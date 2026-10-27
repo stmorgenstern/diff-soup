@@ -1,0 +1,7 @@
+# Module-level imports in diff_soup that point from a lower layer to a higher
+# one (see LAYERS in .github/scripts/check_layers.py), recorded so the check fails only
+# on new ones. Format: "importer -> imported", one per line.
+#
+# This list may only shrink. Remove an entry once its import is moved; do not
+# add one: put the import in a function or move the code to the right layer.
+diff_soup.problem -> diff_soup.timestepping.vsvo.common.contract

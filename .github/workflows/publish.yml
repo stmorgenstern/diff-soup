@@ -1,0 +1,86 @@
+# Publish the wheels attached to a GitHub release to TestPyPI or PyPI.
+#
+# The wheels are built by hand with
+# diff_soup/_internal/klu_ffi/build_release_wheel.sh, checked with
+# verify_release_wheel.sh, and attached to the GitHub release before this
+# workflow runs. This workflow builds nothing: it downloads those wheels and
+# uploads them through PyPI trusted publishing, so no API token is stored in
+# the repository. Each target index needs a trusted publisher for this
+# repository, this workflow file, and the environment of the same name
+# (`testpypi` or `pypi`); the `pypi` environment requires a maintainer's
+# approval before the upload step runs.
+#
+# Publish to TestPyPI first and install from it. A version uploaded to PyPI
+# can never be uploaded again, even after it is deleted.
+name: publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose attached wheels are published (for example v1.0.0)
+        required: true
+        type: string
+      target:
+        description: Package index to publish to
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: ${{ inputs.target }}
+      url: ${{ inputs.target == 'pypi' && 'https://pypi.org/p/diff-soup' || 'https://test.pypi.org/p/diff-soup' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the release wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.whl' --pattern 'SHA256SUMS' --dir dist
+
+      - name: Check the wheels against the release tag and checksums
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          cd dist
+          ls -l
+          version="${TAG#v}"
+          shopt -s nullglob
+          wheels=(diff_soup-*.whl)
+          if [ "${#wheels[@]}" -eq 0 ]; then
+            echo "The release $TAG has no diff_soup wheels attached."
+            exit 1
+          fi
+          for wheel in "${wheels[@]}"; do
+            case "$wheel" in
+              "diff_soup-${version}-"*) ;;
+              *) echo "$wheel does not carry version $version from tag $TAG."; exit 1 ;;
+            esac
+          done
+          if [ -f SHA256SUMS ]; then
+            sha256sum --check --ignore-missing SHA256SUMS
+            rm SHA256SUMS
+          fi
+
+      - name: Publish to TestPyPI
+        if: inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,0 +1,24 @@
+{
+  "warm_runtime_relative": 0.15,
+  "compile_time_relative": 0.2,
+  "peak_memory_relative": 0.15,
+  "peak_device_memory_relative": 0.15,
+  "maximum_relative_mad": 0.15,
+  "absolute_mad_envelope_ms": {},
+  "absolute_noise_floor_ms": {},
+  "compile_noise_floor_ms": {},
+  "memory_noise_floor_bytes": {},
+  "device_memory_noise_floor_bytes": {},
+  "speedup_rules": [
+    {
+      "faster": "jndf-decay-jacfwd-8",
+      "slower": "jndf-decay-scalar-jvp-8",
+      "minimum": 4.0
+    },
+    {
+      "faster": "jndf-decay-vmap-16",
+      "slower": "jndf-decay-scalar-vmap-16",
+      "minimum": 4.0
+    }
+  ]
+}

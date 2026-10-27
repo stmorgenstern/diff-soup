@@ -1,0 +1,348 @@
+{
+  "budgets": {
+    "test_files": 43,
+    "test_functions": 365,
+    "collected_tests": 640,
+    "source_lines": 13021
+  },
+  "tier_budgets": {
+    "public_api": {
+      "files": 19,
+      "functions": 148,
+      "collected": 272,
+      "lines": 4800
+    },
+    "contracts": {
+      "files": 17,
+      "functions": 148,
+      "collected": 253,
+      "lines": 5112
+    },
+    "performance_contracts": {
+      "files": 2,
+      "functions": 14,
+      "collected": 28,
+      "lines": 480
+    },
+    "multi_device": {
+      "files": 2,
+      "functions": 29,
+      "collected": 34,
+      "lines": 960
+    },
+    "integration": {
+      "files": 2,
+      "functions": 16,
+      "collected": 32,
+      "lines": 680
+    },
+    "validation": {
+      "files": 1,
+      "functions": 10,
+      "collected": 20,
+      "lines": 420
+    }
+  },
+  "public_namespaces": [
+    "diff_soup",
+    "diff_soup.inference",
+    "diff_soup.inference.approx",
+    "diff_soup.inference.design",
+    "diff_soup.inference.data",
+    "diff_soup.inference.statistics",
+    "diff_soup.linear",
+    "diff_soup.domains",
+    "diff_soup.timestepping",
+    "diff_soup.problem",
+    "diff_soup.distributed",
+    "diff_soup.projection",
+    "diff_soup.pdesolve",
+    "diff_soup.utils"
+  ],
+  "private_imports": {
+    "tests/contracts/test_architecture.py": "diff_soup.problem._cache",
+    "tests/contracts/test_implicit_layer.py": "diff_soup.problem.implicit",
+    "tests/contracts/test_linear_primitive.py": "diff_soup.linear._primitive",
+    "tests/contracts/test_second_order_ad.py": "diff_soup.timestepping.vsvo",
+    "tests/contracts/test_structural_fitting.py": "diff_soup.inference.solvers",
+    "tests/contracts/test_recipe_handles.py": "diff_soup.inference.fitting",
+    "tests/contracts/test_linear_structured.py": "diff_soup.problem._ir._low_rank",
+    "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
+    "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
+    "tests/contracts/test_lowered_study.py": "diff_soup.inference.hierarchical"
+  },
+  "support_data": [],
+  "suite_files": [
+    "tests/README.md",
+    "tests/conftest.py",
+    "tests/suite_manifest.json",
+    "tests/suite_policy.py",
+    "tests/support/__init__.py",
+    "tests/support/programs.py",
+    "tests/support/problems.py",
+    "tests/support/inference.py",
+    "tests/support/second_order.py",
+    "tests/public_api/test_recipe_build.py",
+    "tests/public_api/test_recipe_observations.py",
+    "tests/public_api/test_recipe_families.py",
+    "tests/public_api/test_boundary_callbacks.py",
+    "tests/public_api/test_implicit_problems.py",
+    "tests/public_api/test_time_stepping.py",
+    "tests/public_api/test_solve_outputs.py",
+    "tests/public_api/test_solve_outputs_ad.py",
+    "tests/public_api/test_adjoints.py",
+    "tests/public_api/test_operators.py",
+    "tests/public_api/test_fits.py",
+    "tests/public_api/test_optimizer_stops.py",
+    "tests/public_api/test_statistics.py",
+    "tests/public_api/test_sampling.py",
+    "tests/public_api/test_design.py",
+    "tests/public_api/test_approximators.py",
+    "tests/public_api/test_measurements.py",
+    "tests/public_api/test_surface.py",
+    "tests/public_api/test_hierarchy.py",
+    "tests/contracts/test_recipe_handles.py",
+    "tests/contracts/test_implicit_layer.py",
+    "tests/contracts/test_linear_dense.py",
+    "tests/contracts/test_linear_host.py",
+    "tests/contracts/test_linear_structured.py",
+    "tests/contracts/test_linear_krylov.py",
+    "tests/contracts/test_linear_primitive.py",
+    "tests/contracts/test_linear_cudss.py",
+    "tests/contracts/test_linear_ad.py",
+    "tests/contracts/test_second_order_ad.py",
+    "tests/contracts/test_second_order_ad_precision.py",
+    "tests/contracts/test_architecture.py",
+    "tests/contracts/test_inference_problem.py",
+    "tests/contracts/test_lowered_study.py",
+    "tests/contracts/test_structural_fitting.py",
+    "tests/contracts/test_study_fingerprint.py",
+    "tests/contracts/test_packaging.py",
+    "tests/performance_contracts/test_compile_cache.py",
+    "tests/performance_contracts/test_batch_lowering.py",
+    "tests/multi_device/test_sharded_joint.py",
+    "tests/multi_device/test_mgmn.py",
+    "tests/integration/test_native_backends.py",
+    "tests/integration/test_krylov_engines.py",
+    "tests/validation/test_physics.py"
+  ],
+  "test_files": [
+    "tests/public_api/test_recipe_build.py",
+    "tests/public_api/test_recipe_observations.py",
+    "tests/public_api/test_recipe_families.py",
+    "tests/public_api/test_boundary_callbacks.py",
+    "tests/public_api/test_implicit_problems.py",
+    "tests/public_api/test_time_stepping.py",
+    "tests/public_api/test_solve_outputs.py",
+    "tests/public_api/test_solve_outputs_ad.py",
+    "tests/public_api/test_adjoints.py",
+    "tests/public_api/test_operators.py",
+    "tests/public_api/test_fits.py",
+    "tests/public_api/test_optimizer_stops.py",
+    "tests/public_api/test_statistics.py",
+    "tests/public_api/test_sampling.py",
+    "tests/public_api/test_design.py",
+    "tests/public_api/test_approximators.py",
+    "tests/public_api/test_measurements.py",
+    "tests/public_api/test_surface.py",
+    "tests/public_api/test_hierarchy.py",
+    "tests/contracts/test_recipe_handles.py",
+    "tests/contracts/test_implicit_layer.py",
+    "tests/contracts/test_linear_dense.py",
+    "tests/contracts/test_linear_host.py",
+    "tests/contracts/test_linear_structured.py",
+    "tests/contracts/test_linear_krylov.py",
+    "tests/contracts/test_linear_primitive.py",
+    "tests/contracts/test_linear_cudss.py",
+    "tests/contracts/test_linear_ad.py",
+    "tests/contracts/test_second_order_ad.py",
+    "tests/contracts/test_second_order_ad_precision.py",
+    "tests/contracts/test_architecture.py",
+    "tests/contracts/test_inference_problem.py",
+    "tests/contracts/test_lowered_study.py",
+    "tests/contracts/test_structural_fitting.py",
+    "tests/contracts/test_study_fingerprint.py",
+    "tests/contracts/test_packaging.py",
+    "tests/performance_contracts/test_compile_cache.py",
+    "tests/performance_contracts/test_batch_lowering.py",
+    "tests/multi_device/test_sharded_joint.py",
+    "tests/multi_device/test_mgmn.py",
+    "tests/integration/test_native_backends.py",
+    "tests/integration/test_krylov_engines.py",
+    "tests/validation/test_physics.py"
+  ],
+  "feature_contracts": [
+    {
+      "file": "tests/public_api/test_recipe_build.py",
+      "feature": "Recipe API: domains and the grid factory, fields, equations, operators, boundary conditions, couplings and read-through aliases, build identity and transformability, the topology report's attribution and coloring, the public sparse-Jacobian coloring"
+    },
+    {
+      "file": "tests/public_api/test_recipe_observations.py",
+      "feature": "Recipe API: observations with domain=, observe(names=) under jit, vmap and grad, constraints and global unknowns, the lowered problem's observable records"
+    },
+    {
+      "file": "tests/public_api/test_recipe_families.py",
+      "feature": "Recipe API: family recipes, per-member parameters, member boundary flux, surface projection, declared stencil radius, family graphs"
+    },
+    {
+      "file": "tests/public_api/test_boundary_callbacks.py",
+      "feature": "Boundary callbacks: flux and Dirichlet functions, facet totals and tractions, nodal access, per-member flux, declaration conflicts"
+    },
+    {
+      "file": "tests/public_api/test_implicit_problems.py",
+      "feature": "Implicit problems and root solves: ImplicitProblem, consistent initialization, algebraic projection, the implicit-layer verbs"
+    },
+    {
+      "file": "tests/public_api/test_time_stepping.py",
+      "feature": "Time stepping: the engine x linear-backend matrix on closed forms, the jit, AD, vmap, dtype and hash safety matrix, solver statistics, float32 routes, float32 recipe assembly and a float32 periodic problem, and precision inheritance"
+    },
+    {
+      "file": "tests/public_api/test_solve_outputs.py",
+      "feature": "Solve outputs and control: save grids and SaveAt and their evaluation count, terminal buffers, events and affects, controls and schedules, history= continuation"
+    },
+    {
+      "file": "tests/public_api/test_solve_outputs_ad.py",
+      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
+    },
+    {
+      "file": "tests/public_api/test_adjoints.py",
+      "feature": "Adjoints: gradients, jvp, checkpointing, second order through solves and events, a differential global and a projected DAE event time, forward and checkpoint adjoint parity"
+    },
+    {
+      "file": "tests/public_api/test_operators.py",
+      "feature": "Operators: grid stencils on polynomials, curl on grids and meshes, divergence, SI control units through the public residual"
+    },
+    {
+      "file": "tests/public_api/test_fits.py",
+      "feature": "Fits: single, joint and lowered-study fits through optsolve and constrained_optsolve with every public optimizer, bounds, the result contract"
+    },
+    {
+      "file": "tests/public_api/test_optimizer_stops.py",
+      "feature": "Optimizer stop rules: termination statuses, cost-relative stops, stalled and derivative-floor verdicts, StopFit, checkpoints and resume, callbacks"
+    },
+    {
+      "file": "tests/public_api/test_statistics.py",
+      "feature": "Statistics verbs: covariance and Laplace with on_singular, profile with owner=, cluster covariance, bootstrap, information, identifiability and reports"
+    },
+    {
+      "file": "tests/public_api/test_sampling.py",
+      "feature": "Sampling: sample in one call, chain map modes, prediction bands and mcmc reports, the cuDSS sampling route, value and gradient from one derivative pass, the refusal of native factor storage by per-device chains and the sharded robust gradient"
+    },
+    {
+      "file": "tests/public_api/test_design.py",
+      "feature": "Design: Fisher information, optimality criteria, sensitivity solves and their higher-order derivatives, robust and sequential designs, checkpointed campaigns: resume, retry and declaration conflicts"
+    },
+    {
+      "file": "tests/public_api/test_approximators.py",
+      "feature": "Approximators: bases from domains, sparse Legendre, learnable signals and functions, coordinate nets, neural approximators and operators"
+    },
+    {
+      "file": "tests/public_api/test_measurements.py",
+      "feature": "Measurements: Measurement and Experiment, likelihood families, observation operators, windows and multishoot continuity, sensitivity labels, float32 evaluation"
+    },
+    {
+      "file": "tests/public_api/test_surface.py",
+      "feature": "Public surface: every exported name resolves, top-level verbs, import time under a measured bound, one catchable error base, hashable static configuration, the JAX hoisting flag warning"
+    },
+    {
+      "file": "tests/public_api/test_hierarchy.py",
+      "feature": "Hierarchies and studies: Study across builds, ParameterSet layouts and clusters, handle lookup in joint results, warm starts, rejected trials and their owners, balance_owners"
+    },
+    {
+      "file": "tests/contracts/test_recipe_handles.py",
+      "feature": "Recipe handles: identity across same-named recipes, parameter schemas, field slices, structural copies, group-name resolution"
+    },
+    {
+      "file": "tests/contracts/test_implicit_layer.py",
+      "feature": "Implicit layer: root derivative exactness and policy invariance, consistent initialization and projection derivatives, the solver view cache"
+    },
+    {
+      "file": "tests/contracts/test_linear_dense.py",
+      "feature": "Linear contract, dense backend: factor lifetime, orientation, derivatives to every order, vmap, dtype, statuses, phased invalidation, typed refusals"
+    },
+    {
+      "file": "tests/contracts/test_linear_host.py",
+      "feature": "Linear contract, host backends (KLU, SuperLU_MT): refactor predicate, the order word, lane slots, native statistics, GPU-program refusal, settings, solves and projections by name"
+    },
+    {
+      "file": "tests/contracts/test_linear_structured.py",
+      "feature": "Linear contract, structured backends: block tridiagonal, Woodbury low rank, member block layouts and refusals"
+    },
+    {
+      "file": "tests/contracts/test_linear_krylov.py",
+      "feature": "Linear contract, Krylov: GMRES statuses and weights, preconditioners, matrix-free operators, inexact tiers and refinement reports"
+    },
+    {
+      "file": "tests/contracts/test_linear_primitive.py",
+      "feature": "Linear primitives: the order word rules, no JAX effects, ahead-of-time compilation, remat, slot tokens, lowering hooks"
+    },
+    {
+      "file": "tests/contracts/test_linear_cudss.py",
+      "feature": "Linear contract, cuDSS: resident storage, statuses, invalidation and replay, symmetric declarations, settings over the layout (owed on a CUDA host)"
+    },
+    {
+      "file": "tests/contracts/test_linear_ad.py",
+      "feature": "Linear derivatives: refinement, route fallback, the options a route analyzes a backend with, root and initialization second derivatives, entry agreement, trace-once programs"
+    },
+    {
+      "file": "tests/contracts/test_second_order_ad.py",
+      "feature": "Second-order AD through solves: Hessians under the checkpoint adjoint against the composable reverse-over-forward reference, the replay guard, run-time failures on an asynchronous device, a declared reverse-sweep dtype"
+    },
+    {
+      "file": "tests/contracts/test_second_order_ad_precision.py",
+      "feature": "Second-order AD and precision policies: fp32 and mixed-mode (fp32_ir) derivative factors under the checkpoint gradient and jax.hessian against the composable reference, the full-precision checkpoint gradient"
+    },
+    {
+      "file": "tests/contracts/test_architecture.py",
+      "feature": "Architecture: layer direction, no static array annotations, bounded content caches, one adjoint identity, the engine never imports the statistics layer"
+    },
+    {
+      "file": "tests/contracts/test_inference_problem.py",
+      "feature": "InferenceProblem: one fit for equivalent declarations, clusters and layouts, flat parameter order, priors, with_data, windows and their stored initialization"
+    },
+    {
+      "file": "tests/contracts/test_lowered_study.py",
+      "feature": "Lowered studies: TrustRegion defaults and refusals, joint and nested fits to one optimum, resume equality, prepare reports, StopFit with checkpoints, bootstrap and sample on a lowered study"
+    },
+    {
+      "file": "tests/contracts/test_structural_fitting.py",
+      "feature": "Structural fitting: analytical optima and KKT points, inner solves meeting the outer stationarity test, a rejected trial costing no residual evaluation, jit, vmap and dtype safety of value_and_jacfwd, tiled forward Jacobians and one solve loop per forward Jacobian, byte-stable KL bases, stop rules relative to the cost scale"
+    },
+    {
+      "file": "tests/contracts/test_study_fingerprint.py",
+      "feature": "Study fingerprints and lanes: fingerprints by axes not devices, memo safety under address reuse, window likelihood separability, the lane map over factorizations, lanes placed over the devices of a mesh with one program per mode and the fit of one device"
+    },
+    {
+      "file": "tests/contracts/test_packaging.py",
+      "feature": "Packaging contracts: the benchmark result schema and comparator, the docs artifact budget tool"
+    },
+    {
+      "file": "tests/performance_contracts/test_compile_cache.py",
+      "feature": "Compile cache: no retrace for a value change, program text flat in the mesh, identical text for inexact arguments, batched solves keep corrector branches, bounded checkpoint carries, root matrices assembled inside the reverse sweep's transposed solves"
+    },
+    {
+      "file": "tests/performance_contracts/test_batch_lowering.py",
+      "feature": "Batch lowering: independent paths lower to true batches without lane scans on the public Multishoot and joint paths, a reordered or reloaded cohort reuses every compiled program"
+    },
+    {
+      "file": "tests/multi_device/test_sharded_joint.py",
+      "feature": "Sharded joints: reverse- and forward-mode fits equal to the mesh-free joint, robust reductions without all-gather, global meshes and submeshes, two-process rows (owed)"
+    },
+    {
+      "file": "tests/multi_device/test_mgmn.py",
+      "feature": "Model-axis cuDSS factors: one factorization over the devices of a model axis equals the one-device solve, the factor lifetime and phased invalidation on the contract, derivatives, the two-process route (owed), and the refusal of a model axis on a backend that cannot serve it"
+    },
+    {
+      "file": "tests/integration/test_native_backends.py",
+      "feature": "Native backends through the public solvers: KLU projected outputs and events, held-factor gradients against the dense reference, the Diffrax stepper, cuDSS replay and its pullback counters (owed)"
+    },
+    {
+      "file": "tests/integration/test_krylov_engines.py",
+      "feature": "Krylov engines: a host-preconditioned Krylov route through one engine, the corrector under non-uniform error weights, the cuDSS reverse sweep (owed)"
+    },
+    {
+      "file": "tests/validation/test_physics.py",
+      "feature": "Physics validation: representative models against analytical invariants"
+    }
+  ]
+}

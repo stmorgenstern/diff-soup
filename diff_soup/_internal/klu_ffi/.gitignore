@@ -1,0 +1,11 @@
+# Built native extension (per-build, not committed).
+build/
+_native_klu*.so
+_native_klu*.pyd
+
+# The vendor/ tree is the EXCEPTION to the repo-wide *.so ignore: its
+# prebuilt SuiteSparse and GCC runtime shared libraries are committed so the
+# wheel builds with no conda or system SuiteSparse and no network access.
+# Negate the *.so ignore for everything under vendor/.
+!vendor/
+!vendor/**

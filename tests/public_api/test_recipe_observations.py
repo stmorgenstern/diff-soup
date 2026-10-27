@@ -1,0 +1,139 @@
+"""Recipe API: observations with ``domain=``, the lowered problem's observable records,
+``observe(names=)`` under jit, vmap and grad, and constraints and globals seen through them."""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+import diff_soup as ds
+
+# measured 0.0 relative on every observation comparison below, CPU VM 2026-10-22,
+# pytest tests/public_api/test_recipe_observations.py
+_EXACT = 1e-12
+
+
+def _two_domains(*observations, lengths=(("narrow", 1.0), ("wide", 2.0))):
+    """Six-cell grids of the given lengths, each carrying ``c_<name> = sin(x)``."""
+    spec = ds.problem("observed_" + "_".join(name for name, _ in lengths))
+    for name, length in lengths:
+        spec = spec.domain(name, ds.cartesian_grid_1d(6, 0.0, length, method="fvm"))
+    for name, _ in lengths:
+        field = f"c_{name}"
+        spec.field(field, domain=name, mass="differential", scale=1.0, init=jnp.sin)
+        spec.equation(writes=field, reads=(field,))(lambda q, field=field: -q[field])
+    for verb, name, fn, keywords in observations:
+        getattr(spec.observe, verb)(name=name, fn=fn, **keywords)
+    return spec
+
+
+def _observe(spec, **keywords):
+    problem, state = spec.build(), spec.assemble_state({})
+    return problem, problem.observe(state, jnp.asarray(0.0), jnp.zeros((0,)), **keywords)
+
+
+def _curvature(q):
+    return q.ops.laplacian(q.c_wide)
+
+
+def test_an_observation_uses_the_operator_bank_of_the_domain_it_reads():
+    """A laplacian observed on the wider of two domains equals the one observed on that
+    domain alone, not one scaled by the other domain's spacing; ``domain=`` selects the bank
+    of an observation that reads two domains, which is refused without it (naming both) or
+    with an undeclared domain."""
+    spec = _two_domains(
+        ("field", "curvature", _curvature, {}),
+        ("field", "mixed", lambda q: q.ops.laplacian(q.c_wide) + q.c_narrow, {"domain": "wide"}),
+    )
+    _, two = _observe(spec)
+    _, alone = _observe(
+        _two_domains(("field", "curvature", _curvature, {}), lengths=(("wide", 2.0),))
+    )
+    np.testing.assert_allclose(two["curvature"], alone["curvature"], rtol=_EXACT)
+    narrow = jnp.sin(ds.cartesian_grid_1d(6, 0.0, 1.0, method="fvm").nodes)
+    np.testing.assert_allclose(two["mixed"], alone["curvature"] + narrow, rtol=_EXACT)
+    mixed = lambda q: q.ops.laplacian(q.c_wide) + q.c_narrow  # noqa: E731
+    with pytest.raises(ds.ConfigurationError, match="(?s)(?=.*narrow)(?=.*wide).*domain="):
+        _two_domains(("field", "mixed", mixed, {})).build()
+    with pytest.raises(ds.ConfigurationError, match="nowhere"):
+        _two_domains(("field", "mixed", mixed, {"domain": "nowhere"})).build()
+
+
+def test_the_lowered_problem_records_every_observable_and_observes_a_named_subset():
+    """``observables`` records each verb's kind, owner, read set, shape and dtype in
+    declaration order; ``observe(names=)`` returns exactly the names asked and refuses an
+    undeclared one."""
+    spec = _two_domains(
+        ("field", "curvature", _curvature, {}),
+        ("scalar", "first", lambda q: q.c_narrow[0], {"domain": "narrow"}),
+        ("spatial_mean", "mean_wide", lambda q: q.c_wide, {}),
+        ("boundary_mean", "right_wide", lambda q: q.c_wide, {"tag": "right"}),
+    )
+    problem, subset = _observe(spec, names=("first",))
+    records = [(o.name, o.kind, o.owner, o.reads, o.shape, o.dtype) for o in problem.observables]
+    wide = (("field", "wide", "c_wide"),)
+    assert records == [
+        ("curvature", "field", "wide", wide, (6,), "float64"),
+        ("first", "scalar", "narrow", (("field", "narrow", "c_narrow"),), (), "float64"),
+        ("mean_wide", "spatial_mean", "wide", wide, (6,), "float64"),
+        ("right_wide", "boundary_mean", "wide", wide, (6,), "float64"),
+    ]
+    assert subset.keys() == {"first"}
+    with pytest.raises(ds.ConfigurationError, match="'nope'"):
+        _observe(spec, names=("nope",))
+
+
+def _constrained(name="constrained", *, scale=1.0, offset=None, load_scale=1.0):
+    spec = ds.problem(name).domain("line", ds.cartesian_grid_1d(4, 0.0, 1.0, method="fvm"))
+    spec.field("u", mass="differential", scale=scale, offset=offset)
+    spec.global_var("load", initial=0.0, scale=load_scale)
+    spec.equation(writes="u", reads=("u", "load"))(lambda q: -q.u + q["load"])
+    spec.constraint.galvanostatic(
+        name="mean_load",
+        closes="load",
+        current_fn=lambda q: jnp.mean(q.u),
+        target_fn=lambda t: jnp.asarray(1.0),
+    )
+    spec.observe.scalar(name="mean_u", fn=lambda q: jnp.mean(q.u))
+    spec.observe.scalar(name="load_gap", fn=lambda q: jnp.mean(q.u) - q["load"])
+    return spec
+
+
+def test_a_named_observation_is_pure_under_jit_vmap_and_grad():
+    """``observe(names=)`` of an observation reading a field and a global gives the eager
+    value under jit, every lane under vmap, and the jacfwd gradient under grad."""
+    problem = _constrained().build()
+    u, lam, t = jnp.arange(4.0), jnp.asarray([0.3]), jnp.asarray(0.0)
+
+    def gap(state):
+        return problem.observe(state, t, lam, names=("load_gap",))["load_gap"]
+
+    np.testing.assert_allclose(jax.jit(gap)(u), 1.2, rtol=_EXACT)
+    np.testing.assert_allclose(jax.vmap(gap)(jnp.stack((u, 2.0 * u))), [1.2, 2.7], rtol=_EXACT)
+    np.testing.assert_allclose(jax.grad(gap)(u), jax.jacfwd(gap)(u), rtol=_EXACT)
+    np.testing.assert_allclose(
+        jax.jacfwd(lambda g: problem.observe(u, t, g)["load_gap"])(lam), -1.0, rtol=_EXACT
+    )
+
+
+def test_constraints_globals_and_scales_survive_authoring_and_meet_at_the_boundary():
+    """The equation set keeps the global, the constraint and the observations; an observation
+    needs the global block it reads; a scale acts at the boundary only: the state holds
+    ``(value - offset) / scale``, closures read it, observations read the dimensional value."""
+    equations = _constrained("authored").to_equation_set()
+    assert (len(equations.globals), len(equations.constraints)) == (1, 1)
+    assert isinstance(equations.constraints[0], ds.GalvanostaticConstraint)
+    assert [o.name for o in equations.observations] == ["mean_u", "load_gap"]
+    problem = _constrained("unscaled").build()
+    with pytest.raises(ds.ConfigurationError, match="load_gap.*'load'.*lam_internal"):
+        problem.observe(jnp.arange(4.0), jnp.asarray(0.0))
+    scaled = _constrained("scaled", scale=2.0, offset=1.0, load_scale=4.0).build()
+    internal = scaled.initial_u(jnp.asarray([3.0, 5.0, 7.0, 9.0]))
+    np.testing.assert_allclose(internal, [1.0, 2.0, 3.0, 4.0], rtol=_EXACT)
+    f, g = scaled.physics_residual(internal, jnp.asarray([0.5]), jnp.asarray(0.0))
+    np.testing.assert_allclose(f, [-0.5, -1.5, -2.5, -3.5], rtol=_EXACT)
+    np.testing.assert_allclose(g, 1.5, rtol=_EXACT)
+    observed = scaled.observe(internal, jnp.asarray(0.0), jnp.asarray([0.5]))
+    np.testing.assert_allclose([observed["mean_u"], observed["load_gap"]], [6.0, 4.0], rtol=_EXACT)

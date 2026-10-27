@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use diff-soup in your work, please cite it as below."
+type: software
+title: "diff-soup: differentiable, GPU-native JAX library for stiff PDEs and DAEs"
+version: 1.0.0
+date-released: "2026-10-26"
+authors:
+  - family-names: Degnan-Morgenstern
+    given-names: Samuel
+license: BSD-3-Clause
+repository-code: "https://github.com/stmorgenstern/diff-soup"
+url: "https://stmorgenstern.github.io/diff-soup/"
+keywords:
+  - JAX
+  - differentiable simulation
+  - stiff ODE
+  - DAE
+  - PDE
+  - GPU
+  - sparse direct solver

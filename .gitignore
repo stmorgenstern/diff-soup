@@ -1,0 +1,41 @@
+# Local working files (never committed)
+_dev/
+scripts/
+performance_check/
+
+# Native FFI artifacts (built per-checkout, symlinked from a primary build)
+*.so
+*.o
+*.dylib
+
+# Golden acceptance pack (file-based .npy; located via DIFF_SOUP_GOLDENS_V0)
+goldens_v0/
+*.npy.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+dist_release/
+/dist_preblock/
+benchmark-results/
+.pytest_cache/
+.ruff_cache/
+
+# JAX / pytest caches
+.jax_cache/
+.xla_cache/
+
+# Docs build
+site/
+
+# Env / editor
+.venv/
+venv/
+.env
+.DS_Store
+_cudss080/
+

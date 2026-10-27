@@ -1,0 +1,25 @@
+# Run: pre-commit install  (then hooks fire on every commit)
+# One-off full pass: pre-commit run --all-files
+repos:
+  - repo: local
+    hooks:
+      - id: test-suite-policy
+        name: test suite architecture policy
+        entry: python tests/suite_policy.py
+        language: system
+        pass_filenames: false
+        files: '^(tests/|pyproject\.toml|\.github/workflows/ci\.yml)'
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.10
+    hooks:
+      - id: ruff-format
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/econchick/interrogate
+    rev: 1.7.0
+    hooks:
+      - id: interrogate
+        # fail-under=94 and excludes are read from pyproject.toml.
+        args: ["-c", "pyproject.toml"]

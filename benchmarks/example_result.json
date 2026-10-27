@@ -1,0 +1,109 @@
+{
+  "cases": [
+    {
+      "backend": "xla-dense",
+      "batch_width": 1,
+      "correctness": {
+        "error": 0.0,
+        "passed": true,
+        "tolerance": 1e-11
+      },
+      "dimensions": {
+        "parameters": 8,
+        "states": 1
+      },
+      "direction_count": 8,
+      "error": null,
+      "evidence": {
+        "reference": "example-case.stablehlo.txt",
+        "stablehlo_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "measurements": {
+        "compile_ms": 10.0,
+        "lower_ms": 1.0,
+        "mad_ms": 0.0,
+        "median_ms": 1.0,
+        "p95_ms": 1.0,
+        "peak_device_bytes": null,
+        "peak_host_bytes": 1000,
+        "raw_ms": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "trace_ms": 1.0,
+        "warmups": 2
+      },
+      "name": "example-case",
+      "native_telemetry": {},
+      "problem": "decay-ode",
+      "seed": 0,
+      "solver": "analytical",
+      "solver_stats": {
+        "accepted_steps": null,
+        "factorizations": null,
+        "nonlinear_iterations": null,
+        "rejected_steps": null,
+        "solve_calls": null
+      },
+      "sparsity": {
+        "density": 1.0,
+        "nnz": 1
+      },
+      "status": "passed",
+      "structure": {
+        "batch_lane_scan_lengths": [],
+        "expected_targets": {},
+        "forbidden_targets_present": {
+          "diffsoup_solve_batched": false
+        },
+        "map_primitive_count": 0,
+        "passed": true
+      },
+      "transform": "jacfwd",
+      "version": "1"
+    }
+  ],
+  "environment": {
+    "compiler": "example",
+    "cpu_count": 1,
+    "cpu_model": "x86_64",
+    "cuda": null,
+    "cudss": null,
+    "device": "cpu",
+    "device_count": 1,
+    "driver": null,
+    "dtype": "float64",
+    "flags": {
+      "JAX_PLATFORMS": "cpu"
+    },
+    "gpu_count": 0,
+    "gpu_memory_mib": null,
+    "gpu_model": null,
+    "jax": "0.0.0",
+    "jaxlib": "0.0.0",
+    "klu": null,
+    "numpy": "0.0.0",
+    "os": "Linux",
+    "precision": "default",
+    "python": "3.12.0",
+    "ram_gib": 1.0,
+    "runner": "example",
+    "x64": true,
+    "xla": "cpu"
+  },
+  "environment_key": "cpu-0000000000000000",
+  "generated_at": "2026-01-01T00:00:00+00:00",
+  "provenance": {
+    "dirty": false,
+    "git_commit": "0000000000000000000000000000000000000000",
+    "imported_from": "example/diff_soup/__init__.py",
+    "source_tree_import_check": "source",
+    "wheel_filename": null,
+    "wheel_sha256": null
+  },
+  "schema_version": "2.0.0",
+  "status": "passed",
+  "suite": "pr-cpu",
+  "suite_version": "2.0.0"
+}

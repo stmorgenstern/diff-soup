@@ -1,0 +1,54 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/scripts/docs_*.py"
+      - ".github/workflows/docs.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Docs toolchain only. mkdocstrings uses griffe static analysis, so
+      # the site builds without installing or importing diff_soup.
+      - run: pip install "mkdocs>=1.6" "mkdocs-material>=9.5" "mkdocstrings[python]>=0.26" "mkdocs-jupyter>=0.25" "pymdown-extensions>=10.9"
+      - run: python .github/scripts/docs_artifact_budget.py
+      - run: mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      # External-link rot check: visible in logs, never blocks the build.
+      - uses: lycheeverse/lychee-action@v2
+        continue-on-error: true
+        with:
+          args: --no-progress "site/**/*.html"
+          fail: false
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

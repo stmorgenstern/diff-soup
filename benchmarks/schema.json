@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://diff-soup.dev/schemas/benchmark-result-2.0.0.json",
+  "title": "diff_soup benchmark result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suite_version",
+    "generated_at",
+    "suite",
+    "environment_key",
+    "environment",
+    "provenance",
+    "cases",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0.0"},
+    "suite_version": {"type": "string"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "suite": {"enum": ["pr-cpu", "nightly-cpu", "nightly-gpu", "release"]},
+    "environment_key": {"type": "string", "minLength": 8},
+    "status": {"enum": ["passed", "failed", "inconclusive"]},
+    "fresh_processes": {"type": "integer", "minimum": 3},
+    "accepted": {"type": "boolean"},
+    "comparison_policy": {
+      "type": "object",
+      "properties": {
+        "warm_runtime_relative": {"type": "number", "maximum": 0.15},
+        "compile_time_relative": {"type": "number", "maximum": 0.20},
+        "peak_memory_relative": {"type": "number", "maximum": 0.15},
+        "peak_device_memory_relative": {"type": "number", "maximum": 0.15},
+        "maximum_relative_mad": {"type": "number"},
+        "absolute_mad_envelope_ms": {
+          "type": "object",
+          "additionalProperties": {"type": "number", "minimum": 0}
+        },
+        "absolute_noise_floor_ms": {
+          "type": "object",
+          "additionalProperties": {"type": "number"}
+        },
+        "compile_noise_floor_ms": {
+          "type": "object",
+          "additionalProperties": {"type": "number"}
+        },
+        "memory_noise_floor_bytes": {
+          "type": "object",
+          "additionalProperties": {"type": "integer"}
+        },
+        "device_memory_noise_floor_bytes": {
+          "type": "object",
+          "additionalProperties": {"type": "integer"}
+        },
+        "speedup_rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["faster", "slower", "minimum"],
+            "properties": {
+              "faster": {"type": "string"},
+              "slower": {"type": "string"},
+              "minimum": {"type": "number"}
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "baseline_review": {
+      "type": "object",
+      "required": ["reason", "reviewer", "comparison_report"],
+      "properties": {
+        "reason": {"type": "string", "minLength": 1},
+        "reviewer": {"type": "string", "minLength": 1},
+        "comparison_report": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python", "jax", "jaxlib", "xla", "numpy", "cuda", "driver", "cudss",
+        "klu", "compiler", "os", "cpu_model", "cpu_count", "ram_gib",
+        "gpu_model", "gpu_count", "gpu_memory_mib", "runner", "flags", "x64",
+        "dtype", "precision", "device", "device_count"
+      ],
+      "properties": {
+        "python": {"type": "string"},
+        "jax": {"type": ["string", "null"]},
+        "jaxlib": {"type": ["string", "null"]},
+        "xla": {"type": ["string", "null"]},
+        "numpy": {"type": "string"},
+        "cuda": {"type": ["string", "null"]},
+        "driver": {"type": ["string", "null"]},
+        "cudss": {"type": ["string", "null"]},
+        "klu": {"type": ["string", "null"]},
+        "compiler": {"type": "string"},
+        "os": {"type": "string"},
+        "cpu_model": {"type": "string"},
+        "cpu_count": {"type": ["integer", "null"]},
+        "ram_gib": {"type": ["number", "null"]},
+        "gpu_model": {"type": ["string", "null"]},
+        "gpu_count": {"type": "integer"},
+        "gpu_memory_mib": {"type": ["integer", "null"]},
+        "runner": {"type": "string"},
+        "flags": {"type": "object", "additionalProperties": {"type": "string"}},
+        "x64": {"type": "boolean"},
+        "dtype": {"type": "string"},
+        "precision": {"type": "string"},
+        "device": {"type": "string"},
+        "device_count": {"type": "integer"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "git_commit", "dirty", "wheel_filename", "wheel_sha256", "imported_from",
+        "source_tree_import_check"
+      ],
+      "properties": {
+        "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "dirty": {"type": "boolean"},
+        "wheel_filename": {"type": ["string", "null"]},
+        "wheel_sha256": {"type": ["string", "null"]},
+        "imported_from": {"type": "string"},
+        "source_tree_import_check": {"enum": ["source", "wheel"]}
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/case"}
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "version", "status", "error", "solver", "backend", "transform",
+        "problem", "dimensions", "sparsity", "batch_width", "direction_count",
+        "seed", "measurements", "solver_stats", "native_telemetry", "correctness",
+        "structure", "evidence"
+      ],
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "status": {"enum": ["passed", "failed", "inconclusive"]},
+        "error": {"type": ["string", "null"]},
+        "solver": {"type": "string"},
+        "backend": {"type": "string"},
+        "transform": {"type": "string"},
+        "problem": {"type": "string"},
+        "dimensions": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "sparsity": {"type": "object"},
+        "batch_width": {"type": "integer", "minimum": 0},
+        "direction_count": {"type": "integer", "minimum": 0},
+        "seed": {"type": "integer"},
+        "measurements": {
+          "type": ["object", "null"],
+          "properties": {
+            "trace_ms": {"type": "number"},
+            "lower_ms": {"type": "number"},
+            "compile_ms": {"type": "number"},
+            "warmups": {"type": "integer"},
+            "raw_ms": {"type": "array", "items": {"type": "number"}, "minItems": 3},
+            "median_ms": {"type": "number"},
+            "mad_ms": {"type": "number"},
+            "p95_ms": {"type": "number"},
+            "peak_host_bytes": {"type": "integer"},
+            "peak_device_bytes": {"type": ["integer", "null"]}
+          },
+          "required": [
+            "trace_ms", "lower_ms", "compile_ms", "warmups", "raw_ms", "median_ms",
+            "mad_ms", "p95_ms", "peak_host_bytes", "peak_device_bytes"
+          ],
+          "additionalProperties": false
+        },
+        "solver_stats": {"type": "object"},
+        "native_telemetry": {"type": "object"},
+        "correctness": {"type": "object"},
+        "structure": {"type": "object"},
+        "evidence": {"type": "object"}
+      }
+    }
+  }
+}

@@ -1,0 +1,297 @@
+[build-system]
+# scikit-build-core runs cmake at install time and bundles the compiled
+# extensions into the wheel.  nanobind and jaxlib must be present in the
+# build-isolated env so CMakeLists.txt can resolve headers and import
+# libraries.
+requires = [
+    "scikit-build-core>=0.10",
+    "nanobind>=2.0",
+    # jax and jaxlib are pinned to the 0.11 line. The cuDSS FFI extension is
+    # compiled against the XLA FFI C API headers that ship with jaxlib
+    # (jax.ffi.include_dir()) and registered through jax.ffi at runtime; the
+    # build and the runtime must share one jaxlib line, or the CUDA custom
+    # call registers under a mismatched ABI ("No registered implementation
+    # for diffsoup_solve_single_f64 for platform CUDA"). Keep this pin in
+    # step with [project.dependencies].
+    "jax>=0.11.1,<0.12",
+    "jaxlib>=0.11.1,<0.12",
+    # The default build compiles the cuDSS extension (CMake
+    # DIFF_SOUP_BUILD_CUDSS defaults ON) once per CUDA line whose NVIDIA wheels
+    # are installed in the build environment, landing in cudss_ffi/cu12 and
+    # cudss_ffi/cu13; the loader picks the one matching the installed JAX
+    # plugin. Those wheels are not listed here: nvidia-cudss-cu12 and
+    # nvidia-cudss-cu13 each require a different cuda-toolkit major, so pip
+    # cannot resolve both in one environment, and an isolated build
+    # environment holds neither. A line whose wheels are absent is skipped, but
+    # a build in which no line resolves at all stops with a CMake error, so an
+    # isolated `pip install .` needs
+    # `-C cmake.define.DIFF_SOUP_BUILD_CUDSS=OFF` to produce the KLU
+    # extension alone and let the guarded cuDSS imports degrade to KLU/Dense.
+    # To compile the cuDSS
+    # extension, install one line's wheels (the [cu12] or [cu13] extra, whose
+    # cuDSS is 1.x, the build's minimum) and that line's nvcc (CUDA 13: the
+    # nvidia-cuda-nvcc wheel; CUDA 12: a toolkit's nvcc passed as
+    # `-C cmake.define.DIFF_SOUP_NVCC=<path>`, since nvidia-cuda-nvcc-cu12 ships
+    # none) and build without isolation:
+    # `pip install --no-build-isolation .`, once per line from that line's
+    # own environment.  The maintainers' cluster scripts that automate this
+    # are not part of the distribution.
+    # patchelf forces the _native_klu RPATH to exactly $ORIGIN/lib so
+    # resolution is purely against the bundled vendored libs — see
+    # diff_soup/_internal/klu_ffi/CMakeLists.txt.  (Conda compilers inject
+    # an absolute $CONDA_PREFIX/lib rpath via LDFLAGS that would otherwise let
+    # a co-resident conda SuiteSparse shadow the bundle; we strip it.)
+    # The SuperLU_MT extension (CMake DIFF_SOUP_BUILD_SUPERLU, default AUTO)
+    # links a SuperLU_MT installation under SUPERLU_MT_ROOT (default: the
+    # active conda prefix); diff_soup/_internal/superlu_ffi/build_superlu_mt.sh
+    # builds and installs one. AUTO builds the extension when that installation is
+    # present and skips it otherwise; require it with
+    # `-C cmake.define.DIFF_SOUP_BUILD_SUPERLU=ON` (plus
+    # `-C cmake.define.SUPERLU_MT_ROOT=<prefix>` outside conda), or skip it
+    # with `-C cmake.define.DIFF_SOUP_BUILD_SUPERLU=OFF`.
+    "patchelf>=0.17",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "diff-soup"
+version = "1.0.0"
+description = "Differentiable, GPU-native JAX library for stiff PDEs and DAEs"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "BSD-3-Clause"
+# The wheel bundles GCC runtime libraries under GPL-3.0-or-later WITH
+# GCC-exception-3.1 and LGPL-2.1-or-later (see THIRD_PARTY_NOTICES.md), so the
+# notices file has to travel with the distribution, not just the repository.
+# Listing it here puts it in dist-info/licenses/ beside LICENSE.
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "Samuel Degnan-Morgenstern" }]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+# Core runtime dependencies: jax/jaxlib, jaxtyping (runtime shape-checking),
+# optax (optimizers), scipy (numerical oracles and IR-scaling utilities),
+# numpy, plus opencv-python, which diff_soup.domains.geometry uses to trace
+# image masks. gmsh, which triangulates polygons into meshes, is in the [mesh]
+# extra because it is GPL-licensed and the default install stays permissive.
+# beartype is a runtime type-checking tool kept in [dev], not here.
+# The NVIDIA cuDSS runtime wheels are OPTIONAL: they live in the [cu12] and
+# [cu13] extras, not here, so the base `pip install diff-soup` is CPU-only
+# (KLU / Dense). They are only needed when the cuDSS extension is
+# built and loaded; see the [build-system.requires] and CMakeLists
+# DIFF_SOUP_BUILD_CUDSS notes.
+dependencies = [
+    # jax/jaxlib pinned to the 0.11 line, see the [build-system.requires]
+    # comment: the compiled cuDSS FFI extension targets jaxlib's XLA FFI C API
+    # at build time and the same line must be present at runtime.
+    "jax>=0.11.1,<0.12",
+    "jaxlib>=0.11.1,<0.12",
+    "equinox>=0.11",
+    "jaxtyping>=0.2",
+    "optax>=0.2",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    # Geometry pipeline: opencv traces image-mask contours; the meshing step
+    # imports gmsh on first use, from the [mesh] extra.
+    "opencv-python>=4.8",
+    # Posterior sampling backend for diff_soup.inference.sample(): blackjax
+    # provides the RMH/NUTS kernels and window adaptation. Pure Python on top
+    # of jax, so it adds no build burden.
+    "blackjax>=1.3,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/stmorgenstern/diff-soup"
+Repository = "https://github.com/stmorgenstern/diff-soup"
+Documentation = "https://stmorgenstern.github.io/diff-soup/"
+Issues = "https://github.com/stmorgenstern/diff-soup/issues"
+
+[project.optional-dependencies]
+mesh = [
+    # gmsh triangulates polygons, CAD primitives, and image masks into meshes:
+    # `pip install "diff-soup[mesh]"`. It is GPL-licensed, so it is opt-in.
+    "gmsh>=4.11",
+]
+cu12 = [
+    # GPU install on the CUDA 12 line: `pip install "diff-soup[cu12]"` pulls
+    # the CUDA 12 JAX plugin and the NVIDIA runtime wheels the CUDA 12 cuDSS
+    # extension loads (cuDSS 1.x under nvidia/cu12, cuda_runtime, and the
+    # cuBLAS and NVRTC that cuDSS needs at load time). The driver must be
+    # 525 or newer. Same 0.11 pin as the base dependencies.
+    "jax[cuda12]>=0.11.1,<0.12",
+    "nvidia-cudss-cu12>=1.0.0,<2",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-nvrtc-cu12",
+]
+cu13 = [
+    # GPU install on the CUDA 13 line: `pip install "diff-soup[cu13]"` pulls
+    # the CUDA 13 JAX plugin and the NVIDIA runtime wheels the CUDA 13 cuDSS
+    # extension loads (cuDSS 1.x, the runtime, cuBLAS and NVRTC, all under
+    # nvidia/cu13). The driver must be 580 or newer. Install exactly one of
+    # cu12 and cu13: the loader refuses an environment with both JAX CUDA
+    # plugins.
+    "jax[cuda13]>=0.11.1,<0.12",
+    "nvidia-cudss-cu13>=1.0.0,<2",
+    "nvidia-cuda-runtime>=13,<14",
+    "nvidia-cublas>=13,<14",
+    "nvidia-cuda-nvrtc>=13,<14",
+]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2",
+    "jsonschema>=4",
+    "beartype>=0.17",
+    # PINNED to match the .pre-commit-config.yaml ruff-pre-commit rev (v0.15.10):
+    # CI runs `ruff format --check .` / `ruff check .`, so the CI ruff MUST be the
+    # same formatter the repo is formatted with. A floating `ruff>=0.15` pulls a
+    # newer line that reformats differently and turns lint red repo-wide.
+    "ruff==0.15.10",
+    "interrogate>=1.7",
+    "pre-commit>=3",
+    # Optional backends imported lazily: the Diffrax stepper wrapper
+    # (diff_soup.timestepping.diffrax_wrapper) imports diffrax, and optimistix
+    # for its event root finder; the pixel-averaging image-interpolation path
+    # imports matplotlib. Not needed to `import diff_soup`, but the test suite
+    # exercises them, so the `.[dev]` environment provides them. Versions on
+    # the jaxlib 0.11 line.
+    "diffrax>=0.7,<0.8",
+    "optimistix>=0.0.10",
+    "matplotlib>=3.5",
+    # The meshing tests need gmsh (the [mesh] extra).
+    "gmsh>=4.11",
+]
+docs = [
+    # Static site toolchain. mkdocstrings resolves the API via griffe's
+    # static analysis, so building the site never imports diff_soup.
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+    "mkdocs-jupyter>=0.25",
+    "pymdown-extensions>=10.9",
+]
+
+[tool.scikit-build]
+# The CMake shim lives in the native tree, next to the three extensions.
+cmake.source-dir = "diff_soup/_internal"
+cmake.build-type = "Release"
+# Ship only the diff_soup Python package; exclude the dev and test trees.
+wheel.packages = ["diff_soup"]
+# Exclude directories that must not appear in the wheel.
+# The vendored SuiteSparse tree (diff_soup/_internal/klu_ffi/vendor/) is a
+# BUILD-TIME source-of-truth (headers + prebuilt .so's compiled+linked against,
+# then the runtime libs are bundled into lib/ via CMake install()).  It must NOT
+# be packaged into the wheel a second time — exclude it to avoid duplicate libs
+# and header bloat.  It STAYS in the sdist so source installs can build.
+wheel.exclude = [
+    "_dev", "tests",
+    "diff_soup/_internal/klu_ffi/vendor",
+    "diff_soup/_internal/klu_ffi/build",
+    "diff_soup/_internal/klu_ffi/stage_vendor.sh",
+    "diff_soup/_internal/superlu_ffi/build_superlu_mt.sh",
+]
+# sdist KEEPS the vendor tree (it is the self-contained build input); only the
+# usual non-essential dev trees are excluded.
+sdist.exclude = ["_dev", "tests", "docs", "benchmarks", ".github"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+# import-mode=importlib keeps tests/ a non-package and avoids sys.path hacks.
+# Runtime jaxtyping+beartype checking of diff_soup and pytest-timeout tier
+# budgets are wired in conftest.py, activated only when their packages are
+# installed (i.e. after `pip install -e .[dev]`) — see tests/conftest.py.
+# This keeps `pytest tests/ -q` green in a minimal env while declaring the
+# intended target configuration.
+addopts = "-ra --strict-markers --import-mode=importlib"
+# Timeouts bound the test body only: the module-scope cache-clearing
+# teardown legitimately runs minutes after a large module on small hosts.
+timeout_func_only = true
+markers = [
+    "unit: public behavior and reusable contracts",
+    "integration: optional native backend and hardware contracts",
+    "validation: representative analytical physics validation",
+    "requires_cuda: requires a CUDA-capable JAX device",
+    "requires_cudss: requires CUDA and the native cuDSS extension",
+    "requires_klu: needs the KLU extension (_native_klu) and its SuiteSparse libraries",
+    "requires_superlu: needs the SuperLU_MT extension (_native_superlu) and its SuperLU_MT library",
+    "requires_two_devices: needs at least two visible JAX devices",
+    "requires_three_devices: needs at least three visible JAX devices",
+    "requires_four_devices: needs at least four visible JAX devices",
+    "requires_two_processes: needs a JAX world of at least two processes",
+]
+# Deprecation drift fails immediately. The allowlist is empty: a trivial
+# `import jax; jax.config.update('jax_enable_x64', True)` emits nothing under
+# -W error in this environment (jax 0.11.1). Add narrowly-scoped ignores here
+# only with a one-line justification.
+filterwarnings = [
+    "error",
+    # Beartype 0.21+ warns for every legacy PEP 484 container annotation
+    # (typing.List, typing.Dict, ...) still used across the package; allow only
+    # that exact migration warning until the repository-wide annotation
+    # conversion lands separately.
+    "ignore:.*PEP 484 type hint .*deprecated by PEP 585.*:UserWarning",
+    # diff_soup.utils.precision warns once per process when a float32 problem is
+    # solved on a CPU device (it recommends float64 there). The suite's float32
+    # rows solve on a CPU device on a CPU-only run (and any row that places a
+    # float32 solve on the CPU does so anywhere); "error" above would turn the
+    # warning into a failure of whichever of them solves first, so it is ignored
+    # suite-wide.
+    # No row asserts the warning itself.
+    "ignore:a float32 problem is being solved on a CPU device:UserWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "D"]
+# F722/F821: jaxtyping shape-string annotations (Float[Array, "n d"]) are
+# parsed by ruff as forward references — the jaxtyping-FAQ-sanctioned ignores.
+ignore = ["E501", "F722", "F821"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and package __init__ files don't need full docstring coverage.
+"tests/**" = ["D"]
+"**/__init__.py" = ["D104"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["diff_soup"]
+
+[tool.interrogate]
+ignore-init-method = false
+# Count package __init__.py docstrings (they carry the layer/import-law
+# contract). Also makes the gate non-vacuous on the day-0 all-__init__
+# skeleton, where ignore-init-module=true would report "no files" and exit 1.
+ignore-init-module = false
+ignore-magic = true
+ignore-private = false
+ignore-property-decorators = false
+ignore-module = false
+ignore-nested-functions = true
+ignore-nested-classes = true
+ignore-setters = true
+# 94: the package (diff_soup/) has sustained ~94.9% docstring coverage; the
+# prior 95 floor was never met (CI was red on it). 94 reflects reality with a
+# small buffer — raise it again behind a dedicated docs pass.
+fail-under = 94
+exclude = [
+    "_dev",
+    "diff_soup/_internal/cudss_ffi",
+    "build",
+    "tests",
+]
+verbose = 2
+quiet = false
+color = true

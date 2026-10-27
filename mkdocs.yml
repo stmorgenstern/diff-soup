@@ -1,0 +1,165 @@
+site_name: diff-soup
+site_description: Differentiable, GPU-native JAX library for stiff PDEs and DAEs
+site_url: https://stmorgenstern.github.io/diff-soup/
+repo_url: https://github.com/stmorgenstern/diff-soup
+repo_name: stmorgenstern/diff-soup
+
+theme:
+  name: material
+  logo: assets/logo.png
+  favicon: assets/favicon.png
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    # Institute Navy -- picked from the 3-direction design review. Its
+    # candidates (Soup Blue, Field Notes) are kept as a reference palette
+    # at the top of extra.css for reuse elsewhere (admonitions, plots).
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: ["."]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            show_bases: false
+            separate_signature: true
+            show_signature_annotations: true
+            members_order: source
+            filters: ["!^_"]
+            relative_crossrefs: true
+            scoped_crossrefs: true
+            # griffe warns for every documented-but-unannotated parameter in
+            # existing docstrings, which fails --strict on code the docs
+            # cannot change. Cross-reference resolution still warns through
+            # mkdocs-autorefs, which is the check that guards these pages.
+            docstring_options:
+              warnings: false
+  - mkdocs-jupyter:
+      execute: false
+      include_source: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Installation: installation/index.md
+  - Overview:
+      - overview/index.md
+      - Modeling:
+          - overview/modeling/index.md
+          - The Recipe API: overview/modeling/recipe-api.md
+          - Domains and discretizations: overview/modeling/domains.md
+          - Fields and globals: overview/modeling/fields.md
+          - Equations: overview/modeling/equations.md
+          - Operators: overview/modeling/operators.md
+          - Boundary conditions: overview/modeling/boundary-conditions.md
+          - Constraints: overview/modeling/constraints.md
+          - Learnable parameters: overview/modeling/parameters.md
+          - Controls: overview/modeling/controls.md
+          - The problem interface: overview/modeling/problem-interface.md
+      - Simulation:
+          - overview/simulation/index.md
+          - Running a simulation: overview/simulation/running-a-simulation.md
+          - Solutions and output: overview/simulation/solutions.md
+          - Consistent initialization: overview/simulation/consistent-init.md
+          - Events: overview/simulation/events.md
+          - Sensitivities and autodiff: overview/simulation/sensitivities.md
+          - ODE/DAE solvers: overview/simulation/solvers.md
+          - Nonlinear solvers: overview/simulation/nonlinear.md
+          - Linear solvers: overview/simulation/linear.md
+          - Precision: overview/simulation/precision.md
+          - Batched solves: overview/simulation/batched-solves.md
+      - Inference:
+          - overview/inference/index.md
+          - Fitting parameters: overview/inference/fitting.md
+          - Optimization solvers: overview/inference/solvers.md
+          - Multiple shooting: overview/inference/multiple-shooting.md
+          - Data assimilation: overview/inference/data-assimilation.md
+          - Function approximation: overview/inference/function-approximation.md
+          - Hierarchical fits: overview/inference/hierarchical.md
+          - Multi-GPU parallelism: overview/inference/multi-gpu.md
+          - Statistical estimation: overview/inference/statistical-estimation.md
+          - Identifiability: overview/inference/identifiability.md
+          - Posterior sampling: overview/inference/mcmc.md
+          - Cohorts across an allocation: overview/inference/cohorts.md
+  - Tutorials:
+      - tutorials/index.md
+  - Worked examples: examples/index.md
+  - API reference:
+      - reference/index.md
+      - Modeling:
+          - Domains: reference/modeling/domains.md
+          - Recipe API: reference/modeling/recipe.md
+          - Operators: reference/modeling/operators.md
+          - Constraints: reference/modeling/constraints.md
+          - Problem interface: reference/modeling/problem-interface.md
+      - Simulation:
+          - pdesolve: reference/simulation/pdesolve.md
+          - Solvers: reference/simulation/solvers.md
+          - Solution: reference/simulation/solution.md
+          - SaveAt: reference/simulation/saveat.md
+          - Events and protocols: reference/simulation/events.md
+          - Consistent initialization: reference/simulation/consistent-init.md
+          - Adjoints: reference/simulation/adjoints.md
+          - Nonlinear solvers: reference/simulation/nonlinear.md
+          - Linear solvers: reference/simulation/linear.md
+          - The factor contract: reference/simulation/factor-contract.md
+          - Precision and placement: reference/simulation/precision-and-placement.md
+      - Inference:
+          - Experiments and studies: reference/inference/experiments.md
+          - Fitting: reference/inference/fitting.md
+          - Optimization solvers: reference/inference/solvers.md
+          - Likelihoods and priors: reference/inference/likelihoods-and-priors.md
+          - Statistics: reference/inference/statistics.md
+          - Posterior sampling: reference/inference/sampling.md
+          - Cohorts: reference/inference/cohorts.md

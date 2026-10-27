@@ -1,0 +1,111 @@
+/* ==========================================================================
+   Reference palette -- candidates from the design review that lost to
+   Institute Navy below, kept here so their colors can be reused elsewhere
+   in the docs (admonitions, plot theming, code highlighting) without
+   re-deriving them.
+
+   Soup Blue (pulled from the sequential-blue viscosity plot):
+     ramp:   #deebf7 -> #4a90d9 -> #1b4f9c
+     accent: #2e7d32 (forest green)
+
+   Field Notes (navy + forest green + gold, no red):
+     navy:   #2b2e3d
+     green:  #2e7d32
+     gold:   #d9a521
+   ========================================================================== */
+
+/* --------------------------------------------------------------------
+   Institute Navy -- echoes the navy-to-maroon title-card gradient from
+   the Petri talk, with a softened MIT-maroon accent (not the exact
+   wordmark hex #750014, so it reads as "affiliated" rather than
+   "official"). Gold code-block accent nods to the deck's highlight color.
+   -------------------------------------------------------------------- */
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #f9f6ef;
+  --md-primary-fg-color: #283347;
+  --md-primary-fg-color--light: #4b5a78;
+  --md-primary-fg-color--dark: #171d29;
+  --md-accent-fg-color: #7e303e;
+  --md-accent-fg-color--transparent: #7e303e1a;
+  --md-typeset-a-color: #283347;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #7c8db0;
+  --md-primary-fg-color--light: #a7b4cc;
+  --md-primary-fg-color--dark: #171d29;
+  --md-accent-fg-color: #ae475a;
+  --md-accent-fg-color--transparent: #ae475a1a;
+  --md-typeset-a-color: #9fb2d4;
+}
+
+.md-typeset pre {
+  border-top: 3px solid var(--md-accent-fg-color);
+}
+
+/* --------------------------------------------------------------------
+   Logo -- single black-line-art asset (docs/assets/logo.png) with a
+   transparent background. The header bar and the mobile drawer's title
+   band both render on --md-primary-fg-color (dark navy in the light
+   scheme, a lighter slate-blue in the dark scheme); black reads clearly
+   against both, so no inversion is needed there.
+   -------------------------------------------------------------------- */
+
+/* --------------------------------------------------------------------
+   Desktop sidebar title -- Material hides this by default once
+   navigation.sections switches the primary nav into "lifted" mode
+   (`.md-nav--lifted > .md-nav__title { display: none }` at the desktop
+   breakpoint), since normally the header already shows the site title.
+   Un-hiding it here gives the Documenter.jl-style layout: logo pinned
+   above the nav tree, directly above "Home". Logo only, no text label --
+   `font-size: 0` collapses the "diff-soup" text node that Material
+   places as a sibling of the logo `<a>` inside the same <label>; there's
+   no element around that text to hide directly.
+
+   NOTE: this <label> is the *same DOM element* used for the mobile
+   drawer's title band (it always carries `for="__drawer"`, regardless of
+   viewport -- that's a checkbox-hack reference, not a mobile flag), so
+   any rule meant only for this desktop state must live inside this
+   min-width media query rather than keying off `[for="__drawer"]`.
+
+   Also: the selector below uses a direct-child combinator (`>`), not a
+   descendant one. Nested nav items (e.g. "API reference") get their own
+   `.md-nav__title` deeper in the tree, for the drill-down panel's own
+   header -- a descendant selector here was matching that too and
+   zeroing out its text via `font-size: 0`, breaking its expand/collapse.
+   -------------------------------------------------------------------- */
+@media screen and (min-width: 76.25em) {
+  .md-nav--primary > .md-nav__title {
+    display: flex !important;
+    justify-content: center;
+    align-items: center;
+    height: auto;
+    padding: 1.5rem 0.8rem;
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+    font-size: 0;
+  }
+
+  .md-nav--primary > .md-nav__title .md-nav__button.md-logo {
+    display: block !important;
+    position: static;
+    margin: 0;
+    padding: 0;
+  }
+
+  .md-nav--primary > .md-nav__title .md-nav__button.md-logo img {
+    height: 6rem;
+    width: auto;
+  }
+
+  /* This instance sits on the ordinary page background rather than the
+     primary color, so -- unlike the header/drawer above -- it does need
+     to invert in the dark scheme to stay legible against a dark page. */
+  [data-md-color-scheme="slate"] .md-nav--primary > .md-nav__title .md-logo img {
+    filter: brightness(0) invert(1);
+  }
+}
+
+/* Breathing room before code blocks in prose. */
+.md-typeset .highlight {
+  margin-top: 1.4em;
+}

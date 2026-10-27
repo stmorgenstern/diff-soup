@@ -1,0 +1,72 @@
+# Hosted CI is a health gate, not the correctness suite.
+#
+# A private-repository hosted runner has 2 vCPUs and 8 GB of memory. The
+# correctness suite under tests/ needs a GPU for its integration tiers, and
+# its CPU tiers run for tens of minutes at several gigabytes, so it does not
+# run here. It runs on the cluster before a pull request is opened or updated;
+# see tests/README.md ("Where the suite runs") for the gate every pull
+# request passes.
+#
+# This workflow answers one question in under fifteen minutes: does a fresh
+# installation of this commit format, lint, import, collect its test tree,
+# and run the benchmark harness? Do not add test execution to this file.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install the lint tools (no package build)
+        run: pip install "ruff==0.15.10" "interrogate>=1.7"
+      - name: ruff format (check)
+        run: ruff format --check .
+      - name: ruff lint
+        run: ruff check .
+      - name: docstring presence (interrogate, threshold in pyproject.toml)
+        run: interrogate -c pyproject.toml
+      - name: import layering (order in .github/scripts/check_layers.py)
+        run: python .github/scripts/check_layers.py
+
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: runner budget (cores, memory)
+        run: nproc && free -g
+      - run: pip install -e ".[dev]" -C cmake.define.DIFF_SOUP_BUILD_CUDSS=OFF
+      - name: installed environment is consistent
+        run: pip check
+      - name: import smoke (with the KLU extension built from the vendored sources)
+        run: python -c "import diff_soup; print(diff_soup.__version__)"
+      - name: test-suite architecture policy
+        run: python tests/suite_policy.py
+      - name: test tree collects (no test bodies run)
+        env:
+          JAX_PLATFORMS: cpu
+        run: pytest --collect-only -q
+      - name: benchmark harness smoke
+        env:
+          JAX_PLATFORMS: cpu
+        run: >-
+          python -m benchmarks.run --suite pr-cpu
+          --output benchmark-results/pr-cpu.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr-performance-evidence
+          path: benchmark-results/

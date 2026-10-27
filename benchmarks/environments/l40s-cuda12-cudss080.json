@@ -1,0 +1,12 @@
+{
+  "id": "l40s-cuda12-cudss080",
+  "device": "gpu",
+  "gpu_model": "NVIDIA L40S",
+  "cuda_major": 12,
+  "cudss": "0.8.0",
+  "jax": "0.11.2",
+  "jaxlib": "0.11.2",
+  "x64": true,
+  "dtype": "float64",
+  "comparison_rule": "Only an exact environment_key match may satisfy this baseline."
+}
