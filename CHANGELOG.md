@@ -113,6 +113,10 @@ issue ledger of that effort.
 
 ### Docs
 
+- End-to-end `Precision.fp32()` initialization failures explain themselves: the `INCONSISTENT_IC`
+  message and `check_consistent_init` say that float32 rounding of the residual can exceed the
+  initialization tolerance and name `Precision.fp32_ir()` and `Precision.fp64()`; on PFHub benchmark 6
+  at 201x200 nodes the float32 floor is about 1e-4 against `atol=1e-6`. (R-33)
 - Precision modes: the mixed modes owe their accuracy to the float64 residual; `fp32_ir` is the
   recommended mixed mode and `fp32_factor` its bare variant; `fp64` for tight tolerances on
   ill-conditioned DAEs; measured speeds (P-1). `step_tol` and `cost_tol` default to `1e-8` in

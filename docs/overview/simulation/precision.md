@@ -118,7 +118,11 @@ there.
 
 End-to-end `fp32` is a different class. It is less accurate than the
 mixed modes, refuses tight tolerances and can fail consistent
-initialization on a DAE.
+initialization on a DAE. Initialization stops when the residual 2-norm
+reaches `atol`, and float32 rounding alone leaves more than that on a
+fine grid: about 1e-4 on PFHub benchmark 6 at 201x200 nodes, against
+`atol=1e-6`. `Precision.fp32_ir()` or `Precision.fp64()` initializes in
+float64.
 
 ## Backends
 

@@ -43,7 +43,11 @@ class RESULT(eqxi.Enumeration):  # pyright: ignore[reportGeneralTypeIssues]
     NONLINEAR_DIVERGED = "Nonlinear corrector diverged."
     LINEAR_FAIL = "Linear solve failed."
     SINGULAR = "Operator / factor detected singular."
-    INCONSISTENT_IC = "Initial state violates algebraic/Schur constraints."
+    INCONSISTENT_IC = (
+        "Initial state violates algebraic/Schur constraints. Under float32 compute, the "
+        "residual's own rounding can exceed the initialization tolerance; "
+        "Precision.fp32_ir() or Precision.fp64() initializes in float64."
+    )
     ACCURACY_LIMIT = (
         "Requested tolerances are tighter than the working precision can resolve at "
         "the current solution's magnitude; loosen atol/rtol."
