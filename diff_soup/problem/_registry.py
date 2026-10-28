@@ -589,8 +589,12 @@ def _copy_reader(count: int):
     return read
 
 
-def theta_value(theta: Any, handle: Any, *, caller: str = "theta[...]") -> Any:
-    """Return the value ``theta`` holds for ``handle``: an array, or a function's learnable arrays."""
+def theta_value(theta: Any, handle: Any, *, caller: str = "theta[...]", total: bool = False) -> Any:
+    """Return the value ``theta`` holds for ``handle``: an array, or a function's learnable arrays.
+
+    ``total=True`` sums each array's copies instead of reading the first, which
+    turns a gradient pytree into the gradient with respect to ``handle``.
+    """
     table, strip = theta_view(theta)
     row = _row(table, handle, caller)
     leaves, _treedef, paths = table.layout(theta, strip=strip)
@@ -604,7 +608,9 @@ def theta_value(theta: Any, handle: Any, *, caller: str = "theta[...]") -> Any:
                 f"{caller}: this theta does not hold every array of {row[0]!r}; "
                 "read it from a whole theta, not a partition of one."
             ) from None
-        return copies[0] if len(copies) == 1 else _copy_reader(len(copies))(*copies)
+        if len(copies) == 1:
+            return copies[0]
+        return sum(copies[1:], copies[0]) if total else _copy_reader(len(copies))(*copies)
 
     values = [read(slot) for slot in row[3]]
     if row[1] == "parameter" and len(row[3]) == 1 and table.slots[row[3][0]][0] == row[2]:

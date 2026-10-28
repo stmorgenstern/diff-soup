@@ -57,6 +57,7 @@ array of the problem, the declared parameters among them.
 theta = ds.default_theta(problem, {D: 0.2})
 theta[D]                        # 0.2
 theta = theta.replace(D, 0.3)   # a new theta with D set to 0.3
+jax.grad(loss)(theta).gradient(D)   # dloss/dD
 ```
 
 ## Named functions

@@ -115,6 +115,7 @@ read in closures as `q.p.<name>`.
       filters: []
       members:
         - __getitem__
+        - gradient
         - replace
 
 ::: diff_soup.inference.learnables

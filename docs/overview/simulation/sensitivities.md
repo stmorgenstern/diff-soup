@@ -120,9 +120,8 @@ dloss_dD = jax.grad(loss_D)(0.1)
 
 `theta[D]` reads the value `theta` holds for `D`, and
 `theta.replace(D, value)` returns a copy with `D` set, the same as
-`ds.default_theta(problem, {D: value})`. Theta holds `D` once for each
-equation that reads it, so `grads[D]` is in general not `dloss_dD`.
-Build `theta` inside the loss, as above.
+`ds.default_theta(problem, {D: value})`. `grads.gradient(D)` reads
+`dloss_dD` from `grads`.
 
 An array parameter is set the same way, with an array as the value.
 `default_theta` works under `jax.jacfwd`, `jax.grad` with

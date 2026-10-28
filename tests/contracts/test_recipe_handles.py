@@ -310,7 +310,8 @@ def test_a_problem_spec_reprs_by_its_name():
 def test_pdesolve_refuses_a_theta_that_is_not_the_problems_pytree():
     """``pdesolve(theta={handle: value})`` and a theta of another shape raise naming
     ``default_theta``; ``theta[rate]`` reads the parameter two equations read, and a solve and
-    its gradient through ``theta.replace(rate, x)`` see both equations' copies set."""
+    its gradient through ``theta.replace(rate, x)`` see both equations' copies set, and
+    ``grads.gradient(rate)`` of a theta gradient sums them while ``grads[rate]`` reads one."""
     spec, rate = _decay("decay_twice", twice=True)
     problem = spec.build()
     y0 = spec.assemble_state({})
@@ -341,3 +342,8 @@ def test_pdesolve_refuses_a_theta_that_is_not_the_problems_pytree():
     reference = jax.grad(lambda x: final(ds.default_theta(problem, {rate: x})).sum())(0.5)
     # measured 3.5e-5, the same solve without the rate^2 term, CPU workstation 2026-10-28
     np.testing.assert_allclose(reference, exact - 1.0, atol=1e-4)
+    grads = jax.grad(lambda t: final(t).sum() + t[rate] ** 2)(theta.replace(rate, 0.5))
+    # measured 3.5e-5 off the exact derivative, CPU workstation 2026-10-28
+    np.testing.assert_allclose(grads.gradient(rate), exact, atol=1e-4)
+    # grads[rate] holds one copy, 0.215 off exact (half of it), measured CPU workstation 2026-10-28
+    assert abs(float(grads[rate]) - exact) > 0.1

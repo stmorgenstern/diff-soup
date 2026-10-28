@@ -66,6 +66,8 @@ issue ledger of that effort.
 - `theta[handle]` reads a parameter's value and `theta.replace(handle, value)` (or a mapping) writes it;
   parameters are located by key path, so a theta that went through `jax.tree.map`, a device transfer
   or a tracer still takes `ds.default_theta(problem, {handle: value})`. (R-1)
+- `theta.gradient(handle)` reads `dloss/dhandle` from `jax.grad(loss)(theta)`, summing the copies of a
+  parameter that several equations read. (P14)
 - `est.values(x)[handle]` reads parameters from any vector in the fit coordinate; `ParameterSchema` is
   exported from `ds.inference`. (WE1-4)
 - `recipe.spec(**inputs)` returns the `ProblemSpec` a recipe authors, so `spec.assemble_state({})`
