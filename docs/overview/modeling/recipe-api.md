@@ -121,3 +121,12 @@ state vector a solve takes as its argument.
 problem = spec.build()
 y0 = spec.assemble_state({})
 ```
+
+A [recipe template](parameters.md#recipe-templates) such as `particle`
+returns the built problem from `build(**inputs)`, and a built problem's `assemble_state`
+ignores `init=`. Its `spec(**inputs)` returns the spec instead, which
+renders the declared initial conditions:
+
+```python
+y0 = particle.spec(R=200.0).assemble_state({})
+```

@@ -97,6 +97,16 @@ non-diagonal or nonlinear in the derivative.
 - structural `gather` / `reduce` / `scatter` maps with static indices,
   discussed below.
 
+A variable heat capacity is a scaled derivative:
+
+```python
+return rho_c * q.dt("T") - q.ops.div_flux(k, q.T)   # rho_c dT/dt = div(k grad T)
+```
+
+`rho_c` is a scalar, a nodal array or, on a mesh, one value per cell.
+The mass is exact on grids and lumped on meshes, and boundary fluxes on
+`T` keep their scale.
+
 A banded mass block applies a declared operator to the writing
 field's derivative:
 
@@ -362,12 +372,14 @@ post-processing and fitting, outside the residual:
 
 - `spec.observe.scalar(name=..., fn=...)` is a single scalar,
 - `spec.observe.field(name=..., fn=...)` a spatially resolved output,
-- `spec.observe.spatial_mean(name=..., fn=...)` an output labelled as a
-  domain mean,
-- `spec.observe.boundary_mean(name=..., fn=..., tag=...)` an output
-  labelled as the mean over a tagged boundary.
+- `spec.observe.spatial_mean(name=..., fn=...)` the mean over the
+  domain,
+- `spec.observe.boundary_mean(name=..., fn=..., tag=...)` the mean over
+  a tagged boundary.
 
-Both labelled verbs record the label only. Your `fn` computes the mean.
+For both means `fn` returns one value per node. `spatial_mean` weights
+them by the cell volumes on a grid and the lumped mass on a mesh, and
+`boundary_mean` by the face areas or facet measures of the tag.
 
 Every verb also takes `domain=`, the domain the observation is evaluated
 on. By default this is the domain whose fields `fn` reads, or the first

@@ -11,7 +11,14 @@ import pytest
 from jax.numpy import where
 
 import diff_soup as ds
-from diff_soup.domains import Operators, TaggedMesh, box_mesh, interval_mesh, rectangle_mesh
+from diff_soup.domains import (
+    Operators,
+    TaggedMesh,
+    box_mesh,
+    cartesian_grid_2d,
+    interval_mesh,
+    rectangle_mesh,
+)
 from diff_soup.inference import approx
 from diff_soup.utils import (
     build_padded_color_arrays,
@@ -33,7 +40,8 @@ def _residual(problem, state, multipliers=None):
 def test_the_grid_factory_places_nodes_at_cell_centres_of_given_faces():
     """``ds.cartesian_grid_1d(faces=...)`` puts nodes at the cell centres with the face
     spacing as cell widths, its laplacian of ``x^2`` is 2 on the uniform stretches, and
-    non-increasing faces or mixed forms are refused."""
+    non-increasing faces or mixed forms are refused; on every grid ``coordinates`` holds the
+    per-axis centres and ``meshgrid()`` the coordinates in field storage order."""
     faces = np.concatenate(
         [np.linspace(0.0, 0.4, 5), [0.425, 0.45, 0.475, 0.5], np.linspace(0.6, 1.0, 5)]
     )
@@ -49,20 +57,29 @@ def test_the_grid_factory_places_nodes_at_cell_centres_of_given_faces():
         ds.cartesian_grid_1d(faces=faces[::-1])
     with pytest.raises(ValueError):
         ds.cartesian_grid_1d(4, 0.0, 1.0, faces=faces)
+    plate = cartesian_grid_2d(3, 4, 1.0, 2.0)
+    x, y = plate.meshgrid()
+    assert x.shape == y.shape == plate.shape
+    np.testing.assert_array_equal(np.stack((x.ravel(), y.ravel()), -1), plate.node_coordinates())
+    for coordinate, axis in zip(plate.coordinates, plate.axes, strict=True):
+        np.testing.assert_array_equal(coordinate, axis.nodes)
+    np.testing.assert_array_equal(grid.meshgrid()[0], grid.coordinates[0])
+    np.testing.assert_array_equal(grid.coordinates[0], grid.nodes)
 
 
-def _decay_spec(name, domain, operators=None):
+def _decay_spec(name, domain, operators=None, init=None):
     spec = ds.problem(name).domain(
         "part", domain, **({} if operators is None else {"operators": operators})
     )
-    spec.field("u", mass="differential", scale=1.0)
+    spec.field("u", mass="differential", scale=1.0, init=init)
     spec.equation(writes="u", reads=("u",))(lambda q: q.ops.laplacian(q.u) - 0.4 * q.u)
     return spec
 
 
 def test_a_built_recipe_is_cached_and_its_residual_transforms():
     """``build()`` returns one problem object per recipe, on a grid and on a mesh, and its
-    residual runs under jit, grad and vmap."""
+    residual runs under jit, grad and vmap; a template's ``spec(...)`` renders the ``init=``
+    that its built problem's ``assemble_state`` ignores."""
     for domain in (ds.cartesian_grid_1d(5, 0.0, 1.0, method="fvm"), rectangle_mesh(2, 2, 1.0, 1.0)):
         spec = _decay_spec(f"cached_{type(domain).__name__}", domain)
         problem = spec.build()
@@ -77,6 +94,14 @@ def test_a_built_recipe_is_cached_and_its_residual_transforms():
             2,
             state.size,
         )
+
+    @ds.recipe
+    def rod(n=5):
+        return _decay_spec(f"rod_{n}", ds.cartesian_grid_1d(n, 0.0, 1.0), init=lambda x: 1.0 + x)
+
+    nodes = ds.cartesian_grid_1d(4, 0.0, 1.0).nodes
+    np.testing.assert_array_equal(rod.build(n=4).assemble_state({}), 0.0)
+    np.testing.assert_allclose(rod.spec(n=4).assemble_state({}), 1.0 + nodes, rtol=_EXACT)
 
 
 class _ScaledOperators(Operators):
@@ -348,7 +373,8 @@ def _heat_end_state(domain, residual_form, coeff, condition=None, reaction=None)
     the residual ``coeff q.dt(T) - lap(T) - 1 + k q.T`` or as the right-hand side
     ``(lap(T) + 1 - k q.T) / coeff``, with an optional reaction rate ``k`` and an optional
     condition at the last node."""
-    spec = ds.problem(f"heat_{residual_form}_{coeff}_{condition}_{reaction}").domain("d", domain)
+    label = coeff if np.ndim(coeff) == 0 else f"array{np.size(coeff)}"
+    spec = ds.problem(f"heat_{residual_form}_{label}_{condition}_{reaction}").domain("d", domain)
     spec.field("T", mass="differential", scale=1.0, init=lambda x, *_: jnp.sin(jnp.pi * x) + 1.0)
     if residual_form and reaction is None:
         rhs = lambda q: coeff * q.dt("T") - q.ops.laplacian(q.T) - 1.0  # noqa: E731
@@ -375,23 +401,45 @@ def _heat_end_state(domain, residual_form, coeff, condition=None, reaction=None)
     return np.asarray(solution.ys[-1])
 
 
+def _cell_and_area_averaged_coefficients(mesh):
+    """A coefficient varying per cell of a TRI3 mesh, and its area average at each node."""
+    points, cells = np.asarray(mesh.points), np.asarray(mesh.cells)
+    a, b, c = (points[cells[:, k]] for k in range(3))
+    u, v = b - a, c - a
+    area = 0.5 * np.abs(u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])
+    per_cell = 1.5 + (a[:, 0] + b[:, 0] + c[:, 0]) / 3.0 + np.arange(len(cells)) % 2
+    weighted, total = np.zeros(len(points)), np.zeros(len(points))
+    for k in range(3):
+        np.add.at(weighted, cells[:, k], per_cell * area)
+        np.add.at(total, cells[:, k], area)
+    return per_cell, weighted / total
+
+
 @pytest.mark.parametrize(
-    ("mesh", "reaction"),
+    ("mesh", "reaction", "per_cell"),
     [
-        (lambda: interval_mesh(8, 0.0, 1.0), None),
-        (lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"), None),
-        (lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"), 0.5),
+        (lambda: interval_mesh(8, 0.0, 1.0), None, False),
+        (lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"), None, False),
+        (lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"), 0.5, False),
+        (lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"), None, True),
     ],
-    ids=["line2", "tri3", "tri3-reaction"],
+    ids=["line2", "tri3", "tri3-reaction", "tri3-per-cell"],
 )
-def test_the_residual_form_on_a_mesh_matches_the_right_hand_side_form(mesh, reaction):
+def test_the_residual_form_on_a_mesh_matches_the_right_hand_side_form(mesh, reaction, per_cell):
     """On a mesh, ``2 q.dt(T) - lap(T) - 1 (+ k q.T) = 0`` solves to the same state as
     ``T' = (lap(T) + 1 (- k q.T)) / 2``: the time-derivative coefficient and every residual term
-    count, a field read at the quadrature points included."""
+    count, a field read at the quadrature points included. A coefficient given per cell solves
+    to the same state as its area average at the nodes."""
     domain = mesh()
-    residual = _heat_end_state(domain, residual_form=True, coeff=2.0, reaction=reaction)
-    explicit = _heat_end_state(domain, residual_form=False, coeff=2.0, reaction=reaction)
+    if per_cell:
+        cells, nodes = _cell_and_area_averaged_coefficients(domain)
+        residual = _heat_end_state(domain, residual_form=True, coeff=cells)
+        explicit = _heat_end_state(domain, residual_form=True, coeff=nodes)
+    else:
+        residual = _heat_end_state(domain, residual_form=True, coeff=2.0, reaction=reaction)
+        explicit = _heat_end_state(domain, residual_form=False, coeff=2.0, reaction=reaction)
     # measured 0.0 (line2), 2.9e-15 (tri3) and 2.1e-14 (tri3-reaction), workstation CPU 2026-10-28,
+    # and 6.2e-15 (tri3-per-cell), workstation CPU 2026-10-28,
     # pytest tests/public_api/test_recipe_build.py::test_the_residual_form_on_a_mesh_matches_the_right_hand_side_form
     np.testing.assert_allclose(residual, explicit, atol=1e-12)
 

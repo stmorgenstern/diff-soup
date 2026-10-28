@@ -107,6 +107,16 @@ read in closures as `q.p.<name>`.
 
 ::: diff_soup.problem.default_theta
 
+::: diff_soup.problem.implicit.solver_lowering._IRTheta
+    options:
+      show_root_heading: false
+      show_root_toc_entry: false
+      heading_level: 4
+      filters: []
+      members:
+        - __getitem__
+        - replace
+
 ::: diff_soup.inference.learnables
 
 ---

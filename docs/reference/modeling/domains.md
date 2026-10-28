@@ -79,6 +79,8 @@ discretization decides how the operator bank evaluates each operator. See
             - nodes
             - faces
             - cell_volumes
+            - coordinates
+            - meshgrid
             - scaled
 
     ::: diff_soup.domains.GridND
@@ -86,6 +88,8 @@ discretization decides how the operator bank evaluates each operator. See
           members:
             - axes
             - shape
+            - coordinates
+            - meshgrid
             - node_coordinates
 
     ::: diff_soup.domains.StaggeredGrid

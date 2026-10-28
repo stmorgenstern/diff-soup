@@ -7,6 +7,11 @@ issue ledger of that effort.
 
 ### Behaviour changes
 
+- `spec.observe.spatial_mean` and `spec.observe.boundary_mean` now average `fn`'s nodal values
+  (volume-weighted over the domain; face-area or facet-measure weighted over `tag`) and return a
+  scalar. A `fn` that returns a scalar is refused at build; one that already averaged per node is
+  averaged again. `boundary_mean(tag=)` must name a tag the domain resolves. 1.0.0 recorded the label
+  only. (A-6)
 - `spec.bc.neumann` imposes the normal derivative `du/dn = s` on FVM, FDM and FEM; it was an alias of
   `spec.bc.flux` (`D du/dn = s`). `name=` and `cross_facet=` stay on `flux`. (R-14)
 - On 2D and 3D grids, flux, Robin and Neumann conditions and boundary integrals weight each selected
@@ -58,6 +63,11 @@ issue ledger of that effort.
 
 ### Additions
 
+- `recipe.spec(**inputs)` returns the `ProblemSpec` a recipe authors, so `spec.assemble_state({})`
+  renders the declared `init=`. (8, R-8)
+- `grid.coordinates` (per-axis cell-centre arrays) and `grid.meshgrid()` (arrays of shape `grid.shape`
+  in field storage order) on both grid classes. (D-2)
+- `c * q.dt(field)` on a mesh accepts one value of `c` per cell. (U-1)
 - Grid transport: velocity fields in `q.ops.advect_upwind`, the conservative `q.ops.div_advect`,
   a per-axis `(Dx, Dy, Dz)` in `q.ops.div_flux`, `axis=`/`side=` on `spec.bc.dirichlet`, `flux`,
   `robin` and `neumann`, and `spec.bc.inflow(axis=, side=, velocity=, value=)` (Danckwerts with

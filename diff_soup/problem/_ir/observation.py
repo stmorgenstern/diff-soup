@@ -57,9 +57,10 @@ class FieldObservation(Observation):
 
 
 class BoundaryMeanObservation(Observation):
-    """An observation labelled as the mean over a tagged boundary.
+    """The mean of a nodal quantity over a tagged boundary.
 
-    `fn` computes the value. The label and `tag` only record what it is.
+    `fn` returns the declared closure's nodal values averaged with the boundary
+    measure of `tag`.
     """
 
     name: str = eqx.field(static=True)
@@ -72,9 +73,10 @@ class BoundaryMeanObservation(Observation):
 
 
 class SpatialMeanObservation(Observation):
-    """An observation labelled as the mean over a domain.
+    """The mean of a nodal quantity over a domain.
 
-    `fn` computes the value. The label only records what it is.
+    `fn` returns the declared closure's nodal values averaged with the lumped
+    mass, the cell volumes on a grid.
     """
 
     name: str = eqx.field(static=True)

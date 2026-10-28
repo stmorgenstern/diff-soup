@@ -943,6 +943,74 @@ class _ObservationTracer:
         return owner or "", inputs, tuple(int(n) for n in out.shape), str(out.dtype)
 
 
+class _MeanObservationFn(eqx.Module):
+    """Average an observation's nodal values with the weights of its domain.
+
+    Without ``nodes`` the weights are the lumped mass of the evaluating bank
+    (cell volumes on a grid, ``int N_i`` on a mesh); with ``nodes`` they are
+    the boundary measure resolved at build, one weight per selected node. The
+    weights are normalized, so a uniform geometry scale cancels.
+    """
+
+    inner: object
+    nodes: Optional[tuple[int, ...]] = eqx.field(static=True, default=None)
+    weights: Optional[tuple[float, ...]] = eqx.field(static=True, default=None)
+
+    def __call__(self, view, ctx, t):
+        from diff_soup.domains.operators.dispatch import _WeakTerm
+
+        values = jnp.asarray(self.inner(view, ctx, t))
+        if self.nodes is None:
+            weights = ctx.ops.lumped_mass()
+            if isinstance(weights, _WeakTerm):
+                weights = weights.value
+        else:
+            values = values[np.asarray(self.nodes)]
+            weights = np.asarray(self.weights)
+        weights = jnp.asarray(weights).astype(values.dtype)
+        return jnp.sum(weights * values) / jnp.sum(weights)
+
+
+def _mean_observation(o: ObservationSpec, fn, tracer: _ObservationTracer, owner: str, out_shape):
+    """Wrap a ``spatial_mean`` or ``boundary_mean`` closure in its weighted mean."""
+    domain = tracer.spec._domains.get(owner) if owner else None
+    if domain is None:
+        raise ConfigurationError(
+            f"observation {o.name!r}: spec.observe.{o.kind} averages over the nodes of "
+            "a domain that carries fields, and the recipe declares none"
+        )
+    n_nodes = int(domain.num_nodes)
+    if tuple(out_shape) != (n_nodes,):
+        raise ConfigurationError(
+            f"observation {o.name!r}: spec.observe.{o.kind} averages one value per node, "
+            f"so fn must return an array of length {n_nodes} on domain {owner!r}; it "
+            f"returns shape {tuple(out_shape)}. Return the nodal values, or declare a "
+            "precomputed value with spec.observe.scalar"
+        )
+    if o.kind == "spatial_mean":
+        return _MeanObservationFn(inner=fn)
+    from diff_soup._lowering.bcs import _boundary_integral_measure
+    from diff_soup.domains.boundary_set import tags
+
+    tag = (o.where or {}).get("tag", "")
+    try:
+        measure = _boundary_integral_measure(
+            domain, tags(tag), constraint_desc=f"observation {o.name!r}"
+        )
+    except (ValueError, TypeError, KeyError) as error:
+        raise ConfigurationError(
+            f"observation {o.name!r}: the boundary tag {tag!r} does not resolve on "
+            f"domain {owner!r}: {error}"
+        ) from error
+    nodes = tuple(int(i) for i in np.asarray(measure.tag_nodes))
+    if not nodes:
+        raise ConfigurationError(
+            f"observation {o.name!r}: the boundary tag {tag!r} selects no node on domain {owner!r}"
+        )
+    weights = tuple(float(w) for w in np.asarray(measure.nodal_measure, dtype=np.float64))
+    return _MeanObservationFn(inner=fn, nodes=nodes, weights=weights)
+
+
 def _emit_observation(
     o: ObservationSpec,
     tracer: _ObservationTracer,
@@ -959,13 +1027,16 @@ def _emit_observation(
     var map.  A read-through alias is refused at build (the observe view holds
     the state and the bordered globals, not the coupled values), and members
     of a family population are not part of the var map an observation reads,
-    so neither appears in the read set.
+    so neither appears in the read set. A ``spatial_mean`` or
+    ``boundary_mean`` closure is wrapped in its weighted mean and records a
+    scalar output.
 
     Raises:
         ConfigurationError: If ``domain=`` names no declared domain with
             fields, the observation reads the fields of two or more components
-            without ``domain=``, or the trace fails or returns something other
-            than a single array.
+            without ``domain=``, the trace fails or returns something other
+            than a single array, a mean's closure returns other than one value
+            per node, or a ``boundary_mean`` tag does not resolve.
     """
     owner, inputs, out_shape, out_dtype = tracer.resolve(o)
     comp_var_map = tracer.comp_var_map(owner) if owner else tracer.var_map
@@ -977,6 +1048,9 @@ def _emit_observation(
         learnable_params=learnable_params,
         learnable_functions=learnable_functions,
     )
+    if o.kind in ("spatial_mean", "boundary_mean"):
+        fn = _mean_observation(o, fn, tracer, owner, out_shape)
+        out_shape = ()
     record = {"owner": owner, "inputs": inputs, "out_shape": out_shape, "out_dtype": out_dtype}
     if o.kind == "scalar":
         return ScalarObservation(name=o.name, fn=fn, **record)
@@ -1182,6 +1256,29 @@ class _FormCell:
         self.data: dict = {}
 
 
+def _weight_by(action, weight):
+    """Multiply a derivative action by one weight per node, shared by a vector field's components."""
+    action = jnp.asarray(action)
+    weight = jnp.asarray(weight)
+    if action.size != weight.size:
+        return (action.reshape(weight.size, -1) * weight[:, None]).reshape(action.shape)
+    return action * weight.reshape(action.shape)
+
+
+def _lumped_weight(ops):
+    """The lumped mass of a mesh bank, one weight per node."""
+    from diff_soup.domains.operators.dispatch import _WeakTerm
+
+    domain = getattr(ops, "domain", None)
+    if domain is not None and hasattr(domain, "lumped_mass"):
+        weight = domain.lumped_mass()
+    else:
+        weight = ops.lumped_mass()
+    if isinstance(weight, _WeakTerm):
+        weight = weight.value
+    return jnp.asarray(weight)
+
+
 def _lumped_derivative_action(ctx, action):
     """Weight a derivative action by the lumped mass on a mesh.
 
@@ -1190,26 +1287,111 @@ def _lumped_derivative_action(ctx, action):
     mass (the problem's mass diagonal). The derivative action gets the same
     weight and is marked as already integrated. On a grid it is unchanged.
     """
-    from diff_soup.domains.operators.dispatch import _WeakTerm
-
     ops = getattr(ctx, "ops", None)
     if ops is None or getattr(ops, "discretization_type", None) != "fem":
         return action
-    domain = getattr(ops, "domain", None)
-    if domain is not None and hasattr(domain, "lumped_mass"):
-        weight = domain.lumped_mass()
-    else:
-        weight = ops.lumped_mass()
-    if isinstance(weight, _WeakTerm):
-        weight = weight.value
-    weight = jnp.asarray(weight)
-    action = jnp.asarray(action)
-    if action.size != weight.size:
-        # A vector or tensor field: one weight per node, shared by its components.
-        weighted = (action.reshape(weight.size, -1) * weight[:, None]).reshape(action.shape)
-    else:
-        weighted = action * weight.reshape(action.shape)
-    return ops.as_weak(weighted)
+    return ops.as_weak(_weight_by(action, _lumped_weight(ops)))
+
+
+def _has_cell_scale(expr) -> bool:
+    """Whether a per-cell coefficient scales any derivative in ``expr``."""
+    from diff_soup.problem._spec.derivative_expr import (
+        DerivativeScale,
+        DerivativeSum,
+        NonlinearDerivativeExpr,
+    )
+
+    if isinstance(expr, DerivativeScale) and expr.per_cell:
+        return True
+    if isinstance(expr, DerivativeSum):
+        return any(_has_cell_scale(term) for term in expr.terms)
+    if isinstance(expr, NonlinearDerivativeExpr):
+        return any(_has_cell_scale(operand) for operand in expr.operands)
+    inner = getattr(expr, "expr", None)
+    return inner is not None and _has_cell_scale(inner)
+
+
+def _split_cell_scale(term):
+    """Split ``term`` into the expression without its per-cell scales and their product.
+
+    A per-cell coefficient must scale a field's derivative directly, possibly
+    through other scales; anywhere else it is refused.
+    """
+    from diff_soup.problem._spec.derivative_expr import DerivativeScale
+
+    if isinstance(term, DerivativeScale):
+        inner, cell = _split_cell_scale(term.expr)
+        if term.per_cell:
+            return inner, term.coeff if cell is None else cell * jnp.asarray(term.coeff)
+        return (term if inner is term.expr else DerivativeScale(inner, term.coeff)), cell
+    if _has_cell_scale(term):
+        raise ValueError(
+            "a per-cell coefficient must scale q.dt(field) directly, as in "
+            "rho_c * q.dt(field), not a gathered, reduced, scattered, applied or "
+            "nonlinear derivative expression"
+        )
+    return term, None
+
+
+def _cell_terms(expr, ctx):
+    """The terms of ``expr`` as ``(term without per-cell scales, coefficient per cell)``.
+
+    Each per-cell coefficient is read against the mesh of the evaluating bank,
+    which refuses another length than the number of cells; on a grid any
+    length other than the field's is refused.
+    """
+    from diff_soup.domains.operators.dispatch import _read_fem_operand
+    from diff_soup.problem._spec.derivative_expr import DerivativeSum, scale_size_error
+
+    terms = expr.terms if isinstance(expr, DerivativeSum) else (expr,)
+    ops = getattr(ctx, "ops", None)
+    on_mesh = ops is not None and getattr(ops, "discretization_type", None) == "fem"
+    out = []
+    for term in terms:
+        inner, cell = _split_cell_scale(term)
+        if cell is not None:
+            if not on_mesh:
+                raise scale_size_error(int(np.shape(cell)[0]), int(inner.size))
+            length = int(np.shape(cell)[0])
+            cell, layout = _read_fem_operand(ops.domain, cell, "a per-cell coefficient of q.dt")
+            if layout != "quad":
+                raise scale_size_error(length, int(inner.size))
+        out.append((inner, cell))
+    return out
+
+
+def _check_cell_scales(expr, ctx) -> None:
+    """Refuse a per-cell coefficient of ``expr`` that its domain cannot read."""
+    if _has_cell_scale(expr):
+        _cell_terms(expr, ctx)
+
+
+def _cell_weighted_parts(expr, slopes: dict, ctx, include: bool):
+    """``(derivative action, residual part)`` of an expression with per-cell coefficients.
+
+    A term scaled per cell by ``c`` is weighted by ``int c N_i``, the lumped
+    mass with the coefficient inside the integral; the other terms take the
+    lumped mass.
+    """
+    from diff_soup.domains.operators.dispatch import dispatch_integrate_scalar_at_quad
+    from diff_soup.problem._ir.derivative_ir import evaluate_parts, sum_residual_terms
+    from diff_soup.problem._spec.derivative_expr import DerivativeSum
+
+    ops = ctx.ops
+    size = int(expr.size)
+    action = None
+    for inner, cell in _cell_terms(expr, ctx):
+        value, _ = evaluate_parts(inner, slopes, size, include_residual=False)
+        if cell is None:
+            weight = _lumped_weight(ops)
+        else:
+            weight = dispatch_integrate_scalar_at_quad(ops.domain, cell)
+        weighted = _weight_by(value, weight)
+        action = weighted if action is None else action + weighted
+    residual = None
+    if include and isinstance(expr, DerivativeSum):
+        residual = sum_residual_terms(expr.residual_terms, size)
+    return ops.as_weak(action), residual
 
 
 def _slope_evaluation(expr, slopes: dict, ctx):
@@ -1217,14 +1399,18 @@ def _slope_evaluation(expr, slopes: dict, ctx):
 
     Returns the derivative action alone, or the full residual rows when the
     context includes the residual part. On a mesh the derivative action is
-    weighted by the lumped mass (see ``_lumped_derivative_action``).
+    weighted by the lumped mass (see ``_lumped_derivative_action``), and a term
+    with a per-cell coefficient by the mass integral of that coefficient.
     """
     from diff_soup.problem._ir.derivative_ir import evaluate_parts
     from diff_soup.problem._spec.derivative_expr import slope_context_includes_residual
 
     include = slope_context_includes_residual()
-    action, residual = evaluate_parts(expr, slopes, int(expr.size), include_residual=include)
-    action = _lumped_derivative_action(ctx, action)
+    if _has_cell_scale(expr):
+        action, residual = _cell_weighted_parts(expr, slopes, ctx, include)
+    else:
+        action, residual = evaluate_parts(expr, slopes, int(expr.size), include_residual=include)
+        action = _lumped_derivative_action(ctx, action)
     if residual is None:
         return action
     return action + residual
@@ -1292,6 +1478,7 @@ class _ResidualFormAdapter(eqx.Module):
         slopes = current_slopes()
         if slopes is not None:
             return _slope_evaluation(result, slopes, ctx)
+        _check_cell_scales(result, ctx)
         ir = normalize_expression(result, out_size=int(result.size))
         record_form(
             form_cell,

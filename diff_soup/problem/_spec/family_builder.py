@@ -329,11 +329,12 @@ class _MemberResidualFormAdapter(eqx.Module):
         if not isinstance(result, DerivativeExpr):
             record_plain(form_cell)
             return result
+        from .build import _check_cell_scales, _slope_evaluation
+
         slopes = current_slopes()
         if slopes is not None:
-            from .build import _slope_evaluation
-
             return _slope_evaluation(result, slopes, ctx)
+        _check_cell_scales(result, ctx)
         ir = normalize_expression(result, out_size=int(result.size))
         # Coefficient state dependence is probed by the family residual block
         # after its capture pass; conservative until then.

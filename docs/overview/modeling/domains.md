@@ -51,6 +51,9 @@ The grid factories describe regular geometries:
   shape `(num_nodes, dim)`, in row-major order over `shape` (x-major).
   A field on a grid is a flat array in the same order. `Grid1D.nodes`
   is the same array without the `dim` axis, and `GridND` has no `nodes`.
+- `grid.coordinates` is the tuple of per-axis cell-centre arrays, and
+  `grid.meshgrid()` the tuple of coordinate arrays of shape `shape`, so
+  `f(*grid.meshgrid()).ravel()` is a field.
 
 `method` selects the discretization: `"fvm"` (the default) or `"fdm"`.
 Flow and advection problems specialize grids further, described

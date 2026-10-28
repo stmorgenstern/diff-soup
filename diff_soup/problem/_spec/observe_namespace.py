@@ -63,14 +63,16 @@ class _ObserveNamespace:
     def boundary_mean(
         self, *, name: str, fn: Callable, tag: str, domain: Optional[str] = None
     ) -> None:
-        """Declare the mean of a quantity over a tagged boundary, computed from the state by `fn(q)`.
+        """Declare the mean of a nodal quantity over a tagged boundary.
 
-        `fn` computes the mean itself, and `tag` is recorded with the observation.
-        Pass `domain` when `fn` reads the fields of more than one component.
+        `fn(q)` returns one value per node, and the observation averages the values
+        on `tag` weighted by the boundary measure: face areas on a grid, facet
+        measures on a mesh. Pass `domain` when `fn` reads the fields of more than
+        one component.
 
         Args:
             name: Observation name.
-            fn: Closure `lambda q: ...` over the fields and globals, returning one array.
+            fn: Closure `lambda q: ...` over the fields and globals, returning one value per node.
             tag: Name of the boundary tag the mean is over.
             domain: Domain the observation evaluates on, or `None` for the domain whose fields `fn` reads.
         """
@@ -81,14 +83,15 @@ class _ObserveNamespace:
         )
 
     def spatial_mean(self, *, name: str, fn: Callable, domain: Optional[str] = None) -> None:
-        """Declare the mean of a quantity over a domain, computed from the state by `fn(q)`.
+        """Declare the mean of a nodal quantity over a domain.
 
-        `fn` computes the mean itself. Pass `domain` when `fn` reads the fields of
-        more than one component.
+        `fn(q)` returns one value per node, and the observation averages them
+        weighted by the cell volumes on a grid or the lumped mass on a mesh. Pass
+        `domain` when `fn` reads the fields of more than one component.
 
         Args:
             name: Observation name.
-            fn: Closure `lambda q: ...` over the fields and globals, returning one array.
+            fn: Closure `lambda q: ...` over the fields and globals, returning one value per node.
             domain: Domain the observation evaluates on, or `None` for the domain whose fields `fn` reads.
         """
         self._spec._observations.append(

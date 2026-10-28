@@ -82,14 +82,7 @@ class RecipeTemplate:
         self._handles = {}
         functools.update_wrapper(self, author)
 
-    def build(self, **inputs):
-        """Build once for each distinct set of authoring argument values.
-
-        The same inputs return the same lowered problem; other inputs return
-        another problem sharing the compiled structure. A problem keeps the
-        values of its own build whatever is built later. The memo holds the
-        128 most recently used input sets.
-        """
+    def _bind(self, inputs):
         try:
             bound = self.signature.bind(**inputs)
         except TypeError as error:
@@ -97,11 +90,9 @@ class RecipeTemplate:
                 f"recipe {self.__name__!r} inputs do not satisfy its arguments {self.argument_names}: {error}"
             ) from None
         bound.apply_defaults()
-        key = _input_key(dict(bound.arguments))
-        if key in self._builds:
-            self._builds.move_to_end(key)
-            self._specs.move_to_end(key)
-            return self._builds[key]
+        return bound
+
+    def _author(self, bound):
         spec = self.author(*bound.args, **bound.kwargs)
         if not isinstance(spec, ProblemSpec):
             raise TypeError(
@@ -119,6 +110,38 @@ class RecipeTemplate:
                 f"value. Rename the argument, and give each experiment's size with "
                 f"Experiment(..., inputs={{{name!r}: value}})."
             )
+        return spec
+
+    def spec(self, **inputs):
+        """Run the authoring function on `inputs` and return its `ProblemSpec`.
+
+        Each call returns a new spec. Its `assemble_state({})` renders the declared
+        `init=` values, and its `build()` gives a problem equal in content to
+        `build(**inputs)`.
+
+        !!! example
+
+            ```python
+            y0 = particle.spec(R=200.0).assemble_state({})
+            ```
+        """
+        return self._author(self._bind(inputs))
+
+    def build(self, **inputs):
+        """Build once for each distinct set of authoring argument values.
+
+        The same inputs return the same lowered problem; other inputs return
+        another problem sharing the compiled structure. A problem keeps the
+        values of its own build whatever is built later. The memo holds the
+        128 most recently used input sets.
+        """
+        bound = self._bind(inputs)
+        key = _input_key(dict(bound.arguments))
+        if key in self._builds:
+            self._builds.move_to_end(key)
+            self._specs.move_to_end(key)
+            return self._builds[key]
+        spec = self._author(bound)
         declarations = {**spec._params, **spec._functions}
         for name, declaration in declarations.items():
             handle = self._handles.setdefault(name, _TemplateHandle(name, self.__name__))
