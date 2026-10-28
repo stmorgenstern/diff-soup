@@ -67,7 +67,7 @@ def _resolve_nodes(mesh, on: Any) -> np.ndarray:
     return arr.astype(np.int64).reshape((-1,))
 
 
-def _dedup_facets(fi: np.ndarray, fl: Any, nm: Any):
+def _dedup_facets(fi: np.ndarray, fl: Any, nm: Any, w: Any = None):
     fi = np.asarray(fi)
     seen: set = set()
     keep: list = []
@@ -77,7 +77,19 @@ def _dedup_facets(fi: np.ndarray, fl: Any, nm: Any):
             seen.add(key)
             keep.append(i)
     idx = np.asarray(keep, dtype=np.int64)
-    return fi[idx], jnp.asarray(fl)[idx], jnp.asarray(nm)[idx]
+    w = None if w is None else jnp.asarray(w)[idx]
+    return fi[idx], jnp.asarray(fl)[idx], jnp.asarray(nm)[idx], w
+
+
+def _concat_facets(parts):
+    """Concatenate ``(rows, measures, normals, weights)`` parts, then drop repeats."""
+    weights = [p[3] for p in parts]
+    return _dedup_facets(
+        np.concatenate([np.asarray(p[0]) for p in parts], axis=0),
+        jnp.concatenate([jnp.asarray(p[1]) for p in parts]),
+        jnp.concatenate([jnp.asarray(p[2]) for p in parts]),
+        None if weights[0] is None else jnp.concatenate([jnp.asarray(w) for w in weights]),
+    )
 
 
 def _resolve_facets(mesh, on: Any):
@@ -89,13 +101,7 @@ def _resolve_facets(mesh, on: Any):
         if on.op == "tags":
             names = on.names
         elif on.op == "union":
-            fil, fll, nml = _resolve_facets(mesh, on.left)
-            fir, flr, nmr = _resolve_facets(mesh, on.right)
-            return _dedup_facets(
-                np.concatenate([np.asarray(fil), np.asarray(fir)], axis=0),
-                jnp.concatenate([jnp.asarray(fll), jnp.asarray(flr)]),
-                jnp.concatenate([jnp.asarray(nml), jnp.asarray(nmr)]),
-            )
+            return _concat_facets([_resolve_facets(mesh, on.left), _resolve_facets(mesh, on.right)])
         else:
             raise ValueError(
                 "surface_measure supports tag names and their unions; for a set "
@@ -103,12 +109,7 @@ def _resolve_facets(mesh, on: Any):
             )
     else:
         raise TypeError("surface_measure(on=...): pass a tag name or a ds.tags(...) selector.")
-    parts = [boundary_face_assembly(mesh, n) for n in names]
-    return _dedup_facets(
-        np.concatenate([np.asarray(p[0]) for p in parts], axis=0),
-        jnp.concatenate([jnp.asarray(p[1]) for p in parts]),
-        jnp.concatenate([jnp.asarray(p[2]) for p in parts]),
-    )
+    return _concat_facets([boundary_face_assembly(mesh, n, weights=True) for n in names])
 
 
 class _DomainMeasure(eqx.Module):
@@ -172,12 +173,14 @@ class _SurfaceMeasure(eqx.Module):
     _fi: Any
     _fl: Any
     _normals: Any
+    _weights: Any
     _n_nodes: int = eqx.field(static=True)
 
-    def __init__(self, face_indices, face_measure, normals, n_nodes) -> None:
+    def __init__(self, face_indices, face_measure, normals, n_nodes, weights=None) -> None:
         self._fi = np.asarray(face_indices)
         self._fl = jnp.asarray(face_measure)
         self._normals = jnp.asarray(normals)
+        self._weights = None if weights is None else jnp.asarray(weights)
         self._n_nodes = int(n_nodes)
 
     @property
@@ -202,15 +205,18 @@ class _SurfaceMeasure(eqx.Module):
     def integrate(self, values):
         """The surface integral ``∫_Γ values dS``.
 
-        ``values`` is either a full nodal field (length ``n_nodes``; face-meaned
-        onto each facet) or one value per facet.  Any other length raises.
+        ``values`` is either a full nodal field (length ``n_nodes``; averaged
+        over each facet with its shape functions) or one value per facet.  Any
+        other length raises.
         """
+        from diff_soup.domains.mesh.fem._boundary import facet_average
+
         flat = jnp.asarray(values).reshape((-1,))
         n_facets = int(self._fi.shape[0])
         if flat.shape[0] == n_facets:
             per_facet = flat
         elif flat.shape[0] == self._n_nodes:
-            per_facet = jnp.mean(flat[jnp.asarray(self._fi)], axis=1)
+            per_facet = facet_average(flat, self._fi, self._weights)
         else:
             raise ValueError(
                 f"surface_measure.integrate: values has length {flat.shape[0]}, "
@@ -254,5 +260,5 @@ def surface_measure(mesh, on: Any) -> _SurfaceMeasure:
         A measure with ``.total``, ``.face_measure``, ``.normals`` and
         ``.integrate(values)`` (the surface integral ``∫_Γ values dS``).
     """
-    fi, fl, normals = _resolve_facets(mesh, on)
-    return _SurfaceMeasure(fi, fl, normals, _n_nodes(mesh))
+    fi, fl, normals, weights = _resolve_facets(mesh, on)
+    return _SurfaceMeasure(fi, fl, normals, _n_nodes(mesh), weights)

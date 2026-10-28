@@ -4,9 +4,10 @@ One facet table serves the flux, Robin and traction conditions, the boundary
 integral constraints, ``q.ops.boundary_integral`` / ``boundary_trace`` /
 ``surface_flux`` and the surface measures.
 
-Each returned row lists one facet's nodes so that an equal share per entry is
-that node's weight ``int_f N_i dS / |f|``, which is the consistent load of a
-constant flux density:
+Each returned row lists one facet's nodes, and each entry carries the node's
+weight ``int_f N_i dS / |f|``, the consistent load of a constant flux density.
+On the linear and quadratic-edge facets the rows repeat nodes so that an equal
+share per entry is that weight, and no weights array is returned:
 
 * a point (``LINE2``): ``[a]``;
 * a linear edge (``TRI3``, ``QUAD4``): ``[a, b]``;
@@ -15,11 +16,20 @@ constant flux density:
 * a triangle (``TET4``): ``[a, b, c]``;
 * a quadrilateral (``HEX8``): ``[a, b, c, d]``, exact on a parallelogram.
 
-The row mean of a nodal field is then the facet's average of it, and the
-consumers (which split each facet's measure equally over its row) need no
-per-element case.  The outward normal of each facet points away from the
-element that owns it; on an interface facet shared by two tagged regions it
-points out of the region whose name sorts first.
+A quadratic face gives some nodes a zero or negative weight, which no equal
+share can, so its row lists the face nodes once and comes with one weight per
+entry, integrated with the face's own shape functions on its own geometry.
+On a flat triangle or a parallelogram they are:
+
+* a six-node triangle (``TET10``): corners ``0``, mid-edges ``1/3``;
+* an eight-node quadrilateral (``HEX20``): corners ``-1/12``, mid-edges ``1/3``;
+* a nine-node quadrilateral (``HEX27``): corners ``1/36``, mid-edges ``1/9``,
+  centre ``4/9``.
+
+``facet_average`` and ``facet_shares`` apply either form, so the consumers need no per-element case.  The outward
+normal of each facet points away from the element that owns it; on an
+interface facet shared by two tagged regions it points out of the region whose
+name sorts first.
 """
 
 from __future__ import annotations
@@ -30,6 +40,11 @@ from typing import TYPE_CHECKING, Any, Union
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, Int
+
+from diff_soup.domains.mesh.fem.basis._common import _gauss_1d_3, _gauss_tri
+from diff_soup.domains.mesh.fem.basis.quad8 import _quad8_shape
+from diff_soup.domains.mesh.fem.basis.quad9 import _quad9_shape
+from diff_soup.domains.mesh.fem.basis.tri6 import _tri6_shape
 
 if TYPE_CHECKING:
     from diff_soup.domains.mesh.core import TaggedMesh
@@ -46,21 +61,61 @@ _LOCAL_EDGES = {
     "QUAD8": ((0, 1), (1, 2), (2, 3), (3, 0)),
 }
 _EDGE_MIDS = {"TRI6": (3, 4, 5), "QUAD8": (4, 5, 6, 7)}
+_TET_FACES = ((1, 2, 3), (0, 3, 2), (0, 1, 3), (0, 2, 1))
+_HEX_FACES = (
+    (0, 3, 7, 4),
+    (1, 2, 6, 5),
+    (0, 1, 5, 4),
+    (3, 2, 6, 7),
+    (0, 1, 2, 3),
+    (4, 5, 6, 7),
+)
 _LOCAL_FACES = {
-    "TET4": ((1, 2, 3), (0, 3, 2), (0, 1, 3), (0, 2, 1)),
-    "HEX8": (
-        (0, 3, 7, 4),
-        (1, 2, 6, 5),
-        (0, 1, 5, 4),
-        (3, 2, 6, 7),
-        (0, 1, 2, 3),
-        (4, 5, 6, 7),
-    ),
+    "TET4": _TET_FACES,
+    "TET10": _TET_FACES,
+    "HEX8": _HEX_FACES,
+    "HEX20": _HEX_FACES,
+    "HEX27": _HEX_FACES,
 }
-SUPPORTED_ELEMENT_TYPES = ("LINE2", "TRI3", "TRI6", "QUAD4", "QUAD8", "TET4", "HEX8")
+# The other nodes of a quadratic face, after its corners (same face order): the
+# mid-edge nodes of edges (c0, c1), (c1, c2), ..., then the HEX27 face centre.
+# Together with the corners they are in the node order of the face shape
+# functions (``_tri6_shape``, ``_quad8_shape``, ``_quad9_shape``).
+_HEX20_FACE_MIDS = (
+    (11, 19, 15, 16),
+    (9, 18, 13, 17),
+    (8, 17, 12, 16),
+    (10, 18, 14, 19),
+    (8, 9, 10, 11),
+    (12, 13, 14, 15),
+)
+_FACE_HIGHER = {
+    "TET10": ((5, 8, 9), (7, 8, 6), (4, 9, 7), (6, 5, 4)),
+    "HEX20": _HEX20_FACE_MIDS,
+    "HEX27": tuple(m + (c,) for m, c in zip(_HEX20_FACE_MIDS, (25, 23, 22, 24, 20, 21))),
+}
+_FACE_KIND = {"TET10": "tri6", "HEX20": "quad8", "HEX27": "quad9"}
+SUPPORTED_ELEMENT_TYPES = (
+    "LINE2",
+    "TRI3",
+    "TRI6",
+    "QUAD4",
+    "QUAD8",
+    "TET4",
+    "TET10",
+    "HEX8",
+    "HEX20",
+    "HEX27",
+)
 
 _Triple = tuple[
     Int[Array, "n_faces row_width"], Float[Array, " n_faces"], Float[Array, "n_faces dim"]
+]
+_Weighted = tuple[
+    Int[Array, "n_faces row_width"],
+    Float[Array, " n_faces"],
+    Float[Array, "n_faces dim"],
+    Union[Float[Array, "n_faces row_width"], None],
 ]
 
 
@@ -159,8 +214,12 @@ def _edge_nodes(et, cells, cell, local) -> np.ndarray:
 
 
 def _face_nodes(et, cells, cell, local) -> np.ndarray:
-    corners = np.asarray(_LOCAL_FACES[et], dtype=np.int64)[local]
-    return np.take_along_axis(cells[cell], corners, axis=1)
+    """The face corners, then any mid-edge and centre nodes of a quadratic face."""
+    local_nodes = np.asarray(_LOCAL_FACES[et], dtype=np.int64)[local]
+    if et in _FACE_HIGHER:
+        higher = np.asarray(_FACE_HIGHER[et], dtype=np.int64)[local]
+        local_nodes = np.concatenate([local_nodes, higher], axis=1)
+    return np.take_along_axis(cells[cell], local_nodes, axis=1)
 
 
 def _orient(raw_normal, facet_points, cell_points) -> np.ndarray:
@@ -198,6 +257,7 @@ class _Facets:
     def __init__(self, mesh, mask: np.ndarray):
         et = _element_type(mesh)
         self.ele_type = et
+        self.weights = None
         table = _facet_table(mesh)
         rows = table[mask]
         points = np.asarray(mesh.points, dtype=np.float64)
@@ -228,13 +288,21 @@ class _Facets:
         else:
             nodes = _face_nodes(et, cells, cell, local)
             p = points[nodes]
-            if nodes.shape[1] == 3:
-                self.kind = "tri"
+            if len(_LOCAL_FACES[et][0]) == 3:
                 cross = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
+            else:
+                cross = np.cross(p[:, 2] - p[:, 0], p[:, 3] - p[:, 1])
+            if et in _FACE_KIND:
+                self.kind = _FACE_KIND[et]
+                w, n, dn = _face_rule(self.kind)
+                jxw = w[None, :] * _surface_jacobian(dn, p)  # (n_faces, n_q)
+                self.measure = jxw.sum(axis=1)
+                self.weights = (jxw @ n) / self.measure[:, None]
+            elif nodes.shape[1] == 3:
+                self.kind = "tri"
                 self.measure = 0.5 * np.linalg.norm(cross, axis=1)
             else:
                 self.kind = "quad"
-                cross = np.cross(p[:, 2] - p[:, 0], p[:, 3] - p[:, 1])
                 self.measure = _bilinear_face_area(p)
             raw = cross / np.linalg.norm(cross, axis=1)[:, None]
             self.rows = nodes
@@ -271,6 +339,44 @@ class _Facets:
             jnp.asarray(self.normals),
         )
 
+    def weighted(self) -> _Weighted:
+        weights = None if self.weights is None else jnp.asarray(self.weights)
+        return (*self.triple(), weights)
+
+
+def facet_average(values: Any, rows: Any, weights: Any = None) -> Array:
+    """Each facet's average of a nodal array, ``(n_faces, ...)``.
+
+    Args:
+        values: One value (or one array) per node, ``(n_nodes, ...)``.
+        rows: The facet rows of a facet assembly.
+        weights: Its weights, or ``None`` for rows whose entries share equally.
+    """
+    at = jnp.asarray(values)[jnp.asarray(rows)]
+    if weights is None:
+        return jnp.mean(at, axis=1)
+    return jnp.einsum("fk,fk...->f...", jnp.asarray(weights, dtype=at.dtype), at)
+
+
+def facet_shares(per_face: Any, rows: Any, weights: Any = None) -> Array:
+    """Each row entry's share of a per-facet quantity, ``(n_faces, row_width, ...)``.
+
+    Scattered with ``.at[rows.reshape(-1)].add``, it gives every node its
+    consistent part of the quantity.
+
+    Args:
+        per_face: One value (or one array) per facet, ``(n_faces, ...)``.
+        rows: The facet rows of a facet assembly.
+        weights: Its weights, or ``None`` for rows whose entries share equally.
+    """
+    per_face = jnp.asarray(per_face)
+    rows = jnp.asarray(rows)
+    if weights is None:
+        per_vertex = per_face / rows.shape[1]
+        return jnp.broadcast_to(per_vertex[:, None], rows.shape + per_face.shape[1:])
+    w = jnp.asarray(weights, dtype=per_face.dtype)
+    return per_face[:, None] * w.reshape(w.shape + (1,) * (per_face.ndim - 1))
+
 
 def boundary_facet_mask_for_ids(mesh: "TaggedMesh", ids: Iterable[int]) -> np.ndarray:
     """Boolean mask over ``mesh.boundary_facets()`` of the rows tagged with one of ``ids``."""
@@ -304,17 +410,22 @@ def boundary_facet_mask_for_nodes(mesh: "TaggedMesh", nodes: Any) -> np.ndarray:
     return mask
 
 
-def boundary_face_assembly_for_mask(mesh: "TaggedMesh", mask: Any) -> _Triple:
+def boundary_face_assembly_for_mask(
+    mesh: "TaggedMesh", mask: Any, *, weights: bool = False
+) -> Union[_Triple, _Weighted]:
     """Return ``(face_indices, face_measures, outward_normals)`` for a facet mask.
 
     Args:
         mesh: A [TaggedMesh][diff_soup.domains.TaggedMesh].
         mask: A boolean array with one entry per row of ``mesh.boundary_facets()``.
+        weights: If ``True``, also return the per-entry weights.
 
     Returns:
         The rows described in the module docstring, ``(n_faces, row_width)``;
         the facet measures, ``(n_faces,)`` (a point measure in 1D, a length in 2D,
-        an area in 3D); and the outward unit normals, ``(n_faces, dim)``.
+        an area in 3D); and the outward unit normals, ``(n_faces, dim)``.  With
+        ``weights=True``, a fourth entry: the weights ``(n_faces, row_width)`` of
+        a quadratic face, or ``None`` where the entries share equally.
 
     Raises:
         KeyError: If the mask selects no facet.
@@ -329,31 +440,39 @@ def boundary_face_assembly_for_mask(mesh: "TaggedMesh", mask: Any) -> _Triple:
         )
     if not mask.any():
         raise KeyError("the selection names no tagged boundary facet")
-    return _Facets(mesh, mask).triple()
+    facets = _Facets(mesh, mask)
+    return facets.weighted() if weights else facets.triple()
 
 
-def boundary_face_assembly(mesh: "TaggedMesh", tag: Union[str, int]) -> _Triple:
+def boundary_face_assembly(
+    mesh: "TaggedMesh", tag: Union[str, int], *, weights: bool = False
+) -> Union[_Triple, _Weighted]:
     """Return ``(face_indices, face_measures, outward_normals)`` for a tagged boundary.
 
     Args:
         mesh: A [TaggedMesh][diff_soup.domains.TaggedMesh].
         tag: A tag name or tag-group name, or an integer tag id.
+        weights: If ``True``, also return the per-entry weights.
 
     Returns:
-        The triple of ``boundary_face_assembly_for_mask``.
+        The tuple of ``boundary_face_assembly_for_mask``.
 
     Raises:
         KeyError: If the name or id tags no facet.
         NotImplementedError: If the element type has no facet support.
     """
     ids = mesh._tag_ids_for_name(tag) if isinstance(tag, str) else [int(tag)]
-    return boundary_face_assembly_for_ids(mesh, ids)
+    return boundary_face_assembly_for_ids(mesh, ids, weights=weights)
 
 
-def boundary_face_assembly_for_ids(mesh: "TaggedMesh", ids: Iterable[int]) -> _Triple:
+def boundary_face_assembly_for_ids(
+    mesh: "TaggedMesh", ids: Iterable[int], *, weights: bool = False
+) -> Union[_Triple, _Weighted]:
     """Return ``(face_indices, face_measures, outward_normals)`` for explicit tag ids.
 
     The facets whose tag id is in ``ids`` form the selection (their union).
+    ``weights=True`` adds the per-entry weights, as in
+    ``boundary_face_assembly_for_mask``.
 
     Raises:
         KeyError: If none of ``ids`` tags a facet.
@@ -364,7 +483,8 @@ def boundary_face_assembly_for_ids(mesh: "TaggedMesh", ids: Iterable[int]) -> _T
     mask = boundary_facet_mask_for_ids(mesh, ids)
     if not mask.any():
         raise KeyError(f"Boundary tag ids {ids} not present in mesh.boundary_tags")
-    return _Facets(mesh, mask).triple()
+    facets = _Facets(mesh, mask)
+    return facets.weighted() if weights else facets.triple()
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +504,16 @@ def _face_rule(kind: str):
             n = np.stack([t * (t - 1) / 2, t * (t + 1) / 2, 1 - t**2], axis=1)
             dn = np.stack([t - 0.5, t + 0.5, -2 * t], axis=1)
         return w, n, dn[:, :, None]
+    if kind == "tri6":
+        pts, w = _gauss_tri(2)
+        n, dn = _tri6_shape(pts)
+        return w, n, dn
+    if kind in ("quad8", "quad9"):
+        p, w1 = _gauss_1d_3(3)
+        uu, vv = np.meshgrid(p, p, indexing="ij")
+        pts = np.stack((uu, vv), axis=-1).reshape(-1, 2)
+        n, dn = (_quad8_shape if kind == "quad8" else _quad9_shape)(pts)
+        return np.outer(w1, w1).reshape(-1), n, dn
     if kind == "tri":
         r = np.array([1.0 / 6, 2.0 / 3, 1.0 / 6])
         s = np.array([1.0 / 6, 1.0 / 6, 2.0 / 3])
@@ -507,4 +637,6 @@ __all__ = [
     "boundary_facet_mask_for_ids",
     "boundary_facet_mask_for_nodes",
     "boundary_load",
+    "facet_average",
+    "facet_shares",
 ]

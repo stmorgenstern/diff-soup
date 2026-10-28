@@ -459,8 +459,8 @@ class _ResolvedDirichlet:
 class _ResolvedFlux:
     """Static geometry + runtime callable for one FluxBC.
 
-    On FEM domains the kernel scatters ``flux_value * face_length /
-    verts_per_face`` to each face vertex (linear-Lagrange surface mass).  On
+    On FEM domains the kernel scatters ``flux_value * face_length`` over each
+    facet row, an equal share per entry or the entry's ``face_weights``.  On
     FVM/FDM grids the kernel adds ``flux_value * face_area / cell_volume`` at
     each boundary cell.
 
@@ -501,6 +501,9 @@ class _ResolvedFlux:
     # Jacobian pattern.  ``True``: the closure sees the whole boundary and the
     # sparsity builder declares the conservative boundary-wide pattern.
     cross_facet: bool = False
+    # FEM per-entry weights ``(n_faces, verts_per_face)`` of a quadratic face
+    # (TET10, HEX20, HEX27); ``None`` where each entry takes an equal share.
+    face_weights: object = None
 
 
 @dataclass(frozen=True)
@@ -525,14 +528,16 @@ class _ResolvedRobin:
     # The owning component, so the residual can rescale ``face_factor`` when
     # that component's grid is scaled by a declared parameter.
     comp_name: object = None
+    # As for ``_ResolvedFlux.face_weights``.
+    face_weights: object = None
 
 
 @dataclass(frozen=True)
 class _ResolvedTraction:
     """Static geometry + runtime callable for one TractionBC.
 
-    Always FEM.  Distributes ``value * face_length / verts_per_face`` to
-    each face vertex per component.  Component count is inferred from
+    Always FEM.  Distributes ``value * face_length`` over each facet row per
+    component, as the flux does.  Component count is inferred from
     ``var_shape[-1]``.
     """
 
@@ -543,6 +548,8 @@ class _ResolvedTraction:
     face_lengths: object
     face_normals: object
     callback_geometry: object = None
+    # As for ``_ResolvedFlux.face_weights``.
+    face_weights: object = None
 
 
 @dataclass(frozen=True)
@@ -653,6 +660,8 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
       facets ([_resolve_facet_mask][diff_soup._lowering.bcs._resolve_facet_mask]):
       a tag leaf selects its facets, a node leaf the outer facets whose vertices
       all lie in the node set.
+    * ``want == "weighted_facets"``: that triple plus the per-entry weights of a
+      quadratic face, ``None`` where each entry takes an equal share.
 
     Args:
         domain: The domain to resolve against.  A facet view requires a tagged
@@ -662,14 +671,16 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
         selector: The
             [BoundarySet][diff_soup.domains.boundary_set.BoundarySet]
             to resolve.
-        want: Either ``"nodes"`` (node view) or ``"facets"`` (facet view).
+        want: ``"nodes"`` (node view), ``"facets"`` (facet view) or
+            ``"weighted_facets"``.
         bc_desc: Optional human-readable description of the boundary target,
             woven into error messages to point back at the offending recipe.
 
     Returns:
         For ``want == "nodes"``: a sorted ``int32`` `numpy.ndarray` of
         unique node indices.  For ``want == "facets"``: the
-        ``(face_indices, face_lengths, face_normals)`` triple.
+        ``(face_indices, face_lengths, face_normals)`` triple, with the weights
+        as a fourth entry for ``want == "weighted_facets"``.
 
     Raises:
         TypeError: If a facet view is requested on a domain that is not a
@@ -689,7 +700,7 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
         )
         return np.array(sorted(node_set), dtype=np.int32)
 
-    if want == "facets":
+    if want in ("facets", "weighted_facets"):
         if not isinstance(domain, TaggedMesh):
             raise TypeError(
                 "facet-valued boundary targets (flux / Robin / traction / boundary "
@@ -698,10 +709,14 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
                 "facets to integrate over."
             )
         return boundary_face_assembly_for_mask(
-            domain, _resolve_facet_mask(domain, selector, bc_desc=bc_desc)
+            domain,
+            _resolve_facet_mask(domain, selector, bc_desc=bc_desc),
+            weights=want == "weighted_facets",
         )
 
-    raise ValueError(f"_resolve_selector: want must be 'nodes' or 'facets', got {want!r}")
+    raise ValueError(
+        f"_resolve_selector: want must be 'nodes', 'facets' or 'weighted_facets', got {want!r}"
+    )
 
 
 def _resolve_facet_mask(domain, selector, *, bc_desc=None) -> np.ndarray:
@@ -927,25 +942,28 @@ class _BoundaryMeasure:
 def _boundary_integral_measure(domain, selector, *, constraint_desc: str) -> _BoundaryMeasure:
     """Resolve a boundary selector to nodal + per-facet integration weights.
 
-    FEM facet measures are distributed equally to their linear-Lagrange
-    vertices and accumulated at shared nodes. Grids carry no facet table, so a
+    FEM facet measures are distributed over their row entries (equally, or by
+    the per-entry weights of a quadratic face) and accumulated at shared nodes. Grids carry no facet table, so a
     selected cell's measure is the area of the boundary face(s) it exposes —
     its ``face_area / cell_volume`` factor times its volume — which makes a
     grid boundary integral a face-area-weighted sum over the selected cells,
     each weighted by the one face the selection lies on.
     """
     if isinstance(domain, TaggedMesh):
-        face_indices, face_measure, _normals = _resolve_selector(
+        face_indices, face_measure, _normals, weights = _resolve_selector(
             domain,
             selector,
-            want="facets",
+            want="weighted_facets",
             bc_desc=constraint_desc,
         )
         faces = np.asarray(face_indices, dtype=np.int64)
         measure = np.asarray(face_measure, dtype=np.float64)
         nodes, inverse = np.unique(faces.reshape(-1), return_inverse=True)
         nodal = np.zeros(nodes.shape, dtype=np.float64)
-        per_vertex = np.repeat(measure / faces.shape[1], faces.shape[1])
+        if weights is None:
+            per_vertex = np.repeat(measure / faces.shape[1], faces.shape[1])
+        else:
+            per_vertex = (measure[:, None] * np.asarray(weights, dtype=np.float64)).reshape(-1)
         np.add.at(nodal, inverse, per_vertex)
         return _BoundaryMeasure(
             tag_nodes=nodes.astype(np.int32),
@@ -1302,10 +1320,10 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                 if bc_name is None and is_face_flux:
                     bc_name = _orig_flux_fn.bc_name
                 if isinstance(domain, TaggedMesh):
-                    fi, fl, fn = _resolve_selector(
+                    fi, fl, fn, fw = _resolve_selector(
                         domain,
                         bc.where.selector,
-                        want="facets",
+                        want="weighted_facets",
                         bc_desc=f"FluxBC on {var.name!r}",
                     )
                     centroids = _face_centroids(domain, fi)
@@ -1357,6 +1375,7 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                             bc_name=bc_name,
                             is_face_flux=is_face_flux,
                             cross_facet=bool(getattr(bc, "cross_facet", False)),
+                            face_weights=None if fw is None else np.asarray(fw, np.float64),
                         )
                     )
                 elif isinstance(domain, (Grid1D, GridND)):
@@ -1437,10 +1456,10 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                 _check_robin_beta(bc, var.name)
                 callback_geometry = _value_callback_geometry(bc, comp, eqset)
                 if isinstance(domain, TaggedMesh):
-                    fi, fl, fn = _resolve_selector(
+                    fi, fl, fn, fw = _resolve_selector(
                         domain,
                         bc.where.selector,
-                        want="facets",
+                        want="weighted_facets",
                         bc_desc=f"RobinBC on {var.name!r}",
                     )
                     robins.append(
@@ -1455,6 +1474,7 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                             face_normals=np.asarray(fn, dtype=np.float64),
                             node_indices=None,
                             face_factor=None,
+                            face_weights=None if fw is None else np.asarray(fw, np.float64),
                         )
                     )
                 elif isinstance(domain, (Grid1D, GridND)):
@@ -1489,10 +1509,10 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                     raise NotImplementedError(
                         "TractionBC currently requires a TaggedMesh FEM domain"
                     )
-                fi, fl, fn = _resolve_selector(
+                fi, fl, fn, fw = _resolve_selector(
                     domain,
                     bc.where.selector,
-                    want="facets",
+                    want="weighted_facets",
                     bc_desc=f"TractionBC on {var.name!r}",
                 )
                 tractions.append(
@@ -1504,6 +1524,7 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                         face_indices=np.asarray(fi, dtype=np.int32),
                         face_lengths=np.asarray(fl, dtype=np.float64),
                         face_normals=np.asarray(fn, dtype=np.float64),
+                        face_weights=None if fw is None else np.asarray(fw, np.float64),
                     )
                 )
 

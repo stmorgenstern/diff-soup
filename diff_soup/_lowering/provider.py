@@ -38,6 +38,7 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision
 from diff_soup.domains.grid.core import _METRIC_DIMENSION
+from diff_soup.domains.mesh.fem._boundary import facet_average, facet_shares
 from diff_soup.domains.operators.dispatch import dispatch_lumped_mass, finalize_residual
 from diff_soup.linear import SparseTopology
 from diff_soup.problem._ad.sparse_jac import SparseJacobian
@@ -1035,6 +1036,7 @@ def _build_full_residual_fn(
             bool(f.is_face_flux),
             jnp.asarray(f.face_centroids) if f.face_centroids is not None else None,
             bool(getattr(f, "cross_facet", False)),
+            jnp.asarray(f.face_weights) if f.face_weights is not None else None,
         )
         for f in bcs.flux
     )
@@ -1066,6 +1068,7 @@ def _build_full_residual_fn(
             jnp.asarray(r_.node_indices, dtype=jnp.int32) if r_.node_indices is not None else None,
             jnp.asarray(r_.face_factor) if r_.face_factor is not None else None,
             r_.comp_name,
+            jnp.asarray(r_.face_weights) if r_.face_weights is not None else None,
         )
         for r_ in bcs.robin
     )
@@ -1077,6 +1080,7 @@ def _build_full_residual_fn(
             jnp.asarray(t_.face_indices, dtype=jnp.int32),
             jnp.asarray(t_.face_lengths),
             jnp.asarray(t_.face_normals),
+            jnp.asarray(t_.face_weights) if t_.face_weights is not None else None,
         )
         for t_ in bcs.traction
     )
@@ -1426,6 +1430,7 @@ def _build_full_residual_fn(
                     is_face_flux,
                     face_centroids,
                     cross_facet,
+                    fw,
                 ) = kern
                 if restricted and int(v_off) not in active_row_offsets:
                     continue  # scatters onto unassembled rows only.
@@ -1488,11 +1493,9 @@ def _build_full_residual_fn(
                 if is_fem:
                     fv = jnp.broadcast_to(jnp.asarray(flux_val), fl.shape)
                     face_contrib = fv * fl
-                    n_verts = fi.shape[1]
-                    per_vertex = face_contrib / n_verts
                     contribution = jnp.zeros((v_size,), dtype=u.dtype)
                     contribution = contribution.at[fi.reshape(-1)].add(
-                        jnp.broadcast_to(per_vertex[:, None], fi.shape).reshape(-1).astype(u.dtype)
+                        facet_shares(face_contrib, fi, fw).reshape(-1).astype(u.dtype)
                     )
                 else:
                     fv = jnp.broadcast_to(jnp.asarray(flux_val), ni.shape)
@@ -1505,7 +1508,7 @@ def _build_full_residual_fn(
             for kern, fns, callback_geom, row_scale in zip(
                 robin_geom, robin_callables, robin_callback_geometry, robin_row_scales
             ):
-                (v_off, v_size, is_fem, fi, fl, _fn_arr, ni, factor, robin_comp) = kern
+                (v_off, v_size, is_fem, fi, fl, _fn_arr, ni, factor, robin_comp, fw) = kern
                 if restricted and int(v_off) not in active_row_offsets:
                     continue  # scatters onto unassembled rows only.
                 if robin_comp in lengths:
@@ -1522,14 +1525,12 @@ def _build_full_residual_fn(
                 # branch above uses.  ``beta`` is nonzero: a zero beta states a
                 # Dirichlet condition and is rejected when the BC is resolved.
                 if is_fem:
-                    u_at_faces = jnp.mean(u_slice[fi], axis=1)
+                    u_at_faces = facet_average(u_slice, fi, fw)
                     inward = (value_val - alpha_val * u_at_faces) / beta_val
                     per_face = inward * fl
-                    n_verts = fi.shape[1]
-                    per_vertex = per_face / n_verts
                     contribution = jnp.zeros((v_size,), dtype=u.dtype)
                     contribution = contribution.at[fi.reshape(-1)].add(
-                        jnp.broadcast_to(per_vertex[:, None], fi.shape).reshape(-1).astype(u.dtype)
+                        facet_shares(per_face, fi, fw).reshape(-1).astype(u.dtype)
                     )
                 else:
                     u_at_nodes = u_slice[ni]
@@ -1544,21 +1545,17 @@ def _build_full_residual_fn(
             for kern, value_fn, callback_geom, row_scale in zip(
                 traction_geom, traction_callables, traction_callback_geometry, traction_row_scales
             ):
-                v_off, v_size, v_shape, fi, fl, _fn_arr = kern
+                v_off, v_size, v_shape, fi, fl, _fn_arr, fw = kern
                 if restricted and int(v_off) not in active_row_offsets:
                     continue  # scatters onto unassembled rows only.
                 n_components = int(v_shape[-1])
                 t_vec = jnp.asarray(boundary_value(value_fn, callback_geom))
                 t_vec = jnp.broadcast_to(t_vec, (fi.shape[0], n_components))
-                n_verts = fi.shape[1]
                 n_nodes = v_size // n_components
                 per_face = t_vec * fl[:, None]
-                per_vertex = per_face / n_verts
                 contribution = jnp.zeros((n_nodes, n_components), dtype=u.dtype)
                 contribution = contribution.at[fi.reshape(-1)].add(
-                    jnp.broadcast_to(per_vertex[:, None, :], (fi.shape[0], n_verts, n_components))
-                    .reshape(-1, n_components)
-                    .astype(u.dtype)
+                    facet_shares(per_face, fi, fw).reshape(-1, n_components).astype(u.dtype)
                 )
                 if row_scale is not None:
                     contribution = contribution / row_scale

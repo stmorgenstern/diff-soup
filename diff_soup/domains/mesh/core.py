@@ -601,7 +601,7 @@ def _checked_cell_tags(cell_tags, cell_tag_names, num_cells: int):
 class TaggedMesh(Mesh):
     """A [Mesh][diff_soup.domains.Mesh] whose boundary facets, and optionally cells, carry integer tags.
 
-    Boundary conditions select facets by name, as `tag="rim"` or with [`ds.tags`][diff_soup.problem.tags]. Facet integrals, such as flux conditions and boundary operators, support `LINE2`, `TRI3`, `TRI6`, `QUAD4`, `QUAD8`, `TET4` and `HEX8` elements. Cell tags name regions, and `cell_indicator` turns one into a piecewise coefficient.
+    Boundary conditions select facets by name, as `tag="rim"` or with [`ds.tags`][diff_soup.problem.tags]. Facet integrals, such as flux conditions and boundary operators, support `LINE2`, `TRI3`, `TRI6`, `QUAD4`, `QUAD8`, `TET4`, `TET10`, `HEX8`, `HEX20` and `HEX27` elements. Cell tags name regions, and `cell_indicator` turns one into a piecewise coefficient.
 
     Args:
         points: The node coordinates, shape `(num_nodes, dim)`.

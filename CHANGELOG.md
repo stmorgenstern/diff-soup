@@ -102,7 +102,9 @@ issue ledger of that effort.
 - `TaggedMesh(cell_tags=, cell_tag_names=)`, `TaggedMesh.cell_indicator(name)`,
   `polygons_to_tagged_mesh({name: polygon}, ...)` with a conforming interface, and `read_mesh`
   region groups. (4, R-15)
-- Flux and Robin conditions on QUAD4, TRI6, QUAD8, HEX8 and TET4 meshes. (R-17)
+- Flux, Robin and traction conditions, `surface_measure`, `q.ops.boundary_integral` and `spec.bc.neumann`
+  on QUAD4, TRI6, QUAD8, HEX8, TET4, TET10, HEX20 and HEX27 meshes; each face node carries its
+  consistent share (zero at a TET10 corner, negative at a HEX20 corner). (R-17)
 - `Field` on a mesh composes with weak terms and nodal arrays and supports `**`, `abs` and
   comparisons; a scalar joins a residual on a mesh. (R-12, R-13)
 - `ds.inference.evidence(est, fit)` and `laplace(est, fit).log_evidence`. (WE1-3)

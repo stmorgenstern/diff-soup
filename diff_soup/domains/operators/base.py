@@ -741,7 +741,7 @@ class Operators(AbstractOperator):
     def boundary_integral(self, field, *, tag):
         """The integral of a nodal field over a tagged boundary of a mesh.
 
-        Each facet contributes the mean of its node values times its measure.
+        Each facet contributes the consistent share of its node values times its measure.
 
         Args:
             field: A nodal field.

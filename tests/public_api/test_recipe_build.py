@@ -438,47 +438,50 @@ def test_the_residual_form_keeps_a_condition_on_the_field_it_writes(condition):
     np.testing.assert_allclose(residual, explicit, atol=1e-12)
 
 
-def _tri6_square():
-    """Two six-node triangles on the unit square, the left side tagged."""
-    points = np.array(
-        [[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0], [1, 0.5], [0.5, 0.5], [0, 0.5], [0.5, 1]], float
-    )
-    cells = np.array([[0, 1, 2, 4, 5, 6], [0, 2, 3, 6, 8, 7]])
-    return TaggedMesh(
-        points, cells, "TRI6", boundary_edges=[[3, 0, 7]], boundary_tags=[1], tag_names={1: "left"}
-    )
+def _unit_side_mesh(ele_type):
+    """A mesh with its side at x = 0, of measure 1, tagged; further nodes are corner means."""
+    if ele_type == "QUAD4":
+        return rectangle_mesh(2, 2, 1.0, 1.0, with_boundary_tags=True)
+    if ele_type == "HEX8":
+        return box_mesh(1, 1, 1, 1.0, 1.0, 1.0, with_boundary_tags=True)
+    cube = np.array([[x, y, z] for z in (0, 1) for x, y in ((0, 0), (1, 0), (1, 1), (0, 1))])
+    edges = "01 12 23 30 45 56 67 74 04 15 26 37"
+    corners, groups, facets = {  # (boundary_edges, boundary_faces)
+        "TRI6": (cube[:4, :2], "01 12 02 03 23", ([[3, 0, 7]], None)),
+        "TET10": (cube[[0, 1, 3, 4]] * [1, 1, 2], "01 12 02 03 23 13", (None, [[0, 3, 2]])),
+        "HEX20": (cube, edges, (None, [[0, 3, 7, 4]])),
+        "HEX27": (cube, edges + " 0123 4567 0154 1265 3267 0374 01234567", (None, [[0, 3, 7, 4]])),
+    }[ele_type]
+    points = np.vstack([corners] + [corners[[int(c) for c in g]].mean(0) for g in groups.split()])
+    cells = [[0, 1, 2, 4, 5, 6], [0, 2, 3, 6, 8, 7]] if ele_type == "TRI6" else [range(len(points))]
+    return TaggedMesh(points, np.asarray(cells), ele_type, *facets, [1], {1: "x_min"})
 
 
 @pytest.mark.parametrize(
-    ("mesh", "side", "loads"),
+    ("ele_type", "side", "shares"),
     [
-        (
-            lambda: rectangle_mesh(2, 2, 1.0, 1.0, with_boundary_tags=True),
-            "left",
-            {0: 0.25, 1: 0.5, 2: 0.25},
-        ),
-        (_tri6_square, "left", {0: 1 / 6, 7: 2 / 3, 3: 1 / 6}),
-        (
-            lambda: box_mesh(1, 1, 1, 1.0, 1.0, 1.0, with_boundary_tags=True),
-            "x_min",
-            dict.fromkeys(range(4), 0.25),
-        ),
+        ("QUAD4", "left", (0.25, 0.5, 0.25)),
+        ("TRI6", "x_min", (1 / 6, 1 / 6, 2 / 3)),
+        ("HEX8", "x_min", (0.25,) * 4),
+        ("TET10", "x_min", (0,) * 3 + (1 / 3,) * 3),
+        ("HEX20", "x_min", (-1 / 12,) * 4 + (1 / 3,) * 4),
+        ("HEX27", "x_min", (1 / 36,) * 4 + (1 / 9,) * 4 + (4 / 9,)),
     ],
-    ids=["quad4", "tri6", "hex8"],
+    ids=["quad4", "tri6", "hex8", "tet10", "hex20", "hex27"],
 )
 def test_a_flux_on_a_quadrilateral_quadratic_or_hexahedral_mesh_loads_its_consistent_share(
-    mesh, side, loads
+    ele_type, side, shares
 ):
-    """A flux density 2 through a unit side of a QUAD4, TRI6 or HEX8 mesh adds ``2 int N_i dS`` to
-    each side node's residual row and nothing elsewhere, so the injected total is 2."""
-    domain = mesh()
+    """A flux density 2 through a unit side adds ``2 int N_i dS`` to each side node's residual row
+    (zero or negative at TET10 and HEX20 corners) and nothing elsewhere, so the total is 2."""
+    domain = _unit_side_mesh(ele_type)
     spec = ds.problem(f"inflow_{domain.ele_type}").domain("plate", domain)
     spec.field("T", mass="differential", scale=1.0)
     spec.equation(writes="T", reads=("T",))(lambda q: q.ops.laplacian(q.T))
     spec.bc.flux("T", tag=side, value=2.0)
     residual = _residual(spec.build(), spec.assemble_state({}))
     expected = np.zeros(domain.num_nodes)
-    expected[list(loads)] = 2.0 * np.array(list(loads.values()))
-    # measured 0.0 on all three meshes (total 2.0), workstation CPU 2026-10-28,
+    expected[np.isclose(np.asarray(domain.points)[:, 0], 0.0)] = 2.0 * np.array(shares)
+    # measured 0.0 on all six meshes (total 2.0), workstation CPU 2026-10-29,
     # pytest tests/public_api/test_recipe_build.py::test_a_flux_on_a_quadrilateral_quadratic_or_hexahedral_mesh_loads_its_consistent_share
     np.testing.assert_allclose(residual, expected, atol=1e-12)
