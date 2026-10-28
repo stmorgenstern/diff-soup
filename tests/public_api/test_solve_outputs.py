@@ -503,15 +503,25 @@ def _stored(solution):
     return {key: getattr(solution, key) for key in ("ts", "ys", "lambdas", "outputs")}
 
 
+_OBSERVED_THETA = ds.default_theta(_OBSERVED, {_RATE: jnp.asarray(1.3)})
+
+
+def _compile_observed(outputs, *, ordered=True):
+    saveat = ds.SaveAt(ts=_SAVE_TIMES, outputs=outputs, ordered=ordered)
+    return ds.compile(
+        _OBSERVED, _CHECKPOINTED, (0.0, 1.0), _OBSERVED_Y0, theta=_OBSERVED_THETA, saveat=saveat
+    )
+
+
 @pytest.fixture(scope="module")
 def saved():
-    """The full save and the named save of one problem as compiled programs: their solutions
-    and their compiled memory analyses, keyed by the output request."""
+    """The full save and the named save of one problem compiled by ``ds.compile``: the
+    compiled solves, their stored outputs and their memory analyses, keyed by the request."""
 
     def compiled(outputs):
-        value = jnp.asarray(1.3)
-        program = jax.jit(lambda v: _stored(_observed_solve(v, outputs))).lower(value).compile()
-        return program(value), program.memory_analysis()
+        program = _compile_observed(outputs)
+        stored = _stored(program((0.0, 1.0), _OBSERVED_Y0, theta=_OBSERVED_THETA))
+        return program, stored, program.memory_analysis()
 
     return {outputs: compiled(outputs) for outputs in (None, _NAMED)}
 
@@ -519,8 +529,17 @@ def saved():
 def test_named_outputs_equal_the_observed_full_save_in_less_compiled_memory(saved):
     """Naming two observations stores them alone (no ``ys``, no ``lambdas``) and equal to
     observe() on the full save; the compiled outputs shrink by exactly the rows not stored and
-    the whole compiled footprint is smaller."""
-    (full, full_memory), (named, named_memory) = saved[None], saved[_NAMED]
+    the whole compiled footprint is smaller. The solve ``ds.compile`` returns equals
+    ``pdesolve`` and refuses a ``y0`` of another shape, and unordered save times are refused."""
+    (_, full, full_memory), (program, named, named_memory) = saved[None], saved[_NAMED]
+    # measured 0.0 between the compiled solve and pdesolve, CPU workstation 2026-10-28
+    eager = _observed_solve(jnp.asarray(1.3), _NAMED)
+    for name in _NAMED:
+        np.testing.assert_array_equal(named["outputs"][name], eager.outputs[name])
+    with pytest.raises(ValueError, match=r"y0 was compiled for shape \(8,\)"):
+        program((0.0, 1.0), _OBSERVED_Y0[:4], theta=_OBSERVED_THETA)
+    with pytest.raises(ValueError, match="ordered=True"):
+        _compile_observed(_NAMED, ordered=False)
     assert (named["ys"], named["lambdas"], full["outputs"]) == (None, None, None)
     assert tuple(named["outputs"]) == _NAMED
     for name in _NAMED:
@@ -534,7 +553,7 @@ def test_named_outputs_equal_the_observed_full_save_in_less_compiled_memory(save
             memory.argument_size_in_bytes + memory.output_size_in_bytes + memory.temp_size_in_bytes
         )
 
-    # measured 784,707 B (full save) against 782,819 B (named), CPU VM 2026-10-22,
+    # measured 787,320 B (full save) against 785,720 B (named), CPU workstation 2026-10-28,
     # pytest tests/public_api/test_solve_outputs.py::test_named_outputs_equal_the_observed_full_save_in_less_compiled_memory
     assert total(named_memory) < total(full_memory)
 
