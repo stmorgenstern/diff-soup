@@ -1,7 +1,8 @@
 """diff_soup.domains.geometry — Complex geometry support via OpenCV + gmsh.
 
-``gmsh`` and ``opencv-python`` install with diff_soup, so this package is
-available in every installation.
+``opencv-python`` installs with diff_soup. Meshing with ``gmsh`` and reading
+or writing meshes with ``meshio`` need the ``mesh`` extra,
+``pip install "diff-soup[mesh]"``.
 
 Typical workflow::
 

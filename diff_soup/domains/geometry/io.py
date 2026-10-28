@@ -1,9 +1,9 @@
 """geometry/io.py — Read/write meshes via meshio.
 
 Supports any format meshio handles (.msh, .vtk, .vtu, .inp, .xdmf, etc.).
-Requires ``meshio``::
+Requires ``meshio``, from the ``mesh`` extra::
 
-    pip install meshio
+    pip install "diff-soup[mesh]"
 """
 
 from __future__ import annotations

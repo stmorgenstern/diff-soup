@@ -118,6 +118,8 @@ mesh = [
     # gmsh triangulates polygons, CAD primitives, and image masks into meshes:
     # `pip install "diff-soup[mesh]"`. It is GPL-licensed, so it is opt-in.
     "gmsh>=4.11",
+    # meshio reads and writes mesh files (read_mesh, write_mesh, write_vtu).
+    "meshio>=5",
 ]
 cu12 = [
     # GPU install on the CUDA 12 line: `pip install "diff-soup[cu12]"` pulls

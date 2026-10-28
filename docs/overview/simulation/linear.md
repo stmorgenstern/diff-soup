@@ -40,7 +40,9 @@ The direct backends factor the iteration matrix and come in both forms.
   float64 values. It is not in the wheels and comes with a
   [source build](../../installation/index.md#install-from-source).
 - `"dense"` is the XLA dense LU on CPU and GPU. It holds the LU of the
-  assembled matrix and batches natively under `jax.vmap`.
+  assembled matrix and batches natively under `jax.vmap`. On a loaded CPU
+  host, above a few hundred unknowns, its LU can stall on OpenBLAS threads
+  that busy-wait. Set `OPENBLAS_NUM_THREADS=4` before importing numpy or jax.
 - `"auto"`, the default, resolves at solve time: dense for blocks of
   at most ten unknowns, otherwise cuDSS on GPU and KLU on CPU. When
   the resolved sparse backend is unavailable the solve raises with a

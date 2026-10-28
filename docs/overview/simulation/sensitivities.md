@@ -119,7 +119,9 @@ dloss_dD = jax.grad(loss_D)(0.1)
 
 An array parameter is set the same way, with an array as the value.
 `default_theta` works under `jax.jacfwd`, `jax.grad` with
-`ds.CheckpointAdjoint()` and `jax.jit`.
+`ds.CheckpointAdjoint()` and `jax.jit`. When `theta` holds a network, an
+`eqx.Module`, use `eqx.filter_jit` in place of `jax.jit`. `jax.grad` alone
+is fine.
 
 Named-parameter sensitivity runs, selected by handle, are provided by
 the [inference](../inference/identifiability.md) layer.

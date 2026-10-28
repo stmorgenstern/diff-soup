@@ -47,6 +47,10 @@ The grid factories describe regular geometries:
   `spherical_grid_1d(n, r_max, r_min=0.0)`. Curvilinear grids carry
   their metric, so axis regularity (the \(r = 0\) cell of a spherical
   grid) needs nothing from you.
+- `grid.node_coordinates()` returns the node coordinates as an array of
+  shape `(num_nodes, dim)`, in row-major order over `shape` (x-major).
+  A field on a grid is a flat array in the same order. `Grid1D.nodes`
+  is the same array without the `dim` axis, and `GridND` has no `nodes`.
 
 `method` selects the discretization: `"fvm"` (the default) or `"fdm"`.
 Flow and advection problems specialize grids further, described

@@ -46,6 +46,25 @@ rebuilding the problem, compiles a fresh program. See
 [ODE/DAE solvers](solvers.md) for which options are static on each
 engine.
 
+To compile a solve without running it, wrap `pdesolve` in a function and
+lower it. `t_span` is traced, and so is `ts` with `ordered=True`, so
+only `len(ts)` is fixed.
+
+```python
+import jax
+
+def f(t0, t1, y0, ts):
+    saveat = ds.SaveAt(ts=ts, ordered=True)
+    return ds.pdesolve(problem, solver, (t0, t1), y0, saveat=saveat).ys
+
+compiled = jax.jit(f).lower(0.0, 0.1, y0, ts).compile()
+```
+
+Small problems run faster on the CPU. Below about 8,000 unknowns, run
+on the CPU with `jax.default_device(jax.devices("cpu")[0])`, because
+each step on a GPU pays a fixed launch cost. The GPU pays off above that
+size.
+
 ### Read the solution
 
 The result is a result-coded `Solution`. `sol.ys` holds the saved

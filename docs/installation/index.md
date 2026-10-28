@@ -21,10 +21,12 @@ Requirements:
 The wheel bundles the KLU sparse solver and installs JAX 0.11. It does
 not include SuperLU_MT, which a [source build](#install-from-source)
 adds. The GPU extras add the CUDA build of JAX and the cuDSS sparse
-solver, so no compiler or CUDA toolkit is needed. Meshing complex
-geometries uses gmsh, which installs with the `mesh` extra, for example
-`pip install "diff-soup[cu13,mesh]"`. gmsh needs the system OpenGL utility
-library (`libglu1-mesa` on Debian and Ubuntu, `mesa-libGLU` on RHEL and Fedora).
+solver, so no compiler or CUDA toolkit is needed. The `mesh` extra installs
+gmsh, which meshes complex geometries, and meshio, which reads and writes mesh
+files, for example `pip install "diff-soup[cu13,mesh]"`. OpenCV, which
+`mask_to_mesh` uses to trace image masks, installs with diff-soup. gmsh needs
+the system OpenGL utility library (`libglu1-mesa` on Debian and Ubuntu,
+`mesa-libGLU` on RHEL and Fedora).
 
 ## Enable float64
 
