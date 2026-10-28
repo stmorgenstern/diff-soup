@@ -11,7 +11,8 @@ import pytest
 from jax.numpy import where
 
 import diff_soup as ds
-from diff_soup.domains import Operators, rectangle_mesh
+from diff_soup.domains import Operators, interval_mesh, rectangle_mesh
+from diff_soup.inference import approx
 from diff_soup.utils import (
     build_padded_color_arrays,
     build_sparse_jvp_groups,
@@ -184,6 +185,23 @@ def test_a_custom_transfer_couples_domains_as_its_hand_oracle(transfer):
     np.testing.assert_allclose(residual[problem.field_slice("c1")], -c1v + c1v * c2v, atol=_EXACT)
 
 
+def test_recipe_handles_print_a_short_declaration_without_addresses():
+    """A field, global, parameter and function handle repr as their declaration alone, with no
+    object address."""
+    spec = ds.problem("handle_reprs").domain(
+        "line", ds.cartesian_grid_1d(2, 0.0, 1.0, method="fvm")
+    )
+    field = spec.field("u", mass="differential", scale=1.0)
+    scalar = spec.global_var("V", initial=0.0, mass="algebraic")
+    rate = spec.param("D", value=0.4, learnable=True)
+    basis = approx.SparseLegendre(intervals=((0.0, 1.0),), degree=2, coeffs=jnp.zeros(3))
+    law = spec.function("g", basis, learnable=True)
+    assert repr(field) == "FieldSpec('u', mass='differential')"
+    assert repr(scalar) == "GlobalVarSpec('V', mass='algebraic')"
+    assert repr(rate) == "ParamSpec('D', learnable=True)"
+    assert repr(law) == "FunctionSpec('g', learnable=True)"
+
+
 def test_a_differential_global_is_authored_with_its_role_and_needs_exactly_one_closure():
     """A differential global appears in the layout with its role; one without an equation,
     or with an equation and a constraint, is refused at build naming it."""
@@ -323,3 +341,62 @@ def test_sparse_jvp_groups_recover_a_tridiagonal_jacobian_exactly():
         residual, state, *build_padded_color_arrays(*groups), nnz=rows.size
     )
     np.testing.assert_array_equal(values, np.asarray(jax.jacfwd(residual)(state))[rows, cols])
+
+
+def _heat_end_state(domain, residual_form, coeff, condition=None):
+    """``T`` at ``t = 0.5`` of ``coeff T' = lap(T) + 1`` from ``sin(pi x) + 1``, written as the
+    residual ``coeff q.dt(T) - lap(T) - 1`` or as the right-hand side ``(lap(T) + 1) / coeff``,
+    with an optional condition at the last node."""
+    spec = ds.problem(f"heat_{residual_form}_{coeff}_{condition}").domain("d", domain)
+    spec.field("T", mass="differential", scale=1.0, init=lambda x, *_: jnp.sin(jnp.pi * x) + 1.0)
+    if residual_form:
+        spec.equation(writes="T", reads=("T",))(
+            lambda q: coeff * q.dt("T") - q.ops.laplacian(q.T) - 1.0
+        )
+    else:
+        spec.equation(writes="T", reads=("T",))(lambda q: (q.ops.laplacian(q.T) + 1.0) / coeff)
+    last = np.array([domain.num_nodes - 1])
+    if condition == "flux":
+        spec.bc.flux("T", node_indices=last, value=1.0)
+    elif condition == "robin":
+        spec.bc.robin("T", node_indices=last, alpha=1.0, beta=1.0, value=2.0)
+    elif condition == "dirichlet":
+        spec.bc.dirichlet("T", node_indices=last, value=1.0)
+    solution = ds.pdesolve(
+        spec.build(),
+        ds.JNDF.stock(linear="dense", **{"rtol": 1e-8, "atol": 1e-10}),
+        (0.0, 0.5),
+        spec.assemble_state({}),
+    )
+    return np.asarray(solution.ys[-1])
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        lambda: interval_mesh(8, 0.0, 1.0),
+        lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"),
+    ],
+    ids=["line2", "tri3"],
+)
+def test_the_residual_form_on_a_mesh_matches_the_right_hand_side_form(mesh):
+    """On a mesh, ``2 q.dt(T) - lap(T) - 1 = 0`` solves to the same state as
+    ``T' = (lap(T) + 1) / 2``: the time-derivative coefficient and every residual term count."""
+    domain = mesh()
+    residual = _heat_end_state(domain, residual_form=True, coeff=2.0)
+    explicit = _heat_end_state(domain, residual_form=False, coeff=2.0)
+    # measured 0.0 (line2) and 2.9e-15 (tri3), workstation CPU 2026-10-28,
+    # pytest tests/public_api/test_recipe_build.py::test_the_residual_form_on_a_mesh_matches_the_right_hand_side_form
+    np.testing.assert_allclose(residual, explicit, atol=1e-12)
+
+
+@pytest.mark.parametrize("condition", ["flux", "robin", "dirichlet"])
+def test_the_residual_form_keeps_a_condition_on_the_field_it_writes(condition):
+    """On a grid, ``q.dt(T) - lap(T) - 1 = 0`` with a flux, Robin or Dirichlet condition on ``T``
+    solves to the same state as ``T' = lap(T) + 1`` with that condition."""
+    grid = ds.cartesian_grid_1d(8, 0.0, 1.0)
+    residual = _heat_end_state(grid, residual_form=True, coeff=1.0, condition=condition)
+    explicit = _heat_end_state(grid, residual_form=False, coeff=1.0, condition=condition)
+    # measured 0.0 for all three conditions, workstation CPU 2026-10-28,
+    # pytest tests/public_api/test_recipe_build.py::test_the_residual_form_keeps_a_condition_on_the_field_it_writes
+    np.testing.assert_allclose(residual, explicit, atol=1e-12)

@@ -70,6 +70,27 @@ def _expand_family_form(cell: dict, *, count: int, member_state: int) -> dict:
     return out
 
 
+def _decided_form(eq, label: str):
+    """The captured form of ``eq``, ``None`` for a plain equation, or raise.
+
+    The one guard for component and family member equations alike: a form
+    cell the build-time capture pass left undecided raises with the stored
+    reason.
+    """
+    cell = getattr(eq.rhs_fn, "_derivative_form", None)
+    if cell is None or cell.get("captured_plain"):
+        return None
+    if cell.get("captured"):
+        return cell
+    reason = cell.get("capture_error", "the build never evaluated it")
+    raise ValueError(
+        f"{label} {getattr(eq, 'name', '?')!r} could not be evaluated at a "
+        f"generic positive state during the build ({reason}). The build "
+        "evaluates every equation there once to record any time-derivative "
+        "structure (q.dt) before the solve; make the equation evaluable there."
+    )
+
+
 class LoweredProblem(eqx.Module):
     """Solve-ready problem compiled from a recipe or an equation set.
 
@@ -234,47 +255,35 @@ class LoweredProblem(eqx.Module):
         keys ``out_field``, ``terms`` (each ``(in_field, rows, cols)`` — the
         exact local coefficient pattern; empty for a nonlinear residual),
         ``nonlinear``, and ``ydot_fields`` (nonlinear only). Empty when no
-        equation uses the residual form. The structure is captured when the
-        equations first evaluate — problem building runs that evaluation.
+        equation uses the residual form. The structure is recorded by the
+        build-time capture pass, which evaluates every equation once. An
+        equation that pass could not evaluate raises with the stored reason:
+        dropping its form would lower it with the plain mass diagonal, which
+        loses scaled and cross-field derivative terms.
 
         Family member equations contribute too: a member form is captured in
         MEMBER-LOCAL coordinates and expanded here across the population
         (member ``k``'s rows/cols shift by ``k * member_state_size``), so the
-        surfaced pattern covers the family field's whole flat block.  A member
-        equation whose build-time capture evaluation failed raises with the
-        stored reason — silently omitting it would lower the family through
-        the diagonal mass surface, which drops scaled and cross-field
-        derivative terms.
+        surfaced pattern covers the family field's whole flat block.
 
         Raises:
             ValueError: when a form-referenced field name is carried by more
-                than one owner (forms resolve fields by bare name), or when a
-                family member equation could not be evaluated for capture.
+                than one owner (forms resolve fields by bare name), or when an
+                equation or a family member equation could not be evaluated
+                for capture.
         """
         forms = []
         for eq in self._equations:
-            cell = getattr(eq.rhs_fn, "_derivative_form", None)
-            if cell and cell.get("captured"):
+            cell = _decided_form(eq, "equation")
+            if cell is not None:
                 forms.append(dict(cell))
         for fam in self._families:
             member_state = int(fam.member_state_size)
             count = int(fam.count)
             for eq in fam.member_equations:
-                cell = getattr(eq.rhs_fn, "_derivative_form", None)
-                if cell is None:
-                    continue
-                if cell.get("captured"):
+                cell = _decided_form(eq, f"family {fam.name!r} member equation")
+                if cell is not None:
                     forms.append(_expand_family_form(cell, count=count, member_state=member_state))
-                elif not cell.get("captured_plain"):
-                    reason = cell.get("capture_error", "the equation was never evaluated")
-                    raise ValueError(
-                        f"family {fam.name!r} member equation "
-                        f"{getattr(eq, 'name', '?')!r} could not be evaluated to "
-                        f"record its derivative structure ({reason}); make the "
-                        "member residual evaluable at generic positive states "
-                        "so any time-derivative structure it states can be "
-                        "recorded before the solve."
-                    )
         if forms:
             self._check_form_field_names_unambiguous(forms)
         return tuple(forms)

@@ -41,9 +41,9 @@ build time; nothing here runs during the solve.
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
+
+from diff_soup._warnings import warn_user
 
 # A dependency farther than this many cells from the perturbed cell (per
 # axis, after periodic wrapping) is treated as global coupling and the block
@@ -381,14 +381,13 @@ def _infer_stencil_offsets(
 
     if clean_states == 0:
         comp_names = sorted({comp.name for comp, _s, _p, _pairs in blocks})
-        warnings.warn(
+        warn_user(
             "stencil inference: the residual evaluated to non-finite values at "
             f"every probe state for component(s) {comp_names}; keeping the "
             "default radius-1 stencil declaration. A body whose true "
             "dependency is wider than one cell per axis will be "
             "under-declared — rewrite the residual to be finite at generic "
             "positive states to enable inference.",
-            stacklevel=2,
         )
         return {}
 

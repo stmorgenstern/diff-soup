@@ -37,7 +37,6 @@ adapters, never stored directly on a frozen IR node.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
@@ -47,6 +46,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._warnings import warn_user
 from diff_soup.problem._ir import (
     BoundarySpec,
     Component,
@@ -1146,13 +1146,61 @@ class _FormCell:
 
     Lives on the static side of the adapter module, so it must be hashable;
     the default object identity hash is correct here — the cell is created
-    per adapter and mutated in place at the first evaluation.
+    per adapter and filled in place by the build-time capture pass.
     """
 
     __slots__ = ("data",)
 
     def __init__(self):
         self.data: dict = {}
+
+
+def _lumped_derivative_action(ctx, action):
+    """Weight a derivative action by the lumped mass on a mesh.
+
+    On a mesh the rows of a residual are integrated against the test
+    functions, and the explicit form weights ``d(field)/dt`` by the lumped
+    mass (the problem's mass diagonal). The derivative action gets the same
+    weight and is marked as already integrated. On a grid it is unchanged.
+    """
+    from diff_soup.domains.operators.dispatch import _WeakTerm
+
+    ops = getattr(ctx, "ops", None)
+    if ops is None or getattr(ops, "discretization_type", None) != "fem":
+        return action
+    domain = getattr(ops, "domain", None)
+    if domain is not None and hasattr(domain, "lumped_mass"):
+        weight = domain.lumped_mass()
+    else:
+        weight = ops.lumped_mass()
+    if isinstance(weight, _WeakTerm):
+        weight = weight.value
+    weight = jnp.asarray(weight)
+    action = jnp.asarray(action)
+    if action.size != weight.size:
+        # A vector or tensor field: one weight per node, shared by its components.
+        weighted = (action.reshape(weight.size, -1) * weight[:, None]).reshape(action.shape)
+    else:
+        weighted = action * weight.reshape(action.shape)
+    return ops.as_weak(weighted)
+
+
+def _slope_evaluation(expr, slopes: dict, ctx):
+    """Evaluate a derivative expression inside a slope context.
+
+    Returns the derivative action alone, or the full residual rows when the
+    context includes the residual part. On a mesh the derivative action is
+    weighted by the lumped mass (see ``_lumped_derivative_action``).
+    """
+    from diff_soup.problem._ir.derivative_ir import evaluate_parts
+    from diff_soup.problem._spec.derivative_expr import slope_context_includes_residual
+
+    include = slope_context_includes_residual()
+    action, residual = evaluate_parts(expr, slopes, int(expr.size), include_residual=include)
+    action = _lumped_derivative_action(ctx, action)
+    if residual is None:
+        return action
+    return action + residual
 
 
 class _ResidualFormAdapter(eqx.Module):
@@ -1167,12 +1215,14 @@ class _ResidualFormAdapter(eqx.Module):
     default, or the derivative action alone when the context excludes the
     residual part.
 
-    The adapter records the expression's static structure
+    During the build-time capture pass (and only then, see
+    [capture_forms][diff_soup.problem._ir.derivative_ir.capture_forms]) the
+    adapter records the expression's static structure
     (``_derivative_form``): the written field, each contributing field's
     exact coefficient pattern, and which fields the coefficients read
-    (``state_deps`` — probed by value at the first evaluation; ``None`` when
-    undecidable). Expressions that are nonlinear in the state derivative are
-    recorded as such; they lower through the general implicit form instead.
+    (``state_deps``, probed by value; ``None`` when undecidable).
+    Expressions that are nonlinear in the state derivative are recorded as
+    such; they lower through the general implicit form instead.
 
     An ``eqx.Module`` (not a plain closure) for the same reason as
     [_TracedQAdapter][diff_soup.problem._spec.build._TracedQAdapter]: the
@@ -1193,7 +1243,7 @@ class _ResidualFormAdapter(eqx.Module):
 
     @property
     def _derivative_form(self) -> dict:
-        """The captured structure cell (empty until the first evaluation)."""
+        """The captured structure cell (empty until the build-time capture pass)."""
         return self.cell.data
 
     def __call__(self, view, ctx, t):
@@ -1201,45 +1251,31 @@ class _ResidualFormAdapter(eqx.Module):
             ImplicitResidualIR,
             evaluate_expression,
             normalize_expression,
+            record_form,
+            record_plain,
             zero_slopes_for,
         )
-        from diff_soup.problem._spec.derivative_expr import (
-            DerivativeExpr,
-            current_slopes,
-            slope_context_includes_residual,
-        )
+        from diff_soup.problem._spec.derivative_expr import DerivativeExpr, current_slopes
 
         result = self.inner(view, ctx, t)
+        form_cell = self.cell.data
         if not isinstance(result, DerivativeExpr):
+            record_plain(form_cell)
             return result
         slopes = current_slopes()
         if slopes is not None:
-            return evaluate_expression(
-                result,
-                slopes,
-                int(result.size),
-                include_residual=slope_context_includes_residual(),
-            )
-        form_cell = self.cell.data
+            return _slope_evaluation(result, slopes, ctx)
         ir = normalize_expression(result, out_size=int(result.size))
+        record_form(
+            form_cell,
+            self.field_name,
+            ir,
+            state_deps=lambda: _probe_coefficient_state_dependence(self.inner, view, ctx, ir),
+        )
         if isinstance(ir, ImplicitResidualIR):
-            if not form_cell.get("captured"):
-                form_cell["out_field"] = self.field_name
-                form_cell["terms"] = ()
-                form_cell["nonlinear"] = True
-                form_cell["ydot_fields"] = ir.ydot_fields
-                form_cell["captured"] = True
             # No slope context: contribute the residual at zero slopes (the
             # derivative-free evaluation the rhs channel expects).
             return evaluate_expression(result, zero_slopes_for(result), int(result.size))
-        if not form_cell.get("captured"):
-            form_cell["out_field"] = self.field_name
-            form_cell["terms"] = tuple(
-                (term.in_field, term.pattern[0], term.pattern[1]) for term in ir.terms
-            )
-            form_cell["nonlinear"] = False
-            form_cell["state_deps"] = _probe_coefficient_state_dependence(self.inner, view, ctx, ir)
-            form_cell["captured"] = True
         return -ir.residual_part()
 
 
@@ -1506,8 +1542,7 @@ def _resolve_scales(
       constraint nodes are born with the resolved ``integrand_scale``
       (same value populates both this and ``integrand_ref``).
 
-    Emits conflict + un-scaled UserWarnings at ``stacklevel=2`` so they
-    surface at the ``to_equation_set`` callsite.
+    Emits the conflict and un-scaled UserWarnings at the user's own call.
 
     ``families`` is the registration-order tuple of
     [Family][diff_soup.problem._ir.family.Family] IR nodes;
@@ -1632,10 +1667,9 @@ def _resolve_scales(
         for key, cval in central.items():
             if key in inline and inline[key] != cval:
                 ival = inline[key]
-                warnings.warn(
+                warn_user(
                     label_fn(key, cval, ival),
                     UserWarning,
-                    stacklevel=2,
                 )
             inline[key] = cval
 
@@ -1650,12 +1684,11 @@ def _resolve_scales(
     # central time
     if spec._central_time is not None:
         if spec._time_scale is not None and float(spec._time_scale) != float(spec._central_time):
-            warnings.warn(
+            warn_user(
                 f"spec.scales: central override of 'time' = "
                 f"{float(spec._central_time)!r} differs from inline scale "
                 f"{float(spec._time_scale)!r}; central value wins",
                 UserWarning,
-                stacklevel=2,
             )
         time_ref = float(spec._central_time)
     # central integrand: sets BOTH integrand_ref and the constraint node.
@@ -1674,12 +1707,11 @@ def _resolve_scales(
     ]
     if unscaled:
         names = ", ".join(repr(n) for n in unscaled)
-        warnings.warn(
+        warn_user(
             f"spec.scales: fields {names} have no scale= and none was set "
             "centrally; defaulting to 1.0 (dimensional). Set scale= per field "
             "or via spec.scales(state=...) to non-dimensionalize.",
             UserWarning,
-            stacklevel=2,
         )
 
     scales = Scales(

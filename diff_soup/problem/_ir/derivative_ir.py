@@ -21,8 +21,11 @@ build/trace time only — nothing here executes inside a compiled step.
 
 from __future__ import annotations
 
+import contextlib
+import threading
 from typing import NamedTuple, Union
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -44,7 +47,14 @@ __all__ = [
     "ImplicitResidualIR",
     "normalize_expression",
     "evaluate_expression",
+    "evaluate_parts",
+    "sum_residual_terms",
     "zero_slopes_for",
+    "capture_forms",
+    "capturing_forms",
+    "record_form",
+    "record_plain",
+    "stamp_capture_error",
 ]
 
 
@@ -298,11 +308,13 @@ class DerivativeIR:
         self.out_size = int(out_size)
 
     def residual_part(self):
-        """The derivative-free contribution of the residual rows."""
-        total = jnp.zeros((self.out_size,))
-        for term in self._residual_terms:
-            total = total + jnp.asarray(term)
-        return total
+        """The derivative-free contribution of the residual rows.
+
+        A weak-form term (an operator output on a mesh) keeps its tag, so the
+        residual finalizer integrates only the still-nodal part.
+        """
+        total = sum_residual_terms(self._residual_terms, self.out_size)
+        return jnp.zeros((self.out_size,)) if total is None else total
 
 
 class ImplicitResidualIR:
@@ -384,6 +396,86 @@ def _referenced_fields(expr: DerivativeExpr) -> set:
     return fields
 
 
+def _is_row_value(value, out_size: int) -> bool:
+    """Whether ``value`` is a plain number or one plain value per row.
+
+    A tagged residual term (a mesh operator's weak-form output) is not, and
+    neither is an array of another shape (values at a mesh's quadrature
+    points).
+    """
+    if not isinstance(value, (np.ndarray, np.generic, int, float, complex, jax.Array)):
+        return False
+    shape = np.shape(value)
+    return shape in ((), (1,), (int(out_size),))
+
+
+def sum_residual_terms(terms, out_size: int):
+    """Add derivative-free residual terms, keeping tagged terms intact.
+
+    Plain numbers and one-value-per-row arrays are summed into one
+    length-``out_size`` block. Any other term (a mesh operator's weak-form
+    output, or values at the quadrature points) is combined with ``+`` and
+    never converted with ``jnp.asarray``, which would drop its tag; the
+    residual finalizer integrates it.
+
+    Returns:
+        The sum, or ``None`` when ``terms`` is empty.
+    """
+    terms = tuple(terms)
+    if not terms:
+        return None
+    # Tagged terms lead, so an array of another shape is added to a tagged
+    # term (which integrates it) rather than the other way round.
+    tagged = sorted(
+        (r for r in terms if not _is_row_value(r, out_size)),
+        key=lambda r: isinstance(r, (np.ndarray, jax.Array)),
+    )
+    plain = [r for r in terms if _is_row_value(r, out_size)]
+    total = None
+    for r in tagged:
+        total = r if total is None else total + r
+    if plain:
+        block = jnp.zeros((out_size,))
+        for r in plain:
+            block = block + jnp.asarray(r)
+        total = block if total is None else total + block
+    return total
+
+
+def evaluate_parts(expr: DerivativeExpr, slopes: dict, out_size: int, *, include_residual=True):
+    """Evaluate a derivative expression as ``(derivative part, residual part)``.
+
+    The derivative part applies every derivative term to the slopes. The
+    residual part sums the expression's top-level derivative-free terms; it is
+    ``None`` when there are none or when ``include_residual`` is ``False``.
+    Kept apart so the caller can weight the derivative part (the lumped mass on
+    a mesh) before the two are added.
+
+    Args:
+        expr: The expression an equation closure returned.
+        slopes: Mapping of field name to that field's slope values.
+        out_size: The equation's row-block length.
+        include_residual: Whether derivative-free terms contribute.
+    """
+    try:
+        if isinstance(expr, DerivativeSum):
+            action = None
+            for term in expr.terms:
+                value = _evaluate(term, slopes, out_size, include_residual)
+                action = value if action is None else action + value
+            residual = (
+                sum_residual_terms(expr.residual_terms, out_size) if include_residual else None
+            )
+            return action, residual
+        return _evaluate(expr, slopes, out_size, include_residual), None
+    except KeyError as missing:
+        raise ValueError(
+            f"the derivative expression references field {missing.args[0]!r}, "
+            "which has no slope entry; derivative expressions may only "
+            "reference declared fields"
+        ) from None
+
+
 def _evaluate(expr, slopes: dict, out_size: int, include_residual: bool = True):
     if isinstance(expr, TimeDerivativeRef):
         return jnp.asarray(slopes[expr.field_name])
@@ -404,8 +496,9 @@ def _evaluate(expr, slopes: dict, out_size: int, include_residual: bool = True):
             value = _evaluate(term, slopes, out_size, include_residual)
             total = value if total is None else total + value
         if include_residual:
-            for r in expr.residual_terms:
-                total = jnp.asarray(r) if total is None else total + jnp.asarray(r)
+            residual = sum_residual_terms(expr.residual_terms, out_size)
+            if residual is not None:
+                total = residual if total is None else total + residual
         return total
     if isinstance(expr, NonlinearDerivativeExpr):
         return expr.combine(
@@ -455,3 +548,100 @@ def normalize_expression(
         residual_terms = ()
     terms = tuple(DerivativeTermIR(field, block) for field, block in sorted(blocks.items()))
     return DerivativeIR(terms=terms, residual_terms=residual_terms, out_size=out_size)
+
+
+# ---------------------------------------------------------------------------
+# Build-time capture of derivative forms
+# ---------------------------------------------------------------------------
+#
+# A residual-form equation adapter (component or family member) records its
+# derivative structure into its form cell only inside ``capture_forms``. Every
+# other evaluation (stencil probes, traces, solves) leaves the cell alone, so
+# the build-time capture pass is the one place a form is recorded.
+
+_CAPTURE = threading.local()
+
+
+def capturing_forms() -> bool:
+    """Whether a build-time capture pass is evaluating the equations."""
+    return bool(getattr(_CAPTURE, "active", False))
+
+
+@contextlib.contextmanager
+def _capture_context():
+    previous = capturing_forms()
+    _CAPTURE.active = True
+    try:
+        yield
+    finally:
+        _CAPTURE.active = previous
+
+
+def _decided(cell) -> bool:
+    return bool(cell.get("captured") or cell.get("captured_plain"))
+
+
+def stamp_capture_error(cells, exc: BaseException) -> None:
+    """Store why a capture pass failed in each cell it left undecided."""
+    note = f"{type(exc).__name__}: {exc}"
+    for cell in cells:
+        if cell is not None and not _decided(cell):
+            cell.setdefault("capture_error", note)
+
+
+def capture_forms(cells, evaluate) -> None:
+    """Run the build-time capture pass for the equations owning ``cells``.
+
+    ``evaluate()`` evaluates those equations once, eagerly, at a generic
+    state. Inside it each residual-form adapter records its structure and each
+    plain equation marks itself plain. A failure is stored in every cell still
+    undecided, so ``LoweredProblem.derivative_forms()`` raises with the reason
+    instead of lowering the equation with the plain mass diagonal.
+
+    Args:
+        cells: The form cells the evaluation should decide.
+        evaluate: A callable of no arguments that evaluates the equations.
+    """
+    pending = [cell for cell in cells if cell is not None and not _decided(cell)]
+    if not pending:
+        return
+    try:
+        with _capture_context(), jax.ensure_compile_time_eval():
+            evaluate()
+    except Exception as exc:  # noqa: BLE001 - stored, raised at the read.
+        stamp_capture_error(pending, exc)
+
+
+def record_form(cell, field_name: str, ir, *, state_deps, check_fields=None) -> None:
+    """Record one equation's derivative structure, during a capture pass only.
+
+    Args:
+        cell: The equation's form cell.
+        field_name: The field the equation writes.
+        ir: The normalized expression (``normalize_expression``).
+        state_deps: A callable of no arguments returning which fields the
+            coefficients read (``None`` when undecidable); linear forms only.
+        check_fields: An optional callable that rejects the referenced fields.
+    """
+    if not capturing_forms() or cell.get("captured"):
+        return
+    if isinstance(ir, ImplicitResidualIR):
+        if check_fields is not None:
+            check_fields(ir.ydot_fields)
+        cell.update(out_field=field_name, terms=(), nonlinear=True, ydot_fields=ir.ydot_fields)
+    else:
+        if check_fields is not None:
+            check_fields(term.in_field for term in ir.terms)
+        cell.update(
+            out_field=field_name,
+            terms=tuple((term.in_field, term.pattern[0], term.pattern[1]) for term in ir.terms),
+            nonlinear=False,
+            state_deps=state_deps(),
+        )
+    cell["captured"] = True
+
+
+def record_plain(cell) -> None:
+    """Mark an equation as plain (no derivative structure), during a capture pass only."""
+    if capturing_forms() and not cell.get("captured"):
+        cell["captured_plain"] = True

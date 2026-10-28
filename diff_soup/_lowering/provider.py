@@ -45,10 +45,15 @@ from diff_soup.problem._ir.constraint import (
     OperationalControlConstraint,
     ReduceResidualConstraint,
 )
+from diff_soup.problem._ir.derivative_ir import capture_forms
 from diff_soup.problem._ir.equation import MultiEquation
 from diff_soup.problem._ir.equation_set import EquationSet
 from diff_soup.problem._ir.lower import _apply_boundary_cast, _LoweringAnalysis
 from diff_soup.problem._ir.variable import GlobalVariable, Variable
+from diff_soup.problem._spec.derivative_expr import (
+    current_slopes,
+    slope_context_includes_residual,
+)
 
 from .constraints import _eval_constraint_residual
 from .couplings import _read_through_alias_owner, _resolve_family_couplings
@@ -1385,7 +1390,17 @@ def _build_full_residual_fn(
             )
             return _eval_boundary_value(value_fn, q, t)
 
-        if flux_geom or robin_geom or traction_geom:
+        # Slope modes (the residual-form lowering, see ``slope_context``): the
+        # boundary kernels and the symmetry and Dirichlet overrides are free of
+        # time derivatives. The derivative-action mode excludes them, and the
+        # full-residual mode subtracts the kernels, so a residual-form row
+        # reads ``residual = derivative_part + free_terms - flux``, as the
+        # family member kernel does.
+        slopes_active = current_slopes() is not None
+        derivative_action_only = slopes_active and not slope_context_includes_residual()
+        bc_sign = -1.0 if slopes_active else 1.0
+
+        if (flux_geom or robin_geom or traction_geom) and not derivative_action_only:
             # Owner-aware string-keyed views built AFTER coupling transfer: each
             # component's post-transfer var_view (local fields + coupled-in
             # targets SET above + injected read-through aliases + globals) keyed by
@@ -1485,7 +1500,7 @@ def _build_full_residual_fn(
                     contribution = contribution.at[ni].add((fv * factor).astype(u.dtype))
                 if row_scale is not None:
                     contribution = contribution / row_scale
-                f = f.at[v_off : v_off + v_size].add(contribution)
+                f = f.at[v_off : v_off + v_size].add(bc_sign * contribution)
 
             for kern, fns, callback_geom, row_scale in zip(
                 robin_geom, robin_callables, robin_callback_geometry, robin_row_scales
@@ -1524,7 +1539,7 @@ def _build_full_residual_fn(
                     contribution = contribution.at[ni].add(per_node.astype(u.dtype))
                 if row_scale is not None:
                     contribution = contribution / row_scale
-                f = f.at[v_off : v_off + v_size].add(contribution)
+                f = f.at[v_off : v_off + v_size].add(bc_sign * contribution)
 
             for kern, value_fn, callback_geom, row_scale in zip(
                 traction_geom, traction_callables, traction_callback_geometry, traction_row_scales
@@ -1547,20 +1562,22 @@ def _build_full_residual_fn(
                 )
                 if row_scale is not None:
                     contribution = contribution / row_scale
-                f = f.at[v_off : v_off + v_size].add(contribution.reshape(-1))
+                f = f.at[v_off : v_off + v_size].add(bc_sign * contribution.reshape(-1))
 
         # Symmetry override: replace the row of each tagged node's dominant
         # normal component with the normal projection ``n·u``, leaving the
         # node's other rows on their assembled physics (free tangential
         # traction).  Applied BEFORE the Dirichlet override so an explicit pin
         # on the same DOF still wins.
-        for sym_rows, sym_cols, sym_coeffs, sym_consts in symmetry_geom:
+        for sym_rows, sym_cols, sym_coeffs, sym_consts in (
+            () if derivative_action_only else symmetry_geom
+        ):
             projection = jnp.sum(sym_coeffs.astype(u.dtype) * u[sym_cols], axis=1)
             f = f.at[sym_rows].set(projection + sym_consts.astype(u.dtype))
 
         # Dirichlet override: pin each tagged DOF to ``u[bc] - target(t)``.
         for dof_idx, value_fn, geometry, projection in zip(
-            bc_dof_indices,
+            () if derivative_action_only else bc_dof_indices,
             dirichlet_value_fns,
             dirichlet_callback_geometry,
             dirichlet_callback_projection,
@@ -2456,6 +2473,35 @@ def _initial_lambda(eqset: EquationSet, dtype) -> jax.Array:
     return jnp.concatenate(parts)
 
 
+def _component_form_cells(eqset: EquationSet):
+    """The derivative-form cell of every component equation that carries one."""
+    for comp in eqset.components:
+        for eq in comp.equations:
+            cell = getattr(eq.rhs_fn, "_derivative_form", None)
+            if cell is not None:
+                yield cell
+
+
+def _capture_component_forms(eqset: EquationSet, probe_f, state_size: int, n_lam: int, dtype):
+    """Run the build-time capture pass over the component equations.
+
+    A component equation authored with ``q.dt`` records its derivative
+    structure only inside this pass (see
+    [capture_forms][diff_soup.problem._ir.derivative_ir.capture_forms]), the
+    same pass family member equations go through. It evaluates the probe
+    residual once, eagerly, at a generic positive state (the family pass's
+    convention), on a grid and on a mesh alike.
+    """
+
+    def evaluate():
+        n_u, n_l = max(int(state_size), 1), max(int(n_lam), 1)
+        u = jnp.linspace(0.75, 1.25, n_u).astype(dtype)[: int(state_size)]
+        lam = jnp.linspace(0.75, 1.25, n_l).astype(dtype)[: int(n_lam)]
+        probe_f(u, lam, jnp.asarray(0.0, dtype=dtype))
+
+    capture_forms(_component_form_cells(eqset), evaluate)
+
+
 def _analyze_family_layer(eqset: EquationSet, compute_dtype) -> _LoweringAnalysis:
     """Host analysis for the multi-component family / coupling / BC path.
 
@@ -2526,6 +2572,13 @@ def _analyze_family_layer(eqset: EquationSet, compute_dtype) -> _LoweringAnalysi
         total,
         int(sum(int(c.dim) for c in eqset.constraints)),
         _probe_f,
+        compute_dtype,
+    )
+    _capture_component_forms(
+        eqset,
+        _probe_f,
+        total,
+        int(sum(int(c.dim) for c in eqset.constraints)),
         compute_dtype,
     )
     rows, cols = _sparsity_full(
@@ -2683,6 +2736,7 @@ def analyze(eqset: EquationSet, *, precision: Optional[Precision] = None) -> _Lo
         _probe_f,
         compute_dtype,
     )
+    _capture_component_forms(eqset, _probe_f, total, 0, compute_dtype)
     rows, cols = _sparsity(eqset, offset_of, total, stencil_offsets=stencil_offsets)
     topo = SparseTopology(rows=rows, cols=cols, n_dofs=total, bc_indices=None)
     mass = _mass_diagonal(eqset)
