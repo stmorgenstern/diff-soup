@@ -57,7 +57,10 @@ class FieldObservation(Observation):
 
 
 class BoundaryMeanObservation(Observation):
-    """Boundary-restricted mean; carries the boundary ``tag``."""
+    """An observation labelled as the mean over a tagged boundary.
+
+    `fn` computes the value. The label and `tag` only record what it is.
+    """
 
     name: str = eqx.field(static=True)
     fn: Callable
@@ -69,7 +72,10 @@ class BoundaryMeanObservation(Observation):
 
 
 class SpatialMeanObservation(Observation):
-    """Volume-integrated mean over the entire domain."""
+    """An observation labelled as the mean over a domain.
+
+    `fn` computes the value. The label only records what it is.
+    """
 
     name: str = eqx.field(static=True)
     fn: Callable

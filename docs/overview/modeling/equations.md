@@ -362,9 +362,12 @@ post-processing and fitting, outside the residual:
 
 - `spec.observe.scalar(name=..., fn=...)` is a single scalar,
 - `spec.observe.field(name=..., fn=...)` a spatially resolved output,
-- `spec.observe.spatial_mean(name=..., fn=...)` a domain average,
-- `spec.observe.boundary_mean(name=..., fn=..., tag=...)` a mean over
-  a tagged boundary.
+- `spec.observe.spatial_mean(name=..., fn=...)` an output labelled as a
+  domain mean,
+- `spec.observe.boundary_mean(name=..., fn=..., tag=...)` an output
+  labelled as the mean over a tagged boundary.
+
+Both labelled verbs record the label only. Your `fn` computes the mean.
 
 Every verb also takes `domain=`, the domain the observation is evaluated
 on. By default this is the domain whose fields `fn` reads, or the first

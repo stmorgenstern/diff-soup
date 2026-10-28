@@ -70,7 +70,9 @@ problem = spec.build(precision=ds.Precision(solve_mode="fp32_ir"))
   inside the solve, residual and Jacobian assembly, the fp32 factors
   and solves, and both derivative directions run in float32. Grid
   stencils cast the grid's geometry, which is stored in float64, to the
-  field's dtype, so their arithmetic is float32 as well.
+  field's dtype, so their arithmetic is float32 as well. A
+  [custom operator](../modeling/operators.md#custom-operators) owns its
+  own casts.
 - `Precision.fp32_factor()`: float64 compute with direct fp32
   factors.
 - `Precision(solve_mode="adaptive")`: the engine switches between the

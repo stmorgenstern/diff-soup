@@ -273,14 +273,20 @@ over the grid spacings:
 class CurlOnGrid(Operators):
     def scalar_curl(self, u):
         nx, ny = self.domain.shape
-        dx = self.domain.axes[0].node_distances[0]
-        dy = self.domain.axes[1].node_distances[0]
+        dx = self.domain.axes[0].node_distances[0].astype(u.dtype)
+        dy = self.domain.axes[1].node_distances[0].astype(u.dtype)
         ux = u[:, 0].reshape(nx, ny)
         uy = u[:, 1].reshape(nx, ny)
         duy_dx = jnp.gradient(uy, dx, axis=0)
         dux_dy = jnp.gradient(ux, dy, axis=1)
         return (duy_dx - dux_dy).reshape(-1)
 ```
+
+An operator body is traced, so geometry such as `node_distances` arrives
+as a traced float64 array. Compute on it with `jnp` arithmetic, never
+with `float()`, `int()`, `.item()` or a Python `if`.
+`x.astype(u.dtype)` keeps the arithmetic in float32 under
+`Precision.fp32()`.
 
 On a mesh the convention is the integrated weak term
 \(\int (\nabla \times u)\, N_i \, d\Omega\), assembled from the

@@ -146,3 +146,6 @@ D = particle.handle("D")
   ([hierarchical fits](../inference/hierarchical.md)). A declaration
   keeps its size and its `learnable=` flag across builds.
 - A name no build declares is refused.
+- `problem.assemble_state` on a built problem ignores `init=`. Pass the
+  initial values to it, as
+  [initial conditions](fields.md#initial-conditions) describes.
