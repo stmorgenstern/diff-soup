@@ -57,6 +57,10 @@ import numpy as np
 
 from diff_soup._adjoints import ForwardAdjoint
 from diff_soup._errors import ConfigurationError
+from diff_soup._jax_compat import Primitive as _Primitive
+from diff_soup._jax_compat import ad as _ad
+from diff_soup._jax_compat import batching as _batching
+from diff_soup._jax_compat import mlir as _mlir
 from diff_soup._jax_compat import partial_eval as _partial_eval
 from diff_soup._precision import Precision, cast_to_compute_dtype
 from diff_soup._solution import result_from_code
@@ -2952,8 +2956,20 @@ def _solve_core(
     )
 
     if adjoint.is_forward_only:
-        # True early-exit primal; forward-mode (JVP) differentiable.
-        final = jax.lax.while_loop(cond_fun, body_fun, init_state)
+        # True early-exit primal; forward-mode (JVP) differentiable. The
+        # custom-JVP wrapper only turns reverse mode into a public error.
+        final = _forward_loop(
+            engine,
+            problem,
+            cfg,
+            has_affect,
+            control_folds_theta,
+            init_state,
+            ts_grid,
+            t1,
+            theta,
+            control0,
+        )
     else:
         # Checkpointed replay loop: the primal early-exits the same way, and
         # the attached reverse rule replays segments from online checkpoints
@@ -3021,6 +3037,99 @@ def _is_reverse_linearize_tangent(leaf) -> bool:
         leaf = getattr(leaf, "val", None)
         depth += 1
     return False
+
+
+_FORWARD_ONLY_REVERSE_ERROR = (
+    "Reverse-mode differentiation (jax.grad, jax.vjp, jax.jacrev) was applied to a "
+    "solve running the forward-only adjoint, which is the default and supports "
+    "jax.jvp and jax.jacfwd only. For a reverse-mode gradient, solve with "
+    "adjoint=ds.CheckpointAdjoint(). For reverse mode over forward sensitivities, "
+    "use adjoint=ds.ForwardAdjoint(composable=True)."
+)
+
+# An identity on the forward-only loop's input tangents. Forward mode passes
+# through it unchanged. Reverse mode partially evaluates it with unknown
+# tangents before it reaches the loop (top level and inside jit alike), and
+# its rule raises the public message there instead of JAX's raw while-loop
+# error. The transpose rule is a second line of defence.
+_forward_only_tangent_p = _Primitive("diffsoup_forward_only_tangent")
+_forward_only_tangent_p.def_impl(lambda x: x)
+_forward_only_tangent_p.def_abstract_eval(lambda aval: aval)
+_mlir.register_lowering(
+    _forward_only_tangent_p, _mlir.lower_fun(lambda x: x, multiple_results=False)
+)
+_batching.primitive_batchers[_forward_only_tangent_p] = lambda args, dims: (
+    _forward_only_tangent_p.bind(args[0]),
+    dims[0],
+)
+
+
+def _forward_only_tangent_jvp(primals, tangents):
+    (x,), (dx,) = primals, tangents
+    out = _forward_only_tangent_p.bind(x)
+    return out, (dx if type(dx) is _ad.Zero else _forward_only_tangent_p.bind(dx))
+
+
+def _forward_only_tangent_partial_eval(trace, tracer):
+    if not tracer.pval.is_known():
+        raise ValueError(_FORWARD_ONLY_REVERSE_ERROR)
+    return trace.default_process_primitive(_forward_only_tangent_p, (tracer,), {})
+
+
+def _forward_only_tangent_transpose(cotangent, x):
+    raise ValueError(_FORWARD_ONLY_REVERSE_ERROR)
+
+
+_ad.primitive_jvps[_forward_only_tangent_p] = _forward_only_tangent_jvp
+_ad.primitive_transposes[_forward_only_tangent_p] = _forward_only_tangent_transpose
+_partial_eval.custom_partial_eval_rules[_forward_only_tangent_p] = (
+    _forward_only_tangent_partial_eval
+)
+
+
+def _forward_loop_impl(
+    engine, problem, cfg, has_affect, control_folds_theta, init_state, ts_grid, t1, theta, control0
+):
+    """The forward-only step loop: the plain early-exit ``jax.lax.while_loop``."""
+    cond_fun, body_fun = _loop_fns(
+        engine, problem, cfg, has_affect, control_folds_theta, ts_grid, t1, theta, control0
+    )
+    return jax.lax.while_loop(cond_fun, body_fun, init_state)
+
+
+@eqx.filter_custom_jvp
+def _forward_loop(
+    engine, problem, cfg, has_affect, control_folds_theta, init_state, ts_grid, t1, theta, control0
+):
+    """The forward-only step loop, with a forward rule that refuses reverse mode.
+
+    The primal and the forward rule run the same plain loop, so forward-mode
+    results are unchanged. The rule marks the input tangents so that reverse
+    mode stops with a message naming the reverse adjoint.
+    """
+    return _forward_loop_impl(
+        engine,
+        problem,
+        cfg,
+        has_affect,
+        control_folds_theta,
+        init_state,
+        ts_grid,
+        t1,
+        theta,
+        control0,
+    )
+
+
+@_forward_loop.def_jvp
+def _forward_loop_jvp(primals, tangents):
+    tangents = jax.tree_util.tree_map(
+        lambda t: None if t is None else _forward_only_tangent_p.bind(t),
+        tangents,
+        is_leaf=lambda t: t is None,
+    )
+    final, d_final = eqx.filter_jvp(_forward_loop_impl, primals, tangents)
+    return final, _canon_tangent(final, d_final)
 
 
 def _canon_tangent(primal, tangent):

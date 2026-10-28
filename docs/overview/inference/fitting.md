@@ -304,8 +304,12 @@ The status flags:
 - `SOLVER_FAILED` is the time-stepping solve at the solution failing
   before the end of the time interval.
 - `UNKNOWN` is the flag before any run.
-- `converged` is `True` for `SUCCESS`, `GRAD_TOL`, `STEP_TOL`, and
-  `COST_TOL`.
+- `converged` is `True` for `SUCCESS`, `GRAD_TOL`, `STEP_TOL`,
+  `COST_TOL`, and `DERIVATIVE_ACCURACY`. It means a local stopping test
+  passed, not that the fit found the best parameters. With a likelihood
+  declared, check every fit with
+  `ds.inference.residual_report(infproblem, result)`
+  ([goodness of fit](statistical-estimation.md#goodness-of-fit)).
 
 For example, a run limited to fifty steps, with the progress printed:
 
@@ -340,6 +344,15 @@ of `observe=`:
   `predict(self, u, t, theta)`, as in the second example below. `u` is
   the state, `t` the observation time, and `theta` the current parameter
   values.
+
+To observe one field at a few probe cells, add the field's offset in
+the state to the cell indices:
+
+```python
+probes = problem.field_slice("u").start + jnp.array([5, 15, 25])
+probe_measurement = ds.inference.Measurement("probes", ts, data[:, [5, 15, 25]],
+                                             observe=lambda state: state[probes], weight=1e6)
+```
 
 For example, to add a second measurement that observes the spatial mean
 of the temperature at the later times only:
@@ -477,6 +490,11 @@ result = ds.inference.optsolve(ds.inference.InferenceProblem(
 result.diagnostics.jacobian_cond           # 5.4e14
 result.diagnostics.theta_singular_values   # one singular value near zero
 ```
+
+The weights of a learnable function (`spec.function(..., learnable=True)`)
+are left out of the test, since a network's weights are not determined
+one at a time. A fit of weights alone records a note in `warnings`
+instead.
 
 The Fisher information, profile likelihoods, and design sensitivities
 behind these numbers are covered on [identifiability](identifiability.md).

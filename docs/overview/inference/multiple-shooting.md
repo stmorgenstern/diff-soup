@@ -90,6 +90,11 @@ differential part of the state is fitted per window and the algebraic
 part is recovered from it
 ([consistent initialization](../simulation/consistent-init.md)).
 
+With the window starts fitted, `ds.inference.optsolve` defaults to
+`ds.inference.NewtonTrustRegion(hessian="gauss-newton")`. The memory of the
+exact Hessian grows with the square of the decision vector, and a few
+hundred entries can already exceed the device.
+
 ## Options
 
 The options, with their defaults:
@@ -124,7 +129,9 @@ The options, with their defaults:
   mismatch a reduced `StateBasis` cannot represent, and the diagnostics
   carry a note to widen the basis when it is large.
 - A decision vector beyond 2000 entries warns that the dense
-  Gauss-Newton solve is the cost wall.
+  Gauss-Newton solve is the cost wall. The exact Hessian reaches its
+  wall far earlier, and a fit that would exceed the device memory
+  stops before it starts with an error naming `hessian_tile=`.
 - Windows with fitted starts take exactly one measurement. A second
   measurement is refused.
 - `ds.inference.Experiment(..., initial_state=ds.inference.LearnedInitialState(guess))`

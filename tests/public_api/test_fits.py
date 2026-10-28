@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -10,12 +13,14 @@ import pytest
 
 import diff_soup as ds
 from diff_soup import inference as inf
+from diff_soup.domains import cartesian_grid_1d
 from tests.support.inference import (
     TRUE_RATE,
     decay_experiment,
     decay_recipe,
     decay_study,
     small_fit,
+    solver,
 )
 
 # measured 2.8e-6 (LM, NTR, BFGS) off the true rate 0.6 at solver rtol 1e-6,
@@ -138,3 +143,52 @@ def test_trust_region_on_a_lowered_study_recovers_shared_and_owner_parameters(jo
     sources = [float(fit[decay.source][owner]) for owner in ("cell-a", "cell-b", "cell-c")]
     # measured 7.9e-6, the run above
     np.testing.assert_allclose(sources, [-0.05, 0.0, 0.05], atol=1e-4)
+
+
+def _network_problem(name, *, blind_rate=False):
+    """A reaction ``u' = f(u)`` fitted by a tanh network with two identical hidden units.
+
+    Identical units have identical Jacobian columns, so the weights are not
+    identifiable one by one. ``blind_rate`` adds a scalar ``rate`` the data cannot see.
+    """
+    network = eqx.nn.MLP("scalar", "scalar", 2, 1, activation=jnp.tanh, key=jax.random.PRNGKey(0))
+    network = eqx.tree_at(
+        lambda net: (net.layers[0].weight, net.layers[0].bias, net.layers[1].weight),
+        network,
+        (jnp.full((2, 1), 0.5), jnp.full((2,), 0.1), jnp.full((1, 2), -0.3)),
+    )
+    spec = ds.problem(name)
+    spec.domain("line", cartesian_grid_1d(3, 0.0, 1.0, method="fvm"))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: 1.0 + x)
+    handles = (spec.function("reaction", network, learnable=True, pointwise=True),)
+    if blind_rate:
+        handles += (spec.param("rate", value=0.3, learnable=True),)
+
+    @spec.equation(writes="u", reads=("u",))
+    def reaction(q):
+        blind = 0.0 * q.p.rate if blind_rate else 0.0
+        return q.fn.reaction(q.u) + blind
+
+    y0 = spec.assemble_state({})
+    times = jnp.linspace(0.0, 0.8, 9)
+    data = jax.vmap(lambda t: (y0 - 0.4) * jnp.exp(-0.5 * t) + 0.4)(times)
+    experiment = inf.Experiment(
+        spec.build(), solver(), (0.0, 0.8), y0, (inf.Measurement("u", times, data),)
+    )
+    return inf.InferenceProblem(experiment, parameters=handles)
+
+
+def test_a_network_fit_records_a_note_instead_of_an_identifiability_warning():
+    """optsolve on network weights alone raises no IdentifiabilityWarning and notes the skipped check."""
+    problem = _network_problem("fits_network")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", inf.fitting.IdentifiabilityWarning)
+        fit = inf.optsolve(problem, inf.LevenbergMarquardt(max_steps=3))
+    assert any("learnable-function weight" in note for note in fit.diagnostics.warnings)
+
+
+def test_a_blind_scalar_beside_a_network_still_raises_the_identifiability_warning():
+    """A scalar parameter the data cannot see is named in the warning, network weights or not."""
+    problem = _network_problem("fits_network_blind", blind_rate=True)
+    with pytest.warns(inf.fitting.IdentifiabilityWarning, match="rate"):
+        inf.optsolve(problem, inf.LevenbergMarquardt(max_steps=3))

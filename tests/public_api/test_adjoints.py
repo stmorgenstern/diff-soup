@@ -88,6 +88,26 @@ def test_a_forward_adjoint_tangent_equals_the_checkpoint_gradient(affect):
     np.testing.assert_allclose(tangent, affect[0], rtol=_PARITY_BOUND)
 
 
+def _default_endpoint(theta):
+    """The end of the first decay under the default adjoint, which is forward-only."""
+    solution = ds.pdesolve(
+        _ODE.problem,
+        ds.JNDF.stock(linear="dense", **_TIGHT),
+        (0.0, 0.05),
+        _ODE.initial_state(),
+        theta=theta,
+    )
+    return solution.ys[-1, 0]
+
+
+@pytest.mark.parametrize("wrap", [lambda f: f, jax.jit], ids=("eager", "jit"))
+def test_reverse_mode_through_the_default_adjoint_names_the_checkpoint_adjoint(wrap):
+    """jax.grad of a solve under the default adjoint, jitted or not, raises a ValueError
+    naming ds.CheckpointAdjoint()."""
+    with pytest.raises(ValueError, match=r"adjoint=ds\.CheckpointAdjoint\(\)"):
+        jax.grad(wrap(_default_endpoint))(_THETA)
+
+
 _LEVEL = 0.93
 _CROSSING = ds.Event(
     cond_fn=lambda time, state, args, **kwargs: state[0] - _LEVEL,

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import warnings
 from typing import Any
 
 import numpy as np
@@ -31,6 +30,7 @@ import numpy as np
 from diff_soup._distributed import assert_decision_value, local_value
 from diff_soup._errors import ConfigurationError
 from diff_soup._logging import log as logger
+from diff_soup._warnings import warn_user
 from diff_soup.inference._abc import RESUME
 from diff_soup.inference.fitting._protocols import StatisticalInferenceProblem
 from diff_soup.inference.fitting.result import OptResult, TerminationStatus
@@ -123,7 +123,7 @@ def _surface_failures(result: OptResult, problem: Any) -> OptResult:
         f"sentinel. The fit may be unreliable — raise the solver's max_steps or "
         f"loosen its tolerances."
     )
-    warnings.warn(msg, stacklevel=2)
+    warn_user(msg)
     logger.warning(msg)
     return dataclasses.replace(
         result,
@@ -412,6 +412,21 @@ def _resume_from(problem: Any, resume: Any) -> tuple[Any, Any]:
     return with_start(result), result.state
 
 
+def _default_optimizer(problem: Any) -> Any:
+    """``NewtonTrustRegion()``, or its Gauss-Newton form when the fit includes window states.
+
+    A multiple-shooting fit whose window starts are decision variables has
+    hundreds of them, and the exact Hessian of that many costs memory
+    quadratic in their number; the Gauss-Newton matrix does not.
+    """
+    from diff_soup.inference.solvers.newton_trust_region import NewtonTrustRegion
+
+    data_problem = getattr(problem, "diagnostic_problem", problem)
+    if bool(getattr(data_problem, "fits_window_states", False)):
+        return NewtonTrustRegion(hessian="gauss-newton")
+    return NewtonTrustRegion()
+
+
 def optsolve(
     problem: Any,
     optimizer: Any = None,
@@ -431,7 +446,7 @@ def optsolve(
 
     Args:
         problem: The problem to fit.
-        optimizer: The optimizer, `ds.inference.NewtonTrustRegion()` when `None`.
+        optimizer: The optimizer, `ds.inference.NewtonTrustRegion()` when `None`, or `NewtonTrustRegion(hessian="gauss-newton")` for a multiple-shooting fit of window states.
         callbacks: [Callback][diff_soup.inference.Callback] objects called during the fit.
         diagnostics: If `True`, attach the fit diagnostics to the result.
         run_restricted_initialization: If `True` and the trajectory sets `warm_start_steps`, first fit the parameters alone for that many steps.
@@ -451,11 +466,7 @@ def optsolve(
     warn_if_float32_default()
 
     if optimizer is None:
-        from diff_soup.inference.solvers.newton_trust_region import (
-            NewtonTrustRegion,
-        )
-
-        optimizer = NewtonTrustRegion()
+        optimizer = _default_optimizer(problem)
 
     callbacks = tuple(callbacks)
     if checkpoint is not None:

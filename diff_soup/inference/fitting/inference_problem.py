@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-import warnings
+import os
+import threading
 from collections.abc import Callable
 from typing import Any, Optional, Union
 
@@ -42,7 +43,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision, cast_to_compute_dtype, compute_dtype_of
+from diff_soup._warnings import warn_user
 from diff_soup.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
     GroupedThetaSelection,
@@ -715,7 +718,173 @@ def _loss_grad_hessian_from_gradient(loss_and_grad_fn: Callable) -> Callable:
         hessian, (loss, grad) = jax.jacfwd(gradient_with_aux, has_aux=True)(x)
         return loss, grad, hessian
 
-    return loss_grad_hessian
+    return _MemoryCheckedHessian(loss_grad_hessian, tile="full")
+
+
+# The memory of an exact Hessian grows with the square of the parameter count:
+# every tangent direction of the forward-over-reverse product carries the whole
+# reverse tape. Measured on a decision-variable multishoot fit (CPU,
+# 2026-10-28): 4.2 / 16.1 / 63.2 GB of compiled temporaries at 83 / 163 / 323
+# parameters. Below this width the Hessian is used without measuring it first.
+_HESSIAN_GUARD_MIN_WIDTH = 64
+#: The share of the free device memory one Hessian evaluation may take.
+_HESSIAN_MEMORY_SHARE = 0.9
+
+
+class _HessianMemoryError(ConfigurationError):
+    """The exact Hessian needs more memory than the device has free."""
+
+
+def _cgroup_memory_headroom() -> Optional[int]:
+    """The bytes this process may still allocate under its cgroup v2 limits, or ``None``."""
+    try:
+        with open("/proc/self/cgroup") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    relative = next((line[3:] for line in lines if line.startswith("0::")), None)
+    if relative is None:
+        return None
+    headroom = None
+    path = os.path.normpath("/sys/fs/cgroup/" + relative.lstrip("/"))
+    while path.startswith("/sys/fs/cgroup"):
+        try:
+            with open(os.path.join(path, "memory.max")) as handle:
+                limit = handle.read().strip()
+            with open(os.path.join(path, "memory.current")) as handle:
+                current = int(handle.read().strip())
+        except (OSError, ValueError):
+            limit = "max"
+            current = 0
+        if limit != "max":
+            room = max(int(limit) - current, 0)
+            headroom = room if headroom is None else min(headroom, room)
+        if path == "/sys/fs/cgroup":
+            break
+        path = os.path.dirname(path)
+    return headroom
+
+
+def _host_available_memory() -> Optional[int]:
+    """The host memory available to this process in bytes, or ``None`` when unknown."""
+    available = None
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    available = int(line.split()[1]) * 1024
+                    break
+    except (OSError, ValueError, IndexError):
+        available = None
+    if available is None:
+        try:
+            import psutil
+
+            available = int(psutil.virtual_memory().available)
+        except Exception:  # psutil is optional; without it the host is unmeasured
+            available = None
+    headroom = _cgroup_memory_headroom()
+    if headroom is not None:
+        available = headroom if available is None else min(available, headroom)
+    return available
+
+
+def _free_device_memory(device: Any) -> Optional[int]:
+    """The bytes ``device`` can still allocate, or ``None`` when it cannot say."""
+    if device.platform == "cpu":
+        return _host_available_memory()
+    try:
+        stats = device.memory_stats() or {}
+    except Exception:  # a backend without allocator statistics is unmeasured
+        return None
+    limit = stats.get("bytes_limit")
+    if limit is None:
+        return None
+    return int(limit) - int(stats.get("bytes_in_use", 0))
+
+
+def _check_hessian_memory(compiled: Any, width: int, tile: Any) -> None:
+    """Raise `_HessianMemoryError` when a compiled Hessian needs more than the free memory.
+
+    ``compiled`` is the ahead-of-time compiled evaluation of ``width``
+    parameters in tiles of ``tile`` directions. A backend that reports no
+    memory figures passes.
+    """
+    try:
+        analysis = compiled.memory_analysis()
+    except Exception:  # not every backend implements the analysis
+        return
+    if analysis is None:
+        return
+    need = int(getattr(analysis, "temp_size_in_bytes", 0) or 0) + int(
+        getattr(analysis, "output_size_in_bytes", 0) or 0
+    )
+    device = jax.local_devices()[0]
+    free = _free_device_memory(device)
+    if free is None or need <= _HESSIAN_MEMORY_SHARE * free:
+        return
+    gib = 2.0**30
+    how = "whole" if tile in (None, "full") else f"in tiles of {tile} directions"
+    smaller = (
+        "a smaller hessian_tile= (8 or 16), " if tile in (None, "full") or int(tile) > 8 else ""
+    )
+    raise _HessianMemoryError(
+        f"The exact Hessian over {width} parameters, formed {how}, needs "
+        f"{need / gib:.1f} GiB and the {device.platform} device has {free / gib:.1f} GiB "
+        f"free. With NewtonTrustRegion pass {smaller}"
+        'hessian="gauss-newton", or subproblem="cg" with '
+        "x_scale=ds.inference.ConstantScale(...). For laplace and information, "
+        'use the expected curvature (curvature="expected", kind="expected").'
+    )
+
+
+#: Set while a concrete check compiles: an enclosing check measures every
+#: nested Hessian, so the nested ones skip their own compilation.
+_ENCLOSING_CHECK = threading.local()
+
+
+class _MemoryCheckedHessian:
+    """A jitted Hessian evaluation whose memory is checked before its first run.
+
+    Above `_HESSIAN_GUARD_MIN_WIDTH` parameters the evaluation is compiled
+    ahead of time once per input shape and its memory compared with the free
+    memory of the device. A concrete input is compiled exactly as the call
+    compiles it, so the call reuses that compilation. A traced input (the
+    Hessian inside another jitted function) is measured on its shape, which
+    costs a second compilation, unless an enclosing check is compiling it.
+    """
+
+    def __init__(self, fn: Callable, *, tile: Any = "full"):
+        self._fn = fn if hasattr(fn, "lower") else jax.jit(fn)
+        self.tile = tile
+        self._checked: set = set()
+
+    def lower(self, *args, **kwargs):
+        """Lower the wrapped jitted function, as `jax.jit(...).lower` does."""
+        return self._fn.lower(*args, **kwargs)
+
+    def check(self, x: Any) -> None:
+        """Compile for ``x`` and raise `_HessianMemoryError` when it does not fit."""
+        shape = tuple(np.shape(x))
+        if len(shape) != 1 or shape[0] <= _HESSIAN_GUARD_MIN_WIDTH:
+            return
+        key = (shape, str(jnp.result_type(x)))
+        traced = isinstance(x, jax.core.Tracer)
+        if key in self._checked or (traced and getattr(_ENCLOSING_CHECK, "active", False)):
+            return
+        point = jax.ShapeDtypeStruct(shape, jnp.result_type(x)) if traced else x
+        enclosing = getattr(_ENCLOSING_CHECK, "active", False)
+        _ENCLOSING_CHECK.active = True
+        try:
+            compiled = self._fn.lower(point).compile()
+        finally:
+            _ENCLOSING_CHECK.active = enclosing
+        _check_hessian_memory(compiled, shape[0], self.tile)
+        self._checked.add(key)
+
+    def __call__(self, x: Any):
+        self.check(x)
+        return self._fn(x)
 
 
 def lower_residual_problem(
@@ -946,13 +1115,12 @@ def _resolve_spec_declared_bounds(inference_problem: Any, problem: Any):
             entries.append((cols, lo, hi))
 
     if unenforceable:
-        warnings.warn(
+        warn_user(
             f"bounds declared on parameter(s) {sorted(set(unenforceable))} cannot "
             "be enforced: they are not decision variables of this inference problem. "
             "A parameter bound binds only when the parameter is declared "
             "learnable=True and selected into the fit; otherwise drop its "
             "bounds or pass bounds explicitly to the InferenceProblem.",
-            stacklevel=3,
         )
 
     if inference_problem.bounds is not None or not entries:
@@ -2005,6 +2173,24 @@ class InferenceProblem:
     def prob_static(self):
         """Frozen theta partition (for warm-start / inspection)."""
         return self._seam.theta_frozen
+
+    @property
+    def fits_window_states(self) -> bool:
+        """Whether the decision vector holds window start states (decision-variable multishoot)."""
+        return self._dv_build is not None
+
+    @property
+    def function_columns(self) -> tuple:
+        """The columns of the theta block that hold learnable-function (network) weights."""
+        from diff_soup.inference.fitting.learnables import learnable_function_leaf_ids
+
+        owners = (self.problem, getattr(self._seam.problem, "source", None))
+        ids = frozenset().union(
+            *(learnable_function_leaf_ids(owner) for owner in owners if owner is not None)
+        )
+        if not ids:
+            return ()
+        return tuple(i for i, leaf_id in enumerate(self._seam.theta_leaf_ids) if leaf_id in ids)
 
     @property
     def theta_names(self) -> tuple:

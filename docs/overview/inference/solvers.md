@@ -63,13 +63,16 @@ The options, with their defaults:
 - `hessian="true"` uses the true Hessian. `"gauss-newton"` uses the
   Gauss-Newton Hessian approximation \(J^\top J\), from one forward-mode
   Jacobian.
-- `subproblem="auto"` solves the trust-region subproblem exactly up to
-  `dense_cutoff=64` parameters and by conjugate gradients above that.
-  Under `"gauss-newton"` it is always solved exactly. `"exact"` and
-  `"cg"` force either.
+- `subproblem="auto"` solves the trust-region subproblem exactly, at
+  every size under the default `x_scale`. It switches to conjugate
+  gradients above `dense_cutoff=64` parameters only for a true Hessian
+  with an `x_scale` other than `HessianScale`. `"exact"` and `"cg"`
+  force either.
 - `linear_solver="auto"` selects the factorization of the exact
   subproblem: `"eigh"`, a symmetric eigendecomposition, for a true
-  Hessian, and `"cholesky"` for the Gauss-Newton approximation. `"eigh"`,
+  Hessian. For the Gauss-Newton approximation it is `"cholesky"` under
+  float64 and `"qr"` of the Jacobian under float32
+  ([precision](../simulation/precision.md#inference)). `"eigh"`,
   `"cholesky"`, and `"qr"` force one.
 - `radius_init=1.0` and `radius_max=1e3` are the initial and largest
   trust radius, in scaled parameter units.
@@ -94,13 +97,21 @@ The options, with their defaults:
   recomputed, with quasi-Newton (SR1) updates between refreshes.
   `"every"` recomputes it at every step, and an integer `k` every
   `k`-th step.
-- `hessian_tile="full"` and `cg_max_iter=None` set the tangent batch
-  width and the conjugate-gradient budget. Both can be left alone.
+- `hessian_tile="auto"` sets how many directions of the true Hessian
+  are formed at once, and with it the memory the Hessian takes. `"auto"`
+  forms it whole up to `dense_cutoff` parameters and 32 directions at a
+  time above, or 16 or 8 when 32 does not fit the device. An integer
+  from 8 to 128, or `"full"`, fixes it.
+- A true Hessian that does not fit the device stops the fit before its
+  first step, with an error naming `hessian_tile=`,
+  `hessian="gauss-newton"`, and `subproblem="cg"`.
+- `cg_max_iter=None` is the conjugate-gradient budget, the parameter
+  count when unset.
 - `callbacks=()` attaches callbacks to the solver, merged with those
   passed to `ds.inference.optsolve` ([run the fit](fitting.md#run-the-fit)).
 
 `result.info` records the `hessian`, `hessian_composition`,
-`subproblem`, and `linear_solver` settings the run used. The
+`subproblem`, `hessian_tile`, and `linear_solver` settings the run used. The
 trust-region radius after every step is in
 `result.trust_region.radius_history`.
 
@@ -134,9 +145,10 @@ The options, with their defaults:
   scales by \(1/s^2\), with `s` the typical magnitude of the
   parameters, one scalar or one entry per parameter.
 - `linear_solver="auto"` factors the damped normal equations by
-  Cholesky. `"qr"` solves the equivalent least-squares system instead,
-  and is unavailable for a joint problem sharded across devices, and
-  `"solve"` uses a general dense solve. `result.info["linear_solver"]`
+  Cholesky under float64, and solves the equivalent least-squares
+  system by QR under float32. `"qr"` forces QR and is unavailable for a
+  joint problem sharded across devices. `"solve"` uses a general dense
+  solve. `result.info["linear_solver"]`
   reports the choice made.
 - `callbacks=()` attaches callbacks to the solver.
 

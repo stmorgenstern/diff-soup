@@ -79,6 +79,45 @@ def test_optsolve_defaults_to_the_exact_newton_trust_region():
         inf.NewtonTrustRegion(subproblem="cg").solve(problem)
 
 
+def test_the_exact_newton_hessian_is_formed_in_tiles_above_the_dense_cutoff():
+    """Above dense_cutoff=64 parameters the default hessian_tile forms the exact Hessian 32
+    directions at a time, and the steps match those on the whole Hessian."""
+    rng = np.random.default_rng(1)
+    matrix, target = (
+        jnp.asarray(rng.standard_normal((80, 70))),
+        jnp.asarray(rng.standard_normal(80)),
+    )
+    problem = inf.LeastSquaresProblem.from_residual(np.zeros(70), lambda x: matrix @ x - target)
+    tiled, whole = (
+        inf.optsolve(problem, inf.NewtonTrustRegion(max_steps=3, **tile), diagnostics=False)
+        for tile in ({}, {"hessian_tile": "full"})
+    )
+    assert (tiled.info["hessian_tile"], whole.info["hessian_tile"]) == (32, "full")
+    # measured 5.0e-16 worst parameter difference, workstation CPU 2026-10-28,
+    # pytest tests/contracts/test_structural_fitting.py
+    np.testing.assert_allclose(tiled.params, whole.params, rtol=0.0, atol=1e-12)
+
+
+def test_optsolve_fits_window_starts_with_gauss_newton_by_default():
+    """optsolve without an optimizer runs NewtonTrustRegion(hessian="gauss-newton") when the
+    multiple-shooting window starts are decision variables."""
+    spec = ds.problem("structural_window_starts")
+    spec.domain("line", ds.cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+    rate = spec.param("rate", value=0.45, learnable=True, bounds=(0.1, 1.2))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    spec.equation(writes="u", reads=("u",))(lambda q: -q.p.rate * q.u)
+    times = jnp.linspace(0.0, 1.0, 5)
+    measurement = inf.Measurement("u", times, jnp.exp(-0.6 * times)[:, None], weight=1e4)
+    experiment = inf.Experiment(
+        spec.build(), solver(), (0.0, 1.0), spec.assemble_state({}), (measurement,)
+    )
+    problem = inf.InferenceProblem(
+        experiment, parameters=rate, trajectory=inf.Multishoot(inf.Windows.uniform(2))
+    )
+    fit = inf.optsolve(problem, diagnostics=False)
+    assert problem.n_params > 1 and fit.info["hessian"] == "gauss-newton"
+
+
 def test_newton_gauss_newton_records_the_final_residual_and_jacobian():
     """NewtonTrustRegion(hessian="gauss-newton") records the rows and Jacobian it holds at the
     returned point, whose cost they reproduce; the true-Hessian path records neither."""

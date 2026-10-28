@@ -179,6 +179,26 @@ def declared_learnable_leaf_ids(problem: Any) -> frozenset:
     )
 
 
+def learnable_function_leaf_ids(problem: Any) -> frozenset:
+    """Return the ``id()`` set of the array leaves of ``problem``'s learnable functions.
+
+    These are the weights of the networks and other callables declared with
+    ``spec.function(..., learnable=True)``, a subset of
+    [declared_learnable_leaf_ids][diff_soup.inference.fitting.learnables.declared_learnable_leaf_ids].
+    """
+    located = _traced_adapter_layer(problem)
+    if located is None or not getattr(located[1], "learnable_functions", ()):
+        return frozenset()
+    prefix = f"{located[0]}.functions."
+    return frozenset(
+        id(leaf)
+        for path in learnable_paths(problem, None)
+        if path.startswith(prefix)
+        for leaf in jax.tree_util.tree_leaves(_walk_path(problem, path))
+        if eqx.is_inexact_array(leaf)
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class LearnableSelector:
     """A named selection of a problem's declared learnables.

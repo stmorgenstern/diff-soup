@@ -38,7 +38,6 @@ dtype; no hard fp64 casts.
 from __future__ import annotations
 
 import dataclasses
-import warnings
 from typing import Any, Optional
 
 import jax
@@ -46,6 +45,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._logging import log as logger
+from diff_soup._warnings import warn_user
 
 # Default θ-conditioning threshold above which the identifiability warning fires.
 # A condition number of 1e8 in fp64 means ~8 digits of precision are lost — the
@@ -264,7 +264,7 @@ def compute_diagnostics(
             of a ``jacfwd``.
         theta_cond_warn: Condition-number threshold for the identifiability
             warning (default ``1e8``).
-        emit_warning: Whether to fire the real ``warnings.warn`` (set ``False`` to
+        emit_warning: Whether to emit the real warning (set ``False`` to
             collect the note without raising under ``-W error``).
 
     Returns:
@@ -289,21 +289,43 @@ def compute_diagnostics(
         jac_theta_full = jac[:, :n_theta]
     if jac is not None and jac.size and n_theta > 0:
         jac_theta = jac[:, :n_theta]
-        # Zero-column detection (a θ leaf the residual is blind to).
-        col_norms = np.linalg.norm(jac_theta, axis=0)
-        max_col = float(np.max(col_norms)) if col_norms.size else 0.0
-        zero_cols = (
-            np.where(col_norms <= _ZERO_COL_REL * max(max_col, 1.0))[0]
-            if max_col > 0.0
-            else np.arange(n_theta)
-        )
         sv_arr = np.linalg.svd(jac_theta, compute_uv=False)
         sv = sv_arr
         smin = float(sv_arr[-1]) if sv_arr.size else 0.0
         smax = float(sv_arr[0]) if sv_arr.size else 0.0
         cond = float("inf") if smin <= 0.0 else smax / smin
 
-        if zero_cols.size > 0 or cond > theta_cond_warn:
+        # The weights of a learnable function (a network) are not identifiable
+        # one by one, so the rank tests read only the other columns.
+        function_cols = set(getattr(problem, "function_columns", ()) or ())
+        tested = np.asarray([i for i in range(n_theta) if i not in function_cols], dtype=int)
+        if function_cols and tested.size == 0:
+            notes.append(
+                "optsolve: every fitted parameter is a learnable-function weight, so the "
+                "identifiability check was skipped."
+            )
+        elif tested.size:
+            jac_tested = jac_theta[:, tested]
+            # Zero-column detection (a θ leaf the residual is blind to).
+            col_norms = np.linalg.norm(jac_tested, axis=0)
+            max_col = float(np.max(col_norms)) if col_norms.size else 0.0
+            zero_cols = (
+                tested[np.where(col_norms <= _ZERO_COL_REL * max(max_col, 1.0))[0]]
+                if max_col > 0.0
+                else tested
+            )
+            if function_cols:
+                tested_sv = np.linalg.svd(jac_tested, compute_uv=False)
+                tested_min = float(tested_sv[-1]) if tested_sv.size else 0.0
+                tested_max = float(tested_sv[0]) if tested_sv.size else 0.0
+                tested_cond = float("inf") if tested_min <= 0.0 else tested_max / tested_min
+            else:
+                tested_cond = cond
+        else:
+            zero_cols = np.zeros(0, dtype=int)
+            tested_cond = cond
+
+        if tested.size and (zero_cols.size > 0 or tested_cond > theta_cond_warn):
             names = _theta_names(problem)
             if zero_cols.size > 0:
                 bad = (
@@ -313,7 +335,8 @@ def compute_diagnostics(
                 )
                 detail = f"parameter(s) {bad} do not move the residual (zero Jacobian column)"
             else:
-                detail = f"theta-block condition number {cond:.2e} exceeds {theta_cond_warn:.0e}"
+                block = "theta-block" if not function_cols else "non-function theta-block"
+                detail = f"{block} condition number {tested_cond:.2e} exceeds {theta_cond_warn:.0e}"
             msg = (
                 f"optsolve: the learnable-parameter Jacobian is rank deficient: {detail}. "
                 "The observations must determine every fitted parameter direction; "
@@ -321,7 +344,7 @@ def compute_diagnostics(
             )
             notes.append(msg)
             if emit_warning:
-                warnings.warn(msg, IdentifiabilityWarning, stacklevel=2)
+                warn_user(msg, IdentifiabilityWarning)
             logger.warning(msg)
 
     # --- per-stream cost split (by name when available) ------------------

@@ -382,6 +382,25 @@ def _sr1_update(
     return 0.5 * (updated + updated.T), True
 
 
+#: The tiles ``hessian_tile="auto"`` tries above ``dense_cutoff`` parameters, widest first.
+_AUTO_HESSIAN_TILES = (32, 16, 8)
+
+
+def _tiled_hessian(value_and_gradient: Callable, tile: int) -> Callable:
+    """``x -> (loss, gradient, Hessian)``, the gradient pushed forward ``tile`` directions at a time."""
+
+    def loss_and_gradient(point):
+        loss_value, gradient_value = value_and_gradient(point)
+        return jnp.concatenate((jnp.reshape(loss_value, (1,)), gradient_value))
+
+    @jax.jit
+    def evaluate(point):
+        value, derivative = value_and_jacfwd_tiled(loss_and_gradient, point, tile=tile)
+        return value[0], value[1:], derivative[1:, :]
+
+    return evaluate
+
+
 class NewtonTrustRegion(OptSolver):
     """The Newton trust-region method, steps on the exact Hessian or its Gauss-Newton approximation.
 
@@ -394,7 +413,7 @@ class NewtonTrustRegion(OptSolver):
         hessian: `"true"` steps on the exact Hessian, `"gauss-newton"` on `J^T J` from the residual Jacobian.
         subproblem: `"exact"`, `"cg"`, or `"auto"`, which picks CG only for an exact Hessian above `dense_cutoff` parameters without `HessianScale`.
         linear_solver: `"eigh"`, `"cholesky"` or `"qr"` for the exact subproblem, or `"auto"` for `"eigh"` on the exact Hessian and Cholesky or QR otherwise.
-        dense_cutoff: The parameter count above which `subproblem="auto"` may pick CG.
+        dense_cutoff: The parameter count above which `subproblem="auto"` may pick CG and `hessian_tile="auto"` tiles the Hessian.
         radius_init: The initial trust radius, in scaled parameter units.
         radius_max: The largest trust radius.
         eta: The ratio of achieved to predicted decrease a step must reach to be accepted.
@@ -405,7 +424,7 @@ class NewtonTrustRegion(OptSolver):
         x_scale: The parameter scaling, `HessianScale()` by default, with `JacScale` refused under `hessian="true"` and `HessianScale` under CG.
         composition: `"forward-over-reverse"` or `"forward-over-forward"` for the exact Hessian, or `"auto"` to pick one the time-stepping adjoint supports.
         hessian_refresh: How often the exact Hessian is recomputed, with SR1 updates between: `"adaptive"`, `"every"`, or every `k` steps for an integer `k`.
-        hessian_tile: The number of tangent directions evaluated together, one of 8, 16, 32, 64 and 128, or `"full"` for all.
+        hessian_tile: How many exact-Hessian directions are formed at once, which sets the memory: 8 to 128, `"full"`, or `"auto"` (whole up to `dense_cutoff`, then 32).
         cg_max_iter: The conjugate-gradient iteration budget, the parameter count when `None`.
         callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
     """
@@ -425,9 +444,17 @@ class NewtonTrustRegion(OptSolver):
     x_scale: XScale = eqx.field(default_factory=HessianScale)
     composition: str = eqx.field(static=True, default="auto")
     hessian_refresh: Any = eqx.field(static=True, default="adaptive")
-    hessian_tile: Any = eqx.field(static=True, default="full")
+    hessian_tile: Any = eqx.field(static=True, default="auto")
     cg_max_iter: int | None = eqx.field(static=True, default=None)
     callbacks: tuple = eqx.field(static=True, default=())
+
+    def _resolved_hessian_tile(self, n_params: int, lanes: bool) -> Any:
+        """The tangent tile the solve starts with: an int, or ``"full"``."""
+        if self.hessian_tile != "auto":
+            return self.hessian_tile
+        if lanes or n_params <= self.dense_cutoff:
+            return "full"
+        return _AUTO_HESSIAN_TILES[0]
 
     @property
     def requires(self) -> frozenset:
@@ -537,8 +564,46 @@ class NewtonTrustRegion(OptSolver):
                     "NewtonTrustRegion hessian_refresh must be 'adaptive', 'every', "
                     "or a positive integer."
                 )
-        normalize_tangent_tile(self.hessian_tile, max(n_params, 1))
+        if self.hessian_tile != "auto":
+            normalize_tangent_tile(self.hessian_tile, max(n_params, 1))
         return resolved_subproblem, composition, resolved_linear_solver
+
+    def _checked_hessian(self, problem: Any, x: jax.Array, tile: Any, lanes: bool) -> Callable:
+        """The exact-Hessian evaluation, memory-checked against the device before any step.
+
+        ``"full"`` uses the problem's own Hessian. A tile pushes the gradient
+        forward that many directions at a time. Either is compiled and checked
+        here, so the problem's own check inside it is skipped and the solve
+        reuses the compilation; under ``hessian_tile="auto"`` a tile that does
+        not fit is narrowed down to 8 directions before the error is raised.
+        """
+        from diff_soup.inference.fitting.inference_problem import (
+            _HESSIAN_GUARD_MIN_WIDTH,
+            _HessianMemoryError,
+            _MemoryCheckedHessian,
+        )
+
+        if lanes or (tile in (None, "full") and x.shape[0] <= _HESSIAN_GUARD_MIN_WIDTH):
+            return problem.value_gradient_hessian
+        if tile in (None, "full"):
+            checked = _MemoryCheckedHessian(problem.value_gradient_hessian, tile="full")
+            checked.check(x)
+            return checked
+        candidates = [tile]
+        if self.hessian_tile == "auto":
+            candidates += [t for t in _AUTO_HESSIAN_TILES if t < tile and t < x.shape[0]]
+        error = None
+        for candidate in candidates:
+            checked = _MemoryCheckedHessian(
+                _tiled_hessian(problem.value_and_gradient, candidate), tile=candidate
+            )
+            try:
+                checked.check(x)
+            except _HessianMemoryError as exc:
+                error = exc
+                continue
+            return checked
+        raise error
 
     def solve(self, problem: Any, *, callbacks: tuple = ()) -> OptResult:
         """Optimize an inference problem with a scaled Newton trust region."""
@@ -589,7 +654,7 @@ class NewtonTrustRegion(OptSolver):
                 "Hessian of its lanes, which needs subproblem='exact'; a CG subproblem "
                 "differentiates the gradient matrix-free, which the lanes do not offer."
             )
-        if lanes and self.hessian == "true" and self.hessian_tile not in (None, "full"):
+        if lanes and self.hessian == "true" and self.hessian_tile not in (None, "full", "auto"):
             raise ConfigurationError(
                 "NewtonTrustRegion with hessian='true' on a lowered study takes the exact "
                 "Hessian of its lanes whole; leave hessian_tile='full'."
@@ -615,8 +680,13 @@ class NewtonTrustRegion(OptSolver):
                     residual = forward_residual(point)
                     return 0.5 * jnp.sum(residual * residual)
 
-            if resolved_subproblem == "exact" and self.hessian_tile in (None, "full"):
-                data_hessian = problem.value_gradient_hessian
+        # The Jacobian of the Gauss-Newton path is pushed forward without a reverse
+        # tape, so "auto" forms it whole; only the exact Hessian is tiled by size.
+        jacobian_tile = "full" if self.hessian_tile == "auto" else self.hessian_tile
+        hessian_tile = self._resolved_hessian_tile(n_params, lanes)
+        if self.hessian == "true" and resolved_subproblem == "exact":
+            data_hessian = self._checked_hessian(problem, x, hessian_tile, lanes)
+            hessian_tile = data_hessian.tile if hasattr(data_hessian, "tile") else hessian_tile
 
         counts = {
             "residual": 0,
@@ -637,20 +707,7 @@ class NewtonTrustRegion(OptSolver):
             return loss + reg_loss, gradient + reg_gradient
 
         def eval_dense(point):
-            if data_hessian is not None:
-                loss, gradient, hessian = data_hessian(point)
-            else:
-
-                def loss_and_gradient(candidate):
-                    loss_value, gradient_value = data_gradient(candidate)
-                    return jnp.concatenate((jnp.reshape(loss_value, (1,)), gradient_value))
-
-                value, derivative = value_and_jacfwd_tiled(
-                    loss_and_gradient,
-                    point,
-                    tile=self.hessian_tile,
-                )
-                loss, gradient, hessian = value[0], value[1:], derivative[1:, :]
+            loss, gradient, hessian = data_hessian(point)
             reg_loss, reg_gradient = jax.value_and_grad(reg.penalty)(point)
             reg_hessian = jax.hessian(reg.penalty)(point)
             counts["hessian"] += 1
@@ -684,7 +741,7 @@ class NewtonTrustRegion(OptSolver):
                 pushforward,
                 point,
                 data_residual,
-                tile=self.hessian_tile,
+                tile=jacobian_tile,
             )
             residual = data_residual
             if reg_residual.shape[0]:
@@ -749,7 +806,7 @@ class NewtonTrustRegion(OptSolver):
             _residual, jacobian = value_and_jacfwd_tiled(
                 forward_residual,
                 point,
-                tile=self.hessian_tile,
+                tile=jacobian_tile,
             )
             reg_rows = reg.residual(point)
             if reg_rows.shape[0]:
@@ -1098,6 +1155,11 @@ class NewtonTrustRegion(OptSolver):
                 "hessian": self.hessian,
                 "hessian_composition": resolved_composition,
                 "subproblem": resolved_subproblem,
+                "hessian_tile": (
+                    hessian_tile
+                    if self.hessian == "true" and resolved_subproblem == "exact"
+                    else None
+                ),
                 "linear_solver": resolved_linear_solver,
                 "linear_solver_fallbacks": counts["factorization_fallback"],
                 "linear_factorizations": counts["factorizations"],

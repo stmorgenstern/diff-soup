@@ -71,7 +71,6 @@ Key design decisions:
 
 from __future__ import annotations
 
-import warnings
 from typing import Any, Optional
 
 import jax
@@ -79,6 +78,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._logging import log as logger
+from diff_soup._warnings import warn_user
 from diff_soup.inference.fitting._forward_seam import _solution_failed
 from diff_soup.inference.fitting._lane_map import folds_enclosing_batches, lane_map
 from diff_soup.inference.fitting.dependencies import (
@@ -87,7 +87,10 @@ from diff_soup.inference.fitting.dependencies import (
 )
 
 # Dense-GN decision-variable ceiling: beyond this, the dense normal-equation
-# solve is the cost wall; condensed sparse Gauss-Newton is unavailable.
+# solve is the cost wall; condensed sparse Gauss-Newton is unavailable. The
+# exact Hessian hits its wall far earlier, at a few hundred variables (63 GB of
+# temporaries at 323 measured 2026-10-28), which the Hessian memory guard in
+# inference_problem.py reports before the solve runs.
 _DENSE_GN_CEIL = 2000
 
 
@@ -424,12 +427,14 @@ def warn_if_over_ceiling(n_decision: int) -> Optional[str]:
     if n_decision > _DENSE_GN_CEIL:
         msg = (
             f"Multishoot (decision-variable windows): the decision vector has "
-            f"{n_decision} variables (> {_DENSE_GN_CEIL}); the dense Gauss-Newton "
-            "normal-equation solve is the cost wall. Declare a StateBasis to "
+            f"{n_decision} variables (> {_DENSE_GN_CEIL}), and the dense Gauss-Newton "
+            "solve is the cost wall at this size. The exact Hessian "
+            '(NewtonTrustRegion(hessian="true")) is out of reach from a few hundred '
+            "variables. Declare a StateBasis to "
             "represent the window starts in a subspace, reduce the window count, or "
             "narrow the learnable set."
         )
-        warnings.warn(msg, stacklevel=3)
+        warn_user(msg)
         logger.warning(msg)
         return msg
     return None
