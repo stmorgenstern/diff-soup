@@ -100,3 +100,11 @@ issue ledger of that effort.
   limits of float32 factors (P-1). `step_tol` and `cost_tol` default to `1e-8` in float64 (R-24).
   `subproblem="auto"`, `linear_solver="auto"` and `hessian_tile` as the code behaves (C-1, R-28).
   `converged` means a local stopping test passed (C-5).
+
+### Planned for the next release
+
+- Explicit parameters: `theta` as `{"p": {name: array}, "fn": {name: module}}`, a public view over the
+  1.0.1 key-path table, with a design document first (private channel for the non-parameter arrays,
+  names for family members and replicates, migration of saved fits, semver).
+- A tiled Gauss-Newton Jacobian for multiple shooting and Levenberg-Marquardt; a refinement target for
+  `Precision.fp32_ir`; boundary facets on TET10, HEX20 and HEX27; the WIRE coordinate network.
