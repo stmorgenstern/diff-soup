@@ -78,6 +78,8 @@ issue ledger of that effort.
 
 ### Additions
 
+- `read_mesh` reads TET10 meshes in the basis's node order (meshio's `tetra10` swaps two mid-edge
+  nodes), so they are no longer reported as tangled. (R-39)
 - `ds.inference.approx.WIRE`, a coordinate network with the real Gabor-wavelet activation
   `cos(omega_0 z) exp(-(s_0 z)^2)` (Saragadam et al. 2023), the same interface as `SIREN`
   (`from_domain`, `bounds`, `transform`, `learnable_paths`); defaults `omega_0=20`, `s_0=10`. (WE2-6)

@@ -146,6 +146,10 @@ def read_mesh(
         if not index:
             return None, None
         data = np.concatenate([np.asarray(blocks[i].data, dtype=np.int64) for i in index])
+        if "tetra10" in types:
+            # meshio hands tetra10 in VTK order (node 8 on edge 1-3, node 9 on edge 2-3);
+            # the TET10 basis uses the gmsh order, which swaps the two.
+            data = data[:, [0, 1, 2, 3, 4, 5, 6, 7, 9, 8]]
         if physical is None:
             return data, None
         tags = np.concatenate([np.asarray(physical[i], dtype=np.int64) for i in index])
