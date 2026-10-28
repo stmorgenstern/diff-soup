@@ -120,7 +120,7 @@ def _surface_failures(result: OptResult, problem: Any) -> OptResult:
     msg = (
         f"optsolve: {n_failed} of {n_seg} segment PDE solve(s) did not reach t_end "
         f"(segments {failed_indices}); their residuals were penalized with a "
-        f"sentinel. The fit may be unreliable — raise the solver's max_steps or "
+        f"sentinel. The fit may be unreliable; raise the solver's max_steps or "
         f"loosen its tolerances."
     )
     warn_user(msg)

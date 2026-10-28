@@ -518,7 +518,7 @@ def _check_closes_pairing(spec) -> None:
             raise ValueError(
                 f"constraints {first!r} and {c.name!r} both close global "
                 f"{target!r}; a global carries one multiplier and is determined "
-                "by exactly one constraint row — give one of the two its own "
+                "by exactly one constraint row; give one of the two its own "
                 "spec.global_var to close, or drop it."
             )
         closed_by[target] = c.name
@@ -530,7 +530,7 @@ def _check_closes_pairing(spec) -> None:
             continue
         raise ValueError(
             f"global {name!r} is closed by no constraint; an algebraic global "
-            "is determined by the one constraint row that closes it — declare "
+            "is determined by the one constraint row that closes it; declare "
             f"a constraint with closes={name!r} (spec.constraint.galvanostatic, "
             ".integral, .boundary_integral, .reduce_residual, .flux_total), name "
             f"it as the current unknown of spec.control.operational(...), "

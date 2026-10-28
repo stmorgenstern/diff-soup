@@ -75,7 +75,7 @@ def mask_to_polygon(
 
     contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
-        raise ValueError("No contours found in mask — check that the mask has non-zero pixels.")
+        raise ValueError("No contours found in mask; check that the mask has non-zero pixels.")
 
     # Sort by area, largest first
     contours = sorted(contours, key=cv2.contourArea, reverse=True)

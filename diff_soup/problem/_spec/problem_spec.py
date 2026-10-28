@@ -1133,7 +1133,7 @@ class ProblemSpec:
         # DOF.
         raise ValueError(
             f"spec.couple({source.name!r}, onto={onto!r}): gathering a component "
-            "field onto another DOMAIN uses the NO-DOF read-through form — "
+            "field onto another DOMAIN uses the NO-DOF read-through form: "
             f"add as_=<alias> (e.g. spec.couple({source.name!r}, onto={onto!r}, "
             f"at=..., as_={source.name!r})) and read it as q.<alias> in the "
             f"{onto!r} closures."
@@ -1229,7 +1229,7 @@ class ProblemSpec:
         if handle is not None and getattr(handle, "is_ragged", False):
             raise NotImplementedError(
                 f"spec.couple: family {name!r} is ragged (static size "
-                "buckets); coupling a ragged family is not supported — author "
+                "buckets); coupling a ragged family is not supported; author "
                 "one uniform family per size and couple each."
             )
 
@@ -1304,7 +1304,7 @@ class ProblemSpec:
         if not members:
             raise ValueError(
                 f"spec.couple(onto={onto!r}): family {onto!r} has no member "
-                "fields yet — declare at least one with parts.field_decl(...) "
+                "fields yet; declare at least one with parts.field_decl(...) "
                 "before gathering onto it."
             )
         return members[0]

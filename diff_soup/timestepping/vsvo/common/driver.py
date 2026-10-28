@@ -2997,7 +2997,7 @@ _COMPOSABLE_REVERSE_ERROR = (
     "Reverse-mode differentiation was applied directly to a solve running the "
     "composable forward-sensitivity mode (ForwardAdjoint(composable=True)). "
     "This mode computes forward sensitivities (jax.jvp / jax.jacfwd) and "
-    "supports differentiating functions of those sensitivities — for example "
+    "supports differentiating functions of those sensitivities, for example "
     "jax.jacrev(jax.jacfwd(solve)), or jax.grad of a scalar criterion of "
     "jax.jacfwd(solve). For a reverse-mode gradient of the solution itself, "
     "solve with adjoint=CheckpointAdjoint() instead."

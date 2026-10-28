@@ -479,7 +479,7 @@ def laplace_posterior(
     """
     if coordinate not in COORDINATES:
         raise ValueError(
-            f"laplace_posterior: coordinate must be one of {COORDINATES} — 'x' for "
+            f"laplace_posterior: coordinate must be one of {COORDINATES}: 'x' for "
             f"the physical parameters, 'z' for the inference coordinate; got "
             f"{coordinate!r}."
         )
@@ -571,7 +571,7 @@ def laplace_posterior(
             else "the data curvature alone (no prior was given)"
         )
         raise ImproperPosteriorError(
-            f"laplace_posterior: the total posterior precision — {prior_clause} — "
+            f"laplace_posterior: the total posterior precision ({prior_clause}) "
             f"leaves {n - rank} of {n} parameter directions undetermined "
             f"(relative curvature threshold {_NULL_TOL:.0e}), so no proper "
             "Gaussian posterior exists. Close the undetermined directions with a "

@@ -214,7 +214,7 @@ def _mass_diagonal(eqset: EquationSet) -> jax.Array:
                 raise ValueError(
                     f"variable {var.name!r} in component {comp.name!r} is "
                     f"declared mass='differential' but its assembled mass "
-                    f"diagonal is all zero — this is degenerate (really "
+                    f"diagonal is all zero, which is degenerate (really "
                     f"algebraic). Declare it mass='algebraic' if you mean 0=f, "
                     f"or supply a domain with positive (lumped/consistent) mass."
                 )
@@ -969,7 +969,7 @@ def _build_full_residual_fn(
         if owner is None:
             raise ValueError(
                 f"_build_full_residual_fn: read-through coupling {cp.name!r} "
-                f"alias {cp.target.name!r} has no consuming component — it is read "
+                f"alias {cp.target.name!r} has no consuming component: it is read "
                 "by no equation and names no onto= target owner."
             )
         consuming_comp, alias_var = owner
@@ -2259,7 +2259,7 @@ def _build_full_jac_blocks_fn(
                         raise ConfigurationError(
                             f"this problem declares an operational control table "
                             f"({table_name!r}); evaluate it with an operating control "
-                            "state — ControlState.operating(mode=..., target=...)."
+                            "state: ControlState.operating(mode=..., target=...)."
                         )
                     C_sum, D_sum = residual_sum_rows(row_lo, row_hi, dim_c)
                     on = jnp.asarray(mode, dtype=jnp.int32) == current_index

@@ -48,7 +48,7 @@ def _is_linearize_tracer(leaf) -> bool:
 
 
 _FORWARD_OVER_REVERSE_ERROR = (
-    "Forward-mode differentiation (jax.jvp / jax.jacfwd — including the "
+    "Forward-mode differentiation (jax.jvp / jax.jacfwd, including the "
     "outer forward pass of jax.hessian) was applied over {entry}, a "
     "reverse-mode derivative entry with an explicit transpose factorization. "
     "That entry supports first-order reverse-mode gradients only: its "

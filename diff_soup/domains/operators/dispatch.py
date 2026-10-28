@@ -1308,8 +1308,8 @@ def dispatch_curl(domain: Domain, vec: Array) -> Array:
         )
     if vec.ndim != 2 or vec.shape[-1] != dim:
         raise ValueError(
-            f"curl: expected a vector field of shape (n, {dim}) — one component "
-            f"per spatial axis of this {dim}-D domain — got shape {tuple(vec.shape)}."
+            f"curl: expected a vector field of shape (n, {dim}): one component "
+            f"per spatial axis of this {dim}-D domain; got shape {tuple(vec.shape)}."
         )
     dt = domain.discretization_type
     if dt == "fem":

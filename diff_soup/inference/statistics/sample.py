@@ -446,7 +446,7 @@ def _build_gradient(
             raise ValueError(
                 f"{caller}: the reverse-mode gradient failed at the initial "
                 f"point ({exc}). Composable forward-sensitivity solver runs "
-                "support jax.jacfwd only — build with gradient='forward'."
+                "support jax.jacfwd only; build with gradient='forward'."
             ) from exc
         atol = _REVERSE_GATE_RTOL * max(1.0, float(np.max(np.abs(forward_grad), initial=0.0)))
         if not np.allclose(reverse_grad, forward_grad, rtol=_REVERSE_GATE_RTOL, atol=atol):
@@ -454,7 +454,7 @@ def _build_gradient(
                 f"{caller}: the reverse-mode gradient disagrees with the "
                 f"forward-assembled gradient at the initial point (reverse "
                 f"{reverse_grad}, forward {forward_grad}). Reverse mode is not "
-                "trustworthy for this target — build with gradient='forward'."
+                "trustworthy for this target; build with gradient='forward'."
             )
         return jax.grad(fn)
     return None
@@ -711,7 +711,7 @@ def whitening(source: Any) -> WhiteningTransform:
         )
     if isinstance(source, IdentifiedSubspace):
         raise ValueError(
-            "whitening: an IdentifiedSubspace is an improper source — it "
+            "whitening: an IdentifiedSubspace is an improper source: it "
             "records the parameter directions an analysis left undetermined, "
             "so no finite (SPD) covariance exists to whiten. Close the "
             "undetermined directions with a proper prior or re-parameterize, "
@@ -1539,7 +1539,7 @@ def sbc(
         raise ValueError(
             f"sbc: the rank statistic takes {outcomes} possible values "
             f"(num_steps / thin + 1), which must divide evenly into ranks_bins "
-            f"(got {ranks_bins}). Adjust num_steps, thin, or ranks_bins — e.g. "
+            f"(got {ranks_bins}). Adjust num_steps, thin, or ranks_bins, e.g. "
             f"num_steps = (k * ranks_bins - 1) * thin for an integer k."
         )
 
@@ -1670,7 +1670,7 @@ def sbc(
         if p_value[j] < alpha:
             flags.append(
                 f"parameter {names[j]!r}: rank histogram departs from uniformity "
-                f"(chi-square p = {p_value[j]:.2e} < {alpha:g}) — the model, "
+                f"(chi-square p = {p_value[j]:.2e} < {alpha:g}): the model, "
                 "prior, and sampler are not jointly calibrated"
             )
 

@@ -389,7 +389,7 @@ def _infer_stencil_offsets(
             f"every probe state for component(s) {comp_names}; keeping the "
             "default radius-1 stencil declaration. A body whose true "
             "dependency is wider than one cell per axis will be "
-            "under-declared — rewrite the residual to be finite at generic "
+            "under-declared; rewrite the residual to be finite at generic "
             "positive states to enable inference.",
         )
         return {}

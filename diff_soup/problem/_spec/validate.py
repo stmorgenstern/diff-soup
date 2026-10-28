@@ -659,7 +659,7 @@ def _validate_global_closures(spec, global_names: set) -> list[str]:
                 errors.append(
                     f"operational control {c.name!r}: {role} observable "
                     f"{obs_name!r} has kind {obs.kind!r}; the table selects "
-                    f"among scalar terminal rows — declare it with "
+                    f"among scalar terminal rows; declare it with "
                     f"spec.observe.scalar"
                 )
         gspec = spec._globals.get(c.closes)
@@ -686,7 +686,7 @@ def _validate_global_closures(spec, global_names: set) -> list[str]:
                 errors.append(
                     f"operational control {c.name!r}: global {c.closes!r} is "
                     f"also bound by control {ctl.name!r}; a bound value would "
-                    f"overwrite the operational row — close the global with "
+                    f"overwrite the operational row; close the global with "
                     f"exactly one of the two"
                 )
 
@@ -721,7 +721,7 @@ def _validate_global_closures(spec, global_names: set) -> list[str]:
             if writers:
                 errors.append(
                     f"equation(s) {writers!r} write algebraic global {gname!r}; an "
-                    f"algebraic global is closed by exactly one constraint row — "
+                    f"algebraic global is closed by exactly one constraint row; "
                     f'declare it with mass="differential" to give it an ordinary '
                     f"equation"
                 )

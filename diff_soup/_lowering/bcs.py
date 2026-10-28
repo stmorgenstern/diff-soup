@@ -1526,7 +1526,7 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                     raise ValueError(
                         f"{bc_desc}: n·u = 0 projects the field onto the boundary "
                         "normal, so the field must carry one component per spatial "
-                        f"dimension — shape (num_nodes, dim). {var.name!r} has shape "
+                        f"dimension, shape (num_nodes, dim). {var.name!r} has shape "
                         f"{tuple(var.shape)}: {detail}. Declare the field with "
                         "components=<spatial dim>, or state the condition directly "
                         "with spec.bc.dirichlet or spec.bc.flux."

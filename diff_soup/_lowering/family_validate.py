@@ -53,7 +53,7 @@ def _validate_families(eqset: EquationSet) -> None:
             raise NotImplementedError(
                 f"coupling {cp.name!r} targets a family from another family "
                 f"({cp.source.name!r} -> {cp.target.name!r}); family<->family "
-                "(many:many) couplings are out of scope — use separate "
+                "(many:many) couplings are out of scope; use separate "
                 "families or an explicit component bridge."
             )
         if not isinstance(cp.op, FamilyScatterOp):

@@ -1177,7 +1177,7 @@ def check_consistent_init(
         raise ValueError(
             "consistent initialization cannot be analyzed: the joint matrix "
             "(the algebraic columns of F_y and the differential columns of "
-            "F_ydot) has non-finite entries at the solved point — the "
+            "F_ydot) has non-finite entries at the solved point: the "
             "residual's derivatives are not finite there. Supply seeds inside "
             "the residual's domain."
         )

@@ -338,7 +338,7 @@ def compile_control_bindings(eqset: EquationSet) -> ControlBindingSet:
                 f"control {ctl.name!r} binds to global {bound!r}, but no "
                 f"constraint closes that global. A derived-quantity control "
                 f"drives the algebraic-global slice of the constraint its "
-                f"global closes — declare a constraint with closes={bound!r}, "
+                f"global closes: declare a constraint with closes={bound!r}, "
                 f"or declare {ctl.name!r} with spec.control.direct if its "
                 f"value is prescribed outright. Globals closed by "
                 f"constraints: {closed!r}."
@@ -348,7 +348,7 @@ def compile_control_bindings(eqset: EquationSet) -> ControlBindingSet:
             raise ValueError(
                 f"controls {other!r} and {ctl.name!r} both bind to global "
                 f"{bound!r}; each driven algebraic-global slice takes exactly one "
-                f"control — remove one of the bindings."
+                f"control: remove one of the bindings."
             )
         driver_by_global[bound] = ctl.name
         off, size = entry

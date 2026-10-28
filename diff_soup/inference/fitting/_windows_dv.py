@@ -1626,7 +1626,7 @@ class DecisionWindowBuild:
             if rank < n_state:
                 notes.append(
                     f"optsolve: window {w} observation block is rank-deficient "
-                    f"({rank}/{n_state}) — the window state is "
+                    f"({rank}/{n_state}): the window state is "
                     "under-determined by the observable alone (expected for "
                     "distribution / marginal observables). The continuity rows + "
                     "manifold init make it observable through the dynamics."

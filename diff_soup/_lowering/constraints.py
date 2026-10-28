@@ -85,7 +85,7 @@ def _eval_constraint_residual(
             raise ConfigurationError(
                 f"this problem declares an operational control table "
                 f"({constraint.name!r}); evaluate it with an operating control "
-                "state — ControlState.operating(mode=..., target=...)."
+                "state: ControlState.operating(mode=..., target=...)."
             )
         if constraint.field is not None:
             if f is None or field_slice is None:

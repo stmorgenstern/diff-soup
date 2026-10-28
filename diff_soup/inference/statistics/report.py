@@ -268,7 +268,7 @@ def identifiability_report(
                     f"combination {combo} (FIM eigenvalue {eigenvalues[k]:.2e}) "
                     "at the evaluated parameter point, inputs, and time grid; "
                     "pin or re-parameterize the combination to fit it here, or "
-                    "redesign the protocol and re-evaluate — a different "
+                    "redesign the protocol and re-evaluate; a different "
                     "experiment may or may not resolve it"
                 ),
             )

@@ -94,7 +94,7 @@ class MassOperator(eqx.Module):
         if self.dependencies.state and self.state_action_sparsity is None:
             raise ValueError(
                 "a state-dependent mass operator (dependencies.state=True) must "
-                "declare state_action_sparsity — the support of d(D @ ydot)/dy over "
+                "declare state_action_sparsity: the support of d(D @ ydot)/dy over "
                 "admissible ydot. Declare the pattern, or set dependencies.state=False "
                 "if the coefficients are state-invariant."
             )
@@ -179,7 +179,7 @@ class MassOperator(eqx.Module):
                 raise ValueError("diagonal(callback) requires n= (the side length).")
             if dependencies is None:
                 raise ValueError(
-                    "diagonal(callback) requires dependencies= — a values callback "
+                    "diagonal(callback) requires dependencies=. A values callback "
                     "must declare which solve-time inputs its values vary with."
                 )
             diag_values = values_or_callback
@@ -250,7 +250,7 @@ class MassOperator(eqx.Module):
         if callable(values_or_callback):
             if dependencies is None:
                 raise ValueError(
-                    "sparse(callback) requires dependencies= — a values callback "
+                    "sparse(callback) requires dependencies=. A values callback "
                     "must declare which solve-time inputs its values vary with."
                 )
             entry_values = values_or_callback
@@ -357,8 +357,8 @@ class MassOperator(eqx.Module):
         cols = np.concatenate(pattern_cols)
         if any_callback and dependencies is None:
             raise ValueError(
-                "block_sparse with callback-valued entries requires dependencies= — "
-                "a values callback must declare which solve-time inputs it varies with."
+                "block_sparse with callback-valued entries requires dependencies=. "
+                "A values callback must declare which solve-time inputs it varies with."
             )
 
         def entry_values(t, y, theta, control):

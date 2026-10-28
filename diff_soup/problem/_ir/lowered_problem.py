@@ -311,7 +311,7 @@ class LoweredProblem(eqx.Module):
                     f"field {name!r} is referenced by a derivative-form "
                     f"equation but is carried by multiple owners "
                     f"{sorted(owners)!r}; derivative forms resolve fields by "
-                    "bare name — give the fields distinct names."
+                    "bare name; give the fields distinct names."
                 )
 
     def physics_jacobian_blocks(
@@ -660,7 +660,7 @@ class LoweredProblem(eqx.Module):
             if callable(v):
                 raise TypeError(
                     f"LoweredProblem.assemble_state: field {var!r} received a "
-                    "callable; a lowered problem has no node coordinates — pass a "
+                    "callable; a lowered problem has no node coordinates; pass a "
                     "concrete array, or use ProblemSpec.assemble_state for "
                     "coordinate closures"
                 )

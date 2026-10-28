@@ -422,7 +422,7 @@ def _validate_closure_is_two_arg(fn: Callable, name: str) -> None:
     ]
     if len(required_positional) != 2:
         raise TypeError(
-            f"family equation {name!r}: closure must be 2-arg (q, m) — the "
+            f"family equation {name!r}: closure must be 2-arg (q, m): the "
             "q-accessor and the per-member view; got "
             f"{len(required_positional)} required positional arg(s)."
         )
@@ -722,7 +722,7 @@ class _FamilyHandle:
         if shape is not None and self.is_ragged:
             raise ValueError(
                 f"family {self.name!r} field {name!r}: shape= cannot be given "
-                "for a ragged family — each size bucket's field takes its own "
+                "for a ragged family; each size bucket's field takes its own "
                 "member domain's node count."
             )
         if any(v.name == name for v in self._member_vars):
@@ -752,14 +752,14 @@ class _FamilyHandle:
                         f"family {self.name!r} field {name!r}: a per-member scalar "
                         f"(shape (1,)) must be mass='algebraic' (0 = f, closed by "
                         f"its own member equation); received mass={mass!r}. A "
-                        "differential per-member scalar has no member mass row — "
+                        "differential per-member scalar has no member mass row; "
                         "declare it algebraic, or make it a profile field on the "
                         "member domain."
                     )
             elif member_size != n_nodes:
                 raise ValueError(
                     f"family {self.name!r} field {name!r}: a multi-dim member field "
-                    f"(shape {shape_k}) is not supported — a family member field is "
+                    f"(shape {shape_k}) is not supported: a family member field is "
                     "a single 1-D radial profile or a per-member algebraic scalar "
                     "(shape=(1,), mass='algebraic'). Reformulate the physics on the "
                     "shared unit ball with the size entering only as the scalar "
@@ -1012,7 +1012,7 @@ class _FamilyHandle:
         if self.is_ragged:
             raise NotImplementedError(
                 f"family {self.name!r}: coupling a ragged family's field is "
-                "not supported — the buckets carry different member sizes. "
+                "not supported: the buckets carry different member sizes. "
                 "Author one uniform family per size and couple each."
             )
         if not any(v.name == name for v in self._member_vars):
@@ -1366,7 +1366,7 @@ def make_family(
         warn_user(
             f"family {name!r}: count={count} exceeds the soft ceiling of "
             f"{_SOFT_COUNT_CEILING}; large populations are legal but assemble a "
-            "wide vmap batch — confirm this is intended.",
+            "wide vmap batch; confirm this is intended.",
             UserWarning,
         )
     coerced = _coerce_member_params(name, int(count), dict(params or {}))

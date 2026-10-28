@@ -270,7 +270,7 @@ def _validate_member_params(fam: Family) -> dict[str, jax.Array]:
                 f"Family {fam.name!r} member_params[{name!r}] is not an array "
                 f"leaf (got {type(value).__name__}); each member param must be a "
                 f"jnp.asarray-able array with leading axis == count (={count}) "
-                f"or a shared scalar — a per-member Python list/closure "
+                f"or a shared scalar. A per-member Python list/closure "
                 f"silently causes one re-trace per member."
             ) from exc
         if arr.ndim == 0:
@@ -494,7 +494,7 @@ class _FamilyResidualBlock:
                         f"written by the residual-form equation and also by "
                         f"{getattr(eq, 'name', '?')!r}; a field stated as a "
                         "derivative-expression residual must be written by "
-                        "that one equation — fold the extra terms into it."
+                        "that one equation; fold the extra terms into it."
                     )
 
     # ------------------------------------------------------------------

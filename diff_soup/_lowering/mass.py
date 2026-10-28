@@ -113,7 +113,7 @@ def _mass_diagonal(eqset: EquationSet, layout: _BlockLayout) -> jax.Array:
                     raise ValueError(
                         f"variable {var.name!r} in component {comp.name!r} is "
                         f"declared mass='differential' but its assembled mass "
-                        f"diagonal is all zero — this is degenerate (really "
+                        f"diagonal is all zero, which is degenerate (really "
                         f"algebraic). Declare it mass='algebraic' if you mean "
                         f"0=f, or supply a domain with positive (lumped/"
                         f"consistent) mass."
@@ -174,7 +174,7 @@ def _mass_diagonal(eqset: EquationSet, layout: _BlockLayout) -> jax.Array:
                     raise ValueError(
                         f"member variable {var.name!r} in family {fam.name!r} "
                         f"is declared mass='differential' but its assembled "
-                        f"mass diagonal is all zero — this is degenerate "
+                        f"mass diagonal is all zero, which is degenerate "
                         f"(really algebraic). Declare it mass='algebraic' if "
                         f"you mean 0=f, or supply a member domain with positive "
                         f"(lumped/consistent) mass."
