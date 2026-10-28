@@ -12,9 +12,9 @@ x64; precision remains a user decision.
 
 from __future__ import annotations
 
-import warnings
-
 import jax
+
+from diff_soup._warnings import warn_user
 
 __all__ = ["warn_if_float32_default", "warn_if_float32_on_cpu"]
 
@@ -48,12 +48,8 @@ def warn_if_float32_default(stacklevel: int = 3) -> None:
     of how many solver calls are made.
 
     Args:
-        stacklevel: Frame the warning is attributed to. The default ``3``
-            points at the caller of the entry point when this function is
-            called directly from the entry point's body (level 1 is this
-            function, level 2 the entry point, level 3 its caller); an entry
-            point that calls through additional wrappers passes a larger
-            value so the warning still names the user's own call site.
+        stacklevel: Ignored. The warning is attributed to the first frame
+            outside diff_soup, equinox, jax and jaxtyping.
     """
     global _WARNED
     if _WARNED:
@@ -63,7 +59,7 @@ def warn_if_float32_default(stacklevel: int = 3) -> None:
     except Exception:
         x64_on = False
     if not x64_on:
-        warnings.warn(_WARN_MSG, UserWarning, stacklevel=stacklevel)
+        warn_user(_WARN_MSG, UserWarning)
     _WARNED = True
 
 
@@ -78,7 +74,7 @@ def warn_if_float32_on_cpu(precision, *sample_arrays, stacklevel: int = 3) -> No
             the solve.
         *sample_arrays: The solve's inputs (initial state, parameters, time
             span); the first placed array names the device.
-        stacklevel: Frame the warning is attributed to, as for
+        stacklevel: Ignored, as for
             [warn_if_float32_default][diff_soup.utils.precision.warn_if_float32_default].
     """
     global _CPU_FLOAT32_WARNED
@@ -93,4 +89,4 @@ def warn_if_float32_on_cpu(precision, *sample_arrays, stacklevel: int = 3) -> No
     if array_platform(*sample_arrays) == "gpu":
         return
     _CPU_FLOAT32_WARNED = True
-    warnings.warn(_CPU_FLOAT32_MSG, UserWarning, stacklevel=stacklevel)
+    warn_user(_CPU_FLOAT32_MSG, UserWarning)

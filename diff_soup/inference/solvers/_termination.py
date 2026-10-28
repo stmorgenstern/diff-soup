@@ -26,12 +26,12 @@ from __future__ import annotations
 
 import dataclasses
 import math
-import warnings
 
 import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._warnings import warn_user
 
 __all__ = [
     "DEFAULT_COST_ATOL",
@@ -78,13 +78,12 @@ def relative_tolerance(value, default: float, dtype, *, name: str, label: str) -
         return max(default, floor)
     value = float(value)
     if 0.0 < value < floor:
-        warnings.warn(
+        warn_user(
             f"{label} {name}={value:g} is below what {np.dtype(dtype).name} resolves "
             f"(10 * eps = {floor:.2g}); it is used as given, so this test can only "
             f"pass on an exactly zero change. Leave {name} unset for a "
             "dtype-aware default, or pass 0 to disable the test.",
             UserWarning,
-            stacklevel=3,
         )
     return value
 
@@ -173,14 +172,13 @@ class GradientTolerance:
         if self.relative:
             return self.value * max(float(initial_norm), float(np.finfo(np.float64).tiny))
         if self.given and self.narrow and 0.0 < self.value < self.floor * float(initial_norm):
-            warnings.warn(
+            warn_user(
                 f"{self.label} grad_tol={self.value:g} is below what {self.dtype_name} "
                 f"resolves for a gradient of norm {float(initial_norm):.3g} "
                 f"(10 * eps relative, {self.floor * float(initial_norm):.2g}); it is used "
                 "as given. Leave grad_tol unset for a tolerance relative to the "
                 "starting gradient.",
                 UserWarning,
-                stacklevel=3,
             )
         return self.value
 

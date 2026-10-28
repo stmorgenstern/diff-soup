@@ -27,7 +27,6 @@ optimizes is not a quantity the experiment identifies.
 
 from __future__ import annotations
 
-import warnings
 from typing import Any, Callable, Optional, Union
 
 import equinox as eqx
@@ -36,6 +35,7 @@ import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 from jaxtyping import Array
 
+from diff_soup._warnings import warn_user
 from diff_soup.inference.fitting._forward_seam import parameter_handle_leaf_ids
 from diff_soup.inference.fitting._path_filter import parameters_at
 
@@ -368,13 +368,12 @@ def sensitivity_solve(
         solver = JIDA.stock()
 
     if include_multipliers and getattr(saveat, "ts", None) is not None:
-        warnings.warn(
+        warn_user(
             "sensitivity_solve: algebraic bordered-global frames on an interpolated "
             "ts grid may be held at accepted-step values rather than projected, so "
             "those channels carry a step-sized bias there. Observe algebraic globals "
             "at the integration endpoint (SaveAt(t1=True)) for exact values.",
             UserWarning,
-            stacklevel=2,
         )
 
     run = SensitivityRun(

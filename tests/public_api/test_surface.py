@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -64,18 +65,79 @@ def test_a_fresh_import_is_fast_and_silent_with_the_hoisting_flag_set():
     assert float(run.stdout.strip().splitlines()[-1]) < _IMPORT_SECONDS
 
 
-def test_importing_jax_before_the_hoisting_flag_warns_once_and_names_the_fix():
-    """A JAX imported without the hoisting flag draws one RuntimeWarning naming the setting."""
+# measured 387 bytes for the closure below after `import jax; import diff_soup` (fix branch) and
+# 80,403 bytes on 1.0.0, which embeds the array, CPU workstation 2026-10-28
+_HOISTED_PROGRAM_BYTES = 4096
+
+
+def test_importing_jax_first_still_hoists_closed_over_arrays_without_a_warning():
+    """With jax imported before diff_soup and the hoisting flag off, `import diff_soup` is
+    silent and a jitted closure over a 10,000-element array lowers to a small program."""
+    script = (
+        "import jax; import diff_soup; import jax.numpy as jnp; "
+        "c = jnp.linspace(0.0, 1.0, 10_000); "
+        "print(len(jax.jit(lambda y: y + jnp.sin(c)).lower(jnp.ones(10_000)).as_text()))"
+    )
     late = subprocess.run(
-        [sys.executable, "-W", "always", "-c", "import jax; import diff_soup"],
+        [sys.executable, "-W", "error", "-c", script],
         env={**_CPU, "JAX_USE_SIMPLIFIED_JAXPR_CONSTANTS": "0"},
         capture_output=True,
         text=True,
         timeout=120,
     )
     assert late.returncode == 0, late.stderr
-    assert late.stderr.count("RuntimeWarning") == 1
-    assert "JAX_USE_SIMPLIFIED_JAXPR_CONSTANTS=1" in late.stderr
+    assert int(late.stdout.strip().splitlines()[-1]) < _HOISTED_PROGRAM_BYTES
+
+
+def _warning_sites(tmp_path, body, pattern):
+    """File names of the warnings matching ``pattern`` that a script with ``body`` raises."""
+    script = tmp_path / "user_script.py"
+    script.write_text(body, encoding="utf-8")
+    run = subprocess.run(
+        [sys.executable, "-W", "always", str(script)],
+        env={**_CPU, "JAX_USE_SIMPLIFIED_JAXPR_CONSTANTS": "1"},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert run.returncode == 0, run.stderr
+    lines = re.findall(r"^(.+?):\d+: \w+: (.*)$", run.stderr, flags=re.MULTILINE)
+    return script, [path for path, message in lines if re.search(pattern, message)]
+
+
+def test_a_float32_cpu_solve_warns_at_the_users_own_line(tmp_path):
+    """The two float32 warnings of a solve name the user's script, not a diff_soup, equinox or
+    jax file."""
+    body = (
+        "import jax.numpy as jnp\n"
+        "import numpy as np\n"
+        "import diff_soup as ds\n"
+        "problem = ds.MassProblem(\n"
+        "    rhs=lambda t, y, theta, control: -theta * y,\n"
+        "    mass=ds.MassOperator.identity(2),\n"
+        "    structure=ds.DAEStructure(differential_vars=np.ones((2,), dtype=bool)),\n"
+        "    precision=ds.Precision.fp32(),\n"
+        ")\n"
+        "ds.pdesolve(problem, ds.JNDF(linear='dense'), (0.0, 0.5),\n"
+        "            jnp.ones((2,), jnp.float32), theta=0.3)\n"
+    )
+    script, sites = _warning_sites(tmp_path, body, r"jax_enable_x64=False|a float32 problem")
+    assert len(sites) == 2
+    assert set(sites) == {str(script)}
+
+
+def test_an_omitted_field_scale_warns_at_the_users_own_line(tmp_path):
+    """The warning for a field declared without ``scale=`` names the line in the user's
+    script that builds the recipe."""
+    body = (
+        "import diff_soup as ds\n"
+        "spec = ds.problem('unscaled').domain('line', ds.cartesian_grid_1d(4, 0.0, 1.0, method='fvm'))\n"
+        "spec.field('u', mass='differential')\n"
+        "spec.equation(writes='u', reads=('u',))(lambda q: -q.u)\n"
+        "spec.build()\n"
+    )
+    script, sites = _warning_sites(tmp_path, body, "have no scale=")
+    assert sites == [str(script)]
 
 
 def test_static_public_configuration_is_hashable_and_equal_to_itself():

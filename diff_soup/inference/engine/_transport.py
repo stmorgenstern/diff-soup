@@ -34,12 +34,12 @@ import os
 import pickle
 import sys
 import time
-import warnings
 from typing import Any, NamedTuple
 
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._warnings import warn_user
 
 MESSAGES: tuple = (
     "PLAN_CHECK",
@@ -200,12 +200,11 @@ def world() -> World:
                 and "mpi4py.run" not in sys.modules
                 and "mpi4py.__main__" not in sys.modules
             ):
-                warnings.warn(
+                warn_user(
                     "the run has several processes and was not started with python -m mpi4py: an "
                     "exception in one process can then leave the others waiting forever; "
                     "launch with python -m mpi4py script.py.",
                     RuntimeWarning,
-                    stacklevel=2,
                 )
     _WORLD.append((found, comm))
     return found

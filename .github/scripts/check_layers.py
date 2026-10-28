@@ -45,6 +45,7 @@ LAYERS: tuple[str, ...] = (
     "_errors",  # the exception hierarchy every package raises
     "_optional",  # optional-dependency loader; raises an _errors type
     "_logging",  # the package logger; imports nothing from diff_soup
+    "_warnings",  # warnings attributed to the user's line; imports nothing from diff_soup
     "_precision",  # dtype policy; raises _errors types
     "_layout",  # state-vector layout helpers; raises _errors types
     "_solution",  # solution container shared by solvers and the schedule
