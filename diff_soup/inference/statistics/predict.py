@@ -880,7 +880,8 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
             variance = jnp.var(values, axis=0) + noise
         else:
             mean = values
-            J = jacobians[measurement.name].reshape(-1, problem.n_params)
+            # The posterior of a multiple-shooting fit covers the parameters alone.
+            J = jacobians[measurement.name].reshape(-1, post.dim)
             variance = jnp.sum(J * covariance(J.T).T, axis=1).reshape(mean.shape)
             if kind == "predictive":
                 mean, noise = _conditional_moments(likelihood, mean)

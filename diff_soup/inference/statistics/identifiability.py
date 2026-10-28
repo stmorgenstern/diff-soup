@@ -301,7 +301,8 @@ def identifiability(
 
     The prior and any regularization are left out, so neither can hide a direction the data
     leave open. The analysis is reported twice, in the parameters' own units and after scaling
-    by `parameter_scales`.
+    by `parameter_scales`. A multiple-shooting fit that fits its window starts has them
+    integrated out.
 
     Args:
         problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] whose measurements
@@ -362,7 +363,11 @@ def identifiability(
     if not np.all(np.isfinite(params)):
         raise ValueError("identifiability: fitted parameter vector is non-finite.")
 
-    coordinates = _schema_coordinates(schema, params.size)
+    from diff_soup.inference.statistics.information import _marginal_jacobian, _window_split
+
+    split = _window_split(problem)
+    n_theta = params.size if split is None else split[0].size
+    coordinates = _schema_coordinates(schema, n_theta)
     names = tuple(coordinate.name for coordinate in coordinates)
     scales = _parameter_scales(
         parameter_scales,
@@ -375,6 +380,11 @@ def identifiability(
             f"identifiability: data Jacobian has {jacobian.shape[1]} columns; "
             f"expected {params.size} from the handle-based parameter schema."
         )
+    if split is not None:
+        # The window starts of a decision-variable multishoot fit are integrated out:
+        # the parameter columns are projected off the span of the window-start columns.
+        jacobian = _marginal_jacobian(jacobian, split)
+        params = params[split[0]]
 
     status = getattr(fit.status, "value", str(fit.status))
     common_provenance = {
@@ -396,6 +406,9 @@ def identifiability(
         ),
         "n_data_rows": int(residual.size),
     }
+    if split is not None:
+        common_provenance["information_source"] = "whitened measurement and continuity residuals"
+        common_provenance["window_starts"] = f"marginalized ({split[1].size} coordinates)"
     raw_report = identifiability_report(
         whitened_jacobian=jacobian,
         names=names,

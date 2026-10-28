@@ -13,6 +13,7 @@ from diff_soup.domains import cartesian_grid_1d
 from diff_soup.inference.approx import legendre_weights
 from diff_soup.inference.statistics import IdentifiedSubspace, ImproperPosteriorError
 from tests.support.inference import (
+    TIMES,
     decay_recipe,
     decay_study,
     decay_values,
@@ -86,6 +87,49 @@ def test_laplace_defaults_to_observed_curvature_and_labels_it(single):
     assert lower < float(fit[rate]) < upper
     observed = np.asarray(inf.information(problem, at=fit, kind="observed").observed)
     np.testing.assert_array_equal(observed, observed.T)
+
+
+# measured 0.0 relative difference, workstation CPU 2026-10-28,
+# pytest tests/public_api/test_statistics.py::test_the_laplace_evidence_of_a_map_fit_is_its_closed_form
+_EVIDENCE = 1e-12
+
+
+def test_the_laplace_evidence_of_a_map_fit_is_its_closed_form(single):
+    """evidence(problem, fit) and laplace(problem, fit).log_evidence equal
+    log p(y | mode) + log p(mode) + d/2 log 2 pi - 1/2 log det H, with H the observed
+    information plus the prior precision, so the user restates no prior."""
+    problem, _, fit, _ = single
+    curvature = inf.information(problem, at=fit)
+    precision = np.asarray(curvature.observed) + np.asarray(curvature.prior_precision)
+    closed = (
+        fit.log_likelihood
+        + fit.log_prior
+        + 0.5 * precision.shape[0] * np.log(2.0 * np.pi)
+        - 0.5 * np.linalg.slogdet(precision)[1]
+    )
+    values = [inf.evidence(problem, fit).log_evidence, inf.laplace(problem, fit).log_evidence]
+    np.testing.assert_allclose(values, closed, rtol=_EVIDENCE)
+
+
+# measured 3.3e-3 relative difference (Continuity weight 1e6), workstation CPU 2026-10-28,
+# pytest tests/public_api/test_statistics.py::test_laplace_on_a_multishoot_fit_integrates_out_the_window_starts
+_MARGINAL_SD = 1e-2
+
+
+def test_laplace_on_a_multishoot_fit_integrates_out_the_window_starts(single):
+    """On a multiple-shooting fit, laplace covers the rate alone, the window starts integrated
+    out, and its standard deviation is the single-shooting fit's."""
+    problem, rate, fit, _ = single
+    windowed = inf.InferenceProblem(
+        problem.study.experiments[0],
+        parameters=rate,
+        objective=inf.MAP(),
+        trajectory=inf.Multishoot(inf.Windows.at(TIMES), inf.Continuity(weight=1.0e6)),
+    )
+    posterior = inf.laplace(windowed, small_fit(windowed, inf.LevenbergMarquardt(max_steps=30)))
+    assert posterior.names == ("rate",)
+    single_sd = float(inf.laplace(problem, fit)[rate].sd)
+    np.testing.assert_allclose(float(posterior[rate].sd), single_sd, rtol=_MARGINAL_SD)
 
 
 def test_identifiability_and_profile_name_the_fitted_handle(single):

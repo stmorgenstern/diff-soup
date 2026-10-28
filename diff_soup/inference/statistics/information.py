@@ -486,8 +486,8 @@ def _expected_information_core(predictor: Any, x: Any, response: tuple) -> tuple
     return predictions, jacobian_by_name, whitened_jacobian, expected
 
 
-def _coordinate_names(problem: EstimationProblem) -> tuple[str, ...]:
-    """Return one unambiguous label per flat physical coordinate."""
+def _schema_names(problem: EstimationProblem) -> list:
+    """One label per flat coordinate, ``None`` where the parameter schema labels none."""
     names: list[str | None] = [None] * problem.n_params
     for entry in problem.parameter_schema.entries:
         for occurrence in entry.occurrences:
@@ -495,9 +495,79 @@ def _coordinate_names(problem: EstimationProblem) -> tuple[str, ...]:
             for component, column in enumerate(occurrence.columns):
                 suffix = "" if entry.size == 1 else f"[{component}]"
                 names[int(column)] = f"{entry.handle.name}{owner}{suffix}"
-    if any(name is None for name in names):
+    return names
+
+
+def _window_split(problem: EstimationProblem) -> tuple[np.ndarray, np.ndarray] | None:
+    """The parameter and window-start columns of a decision-variable multishoot fit.
+
+    Such a fit's flat vector holds the parameters, then the window-start states,
+    which the parameter schema leaves unlabelled. ``None`` when the schema labels
+    every column.
+    """
+    names = _schema_names(problem)
+    unlabelled = np.asarray([i for i, name in enumerate(names) if name is None], dtype=int)
+    if unlabelled.size == 0:
+        return None
+    labelled = np.asarray([i for i, name in enumerate(names) if name is not None], dtype=int)
+    decision_windows = bool(getattr(problem.diagnostic_problem, "is_decision_variable", False))
+    if not decision_windows or not np.array_equal(labelled, np.arange(labelled.size)):
         raise ValueError("parameter schema does not label every fitted coordinate")
-    return tuple(name for name in names if name is not None)
+    return labelled, unlabelled
+
+
+def _coordinate_names(problem: EstimationProblem) -> tuple[str, ...]:
+    """Return one unambiguous label per parameter coordinate, window starts left out."""
+    _window_split(problem)
+    return tuple(name for name in _schema_names(problem) if name is not None)
+
+
+def _marginal_jacobian(jacobian: Any, split: tuple) -> jax.Array:
+    """The whitened Jacobian of the parameters with the window starts integrated out.
+
+    Its Gram matrix is the Schur complement of the window-start block of ``J^T J``,
+    formed by projecting the parameter columns off the span of the window-start
+    columns, which does not square the condition number.
+    """
+    theta, states = split
+    j = np.asarray(jacobian, dtype=float)
+    j_theta, j_states = j[:, theta], j[:, states]
+    basis, singular, _ = np.linalg.svd(j_states, full_matrices=False)
+    largest = float(singular[0]) if singular.size else 0.0
+    basis = basis[:, singular > _DEFAULT_NULL_TOL * largest]
+    return jnp.asarray(j_theta - basis @ (basis.T @ j_theta))
+
+
+def _marginal_curvature(matrix: Any, split: tuple, *, what: str) -> jax.Array:
+    """The Schur complement ``H_tt - H_ts H_ss^-1 H_st`` of the window-start block of ``matrix``.
+
+    It is the precision of the parameters with the window starts integrated out of
+    a Gaussian of precision ``matrix``.
+    """
+    theta, states = split
+    h = np.asarray(matrix, dtype=float)
+    h = 0.5 * (h + h.T)
+    h_tt, h_ts, h_ss = h[np.ix_(theta, theta)], h[np.ix_(theta, states)], h[np.ix_(states, states)]
+    try:
+        factor = np.linalg.cholesky(h_ss)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            f"the window-start block of the {what} is not positive definite, so the window "
+            'starts cannot be integrated out; pass curvature="expected", or refit with single '
+            f"shooting from fit.params[:{theta.size}]."
+        ) from exc
+    whitened = np.linalg.solve(factor, h_ts.T)
+    schur = h_tt - whitened.T @ whitened
+    return jnp.asarray(0.5 * (schur + schur.T))
+
+
+def _observed_curvature(problem: EstimationProblem, point: Any) -> Any:
+    """The observed data curvature at ``point``, window starts integrated out."""
+    observed = _symmetrized(problem.observed_information(point))
+    split = _window_split(problem)
+    if split is None:
+        return observed
+    return _marginal_curvature(observed, split, what="observed curvature")
 
 
 def _point(problem: EstimationProblem, at: Any) -> jax.Array:
@@ -539,13 +609,28 @@ def _recorded_data_jacobian(problem: EstimationProblem, at: Any, point: Any) -> 
     return jnp.asarray(jacobian)
 
 
-def _information_facade(
+def _recorded_data_residual(problem: EstimationProblem, at: Any, point: Any) -> Any:
+    """The whitened data residual a fit recorded at ``point``, or ``None``.
+
+    Recorded beside the Jacobian ``_recorded_data_jacobian`` reads, under the same checks.
+    """
+    if _recorded_data_jacobian(problem, at, point) is None:
+        return None
+    residual = at.info.get("final_data_residual")
+    if residual is None or np.ndim(residual) != 1:
+        return None
+    if np.shape(residual)[0] != np.shape(at.info["final_data_jacobian"])[0]:
+        return None
+    return jnp.asarray(residual)
+
+
+def _information_terms(
     problem: EstimationProblem,
     *,
     at: Any = None,
     kind: str = "expected",
-) -> InformationResult:
-    """Information of an ``InferenceProblem`` (the estimation-problem route of ``information``).
+) -> tuple[InformationResult, Any]:
+    """Information of an ``InferenceProblem`` and the whitened data residual it was formed from.
 
     Expected/GGN information is the Gram matrix of the exact whitened
     residual Jacobian; a lowered study sums it over its lanes
@@ -555,48 +640,79 @@ def _information_facade(
     ``jax.jacfwd(jax.jacfwd(nll))`` Hessian retained by
     [InferenceProblem][diff_soup.inference.InferenceProblem], on a lowered
     study the sum of its lanes' exact Hessians.
+
+    A decision-variable multishoot fit also fits the window-start states. They are
+    integrated out: every curvature is the Schur complement of its window-start
+    block, which is the precision of the parameters' marginal Gaussian, and
+    ``provenance["window_starts"]`` records it. The residual is ``None`` when no
+    residual was evaluated (a lowered study, or a fit that recorded only its Jacobian).
     """
     if kind not in ("expected", "ggn", "observed", "all"):
         raise ValueError(
             f"information kind must be 'expected', 'ggn', 'observed', or 'all'; got {kind!r}."
         )
     point = _point(problem, at)
+    split = _window_split(problem)
+    residual = None
     # A lowered study sums J^T J over its lanes; it forms no residual Jacobian.
     lanes = getattr(problem, "expected_information", None)
     expected = lanes(point) if callable(lanes) else None
     if expected is None:
         jacobian = _recorded_data_jacobian(problem, at, point)
         if jacobian is None:
-            _residual, jacobian = problem.data_residual_jacobian(point)
+            residual, jacobian = problem.data_residual_jacobian(point)
+        else:
+            residual = _recorded_data_residual(problem, at, point)
+        if split is not None:
+            jacobian = _marginal_jacobian(jacobian, split)
         expected = jacobian.T @ jacobian
     else:
         jacobian = None
-    observed = (
-        _symmetrized(problem.observed_information(point)) if kind in ("observed", "all") else None
-    )
+        if split is not None:
+            expected = _marginal_curvature(expected, split, what="expected information")
+    observed = _observed_curvature(problem, point) if kind in ("observed", "all") else None
     prior = problem.prior_precision(point) if isinstance(problem.objective, MAP) else None
-    return assemble_information(
+    provenance = {
+        "study_fingerprint": problem.study.fingerprint,
+        "objective": type(problem.objective).__name__,
+        "at": tuple(float(value) for value in np.asarray(point)),
+        "theta_names": _coordinate_names(problem),
+        "curvature_kind": kind,
+    }
+    if split is not None:
+        theta, states = split
+        if prior is not None:
+            # The declared priors cover the parameters alone.
+            prior = jnp.asarray(np.asarray(prior, dtype=float)[np.ix_(theta, theta)])
+        provenance["window_starts"] = f"marginalized ({states.size} coordinates)"
+    result = assemble_information(
         whitened_jacobian=jacobian,
         expected=expected,
         ggn=expected if kind in ("ggn", "all") else None,
         observed=observed,
         prior_precision=prior,
         coordinate="x",
-        provenance={
-            "study_fingerprint": problem.study.fingerprint,
-            "objective": type(problem.objective).__name__,
-            "at": tuple(float(value) for value in np.asarray(point)),
-            "theta_names": _coordinate_names(problem),
-            "curvature_kind": kind,
-        },
+        provenance=provenance,
     )
+    return result, residual
+
+
+def _information_facade(
+    problem: EstimationProblem,
+    *,
+    at: Any = None,
+    kind: str = "expected",
+) -> InformationResult:
+    """Information of an ``InferenceProblem`` (the estimation-problem route of ``information``)."""
+    return _information_terms(problem, at=at, kind=kind)[0]
 
 
 def information(problem: Any, *, at: Any, kind: str = "observed") -> InformationResult:
     """Assemble the information matrix, the curvature of the negative log likelihood, at a point.
 
     For a `MAP` problem the result also holds the prior's curvature and their sum, the posterior
-    precision.
+    precision. A multiple-shooting fit that fits its window starts has them integrated out, so
+    the matrix covers the parameters alone.
 
     Args:
         problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] whose measurements

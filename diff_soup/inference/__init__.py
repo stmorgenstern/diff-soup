@@ -45,6 +45,7 @@ from diff_soup.inference.statistics.bootstrap import (
 from diff_soup.inference.statistics.cluster import cluster_covariance
 from diff_soup.inference.statistics.diagnostics import mcmc_report, residual_report
 from diff_soup.inference.statistics.estimation import MAP, MLE
+from diff_soup.inference.statistics.evidence import evidence
 from diff_soup.inference.statistics.hierarchy import Hierarchy
 from diff_soup.inference.statistics.identifiability import identifiability
 from diff_soup.inference.statistics.information import information
@@ -148,6 +149,7 @@ __all__ = [
     # Statistics: analysis verbs
     "information",
     "laplace",
+    "evidence",
     "profile",
     "identifiability",
     "cluster_covariance",

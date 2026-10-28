@@ -1058,11 +1058,15 @@ def _profile_facade(
         raise TypeError("profile fit must be an optimization OptResult.")
     _validate_fit(problem, fit)
     if getattr(problem.diagnostic_problem, "is_decision_variable", False):
+        n_theta = sum(
+            len(occurrence.columns)
+            for entry in problem.parameter_schema.entries
+            for occurrence in entry.occurrences
+        )
         raise ValueError(
-            "profile does not support an EstimationProblem lowered with "
-            "decision-variable multishoot: its fitted vector mixes physical "
-            "parameters with window states. Rebuild the Study with single "
-            "shooting or observed-state windows before profiling a handle."
+            "profile refits every other coordinate at each point of the curve, and the "
+            "window starts of a multiple-shooting fit are not parameters; refit with single "
+            f"shooting from fit.params[:{n_theta}] and profile that fit."
         )
     entry, occurrence = _resolve_occurrence(problem, handle, owner)
 

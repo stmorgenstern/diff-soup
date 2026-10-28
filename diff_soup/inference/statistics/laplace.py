@@ -44,10 +44,11 @@ from diff_soup.inference.fitting.result import OptResult
 from diff_soup.inference.statistics.estimation import EstimationProblem
 from diff_soup.inference.statistics.information import (
     _coordinate_names,
-    _information_facade,
+    _information_terms,
+    _observed_curvature,
     _point,
     _recorded_data_jacobian,
-    _symmetrized,
+    _window_split,
     assemble_information,
 )
 from diff_soup.inference.statistics.measurement import require_likelihoods
@@ -68,6 +69,11 @@ _NULL_TOL = 1e-10
 
 # Relative tolerance for rejecting a materially asymmetric curvature input.
 _SYMMETRY_RTOL = 1e-8
+
+# Stationarity tolerance on the Newton decrement sqrt(g^T H^-1 g) at a fit. The log joint
+# at the exact mode is about half its square above the fit's value, 0.005 at this bound,
+# which bounds the error the fit's point adds to a Laplace log evidence.
+_STATIONARITY_TOL = 0.1
 
 
 @dataclass(frozen=True)
@@ -130,8 +136,9 @@ class LaplacePosterior(eqx.Module):
         curvature_regularization: Numerical ridge added to the reported
             curvature. ``None`` means its status is unknown; a clean,
             unregularized construction records ``0.0`` explicitly.
-        mode_gradient_norm: Norm of the log-joint gradient at ``mode`` when
-            checked, otherwise ``None``.
+        mode_gradient_norm: Size of the log-joint gradient ``g`` at ``mode``
+            when checked, which `laplace` records as the Newton decrement
+            ``sqrt(g^T P^-1 g)``, otherwise ``None``.
         stationarity_tolerance: Tolerance used for the stationarity check.
         provenance: Caller-supplied experiment, channel, fit, and geometry
             metadata.
@@ -155,6 +162,7 @@ class LaplacePosterior(eqx.Module):
 
     parameter_schema: Any = None
     _data_curvature: Optional[Array] = None
+    _evidence_prior: Any = None
 
     def __getitem__(self, handle):
         """Return the marginal for a shared handle, or marginals keyed by owner."""
@@ -274,6 +282,21 @@ class LaplacePosterior(eqx.Module):
     def log_det_precision(self) -> Array:
         """Return ``log det P`` from the Cholesky diagonal (exact, stable)."""
         return 2.0 * jnp.sum(jnp.log(jnp.diag(self.precision_factor)))
+
+    @property
+    def log_evidence(self) -> float:
+        """The Laplace approximation to the log marginal likelihood, as `ds.inference.evidence` returns it."""
+        from diff_soup.inference.statistics.evidence import laplace_evidence
+
+        prior = self._evidence_prior
+        if isinstance(prior, str):
+            raise ValueError(prior)
+        if prior is None:
+            raise ValueError(
+                "log_evidence needs a posterior from ds.inference.laplace(problem, fit); for "
+                "a posterior built by hand use laplace_evidence(posterior, prior)."
+            )
+        return laplace_evidence(self, prior).log_evidence
 
 
 # What satisfies the finiteness check, per source of curvature.
@@ -588,6 +611,58 @@ def laplace_posterior(
     )
 
 
+class _DeclaredPrior:
+    """The joint prior a MAP problem declares, as the normalized density `laplace_evidence` takes."""
+
+    coordinate = "x"
+    proper = True
+    normalized = True
+
+    def __init__(self, problem: EstimationProblem):
+        self._problem = problem
+        self.size = int(problem.n_params)
+
+    def log_prob(self, value: Any) -> Array:
+        """The normalized log density of the declared priors at ``value``."""
+        return self._problem.log_prior(value)
+
+
+def _evidence_refusal(problem: EstimationProblem) -> str | None:
+    """Why ``problem`` has no Laplace evidence, or ``None`` when it has one."""
+    from diff_soup.inference.statistics.estimation import MAP
+
+    split = _window_split(problem)
+    if split is not None:
+        return (
+            "evidence needs a single-shooting fit, because the window starts of a "
+            "multiple-shooting fit carry no normalized prior; refit with single shooting "
+            f"from fit.params[:{split[0].size}]."
+        )
+    if not isinstance(problem.objective, MAP):
+        return (
+            "evidence needs a normalized prior: build the problem with objective=MAP() and "
+            "a prior on every fitted handle."
+        )
+    return None
+
+
+def _negative_log_joint_gradient(problem: EstimationProblem, point: Any, terms: tuple) -> Any:
+    """The gradient of the negative log likelihood plus the negative log prior at ``point``.
+
+    ``terms`` is the whitened data ``(residual, jacobian)`` at ``point`` when both are
+    known, so the data gradient is ``J^T r`` and no solve runs; otherwise the
+    problem's own objective gradient is evaluated once.
+    """
+    residual, jacobian = terms
+    if residual is not None and jacobian is not None:
+        data = jnp.asarray(jacobian).T @ jnp.asarray(residual)
+        prior = jax.grad(lambda x: -problem.log_prior(x))(jnp.asarray(point))
+        return np.asarray(data + prior, dtype=float)
+    # The MAP objective's prior rows differ from the negative log prior by a constant.
+    ad = "forward" if "forward" in problem.supported_compositions else "reverse"
+    return np.asarray(problem.loss_and_grad_fn(ad)(jnp.asarray(point))[1], dtype=float)
+
+
 def _laplace_facade(
     problem: EstimationProblem,
     fit: OptResult | None = None,
@@ -601,29 +676,35 @@ def _laplace_facade(
     Supply either ``fit`` or ``at``; a fit must carry the same
     parameter schema as ``problem``. A fit of the same study that recorded the
     data Jacobian at its parameters supplies that Jacobian and its log
-    likelihood, so the expected curvature runs no forward solve.
+    likelihood, so the expected curvature runs no forward solve. A
+    decision-variable multishoot fit has its window starts integrated out.
+    On a MAP problem the posterior records the Newton decrement of the fit's
+    point and the declared priors, which is what its log evidence needs.
     """
     if (fit is None) == (at is None):
         raise ValueError("laplace needs exactly one of fit or at.")
     if curvature not in CURVATURE_KINDS:
         raise ValueError(f"laplace curvature must be one of {CURVATURE_KINDS}.")
     source = fit if fit is not None else at
-    mode = _point(problem, source)
+    point = _point(problem, source)
+    split = _window_split(problem)
+    mode = point if split is None else point[jnp.asarray(split[0])]
     # The residual Jacobian settles both the rank question below and the
     # expected/Gauss-Newton curvature, so the observed Hessian — much the more
     # expensive of the two — is assembled only where it is actually used.
-    info = _information_facade(
+    info, residual = _information_terms(
         problem,
-        at=source if isinstance(source, OptResult) else mode,
+        at=source if isinstance(source, OptResult) else point,
         kind="expected" if curvature == "observed" else curvature,
     )
     recorded_fit = (
-        isinstance(source, OptResult) and _recorded_data_jacobian(problem, source, mode) is not None
+        isinstance(source, OptResult)
+        and _recorded_data_jacobian(problem, source, point) is not None
     )
     log_likelihood = (
         source.log_likelihood
         if recorded_fit and source.log_likelihood is not None
-        else problem.log_likelihood(mode)
+        else problem.log_likelihood(point)
     )
     provenance = dict(info.provenance)
     provenance["curvature_kind"] = curvature
@@ -634,7 +715,9 @@ def _laplace_facade(
         "names": _coordinate_names(problem),
         "on_singular": on_singular,
         "log_likelihood_at_mode": log_likelihood,
-        "likelihood_normalized": True,
+        # A multishoot objective also carries the continuity rows, which no
+        # measurement normalizes.
+        "likelihood_normalized": split is None,
         "curvature_regularization": 0.0,
         "provenance": provenance,
     }
@@ -662,7 +745,7 @@ def _laplace_facade(
             squares = np.linalg.svd(jacobian, compute_uv=False) ** 2
         largest = float(squares[0]) if squares.size else 0.0
         rank = int(np.sum(squares > _NULL_TOL * largest))
-        if rank < problem.n_params:
+        if rank < mode.shape[0]:
             # The residual Jacobian is the structural rank source. An observed
             # Hessian can acquire tiny positive curvature in a truly null
             # direction from solver noise or nonzero residual terms; that does
@@ -670,16 +753,31 @@ def _laplace_facade(
             return laplace_posterior(mode, **expected, **kwargs)
     if curvature == "observed":
         observed = assemble_information(
-            observed=_symmetrized(problem.observed_information(mode)), coordinate="x"
+            observed=_observed_curvature(problem, point), coordinate="x"
         ).observed
-        return laplace_posterior(mode, data_curvature=observed, **kwargs)
-    return laplace_posterior(mode, **expected, **kwargs)
+        posterior = laplace_posterior(mode, data_curvature=observed, **kwargs)
+    else:
+        posterior = laplace_posterior(mode, **expected, **kwargs)
+    if not isinstance(posterior, LaplacePosterior):
+        return posterior
+    refusal = _evidence_refusal(problem)
+    if refusal is not None:
+        object.__setattr__(posterior, "_evidence_prior", refusal)
+        return posterior
+    gradient = _negative_log_joint_gradient(problem, point, (residual, info.whitened_jacobian))
+    factor = np.asarray(posterior.precision_factor, dtype=float)
+    decrement = float(np.linalg.norm(np.linalg.solve(factor, gradient)))
+    object.__setattr__(posterior, "mode_gradient_norm", decrement)
+    object.__setattr__(posterior, "stationarity_tolerance", _STATIONARITY_TOL)
+    object.__setattr__(posterior, "_evidence_prior", _DeclaredPrior(problem))
+    return posterior
 
 
 def laplace(problem: Any, fit: Any, *, curvature: str = "observed", on_singular: str = "raise"):
     """Build the Laplace approximation, the Gaussian centered on a fit with the inverse curvature as covariance.
 
-    For a `MAP` problem the curvature includes the prior's.
+    For a `MAP` problem the curvature includes the prior's, and `log_evidence` is the Laplace
+    log evidence. A multiple-shooting fit that fits its window starts has them integrated out.
 
     Args:
         problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] whose measurements
