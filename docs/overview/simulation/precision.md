@@ -128,7 +128,7 @@ The optimizers' termination tolerances follow the decision vector's
 dtype when they are left unset. `step_tol` and `cost_tol` become
 $\max(\text{default}, 10\,\varepsilon)$, with $\varepsilon$ the
 machine epsilon of that dtype: under float64 this is the default
-itself ($10^{-10}$ and $10^{-12}$), under float32 it is about
+itself ($10^{-8}$), under float32 it is about
 $1.2 \times 10^{-6}$. `grad_tol` stays the absolute $10^{-8}$ under
 float64. Under float32 it is relative to the gradient norm at the start
 of the fit, $\max(10^{-8}, 10\,\varepsilon)$ times that norm, because

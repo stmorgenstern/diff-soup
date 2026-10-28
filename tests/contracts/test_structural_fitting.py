@@ -26,7 +26,7 @@ from diff_soup.inference.solvers.tangent import (
     value_and_jacfwd,
     value_and_jacfwd_tiled,
 )
-from tests.support.inference import solver
+from tests.support.inference import NOISE, decay_experiment, decay_recipe, small_fit, solver
 from tests.support.programs import primitive_names
 
 _RNG = np.random.default_rng(0)
@@ -116,6 +116,22 @@ def test_optsolve_fits_window_starts_with_gauss_newton_by_default():
     )
     fit = inf.optsolve(problem, diagnostics=False)
     assert problem.n_params > 1 and fit.info["hessian"] == "gauss-newton"
+
+
+def test_fitted_window_starts_solve_each_window_once_and_reach_the_single_shoot_rate():
+    """Fitted starts of two windows with two observed frames each are solved once per window
+    per evaluation, and the fit ends at the rate of the single shoot."""
+    decay = decay_recipe("structural_window_solves")
+    experiment = decay_experiment(decay, noise=NOISE)
+    windows = inf.InferenceProblem(
+        experiment, parameters=decay.rate, trajectory=inf.Multishoot(inf.Windows.uniform(2))
+    )
+    assert windows.diagnostic_problem.trajectory_solves_per_eval == 2
+    single = small_fit(inf.InferenceProblem(experiment, parameters=decay.rate))
+    fit = small_fit(windows)
+    # the continuity rows hold the window fit 1.25e-4 from the single shoot (0.601196 against
+    # 0.601071); measured, workstation CPU 2026-10-28, pytest tests/contracts/test_structural_fitting.py
+    np.testing.assert_allclose(fit[decay.rate], single[decay.rate], rtol=0.0, atol=5e-4)
 
 
 def test_newton_gauss_newton_records_the_final_residual_and_jacobian():

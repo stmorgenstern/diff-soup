@@ -37,7 +37,7 @@ class TerminationStatus(enum.Enum):
         DIVERGED: `BFGS` met an objective or gradient that is not finite.
         STOPPED: A callback raised `StopFit`.
         UNKNOWN: The status before any run.
-        STALLED: `TrustRegion` stopped without converging, after failed trials in a row or while its model still predicted a decrease.
+        STALLED: The fit stopped without converging: `TrustRegion` after failed trials in a row or while its model still predicted a decrease, and `NewtonTrustRegion` or `LevenbergMarquardt` when a step or cost test passed on a step the trust radius or damping held short.
         DERIVATIVE_ACCURACY: `TrustRegion` converged to the accuracy of its derivatives, which a tighter solver `rtol` improves.
     """
 
@@ -370,6 +370,7 @@ class OptInfo(TypedDict, total=False):
             Hessian (``"forward-over-reverse"``, ...), ``None`` for the
             Gauss-Newton matrix.
         subproblem: The trust-region subproblem method.
+        stall_reason: Why a ``NewtonTrustRegion`` or ``LevenbergMarquardt`` fit stalled: ``"radius_collapsed"``, ``"evaluation_noise"`` or ``"invalid_trials"``.
         linear_solver: The linear solver of the step equations.
         linear_solver_fallbacks: Factorizations that fell back to the
             regularized route (``NewtonTrustRegion``).
@@ -411,6 +412,7 @@ class OptInfo(TypedDict, total=False):
     hessian: str
     hessian_composition: Optional[str]
     subproblem: str
+    stall_reason: str
     linear_solver: str
     linear_solver_fallbacks: int
     linear_factorizations: int

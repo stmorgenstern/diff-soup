@@ -33,7 +33,9 @@ from diff_soup.inference.solvers._termination import (
     DEFAULT_STEP_TOL,
     absolute_tolerance,
     gradient_tolerance,
+    model_held_the_step,
     relative_tolerance,
+    stall_reason_of,
     step_budget,
 )
 from diff_soup.inference.solvers.factorization import (
@@ -605,6 +607,27 @@ class NewtonTrustRegion(OptSolver):
             return checked
         raise error
 
+    def _radius_held_the_step(
+        self, attempt: tuple, threshold: float, bounds: Any, lb: Any, ub: Any, cg_iters: int
+    ) -> bool:
+        """Whether the radius held the stopping step short of the model's own step.
+
+        ``attempt`` is the model at the step's start: the point, its gradient, the
+        model matrix (``None`` for the matrix-free Hessian), the scale, the
+        Hessian-vector product, and the decrease predicted for the step taken.
+        The model's own step is its step within ``radius_max``.
+        """
+        point, gradient, matrix, scale, model_hvp, predicted = attempt
+        if matrix is not None:
+            step, decrease, _multiplier = _more_sorensen(matrix, gradient, scale, self.radius_max)
+        else:
+            step, decrease, *_ = _steihaug_cg(model_hvp, gradient, scale, self.radius_max, cg_iters)
+        if bounds is not None:
+            step = jnp.clip(point + step, lb, ub) - point
+            product = matrix @ step if matrix is not None else model_hvp(step)
+            decrease = -(gradient @ step + 0.5 * step @ product)
+        return model_held_the_step(float(local_value(decrease)), predicted, threshold)
+
     def solve(self, problem: Any, *, callbacks: tuple = ()) -> OptResult:
         """Optimize an inference problem with a scaled Newton trust region."""
         resolved_subproblem, resolved_composition, resolved_linear_solver = self._resolve_options(
@@ -855,6 +878,8 @@ class NewtonTrustRegion(OptSolver):
         refresh_at_start = False
         hessian_exact_at_x = self.hessian == "true" and resolved_subproblem == "exact"
         status = TerminationStatus.MAX_STEPS
+        stall_reason = None
+        cg_iters = n_params if self.cg_max_iter is None else self.cg_max_iter
 
         for step_index in range(self.max_steps):
             if refresh_at_start:
@@ -925,7 +950,7 @@ class NewtonTrustRegion(OptSolver):
                 else:
                     data_hessian_vector = problem.hessian_vector
 
-                    def model_hvp(vector):
+                    def model_hvp(vector, x=x):
                         data_product = data_hessian_vector(x, vector)
                         reg_product = jax.jvp(jax.grad(reg.penalty), (x,), (vector,))[1]
                         return data_product + reg_product
@@ -935,7 +960,7 @@ class NewtonTrustRegion(OptSolver):
                     g,
                     scale,
                     radius,
-                    n_params if self.cg_max_iter is None else self.cg_max_iter,
+                    cg_iters,
                 )
                 counts["hvp"] += products
                 multiplier = None
@@ -991,6 +1016,8 @@ class NewtonTrustRegion(OptSolver):
             accepted = assert_decision_value(
                 trial_ok and not invalid_pde and rho >= self.eta, label="Newton trust region accept"
             )
+            # The model at the point this step was taken from, for the stall test.
+            attempt = (x, g, B, scale, model_hvp, predicted_value)
 
             if rho < 0.25:
                 radius = max(radius / 4.0, np.finfo(float).tiny)
@@ -1074,24 +1101,35 @@ class NewtonTrustRegion(OptSolver):
                 status = TerminationStatus.STOPPED
                 break
 
+            actual_reduction = float(local_value(previous_f)) - float(local_value(trial_cost))
+            # Relative to the cost itself, so where a fit stops does not depend
+            # on the units of its objective; ``cost_atol`` is the absolute floor.
+            threshold = cost_threshold(float(local_value(previous_f)), cost_tol, cost_atol)
+            stop = None
             if assert_decision_value(
                 trial_ok
                 and not invalid_pde
                 and step_norm <= step_tol * (1.0 + float(local_value(jnp.linalg.norm(x)))),
                 label="Newton trust region",
             ):
-                status = TerminationStatus.STEP_TOL
-                break
-            actual_reduction = float(local_value(previous_f)) - float(local_value(trial_cost))
-            # Relative to the cost itself, so where a fit stops does not depend
-            # on the units of its objective; ``cost_atol`` is the absolute floor.
-            if assert_decision_value(
-                accepted
-                and abs(actual_reduction)
-                <= cost_threshold(float(local_value(previous_f)), cost_tol, cost_atol),
+                stop = TerminationStatus.STEP_TOL
+            # A cost stop needs the model to agree with the decrease (SciPy's ratio).
+            elif assert_decision_value(
+                accepted and rho > 0.25 and abs(actual_reduction) <= threshold,
                 label="Newton trust region",
             ):
-                status = TerminationStatus.COST_TOL
+                stop = TerminationStatus.COST_TOL
+            if stop is not None:
+                status = stop
+                if assert_decision_value(
+                    self._radius_held_the_step(attempt, threshold, bounds, lb, ub, cg_iters),
+                    label="Newton trust region stall",
+                ):
+                    status = TerminationStatus.STALLED
+                    stall_reason = stall_reason_of(
+                        invalid=failure_growth_lock > 0,
+                        noise=not accepted and abs(actual_reduction) <= threshold,
+                    )
                 break
         else:
             step_index = self.max_steps - 1
@@ -1163,6 +1201,7 @@ class NewtonTrustRegion(OptSolver):
                 "linear_solver": resolved_linear_solver,
                 "linear_solver_fallbacks": counts["factorization_fallback"],
                 "linear_factorizations": counts["factorizations"],
+                **({} if stall_reason is None else {"stall_reason": stall_reason}),
                 **final_arrays,
             },
             trust_region=TrustRegionReport(radius_history=radius_history),

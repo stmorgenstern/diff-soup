@@ -20,6 +20,12 @@ is below what the dtype can resolve.
 
 The absolute cost-change tolerance ``cost_atol`` has no dtype floor: ``None``
 is 0, and a finite value of at least 0 is used as given.
+
+A step or cost test passed on a step that the trust radius
+(``NewtonTrustRegion``) or the damping (``LevenbergMarquardt``) held short is
+not convergence: the model still predicts a decrease the fit did not take. Such
+a fit ends ``STALLED``, with the reason ``TrustRegion`` gives for the same end
+(``radius_collapsed``, ``evaluation_noise`` or ``invalid_trials``).
 """
 
 from __future__ import annotations
@@ -41,7 +47,9 @@ __all__ = [
     "GradientTolerance",
     "absolute_tolerance",
     "gradient_tolerance",
+    "model_held_the_step",
     "relative_tolerance",
+    "stall_reason_of",
     "step_budget",
 ]
 
@@ -206,3 +214,41 @@ def gradient_tolerance(value, dtype, *, label: str) -> GradientTolerance:
             max(DEFAULT_GRAD_TOL, floor), True, False, name, floor, True, label
         )
     return GradientTolerance(DEFAULT_GRAD_TOL, False, False, name, floor, False, label)
+
+
+def model_held_the_step(full_decrease: float, step_decrease: float, threshold: float) -> bool:
+    """Whether a step that passed a step or cost test was held short of the model's own.
+
+    The model's full step is its step without the trust radius or the damping.
+    The step was held short when the full step predicts a decrease above the
+    cost tolerance. That decrease must also be more than four times the one
+    predicted for the step taken.
+
+    Args:
+        full_decrease: The decrease the model predicts for its full step.
+        step_decrease: The decrease it predicted for the step taken.
+        threshold: The cost-change tolerance at the step's start, an absolute cost.
+
+    Returns:
+        ``True`` when the fit stalled rather than converged.
+    """
+    full = float(full_decrease)
+    return bool(np.isfinite(full) and full > threshold and full > 4.0 * max(step_decrease, 0.0))
+
+
+def stall_reason_of(*, invalid: bool, noise: bool) -> str:
+    """The reason a stalled fit records, in ``TrustRegion``'s words.
+
+    Args:
+        invalid: An invalid trial shrank the radius or raised the damping.
+        noise: The step that ended the fit was rejected with a cost change
+            within the cost tolerance.
+
+    Returns:
+        ``"invalid_trials"``, ``"evaluation_noise"`` or ``"radius_collapsed"``.
+    """
+    if invalid:
+        return "invalid_trials"
+    if noise:
+        return "evaluation_noise"
+    return "radius_collapsed"

@@ -18,17 +18,16 @@ Tikhonov θ rows are appended by the LM engine via the problem regularizer.
 
 Key design decisions:
 
-* **One batched propagation set.**  Because every window start is a decision
+* **One solve per window.**  Because every window start is a decision
   variable, the windows are mutually independent:
   [build_segment_plan][diff_soup.inference.fitting._windows_dv.build_segment_plan]
-  enumerates the distinct ``(window, target time)`` propagations once, host-side,
-  and
+  plans, host-side, one solve per window that saves the window's observed frames
+  and its end, and
   [DecisionWindowBuild.residual][diff_soup.inference.fitting._windows_dv.DecisionWindowBuild.residual]
-  runs them all through a single
-  ``jax.vmap``.  The traced program is then independent of the window count, and
-  a target reached by both an observation frame and the next window's continuity
-  row is solved once instead of twice.  Rows are gathered from one pooled state
-  array, so no per-row branching survives into the trace.
+  runs them all through a single ``jax.vmap`` over windows.  The traced program
+  is then independent of the window count, and the integrated time is the
+  horizon once, however many frames a window holds.  Rows are gathered from one
+  pooled state array, so no per-row branching survives into the trace.
 
 * **Continuity auto-weight.**  The naive ``√W_c/(atol+rtol|s̃|)`` weight blows
   up conditioning at production tolerances. The ``"auto"`` mode adds a
@@ -314,41 +313,56 @@ def frames_in_window(ts: np.ndarray, t0: float, t1: float, *, first: bool) -> np
 
 
 class SegmentPlan:
-    """Host-side plan mapping one batch of window propagations onto residual rows.
+    """Host-side plan mapping one batch of window solves onto residual rows.
 
     Every residual row a decision-variable window stack needs is a function of
-    either a window-start state or the endpoint of one propagation from a window
-    start.  Enumerating the *distinct* propagations once, up front, has two
-    consequences that matter:
-
-    * a target time reached by both an observation frame and the next window's
-      continuity row is solved **once**, not twice — with boundaries placed on
-      the data frames, which is the usual configuration, that halves the solves;
-    * the propagations are independent (every window start is a decision
-      variable), so they run as a single ``jax.vmap`` instead of a Python loop.
-      The traced program is then independent of the window count, and a sparse
-      GPU backend factorizes the batch in one dispatch rather than serially.
+    either a window-start state or a state saved by one solve from a window
+    start.  Each window that needs a propagated state is solved **once**, from
+    its start to the last time it needs, saving every needed time on the way:
+    its observed frames and, for every window but the last, the next window's
+    start time that its continuity row reads.  A frame shared by both is saved
+    once.  The solves are independent (every window start is a decision
+    variable), so they run as a single ``jax.vmap`` over windows.  Each
+    window's save times are padded to the longest list by repeating its last
+    time, which keeps the batch rectangular; a padded slot is never read.
 
     Rows are assembled by gathering from one pooled state array,
-    ``concatenate([segment_endpoints, window_starts])``, so the indices below are
-    offsets into that pool and no per-row branching survives into the trace.
+    ``concatenate([saved_states, window_starts])``, where the saved states are
+    the ``(n_segments, save_width)`` save grid flattened row-major, so the
+    indices below are offsets into that pool and no per-row branching survives
+    into the trace.
 
     Attributes:
-        seg_window: Source window of each propagation, shape ``(n_segments,)``.
-        seg_t0: Start time of each propagation.
-        seg_t1: Target time of each propagation.
+        seg_window: Source window of each solve, shape ``(n_segments,)``.
+        seg_t0: Start time of each solve (its window's start).
+        seg_t1: End time of each solve (the last time it saves).
+        seg_ts: Save times of each solve, padded, shape ``(n_segments, save_width)``.
+        seg_count: Number of distinct save times of each solve.
         obs_pool: Pool index supplying each observation row group's state.
         obs_frames: Data-frame index scored by each observation row group.
         cont_pool: Pool index supplying each continuity row's propagated state.
         cont_windows: Window whose decision block each continuity row constrains.
-        n_segments: Number of distinct propagations.
+        n_segments: Number of solves, at most one per window.
     """
 
-    def __init__(self, seg_window, seg_t0, seg_t1, obs_pool, obs_frames, cont_pool, cont_windows):
+    def __init__(
+        self,
+        seg_window,
+        seg_t0,
+        seg_t1,
+        seg_ts,
+        seg_count,
+        obs_pool,
+        obs_frames,
+        cont_pool,
+        cont_windows,
+    ):
         """Store the plan as concrete host arrays."""
         self.seg_window = np.asarray(seg_window, dtype=np.int64)
         self.seg_t0 = np.asarray(seg_t0, dtype=float)
         self.seg_t1 = np.asarray(seg_t1, dtype=float)
+        self.seg_ts = np.asarray(seg_ts, dtype=float).reshape((self.seg_window.shape[0], -1))
+        self.seg_count = np.asarray(seg_count, dtype=np.int64)
         self.obs_pool = np.asarray(obs_pool, dtype=np.int64)
         self.obs_frames = np.asarray(obs_frames, dtype=np.int64)
         self.cont_pool = np.asarray(cont_pool, dtype=np.int64)
@@ -356,18 +370,41 @@ class SegmentPlan:
 
     @property
     def n_segments(self) -> int:
-        """Number of distinct propagations in the batch."""
+        """Number of solves in the batch, at most one per window."""
         return int(self.seg_window.shape[0])
+
+    @property
+    def save_width(self) -> int:
+        """Saved states per solve after padding (``0`` without solves)."""
+        return int(self.seg_ts.shape[1]) if self.n_segments else 0
+
+    @property
+    def n_saved(self) -> int:
+        """Rows of saved states in the pool, ahead of the window starts."""
+        return self.n_segments * self.save_width
+
+    def source_window(self, pool_index: int) -> int:
+        """The window whose solve (or start) supplies pool row ``pool_index``."""
+        pool_index = int(pool_index)
+        if pool_index < self.n_saved:
+            return int(self.seg_window[pool_index // self.save_width])
+        return pool_index - self.n_saved
+
+
+def _same_time(a: float, b: float) -> bool:
+    """Whether two host times name the same instant (relative 1e-12)."""
+    return abs(a - b) <= 1e-12 * max(1.0, abs(b))
 
 
 def build_segment_plan(win_frames: list, ts: np.ndarray, boundaries: np.ndarray) -> SegmentPlan:
-    """Enumerate the distinct window propagations and index the rows onto them.
+    """Plan one solve per window and index the residual rows onto its saved states.
 
-    A frame coinciding with its window's start time needs no propagation — its
-    state *is* the window start — so it reads the window-start section of the
+    A frame coinciding with its window's start time needs no propagation (its
+    state *is* the window start), so it reads the window-start section of the
     pool directly.  Every other observation frame, and every continuity row,
-    reads a propagation endpoint; identical ``(window, target time)`` requests
-    collapse to one entry.
+    reads a state saved by its window's single solve.  A window that needs no
+    propagated state (the last window when no observed frame lies after its
+    start) gets no solve.
 
     Args:
         win_frames: Per-window arrays of observed data-frame indices.
@@ -382,25 +419,43 @@ def build_segment_plan(win_frames: list, ts: np.ndarray, boundaries: np.ndarray)
     boundaries = np.asarray(boundaries, dtype=float)
     n_windows = len(win_frames)
 
-    seg_window: list[int] = []
-    seg_t0: list[float] = []
-    seg_t1: list[float] = []
+    window_times: list[list[float]] = []
+    for window in range(n_windows):
+        t_start = float(boundaries[window])
+        needed = [
+            float(ts[int(frame)])
+            for frame in win_frames[window]
+            if not abs(float(ts[int(frame)]) - t_start) <= 1e-12
+        ]
+        if window < n_windows - 1:
+            needed.append(float(boundaries[window + 1]))
+        distinct: list[float] = []
+        for time in sorted(needed):
+            if not distinct or not _same_time(distinct[-1], time):
+                distinct.append(time)
+        window_times.append(distinct)
 
-    def segment_index(window: int, t_target: float) -> int:
-        """Return the index of ``(window, t_target)``, adding it if it is new."""
-        for existing, (w, t1) in enumerate(zip(seg_window, seg_t1)):
-            if w == window and abs(t1 - t_target) <= 1e-12 * max(1.0, abs(t_target)):
-                return existing
-        seg_window.append(int(window))
-        seg_t0.append(float(boundaries[window]))
-        seg_t1.append(float(t_target))
-        return len(seg_window) - 1
+    seg_window = [w for w in range(n_windows) if window_times[w]]
+    width = max((len(window_times[w]) for w in seg_window), default=0)
+    segment_of = {w: s for s, w in enumerate(seg_window)}
+    seg_t0 = [float(boundaries[w]) for w in seg_window]
+    seg_t1 = [window_times[w][-1] for w in seg_window]
+    seg_count = [len(window_times[w]) for w in seg_window]
+    seg_ts = [
+        window_times[w] + [window_times[w][-1]] * (width - len(window_times[w])) for w in seg_window
+    ]
+    n_saved = len(seg_window) * width
 
-    # Continuity requests come first so the aligned configuration — boundaries on
-    # the frames — lays the batch out in window order.
-    cont_pool_segments = [segment_index(w - 1, float(boundaries[w])) for w in range(1, n_windows)]
+    def saved_index(window: int, time: float) -> int:
+        """Pool row of the state ``window``'s solve saves at ``time``."""
+        segment = segment_of[window]
+        for slot, saved in enumerate(window_times[window]):
+            if _same_time(saved, time):
+                return segment * width + slot
+        raise AssertionError(f"window {window} saves no state at {time!r}")  # pragma: no cover
 
-    obs_segments: list[tuple[int, bool, int]] = []
+    cont_pool = [saved_index(w - 1, float(boundaries[w])) for w in range(1, n_windows)]
+    obs_pool: list[int] = []
     obs_frames: list[int] = []
     for window in range(n_windows):
         t_start = float(boundaries[window])
@@ -408,18 +463,21 @@ def build_segment_plan(win_frames: list, ts: np.ndarray, boundaries: np.ndarray)
             t_frame = float(ts[int(frame)])
             obs_frames.append(int(frame))
             if abs(t_frame - t_start) <= 1e-12:
-                obs_segments.append((window, True, window))
+                obs_pool.append(n_saved + window)
             else:
-                obs_segments.append((window, False, segment_index(window, t_frame)))
-
-    # Pool layout: propagation endpoints first, then the window-start states.
-    n_segments = len(seg_window)
-    obs_pool = [
-        (n_segments + index) if from_start else index for _w, from_start, index in obs_segments
-    ]
-    cont_pool = list(cont_pool_segments)
+                obs_pool.append(saved_index(window, t_frame))
     cont_windows = list(range(1, n_windows))
-    return SegmentPlan(seg_window, seg_t0, seg_t1, obs_pool, obs_frames, cont_pool, cont_windows)
+    return SegmentPlan(
+        seg_window,
+        seg_t0,
+        seg_t1,
+        np.asarray(seg_ts, dtype=float).reshape((len(seg_window), width)),
+        seg_count,
+        obs_pool,
+        obs_frames,
+        cont_pool,
+        cont_windows,
+    )
 
 
 def warn_if_over_ceiling(n_decision: int) -> Optional[str]:
@@ -595,17 +653,21 @@ class DecisionWindowBuild:
         t0: Any,
         t1: Any,
         segment_index: Any = 0,
+        save_ts: Any = None,
     ) -> Any:
         """Solve one segment forward; ``t0``/``t1`` may be traced (mapped) scalars.
 
-        The save specification is ``t1``-only and built once outside any trace, so
-        the interval endpoints are the only per-segment values and the batch maps
-        over them directly.
+        Without ``save_ts`` the solve saves its end state only, through a
+        ``t1``-only save specification built once outside any trace. With
+        ``save_ts`` it saves at those times, given in order (``ordered=True``),
+        so a mapped batch may pass each lane its own, possibly traced, times.
+        A traced list may repeat its last time to pad the batch.
         """
-        from diff_soup import pdesolve
+        from diff_soup import SaveAt, pdesolve
 
+        saveat = self._saveat_t1 if save_ts is None else SaveAt(ts=save_ts, ordered=True)
         kwargs = dict(
-            saveat=self._saveat_t1,
+            saveat=saveat,
             theta=theta_p,
             adjoint=getattr(self.solver, "adjoint", None),
         )
@@ -631,21 +693,22 @@ class DecisionWindowBuild:
         return self._full_start(s_diff)
 
     def states_at_frames(self, x: jax.Array, w: int) -> list:
-        """Predicted full states at every observed frame in window ``w``."""
+        """Predicted full states at every observed frame in window ``w``, from one solve."""
         theta_p = self._theta_pytree(x)
-        bnd = self.layout.boundaries
-        t0 = float(bnd[w])
+        t0 = float(self.layout.boundaries[w])
         y_start = self._window_start_state(x, w)
-        out = []
-        for fi in self._win_frames[w]:
-            tf = float(np.asarray(self.series.ts)[fi])
-            if abs(tf - t0) <= 1e-12:
-                # The frame coincides with the window start (window-0 IC frame).
-                out.append((fi, y_start))
-                continue
-            sol = self._propagate(theta_p, y_start, t0, tf)
-            out.append((fi, sol.ys[-1]))
-        return out
+        ts = np.asarray(self.series.ts)
+        frames = [int(fi) for fi in self._win_frames[w]]
+        # A frame at the window start (the window-0 initial-state frame) is the start.
+        later = [fi for fi in frames if not abs(float(ts[fi]) - t0) <= 1e-12]
+        saved = {}
+        if later:
+            times = np.asarray([float(ts[fi]) for fi in later])
+            sol = self._propagate_traced(
+                theta_p, y_start, t0, float(times[-1]), w, save_ts=jnp.asarray(times)
+            )
+            saved = {fi: sol.ys[k] for k, fi in enumerate(later)}
+        return [(fi, saved.get(fi, y_start)) for fi in frames]
 
     # --- residual stack -----------------------------------------------------
 
@@ -705,10 +768,9 @@ class DecisionWindowBuild:
         child's initial state, anchors, targets, and weights. Keeping one algebra
         with two callers is what stops the joint and leaf paths from drifting.
 
-        Every propagation the stack needs runs through one mapped operation over
-        the plan's distinct ``(window, target time)`` requests, so the traced
-        program does not grow with the window count and a target reached by both
-        an observation frame and a continuity row is solved once. Leaf
+        Every window the stack needs is solved once, saving its observed frames
+        and its end, through one mapped operation over the windows, so the
+        traced program does not grow with the window count. Leaf
         problems use `jax.vmap`; a homogeneous joint passes
         ``parallel_segments=False`` because it already vmaps children and sparse
         direct factor banks support one matrix-batch axis.
@@ -802,18 +864,12 @@ class DecisionWindowBuild:
         if not 0 <= window < layout.n_windows:
             raise IndexError(f"window must be in [0, {layout.n_windows}); got {window}")
 
-        segment_indices = np.where(plan.seg_window == window)[0]
-        segment_lookup = {
-            int(segment): position for position, segment in enumerate(segment_indices.tolist())
-        }
-        observation_positions = []
-        for position, pool_index in enumerate(plan.obs_pool.tolist()):
-            if pool_index < plan.n_segments:
-                source_window = int(plan.seg_window[pool_index])
-            else:
-                source_window = int(pool_index - plan.n_segments)
-            if source_window == window:
-                observation_positions.append(position)
+        segments = np.where(plan.seg_window == window)[0]
+        observation_positions = [
+            position
+            for position, pool_index in enumerate(plan.obs_pool.tolist())
+            if plan.source_window(pool_index) == window
+        ]
         continuity_positions = [
             position
             for position, target_window in enumerate(plan.cont_windows.tolist())
@@ -821,25 +877,25 @@ class DecisionWindowBuild:
         ]
 
         start = self._window_start_from(state_block, y0, anchors, window)
-        if segment_indices.size:
-            actual_indices = jnp.asarray(segment_indices, dtype=jnp.int32)
-            t0 = jnp.asarray(plan.seg_t0[segment_indices])
-            t1 = jnp.asarray(plan.seg_t1[segment_indices])
-
-            def propagate(segment_index, start_time, end_time):
-                solution = self._propagate_traced(
-                    theta_p,
-                    start,
-                    start_time,
-                    end_time,
-                    segment_index,
-                )
-                return solution.ys[-1], _solution_failed(solution)
-
-            endpoints, failures = jax.vmap(propagate)(actual_indices, t0, t1)
-            any_failed = jnp.any(failures)
+        # The window's one solve saves its own times, unpadded: ``saved[k]`` is
+        # pool row ``first_saved + k``.
+        first_saved = None
+        if segments.size:
+            segment = int(segments[0])
+            count = int(plan.seg_count[segment])
+            first_saved = segment * plan.save_width
+            solution = self._propagate_traced(
+                theta_p,
+                start,
+                float(plan.seg_t0[segment]),
+                float(plan.seg_t1[segment]),
+                window,
+                save_ts=None if count == 1 else jnp.asarray(plan.seg_ts[segment, :count]),
+            )
+            saved = solution.ys[-1:] if count == 1 else solution.ys[:count]
+            any_failed = _solution_failed(solution)
         else:
-            endpoints = jnp.zeros((0,) + start.shape, dtype=start.dtype)
+            saved = jnp.zeros((0,) + start.shape, dtype=start.dtype)
             any_failed = jnp.asarray(False)
 
         rows = []
@@ -849,8 +905,8 @@ class DecisionWindowBuild:
             for position in observation_positions:
                 pool_index = int(plan.obs_pool[position])
                 frames.append(int(plan.obs_frames[position]))
-                if pool_index < plan.n_segments:
-                    predicted.append(endpoints[segment_lookup[pool_index]])
+                if pool_index < plan.n_saved:
+                    predicted.append(saved[pool_index - first_saved])
                 else:
                     predicted.append(start)
             frame_array = jnp.asarray(frames, dtype=jnp.int32)
@@ -888,7 +944,7 @@ class DecisionWindowBuild:
                 )
             position = continuity_positions[0]
             pool_index = int(plan.cont_pool[position])
-            predicted = endpoints[segment_lookup[pool_index]][self._diff_idx]
+            predicted = saved[pool_index - first_saved][self._diff_idx]
             target_window = int(plan.cont_windows[position])
             target = self._lift_state_block(
                 state_block,
@@ -958,13 +1014,10 @@ class DecisionWindowBuild:
                 columns.extend(next_group)
                 elimination_groups.append(next_group)
 
-            observation_count = 0
-            for pool_index in plan.obs_pool.tolist():
-                if pool_index < plan.n_segments:
-                    source_window = int(plan.seg_window[pool_index])
-                else:
-                    source_window = int(pool_index - plan.n_segments)
-                observation_count += int(source_window == window)
+            observation_count = sum(
+                int(plan.source_window(pool_index) == window)
+                for pool_index in plan.obs_pool.tolist()
+            )
             row_count = observation_count * max(n_observed_values, 1)
             if has_continuity:
                 row_count += layout.n_state
@@ -987,12 +1040,13 @@ class DecisionWindowBuild:
         return tuple(blocks)
 
     def residual_dependency_buckets(self) -> tuple[ResidualDependencyBucket, ...]:
-        """Bucket aligned one-segment windows behind shared traced bodies.
+        """Bucket aligned one-save windows behind shared traced bodies.
 
         More general window plans retain the exact per-block declarations and
         use the safe unbucketed path. The aligned case covers the common design
-        with boundaries on observation frames: one propagation/observation per
-        window and one outgoing continuity row except at the final window.
+        with boundaries on observation frames: each window's solve saves one
+        state, its end, which its one observation and its outgoing continuity
+        row (every window but the last) both read.
 
         One shared traced body serves every lane, so it cannot carry a
         per-lane likelihood view; a likelihood-scored stream therefore keeps
@@ -1000,7 +1054,7 @@ class DecisionWindowBuild:
         """
         layout = self.layout
         plan = self._plan
-        if self._likelihood is not None:
+        if self._likelihood is not None or plan.save_width != 1:
             return ()
         blocks = self.residual_dependency_blocks()
         segments_by_window = [
@@ -1008,7 +1062,7 @@ class DecisionWindowBuild:
         ]
         observations_by_window: list[list[int]] = [[] for _ in range(layout.n_windows)]
         for position, pool_index in enumerate(plan.obs_pool.tolist()):
-            if pool_index >= plan.n_segments:
+            if pool_index >= plan.n_saved:
                 return ()
             source = int(plan.seg_window[pool_index])
             observations_by_window[source].append(position)
@@ -1246,13 +1300,14 @@ class DecisionWindowBuild:
     def _propagate_segments(
         self, theta_p: Any, starts: jax.Array, *, parallel: bool = True
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """Propagate every planned window segment in one batch.
+        """Solve every planned window once, in one batch, saving its planned times.
 
         Returns:
-            ``(endpoints, any_failed, trial_steps)`` with endpoints shape
-            ``(n_segments, state)``, a scalar boolean set when any segment hit
-            the solver's step limit, and the integrator's trial-step count
-            summed over the segments (zero when the solver reports none).
+            ``(saved, any_failed, trial_steps)`` with the saved states flattened to
+            ``(n_segments * save_width, state)`` in plan order, a scalar boolean
+            set when any solve failed or saved a non-finite state, and the
+            integrator's trial-step count summed over the solves (zero when the
+            solver reports none).
         """
         plan = self._plan
         starts = jnp.asarray(starts)
@@ -1263,30 +1318,37 @@ class DecisionWindowBuild:
                 jnp.zeros((), dtype=jnp.int32),
             )
         seg_starts = starts[jnp.asarray(plan.seg_window)]
+        width = plan.save_width
 
-        def one(theta, segment_index, t0, t1, y_start):
-            sol = self._propagate_traced(theta, y_start, t0, t1, segment_index)
-            return sol.ys[-1], _solution_failed(sol), _trial_steps(sol)
+        def one(theta, segment_index, t0, t1, save_ts, y_start):
+            if width == 1:
+                # One save per window is its end state, which the t1-only solve keeps.
+                sol = self._propagate_traced(theta, y_start, t0, t1, segment_index)
+                return sol.ys[-1][None], _solution_failed(sol), _trial_steps(sol)
+            sol = self._propagate_traced(theta, y_start, t0, t1, segment_index, save_ts=save_ts)
+            return sol.ys[:width], _solution_failed(sol), _trial_steps(sol)
 
         segment_data = (
-            jnp.arange(plan.n_segments, dtype=jnp.int32),
+            jnp.asarray(plan.seg_window, dtype=jnp.int32),
             jnp.asarray(plan.seg_t0),
             jnp.asarray(plan.seg_t1),
+            jnp.asarray(plan.seg_ts),
             seg_starts,
         )
         if parallel:
             # On a forward-only seam an enclosing vmap over parameter points folds
             # into the segment axis, keeping the solves on one matrix-batch axis.
-            ends, failed, steps = lane_map(
+            saved, failed, steps = lane_map(
                 one,
-                (None, 0, 0, 0, 0),
+                (None, 0, 0, 0, 0, 0),
                 theta_p,
                 *segment_data,
                 fold=folds_enclosing_batches(self.solver),
             )
         else:
-            ends, failed, steps = jax.lax.map(lambda seg: one(theta_p, *seg), segment_data)
-        return ends, jnp.any(failed), jnp.sum(steps)
+            saved, failed, steps = jax.lax.map(lambda seg: one(theta_p, *seg), segment_data)
+        saved = jnp.reshape(saved, (plan.n_saved,) + saved.shape[2:])
+        return saved, jnp.any(failed), jnp.sum(steps)
 
     def _segment_endpoints(self, x: jax.Array, starts: jax.Array) -> tuple[jax.Array, jax.Array]:
         """Segment endpoints at the decision vector ``x``."""

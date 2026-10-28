@@ -358,22 +358,51 @@ def _foreign(problem: Any, recorded: Any) -> bool:
     )
 
 
-def _checkpoint_source(problem: Any, directory: Any) -> Any:
-    """The newest attempt file of ``directory`` as a result to resume from, or ``None``."""
-    from diff_soup.inference.fitting.callbacks import _attempt_files
+def _recorded_layout_text(text: str) -> str:
+    """A saved parameter layout (``info["schema_layout"]``) as ``rate: 0, source@cell-a: 1``."""
+    import json
 
-    files = _attempt_files(directory)
+    labels = []
+    for name, _kind, _size, occurrences in json.loads(text):
+        for owner, columns in occurrences:
+            label = name if owner is None else f"{name}@{owner}"
+            labels.append((tuple(columns), f"{label}: {', '.join(str(c) for c in columns)}"))
+    return "; ".join(label for _, label in sorted(labels))
+
+
+def _checkpoint_source(problem: Any, directory: Any) -> Any:
+    """The newest checkpoint of ``directory`` as a result to resume from, or ``None``.
+
+    The newest ``attempt-`` file of a solver that resumes its state, else the
+    newest ``step-`` file of the others. A checkpoint whose parameters are laid
+    out otherwise than ``problem``'s is refused.
+    """
+    from diff_soup.inference.fitting.callbacks import checkpoint_files
+
+    files = checkpoint_files(directory)
     if not files:
         return None
     newest = files[-1]
     result = OptResult.load(newest)
+    where = f"optsolve(checkpoint={str(directory)!r}) holds {newest.name} of another problem"
+    schema = getattr(problem, "parameter_schema", None)
+    recorded_layout = result.info.get("schema_layout")
+    if schema is not None and recorded_layout:
+        from diff_soup.inference.fitting._layout import describe_layout, layout_text
+
+        if str(recorded_layout) != layout_text(schema):
+            raise ValueError(
+                f"{where}: its parameters are laid out as "
+                f"({_recorded_layout_text(str(recorded_layout))}), this problem's as "
+                f"({describe_layout(schema)}); give a directory of this problem or an "
+                "empty one."
+            )
     recorded = _recorded_fingerprint(result)
     if _foreign(problem, recorded):
         raise ValueError(
-            f"optsolve(checkpoint={str(directory)!r}) holds {newest.name} of another problem: "
-            f"its parameter schema fingerprint is {str(recorded)!r}, this problem's is "
-            f"{str(problem.parameter_schema.fingerprint)!r}; give a directory of this problem "
-            "or an empty one."
+            f"{where}: its parameter schema fingerprint is {str(recorded)!r}, this problem's "
+            f"is {str(problem.parameter_schema.fingerprint)!r}; give a directory of this "
+            "problem or an empty one."
         )
     return result
 

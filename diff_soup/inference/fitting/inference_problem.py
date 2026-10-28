@@ -1954,7 +1954,8 @@ class InferenceProblem:
         _set(self, "_param_group_names", group_names)
         _set(self, "_param_group_cols", group_cols)
         _set(self, "_union_ts", None)
-        _set(self, "_solve_probe", None)
+        # One solve per window per evaluation, all windows in one batch.
+        _set(self, "_solve_probe", {"n": int(build._plan.n_segments)})
 
     # --- LM-engine duck-typed surface ---
     @property
@@ -2294,10 +2295,11 @@ class InferenceProblem:
 
     @property
     def trajectory_solves_per_eval(self) -> Optional[int]:
-        """Forward solves performed per residual evaluation (single-shoot probe).
+        """Forward solves performed per residual evaluation.
 
-        For single-shoot this is 1 once the residual has been traced — the
-        one-solve-over-the-union invariant.  ``None`` for multishoot.
+        A single shoot counts its traced solves: 1 once the residual has been
+        traced. Fitted window starts solve each window once per evaluation, all in
+        one batch, and count those solves. ``None`` for observed window starts.
         """
         return None if self._solve_probe is None else int(self._solve_probe["n"])
 

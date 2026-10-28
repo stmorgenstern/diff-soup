@@ -42,7 +42,9 @@ from diff_soup.inference.solvers._termination import (
     DEFAULT_STEP_TOL,
     absolute_tolerance,
     gradient_tolerance,
+    model_held_the_step,
     relative_tolerance,
+    stall_reason_of,
     step_budget,
 )
 from diff_soup.inference.solvers.factorization import (
@@ -166,6 +168,25 @@ def _gn_step_normal(
     pred_red = -(Jtr @ delta + 0.5 * delta @ (JtJ @ delta))
 
     return delta, dnorm, pred_red, Jtr, grad_norm
+
+
+def _gauss_newton_decrease(gram, gradient, point, lb=None, ub=None) -> float:
+    """The decrease the Gauss-Newton model predicts for its undamped step at ``point``.
+
+    The step is the minimum-norm minimizer of ``g.T p + 0.5 p.T G p`` over the
+    range of ``G`` (eigenvalues above ``n * eps`` of the largest), projected onto
+    the box when bounds are given.
+    """
+    gram = 0.5 * (gram + gram.T)
+    values, vectors = jnp.linalg.eigh(gram)
+    cutoff = values.shape[0] * jnp.finfo(values.dtype).eps * jnp.maximum(values[-1], 0.0)
+    coefficients = vectors.T @ gradient
+    keep = values > cutoff
+    safe = jnp.where(keep, values, 1.0)
+    step = -vectors @ jnp.where(keep, coefficients / safe, 0.0)
+    if lb is not None:
+        step = jnp.clip(point + step, lb, ub) - point
+    return float(local_value(-(gradient @ step + 0.5 * step @ (gram @ step))))
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +423,7 @@ class LevenbergMarquardt(OptSolver):
         n_resid_evals, n_jac_evals = 1, 1
         trial_predicate_rejections = 0
         status = TerminationStatus.MAX_STEPS
+        stall_reason = None
         # ``max_steps=0`` makes no step: the start point is returned.
         n_steps = 0
 
@@ -499,6 +521,10 @@ class LevenbergMarquardt(OptSolver):
 
             actual_red = cost - cost_trial
             rho = actual_red / max(pred_red_f, 1e-30)
+            # The model at the point this step was taken from, for the stall test.
+            attempt_point = x
+            attempt_gram = JtJ_red if use_reduced or use_lanes else JtJ
+            threshold = cost_threshold(cost, cost_tol, cost_atol)
 
             if assert_decision_value(
                 rho > self.accept_cutoff and trial_ok, label="Levenberg-Marquardt"
@@ -567,19 +593,34 @@ class LevenbergMarquardt(OptSolver):
             # reduction and therefore miss the gain-ratio acceptance cutoff.
             # Step/cost convergence describe that stationary trial itself, so
             # they require a valid evaluation but not formal acceptance.
+            stop = None
             if assert_decision_value(
                 trial_ok and dnorm_f < step_tol * (1.0 + x_norm), label="Levenberg-Marquardt"
             ):
-                status = TerminationStatus.STEP_TOL
-                break
-            # The cost-change test is relative to the cost itself, so where a fit
-            # stops does not depend on the units of its residual rows; an
-            # absolute floor is ``cost_atol``, which the caller sets.
-            if assert_decision_value(
-                trial_ok and abs(actual_red) < cost_threshold(cost, cost_tol, cost_atol),
+                stop = TerminationStatus.STEP_TOL
+            # The cost-change test is relative to the cost at the step's start, so
+            # where a fit stops does not depend on the units of its residual rows;
+            # an absolute floor is ``cost_atol``, which the caller sets. It needs
+            # the model to agree with the decrease (SciPy's ratio), or a model that
+            # predicts no decrease the tolerance can see.
+            elif assert_decision_value(
+                trial_ok
+                and abs(actual_red) < threshold
+                and (rho > 0.25 or pred_red_f <= threshold),
                 label="Levenberg-Marquardt",
             ):
-                status = TerminationStatus.COST_TOL
+                stop = TerminationStatus.COST_TOL
+            if stop is not None:
+                status = stop
+                full_decrease = _gauss_newton_decrease(attempt_gram, Jtr, attempt_point, lb, ub)
+                if assert_decision_value(
+                    model_held_the_step(full_decrease, pred_red_f, threshold),
+                    label="Levenberg-Marquardt stall",
+                ):
+                    status = TerminationStatus.STALLED
+                    stall_reason = stall_reason_of(
+                        invalid=False, noise=not accepted and abs(actual_red) < threshold
+                    )
                 break
 
         wall_time = time.perf_counter() - t0_wall
@@ -637,6 +678,7 @@ class LevenbergMarquardt(OptSolver):
             info={
                 "trial_predicate_rejections": trial_predicate_rejections,
                 "linear_solver": resolved_linear_solver,
+                **({} if stall_reason is None else {"stall_reason": stall_reason}),
                 **final_arrays,
             },
         )

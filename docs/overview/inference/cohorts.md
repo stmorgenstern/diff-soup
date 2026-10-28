@@ -75,9 +75,11 @@ inventory = lowered.inventory()
 
 ## Checkpoint, stop, and resume
 
-`checkpoint=` on `ds.inference.optsolve` saves the fit after every attempt.
-When the directory already holds a checkpoint, the fit resumes from it, and
-its next attempt is the one the uninterrupted fit would have made.
+`checkpoint=` on `ds.inference.optsolve` saves the fit as it runs:
+`TrustRegion` after every attempt, `LevenbergMarquardt` and
+`NewtonTrustRegion` after every accepted step. When the directory already
+holds a checkpoint, the fit resumes from it. Under `TrustRegion` the next
+attempt is the one the uninterrupted fit would have made.
 
 ```python
 class StopBeforeTheLimit(ds.inference.Callback):
@@ -93,6 +95,8 @@ result = ds.inference.optsolve(
 
 - A callback that raises `ds.inference.StopFit` ends the fit after the
   current step with the status `STOPPED`.
-- Running the same script again resumes from the newest checkpoint.
-  `max_steps` counts the steps of the whole fit, across resumes.
-- A checkpoint of a different study is refused.
+- Running the same script again resumes from the newest checkpoint. Under
+  `TrustRegion`, `max_steps` counts the steps of the whole fit, across
+  resumes. The other optimizers restart from the saved point with a fresh
+  budget.
+- A checkpoint of other parameters, or of a different study, is refused.

@@ -292,7 +292,9 @@ The status flags:
 - `MAX_STEPS` is the step budget running out.
 - `STALLED` is a fit that stopped while its model still predicted a
   decrease, or after too many invalid trial steps in a row. A stalled
-  fit has not converged.
+  fit has not converged. `NewtonTrustRegion` and `LevenbergMarquardt`
+  stall when their trust radius or damping shrinks the step below its
+  tolerance, and record why in `result.info["stall_reason"]`.
 - `DERIVATIVE_ACCURACY` is `ds.inference.TrustRegion` converging to the
   accuracy of its gradient, which the time-stepping solves compute to
   about their relative tolerance. A tighter `rtol` lets the fit go
@@ -339,6 +341,7 @@ of `observe=`:
 - A function of the state, such as `lambda state: state.mean()`. The
   function may also take the keyword arguments `t`, the observation time,
   and `theta`, the current parameter values.
+- The name of a declared observation, such as `observe="mean_u"` for a `spec.observe` declaration named `mean_u`, read in its dimensional units.
 - The `predict` method of a subclass of
   `ds.inference.data.ObservationOperator`, which defines
   `predict(self, u, t, theta)`, as in the second example below. `u` is

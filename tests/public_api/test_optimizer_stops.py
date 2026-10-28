@@ -116,6 +116,21 @@ def test_trust_region_stationarity_stop_does_not_depend_on_residual_units():
     )
 
 
+def test_a_newton_fit_whose_radius_collapses_short_of_the_minimum_ends_stalled():
+    """At a kink of |x0| the trust radius collapses before x1 reaches its minimum at 0.5, and the
+    fit ends STALLED, not converged, with the reason radius_collapsed."""
+    problem = inf.LeastSquaresProblem.from_residual(
+        jnp.asarray([0.3, 0.2]),
+        lambda x: jnp.stack([jnp.abs(x[0]) + 1.0, x[0] + 2.0 * x[1] - 1.0]),
+    )
+    fit = small_fit(problem, inf.NewtonTrustRegion(hessian="gauss-newton"))
+    assert (fit.status, fit.converged, fit.info["stall_reason"]) == (
+        inf.TerminationStatus.STALLED,
+        False,
+        "radius_collapsed",
+    )
+
+
 def _growth(start, values, scale, observe):
     """``u' = rate`` from ``u(0) = 1``, observed through ``observe`` at the suite's times."""
     spec = ds.problem("stops_growth")
@@ -215,35 +230,45 @@ class _StopAtFirstAccepted(inf.Callback):
             raise inf.StopFit()
 
 
-@pytest.fixture(scope="module")
-def stopped(problem, tmp_path_factory):
+@pytest.fixture(
+    scope="module",
+    params=[
+        functools.partial(inf.LevenbergMarquardt, max_steps=30),
+        functools.partial(inf.NewtonTrustRegion, hessian="gauss-newton"),
+    ],
+    ids=("levenberg_marquardt", "newton_gauss_newton"),
+)
+def stopped(problem, tmp_path_factory, request):
     directory = tmp_path_factory.mktemp("stops_checkpoint")
     fit = small_fit(
-        problem,
-        inf.LevenbergMarquardt(max_steps=30),
-        callbacks=(inf.CheckpointCallback(directory), _StopAtFirstAccepted()),
+        problem, request.param(), callbacks=(_StopAtFirstAccepted(),), checkpoint=directory
     )
-    return directory, fit
+    return directory, fit, request.param
 
 
 def test_a_fit_stopped_by_stop_fit_resumes_from_its_checkpoint_to_the_same_optimum(
     problem, straight, stopped
 ):
-    """StopFit ends a fit STOPPED; resume=directory continues it to the straight fit's point."""
-    directory, fit = stopped
+    """StopFit ends a fit STOPPED; checkpoint=directory continues it from its step file to the
+    straight fit's point."""
+    directory, fit, optimizer = stopped
     assert fit.status is inf.TerminationStatus.STOPPED and fit.n_accepted == 1
     assert [path.name for path in sorted(directory.glob("step-*.npz"))] == ["step-000000.npz"]
-    resumed = small_fit(
-        problem,
-        inf.LevenbergMarquardt(max_steps=30),
-        callbacks=(inf.CheckpointCallback(directory),),
-        resume=directory,
-    )
+    resumed = small_fit(problem, optimizer(), checkpoint=directory)
     np.testing.assert_array_equal(resumed.initial_params, fit.params)
     assert resumed.converged
-    # measured 5.1e-12 relative difference, CPU VM 2026-10-22,
-    # pytest tests/public_api/test_optimizer_stops.py
+    # measured 5.1e-12 relative difference (Levenberg-Marquardt), 3.0e-11 (Gauss-Newton),
+    # workstation CPU 2026-10-28, pytest tests/public_api/test_optimizer_stops.py
     np.testing.assert_allclose(resumed.params, straight.params, rtol=1e-10)
+
+
+def test_a_checkpoint_of_another_parameter_layout_is_refused(stopped):
+    """optsolve(checkpoint=...) refuses a directory a fit of other parameters wrote."""
+    directory, _fit, optimizer = stopped
+    decay = decay_recipe("stops_two_parameters", source=True)
+    other = inf.InferenceProblem(decay_experiment(decay), parameters=(decay.rate, decay.source))
+    with pytest.raises(ValueError, match=r"laid out as \(rate: 0\), this problem's as"):
+        small_fit(other, optimizer(), checkpoint=directory)
 
 
 def test_log_callback_writes_one_line_per_step_to_its_file(problem, tmp_path):

@@ -80,8 +80,8 @@ The options, with their defaults:
   must exceed to be accepted.
 - `grad_tol=None`, `step_tol=None`, and `cost_tol=None` are the
   convergence tolerances on the gradient norm, the step norm, and the
-  change in the objective. Under float64 they resolve to `1e-8`,
-  `1e-10`, and `1e-12` ([precision](../simulation/precision.md#inference)).
+  change in the objective. Under float64 each resolves to `1e-8`
+  ([precision](../simulation/precision.md#inference)).
   `cost_atol=None` sets an absolute floor under the test on the change in
   the objective. Set it at the size of the noise in the objective when
   that noise does not shrink with the objective.
@@ -115,6 +115,10 @@ The options, with their defaults:
 trust-region radius after every step is in
 `result.trust_region.radius_history`.
 
+A step or cost test that passes on a step the trust radius held short ends
+the fit `STALLED`, not converged. `result.info["stall_reason"]` says why:
+`"radius_collapsed"`, `"evaluation_noise"`, or `"invalid_trials"`.
+
 #### Levenberg-Marquardt
 
 ```python
@@ -133,8 +137,8 @@ The options, with their defaults:
   a step must exceed to be accepted.
 - `grad_tol=None`, `step_tol=None`, and `cost_tol=None` are the
   convergence tolerances on the gradient norm, the step norm, and the
-  change in the objective. Under float64 they resolve to `1e-8`,
-  `1e-10`, and `1e-12` ([precision](../simulation/precision.md#inference)).
+  change in the objective. Under float64 each resolves to `1e-8`
+  ([precision](../simulation/precision.md#inference)).
   `cost_atol=None` sets an absolute floor under the test on the change in
   the objective. Set it at the size of the noise in the objective when
   that noise does not shrink with the objective.
@@ -151,6 +155,9 @@ The options, with their defaults:
   solve. `result.info["linear_solver"]`
   reports the choice made.
 - `callbacks=()` attaches callbacks to the solver.
+
+A step or cost test that passes on a step the damping held short ends the
+fit `STALLED`, with the reason in `result.info["stall_reason"]`.
 
 ```python
 lm = ds.inference.LevenbergMarquardt(
@@ -171,8 +178,8 @@ The options, with their defaults:
 
 - `max_steps=200` is the step budget.
 - `grad_tol=None` and `step_tol=None` are the convergence tolerances on
-  the gradient norm and the step norm. Under float64 they resolve to
-  `1e-8` and `1e-10` ([precision](../simulation/precision.md#inference)).
+  the gradient norm and the step norm. Under float64 each resolves to
+  `1e-8` ([precision](../simulation/precision.md#inference)).
 - `c1=1e-4` is the sufficient-decrease parameter of the line search.
 - `max_linesearch=20` is the number of step halvings the line search
   tries per step.

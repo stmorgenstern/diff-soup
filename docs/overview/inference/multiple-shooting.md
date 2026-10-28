@@ -110,6 +110,9 @@ The options, with their defaults:
 
 ## Batching and derivatives
 
+- Each window is solved once per evaluation, saving its frames on the
+  way, so a fit integrates the horizon once however many frames a window
+  holds.
 - The windows solve as one batch. A `jax.vmap` over parameter values
   of the likelihood joins that batch, and so do the chains of
   [`ds.inference.sample`](mcmc.md#run-the-sampler).
