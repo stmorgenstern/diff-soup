@@ -18,9 +18,12 @@ The re-exports are the module objects themselves, not copies:
 ``custom_call`` diff_soup wraps), ``mlir`` is the public
 ``jax.interpreters.mlir``, ``internal_partial_eval`` is
 ``jax._src.interpreters.partial_eval`` (whose rematerialisation policy types
-the linear-solver primitives read in their partial-evaluation rules), and
+the linear-solver primitives read in their partial-evaluation rules),
 ``dispatch`` is ``jax._src.dispatch`` (which holds the tokens of the effects
-of dispatched programs, waited on when a solve context is released).
+of dispatched programs, waited on when a solve context is released), and
+``internal_core`` and ``internal_array`` are ``jax._src.core`` and
+``jax._src.array`` (whose import-time constant-hoisting state
+``diff_soup._jax_constants`` repairs when JAX was imported first).
 
 This module imports JAX and nothing from diff_soup, so any module of the
 package can import it without an import cycle. The package imports
@@ -126,6 +129,8 @@ def _check_jax_version(version: str) -> None:
 
 _check_jax_version(jax.__version__)
 
+from jax._src import array as internal_array  # noqa: E402
+from jax._src import core as internal_core  # noqa: E402
 from jax._src import dispatch  # noqa: E402
 from jax._src.interpreters import mlir as internal_mlir  # noqa: E402
 from jax._src.interpreters import partial_eval as internal_partial_eval  # noqa: E402
@@ -138,8 +143,11 @@ from jax.interpreters import ad, batching, mlir, partial_eval  # noqa: E402
 __all__ = [
     # jax._src: JAX's private implementation (``internal_partial_eval`` holds
     # the rematerialisation policy types a partial-evaluation rule reads;
-    # ``dispatch`` holds the tokens of the effects of dispatched programs)
+    # ``dispatch`` holds the tokens of the effects of dispatched programs;
+    # ``internal_core`` and ``internal_array`` hold the constant-hoisting state)
     "dispatch",
+    "internal_array",
+    "internal_core",
     "internal_partial_eval",
     "internal_mlir",
     "ir",

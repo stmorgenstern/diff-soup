@@ -39,6 +39,10 @@ jax.config.update("jax_enable_x64", True)
 
 Exporting `JAX_ENABLE_X64=1` before starting Python does the same.
 
+`import diff_soup` also turns on JAX's constant hoisting, so a compiled
+program takes the mesh arrays it uses as arguments instead of embedding them.
+This works whether `jax` is imported before or after `diff_soup`.
+
 ## Install from source
 
 A source build needs a C++17 compiler. CMake and Ninja are fetched by the
