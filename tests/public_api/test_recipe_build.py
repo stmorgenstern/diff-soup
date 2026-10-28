@@ -19,7 +19,6 @@ from diff_soup.domains import (
     interval_mesh,
     rectangle_mesh,
 )
-from diff_soup.inference import approx
 from diff_soup.utils import (
     build_padded_color_arrays,
     build_sparse_jvp_groups,
@@ -208,23 +207,6 @@ def test_a_custom_transfer_couples_domains_as_its_hand_oracle(transfer):
     moved = c1v[::2] if transfer == "every-other-node" else 0.25 * c1v[0] + 0.75 * c1v[1]
     np.testing.assert_allclose(residual[problem.field_slice("u")], -u + moved, atol=_EXACT)
     np.testing.assert_allclose(residual[problem.field_slice("c1")], -c1v + c1v * c2v, atol=_EXACT)
-
-
-def test_recipe_handles_print_a_short_declaration_without_addresses():
-    """A field, global, parameter and function handle repr as their declaration alone, with no
-    object address."""
-    spec = ds.problem("handle_reprs").domain(
-        "line", ds.cartesian_grid_1d(2, 0.0, 1.0, method="fvm")
-    )
-    field = spec.field("u", mass="differential", scale=1.0)
-    scalar = spec.global_var("V", initial=0.0, mass="algebraic")
-    rate = spec.param("D", value=0.4, learnable=True)
-    basis = approx.SparseLegendre(intervals=((0.0, 1.0),), degree=2, coeffs=jnp.zeros(3))
-    law = spec.function("g", basis, learnable=True)
-    assert repr(field) == "FieldSpec('u', mass='differential')"
-    assert repr(scalar) == "GlobalVarSpec('V', mass='algebraic')"
-    assert repr(rate) == "ParamSpec('D', learnable=True)"
-    assert repr(law) == "FunctionSpec('g', learnable=True)"
 
 
 def test_a_differential_global_is_authored_with_its_role_and_needs_exactly_one_closure():

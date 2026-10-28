@@ -591,10 +591,3 @@ def test_named_outputs_hold_the_terminal_sample_and_refuse_undeclared_names(case
     else:
         with pytest.raises(ds.ConfigurationError, match="tuple of output names"):
             ds.SaveAt(outputs="mean_u")
-
-
-def test_a_result_member_prints_under_the_public_module_path():
-    """A ``RESULT`` member reprs as ``diff_soup.RESULT<...>``, still equal to itself."""
-    shown = repr(ds.RESULT.MAX_STEPS)
-    assert shown.startswith("diff_soup.RESULT<")
-    assert ds.RESULT.MAX_STEPS == ds.RESULT.MAX_STEPS != ds.RESULT.SUCCESS

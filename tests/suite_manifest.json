@@ -1,26 +1,26 @@
 {
   "budgets": {
     "test_files": 43,
-    "test_functions": 440,
-    "collected_tests": 780,
-    "source_lines": 15500
+    "test_functions": 390,
+    "collected_tests": 560,
+    "source_lines": 14000
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
-      "functions": 185,
-      "collected": 340,
-      "lines": 5900
+      "functions": 175,
+      "collected": 270,
+      "lines": 5500
     },
     "contracts": {
       "files": 17,
-      "functions": 180,
-      "collected": 310,
-      "lines": 6000
+      "functions": 160,
+      "collected": 220,
+      "lines": 5400
     },
     "performance_contracts": {
       "files": 2,
-      "functions": 14,
+      "functions": 11,
       "collected": 28,
       "lines": 480
     },
@@ -32,13 +32,13 @@
     },
     "integration": {
       "files": 2,
-      "functions": 16,
+      "functions": 11,
       "collected": 32,
       "lines": 680
     },
     "validation": {
       "files": 1,
-      "functions": 10,
+      "functions": 4,
       "collected": 20,
       "lines": 420
     }

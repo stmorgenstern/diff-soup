@@ -98,29 +98,10 @@ def test_the_exact_newton_hessian_is_formed_in_tiles_above_the_dense_cutoff():
     np.testing.assert_allclose(tiled.params, whole.params, rtol=0.0, atol=1e-12)
 
 
-def test_optsolve_fits_window_starts_with_gauss_newton_by_default():
-    """optsolve without an optimizer runs NewtonTrustRegion(hessian="gauss-newton") when the
-    multiple-shooting window starts are decision variables."""
-    spec = ds.problem("structural_window_starts")
-    spec.domain("line", ds.cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
-    rate = spec.param("rate", value=0.45, learnable=True, bounds=(0.1, 1.2))
-    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
-    spec.equation(writes="u", reads=("u",))(lambda q: -q.p.rate * q.u)
-    times = jnp.linspace(0.0, 1.0, 5)
-    measurement = inf.Measurement("u", times, jnp.exp(-0.6 * times)[:, None], weight=1e4)
-    experiment = inf.Experiment(
-        spec.build(), solver(), (0.0, 1.0), spec.assemble_state({}), (measurement,)
-    )
-    problem = inf.InferenceProblem(
-        experiment, parameters=rate, trajectory=inf.Multishoot(inf.Windows.uniform(2))
-    )
-    fit = inf.optsolve(problem, diagnostics=False)
-    assert problem.n_params > 1 and fit.info["hessian"] == "gauss-newton"
-
-
 def test_fitted_window_starts_solve_each_window_once_and_reach_the_single_shoot_rate():
     """Fitted starts of two windows with two observed frames each are solved once per window
-    per evaluation, and the fit ends at the rate of the single shoot."""
+    per evaluation; optsolve without an optimizer fits them with
+    NewtonTrustRegion(hessian="gauss-newton") and ends at the rate of the single shoot."""
     decay = decay_recipe("structural_window_solves")
     experiment = decay_experiment(decay, noise=NOISE)
     windows = inf.InferenceProblem(
@@ -129,6 +110,7 @@ def test_fitted_window_starts_solve_each_window_once_and_reach_the_single_shoot_
     assert windows.diagnostic_problem.trajectory_solves_per_eval == 2
     single = small_fit(inf.InferenceProblem(experiment, parameters=decay.rate))
     fit = small_fit(windows)
+    assert fit.info["hessian"] == "gauss-newton"
     # the continuity rows hold the window fit 1.25e-4 from the single shoot (0.601196 against
     # 0.601071); measured, workstation CPU 2026-10-28, pytest tests/contracts/test_structural_fitting.py
     np.testing.assert_allclose(fit[decay.rate], single[decay.rate], rtol=0.0, atol=5e-4)

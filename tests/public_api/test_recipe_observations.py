@@ -72,7 +72,7 @@ def _linear_means(domain, tag, value):
     return _observe(spec)[1]
 
 
-def test_the_lowered_problem_records_every_observable_and_observes_a_named_subset():
+def test_observables_are_recorded_and_a_spatial_or_boundary_mean_is_the_weighted_average():
     """``observables`` records each verb's kind, owner, read set, shape and dtype in
     declaration order; ``observe(names=)`` returns exactly the names asked and refuses an
     undeclared one. A spatial mean of a linear field is its volume average on a non-uniform

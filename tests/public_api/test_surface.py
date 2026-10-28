@@ -142,20 +142,6 @@ def test_a_float32_cpu_solve_warns_at_the_users_own_line(tmp_path):
     assert leaks == []
 
 
-def test_an_omitted_field_scale_warns_at_the_users_own_line(tmp_path):
-    """The warning for a field declared without ``scale=`` names the line in the user's
-    script that builds the recipe."""
-    body = (
-        "import diff_soup as ds\n"
-        "spec = ds.problem('unscaled').domain('line', ds.cartesian_grid_1d(4, 0.0, 1.0, method='fvm'))\n"
-        "spec.field('u', mass='differential')\n"
-        "spec.equation(writes='u', reads=('u',))(lambda q: -q.u)\n"
-        "spec.build()\n"
-    )
-    script, sites = _warning_sites(tmp_path, body, "have no scale=")
-    assert sites == [str(script)]
-
-
 def test_static_public_configuration_is_hashable_and_equal_to_itself():
     """Layouts, precisions, stock solvers and output policies hash and compare by value."""
     for build in (

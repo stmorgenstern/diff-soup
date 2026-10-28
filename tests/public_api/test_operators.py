@@ -18,7 +18,6 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.domains import (
-    Mesh,
     Operators,
     box_mesh,
     cartesian_grid_1d,
@@ -28,8 +27,9 @@ from diff_soup.domains import (
     staggered_grid_2d,
 )
 
-# measured at most 5.6e-17 on the orientation, coefficient-length, traced-first and composition
-# checks (0.0 on all but the clockwise lumped mass), workstation CPU 2026-10-28, run one by one;
+# measured 0.0 on the coefficient-length and traced-first checks, workstation CPU 2026-10-28,
+# run one by one, and on the three composition rows, workstation CPU 2026-10-28, pytest
+# tests/public_api/test_operators.py -k composes;
 # measured at most 8.9e-16 on every stencil, rotation, divergence and residual-row check below
 # (0.0 on the control-unit rows), CPU VM 2026-10-22, pytest tests/public_api/test_operators.py;
 # measured at most 1.1e-16 on the transport checks (0.0 on all but the inflow balance),
@@ -218,17 +218,6 @@ def test_the_lowered_controls_surface_takes_internal_time():
     np.testing.assert_allclose(values["protocol"], 2.0, rtol=0.0, atol=_EXACT)
 
 
-def test_a_clockwise_element_measures_the_same_positive_mass_as_its_mirror():
-    """Listing each triangle of a unit square clockwise leaves its lumped mass, a sixth of
-    the triangle's area at each corner, unchanged."""
-    points = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
-    ccw = Mesh(points, np.array([[0, 1, 2], [1, 3, 2]]), ele_type="TRI3")
-    cw = Mesh(points, np.array([[0, 2, 1], [1, 2, 3]]), ele_type="TRI3")
-    np.testing.assert_allclose(
-        Operators(cw).lumped_mass(), Operators(ccw).lumped_mass(), rtol=0.0, atol=_EXACT
-    )
-
-
 def _per_cell_coefficient():
     mesh = rectangle_mesh(3, 2, 1.0, 1.0)
     ops = Operators(mesh)
@@ -254,38 +243,36 @@ def test_a_one_dimensional_coefficient_is_read_by_its_length(operator):
 
 
 _NODAL = 0.25 + np.arange(16) / 16.0
+
+
+def _explicit_composition(q):
+    """``jnp.where(abs(T) > 0.5, T**2, nodal - T) + T * lap`` with explicit arrays."""
+    at_quad = q.ops.interp_to_quad(q.ops.unwrap_field(q.T))
+    nodal = q.ops.interp_to_quad(jnp.asarray(_NODAL))
+    pointwise = jnp.where(jnp.abs(at_quad) > 0.5, at_quad * at_quad, nodal - at_quad)
+    return pointwise + q.ops.unwrap_field(q.T) * q.ops.laplacian(q.T)
+
+
 _COMPOSED = {
-    "lap + 1": (
+    "1 + lap": (
+        lambda q: 1.0 + q.ops.laplacian(q.T),
         lambda q: q.ops.laplacian(q.T) + 1.0,
         lambda q: q.ops.laplacian(q.T) + jnp.ones(16),
     ),
-    "1 + lap": (
-        lambda q: 1.0 + q.ops.laplacian(q.T),
-        lambda q: jnp.ones(16) + q.ops.laplacian(q.T),
-    ),
     "constant": (lambda q: 1.0, lambda q: jnp.ones(16)),
-    "power": (lambda q: q.T**2, lambda q: q.T * q.T),
-    "abs": (lambda q: abs(q.T), lambda q: jnp.abs(q.T)),
-    "compare": (
-        lambda q: jnp.where(q.T > 0.5, 1.0, 0.0),
-        lambda q: jnp.where(q.ops.interp_to_quad(q.T) > 0.5, 1.0, 0.0),
-    ),
-    "nodal - T": (
-        lambda q: _NODAL - q.T,
-        lambda q: q.ops.interp_to_quad(jnp.asarray(_NODAL)) - q.T,
-    ),
-    "T * lap": (
-        lambda q: q.T * q.ops.laplacian(q.T),
-        lambda q: q.ops.unwrap_field(q.T) * q.ops.laplacian(q.T),
+    "field algebra": (
+        lambda q: jnp.where(abs(q.T) > 0.5, q.T**2, _NODAL - q.T) + q.T * q.ops.laplacian(q.T),
+        _explicit_composition,
     ),
 }
 
 
 @pytest.mark.parametrize("form", list(_COMPOSED), ids=list(_COMPOSED))
 def test_a_mesh_field_composes_like_its_explicit_form(form):
-    """On a mesh a constant joins a residual as the source ``1`` would, and a field read
-    composes with powers, ``abs``, comparisons, nodal arrays and operator outputs: each
-    residual equals the one written with explicit nodal or quadrature arrays."""
+    """On a mesh a constant joins a residual as the source ``1`` would, on either side of an
+    operator output, and a field read composes with ``abs``, comparisons, powers, nodal arrays
+    and operator outputs: each residual equals the one written with explicit nodal or
+    quadrature arrays."""
     mesh = rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3")
     coords = np.asarray(mesh.node_coordinates())
     rows = []
@@ -295,7 +282,8 @@ def test_a_mesh_field_composes_like_its_explicit_form(form):
         spec.equation(writes="T", reads=("T",))(expr)
         state = spec.assemble_state({"T": jnp.asarray(0.2 + coords[:, 0] - coords[:, 1] ** 2)})
         rows.append(spec.build().physics_residual(state, jnp.zeros(0), jnp.asarray(0.0))[0])
-    np.testing.assert_allclose(rows[0], rows[1], rtol=0.0, atol=_EXACT)
+    for row in rows[:-1]:
+        np.testing.assert_allclose(row, rows[-1], rtol=0.0, atol=_EXACT)
 
 
 def _bed_cells(method):

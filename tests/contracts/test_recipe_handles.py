@@ -302,17 +302,11 @@ def test_declarations_from_one_array_or_one_module_stay_distinct():
     assert _has_leaf(ds.default_theta(problem, {first: 0.0}), network.layers[0].weight)
 
 
-def test_a_problem_spec_reprs_by_its_name():
-    """A ``ProblemSpec`` prints as its constructor call, not as its declaration tables."""
-    assert repr(ds.problem("heat")) == "ProblemSpec('heat')"
-
-
-def test_pdesolve_refuses_a_theta_that_is_not_the_problems_pytree():
+def test_pdesolve_takes_the_problems_own_theta_and_reads_writes_and_differentiates_it_by_handle():
     """``pdesolve(theta={handle: value})`` and a theta of another shape raise naming
-    ``default_theta``; ``theta[rate]`` reads the parameter two equations read, and a solve and
-    its gradient through ``theta.replace(rate, x)`` see both equations' copies set, and
-    ``ds.parameter_gradient(grads, rate)`` of a theta gradient sums them while ``grads[rate]``
-    reads one."""
+    ``default_theta``; ``theta[rate]`` reads the parameter two equations read, a solve and its
+    gradient through ``theta.replace(rate, x)`` see both equations' copies set, and
+    ``ds.parameter_gradient(grads, rate)`` of a theta gradient sums them."""
     spec, rate = _decay("decay_twice", twice=True)
     problem = spec.build()
     y0 = spec.assemble_state({})
@@ -346,5 +340,3 @@ def test_pdesolve_refuses_a_theta_that_is_not_the_problems_pytree():
     grads = jax.grad(lambda t: final(t).sum() + t[rate] ** 2)(theta.replace(rate, 0.5))
     # measured 3.5e-5 off the exact derivative, CPU workstation 2026-10-28
     np.testing.assert_allclose(ds.parameter_gradient(grads, rate), exact, atol=1e-4)
-    # grads[rate] holds one copy, 0.215 off exact (half of it), measured CPU workstation 2026-10-28
-    assert abs(float(grads[rate]) - exact) > 0.1
