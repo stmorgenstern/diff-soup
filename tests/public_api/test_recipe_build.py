@@ -343,18 +343,22 @@ def test_sparse_jvp_groups_recover_a_tridiagonal_jacobian_exactly():
     np.testing.assert_array_equal(values, np.asarray(jax.jacfwd(residual)(state))[rows, cols])
 
 
-def _heat_end_state(domain, residual_form, coeff, condition=None):
-    """``T`` at ``t = 0.5`` of ``coeff T' = lap(T) + 1`` from ``sin(pi x) + 1``, written as the
-    residual ``coeff q.dt(T) - lap(T) - 1`` or as the right-hand side ``(lap(T) + 1) / coeff``,
-    with an optional condition at the last node."""
-    spec = ds.problem(f"heat_{residual_form}_{coeff}_{condition}").domain("d", domain)
+def _heat_end_state(domain, residual_form, coeff, condition=None, reaction=None):
+    """``T`` at ``t = 0.5`` of ``coeff T' = lap(T) + 1 - k T`` from ``sin(pi x) + 1``, written as
+    the residual ``coeff q.dt(T) - lap(T) - 1 + k q.T`` or as the right-hand side
+    ``(lap(T) + 1 - k q.T) / coeff``, with an optional reaction rate ``k`` and an optional
+    condition at the last node."""
+    spec = ds.problem(f"heat_{residual_form}_{coeff}_{condition}_{reaction}").domain("d", domain)
     spec.field("T", mass="differential", scale=1.0, init=lambda x, *_: jnp.sin(jnp.pi * x) + 1.0)
-    if residual_form:
-        spec.equation(writes="T", reads=("T",))(
-            lambda q: coeff * q.dt("T") - q.ops.laplacian(q.T) - 1.0
-        )
+    if residual_form and reaction is None:
+        rhs = lambda q: coeff * q.dt("T") - q.ops.laplacian(q.T) - 1.0  # noqa: E731
+    elif residual_form:
+        rhs = lambda q: coeff * q.dt("T") - q.ops.laplacian(q.T) - 1.0 + reaction * q.T  # noqa: E731
+    elif reaction is None:
+        rhs = lambda q: (q.ops.laplacian(q.T) + 1.0) / coeff  # noqa: E731
     else:
-        spec.equation(writes="T", reads=("T",))(lambda q: (q.ops.laplacian(q.T) + 1.0) / coeff)
+        rhs = lambda q: (q.ops.laplacian(q.T) + 1.0 - reaction * q.T) / coeff  # noqa: E731
+    spec.equation(writes="T", reads=("T",))(rhs)
     last = np.array([domain.num_nodes - 1])
     if condition == "flux":
         spec.bc.flux("T", node_indices=last, value=1.0)
@@ -372,20 +376,22 @@ def _heat_end_state(domain, residual_form, coeff, condition=None):
 
 
 @pytest.mark.parametrize(
-    "mesh",
+    ("mesh", "reaction"),
     [
-        lambda: interval_mesh(8, 0.0, 1.0),
-        lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"),
+        (lambda: interval_mesh(8, 0.0, 1.0), None),
+        (lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"), None),
+        (lambda: rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3"), 0.5),
     ],
-    ids=["line2", "tri3"],
+    ids=["line2", "tri3", "tri3-reaction"],
 )
-def test_the_residual_form_on_a_mesh_matches_the_right_hand_side_form(mesh):
-    """On a mesh, ``2 q.dt(T) - lap(T) - 1 = 0`` solves to the same state as
-    ``T' = (lap(T) + 1) / 2``: the time-derivative coefficient and every residual term count."""
+def test_the_residual_form_on_a_mesh_matches_the_right_hand_side_form(mesh, reaction):
+    """On a mesh, ``2 q.dt(T) - lap(T) - 1 (+ k q.T) = 0`` solves to the same state as
+    ``T' = (lap(T) + 1 (- k q.T)) / 2``: the time-derivative coefficient and every residual term
+    count, a field read at the quadrature points included."""
     domain = mesh()
-    residual = _heat_end_state(domain, residual_form=True, coeff=2.0)
-    explicit = _heat_end_state(domain, residual_form=False, coeff=2.0)
-    # measured 0.0 (line2) and 2.9e-15 (tri3), workstation CPU 2026-10-28,
+    residual = _heat_end_state(domain, residual_form=True, coeff=2.0, reaction=reaction)
+    explicit = _heat_end_state(domain, residual_form=False, coeff=2.0, reaction=reaction)
+    # measured 0.0 (line2), 2.9e-15 (tri3) and 2.1e-14 (tri3-reaction), workstation CPU 2026-10-28,
     # pytest tests/public_api/test_recipe_build.py::test_the_residual_form_on_a_mesh_matches_the_right_hand_side_form
     np.testing.assert_allclose(residual, explicit, atol=1e-12)
 

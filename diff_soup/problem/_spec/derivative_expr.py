@@ -379,6 +379,11 @@ class DerivativeSum(DerivativeExpr):
             )
         (size,) = sizes
         for r in residual_terms:
+            if np.ndim(r) >= 2:
+                # Values at a mesh's quadrature points (a quad-native field
+                # after arithmetic, ``(n_cells, n_q, ...)``): the residual
+                # finalizer integrates them to one value per node.
+                continue
             r_len = _static_len(r)
             if r_len not in (1, size):
                 raise ValueError(
