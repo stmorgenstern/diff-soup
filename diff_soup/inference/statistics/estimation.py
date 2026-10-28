@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import types
 from typing import Any
 
 import jax
@@ -10,7 +11,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._precision import cast_floating_leaves
-from diff_soup.inference.fitting.inference_problem import _is_structural_schema
+from diff_soup.inference.fitting._layout import resolve_point
+from diff_soup.inference.fitting.inference_problem import _MemoryCheckedHessian
 from diff_soup.inference.fitting.regularization import NoReg
 from diff_soup.inference.fitting.result import OptResult
 from diff_soup.inference.solvers.tangent import value_and_jacfwd
@@ -270,9 +272,10 @@ class EstimationProblem:
             trial_predicate: Optional callable ``x -> bool`` (JAX-traceable)
                 evaluated on every optimizer trial point before any residual or
                 PDE solve; a ``False`` rejects the trial without evaluating it.
-            start: Optional warm start, either a flat vector or a prior
-                :class:`~diff_soup.inference.fitting.result.OptResult` from the same
-                schema.
+            start: Optional warm start: a flat vector, a mapping from every fitted
+                handle to its value, or an
+                :class:`~diff_soup.inference.fitting.result.OptResult` of the same
+                parameter layout.
             layout: Optional device placement for the Study's child batch,
                 forwarded to :meth:`Study.compile_inference_problem`.
         """
@@ -310,9 +313,11 @@ class EstimationProblem:
         data_residual_jacobian = jax.jit(lambda x: value_and_jacfwd(data_r, x))
         data_loss_grad_hessian = problem.loss_grad_hessian_fn("auto")
 
-        @jax.jit
-        def observed_information(x):
-            return data_loss_grad_hessian(x)[2]
+        # Memory-checked once here, so the data Hessian's own check skips itself and the
+        # Hessian compiles once.
+        observed_information = _MemoryCheckedHessian(
+            lambda x: data_loss_grad_hessian(x)[2], tile="full"
+        )
 
         def negative_log_prior(x):
             total = jnp.zeros((), dtype=x.dtype)
@@ -324,24 +329,9 @@ class EstimationProblem:
 
         x0 = np.asarray(problem.x0)
         if start is not None:
-            start = start if isinstance(start, OptResult) else np.asarray(start).astype(dtype)
-            if isinstance(start, OptResult):
-                # A structural schema records one problem's own column layout, not
-                # the content of a declaration, so it is never comparable with a Study
-                # fingerprint; the shape check below is what validates such a start.
-                if start.parameter_schema is not None and not _is_structural_schema(
-                    start.parameter_schema
-                ):
-                    if start.parameter_schema.fingerprint != schema.fingerprint:
-                        raise ValueError(
-                            "EstimationProblem start OptResult carries parameter schema "
-                            f"fingerprint {start.parameter_schema.fingerprint!r}, but this "
-                            f"Study's schema fingerprint is {schema.fingerprint!r}. Pass a "
-                            "start produced from this Study, or a flat parameter vector."
-                        )
-                x0 = np.asarray(start.params).astype(dtype)
-            else:
-                x0 = np.asarray(start)
+            view = types.SimpleNamespace(parameter_schema=schema, x0=x0)
+            x0 = np.asarray(resolve_point(view, start, where="EstimationProblem start"))
+            x0 = x0.astype(dtype)
             if x0.shape != np.asarray(problem.x0).shape:
                 raise ValueError(
                     f"EstimationProblem start has shape {x0.shape}; expected "
@@ -489,7 +479,9 @@ class EstimationProblem:
                     hessian + prior_hessian,
                 )
 
-            cached = loss_grad_hessian
+            # One memory check, here, compiles the Hessian once: the data Hessian's own
+            # check skips itself inside this one.
+            cached = _MemoryCheckedHessian(loss_grad_hessian, tile="full")
             self._loss_grad_hessian_fns[resolved] = cached
         return cached
 

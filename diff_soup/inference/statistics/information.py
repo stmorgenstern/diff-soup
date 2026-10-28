@@ -40,7 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from diff_soup.inference.fitting.inference_problem import _is_structural_schema
+from diff_soup.inference.fitting._layout import resolve_point
 from diff_soup.inference.fitting.result import OptResult
 from diff_soup.inference.statistics.estimation import MAP, EstimationProblem
 from diff_soup.inference.statistics.experiment import (
@@ -501,45 +501,15 @@ def _coordinate_names(problem: EstimationProblem) -> tuple[str, ...]:
 
 
 def _point(problem: EstimationProblem, at: Any) -> jax.Array:
-    """Resolve an explicit vector or same-schema fit result."""
+    """Resolve a flat vector, a mapping from handle to value, or a fit of the same layout."""
     if at is None:
         return jnp.asarray(problem.x0)
-    if isinstance(at, OptResult):
-        schema = at.parameter_schema
-        if schema is None:
-            raise ValueError(
-                "UQ analysis needs an OptResult carrying a parameter schema, or a flat "
-                "parameter vector; this OptResult carries neither."
-            )
-        # A structural schema records one problem's own column layout rather than
-        # the content of a declaration, so it is never comparable with a Study
-        # fingerprint; the shape check below is what validates such a point.
-        if (
-            not _is_structural_schema(schema)
-            and schema.fingerprint != problem.parameter_schema.fingerprint
-        ):
-            raise ValueError(
-                f"UQ analysis OptResult carries parameter schema fingerprint "
-                f"{schema.fingerprint!r}, but this problem's schema fingerprint is "
-                f"{problem.parameter_schema.fingerprint!r}."
-            )
-        at = at.params
-    if isinstance(at, Mapping):
-        point = jnp.asarray(problem.x0)
-        assigned = set()
-        for handle, value in at.items():
-            entry = problem.parameter_schema.entry(handle)
-            assigned.add(entry.handle.identity)
-            for occurrence in entry.occurrences:
-                block = value[occurrence.owner] if occurrence.owner is not None else value
-                block = jnp.asarray(block).reshape(-1)
-                if block.size != entry.size:
-                    raise ValueError(f"point for {entry.handle.name!r} needs {entry.size} values.")
-                point = point.at[jnp.asarray(occurrence.columns)].set(block)
-        if assigned != {entry.handle.identity for entry in problem.parameter_schema.entries}:
-            raise ValueError("an analysis point requires a value for every fitted handle.")
-        return point
-    point = jnp.asarray(at)
+    if isinstance(at, OptResult) and at.parameter_schema is None:
+        raise ValueError(
+            "UQ analysis needs an OptResult carrying a parameter schema, or a flat "
+            "parameter vector such as fit.params; this OptResult carries no schema."
+        )
+    point = jnp.asarray(resolve_point(problem, at, where="UQ analysis"))
     if point.shape != problem.x0.shape:
         raise ValueError(f"UQ analysis point has shape {point.shape}; expected {problem.x0.shape}.")
     return point

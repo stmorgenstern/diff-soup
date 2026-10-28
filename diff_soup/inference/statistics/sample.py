@@ -22,8 +22,8 @@ normalized log posterior of a data-bearing
 Every [LogDensity][] can audit its own gradient:
 [LogDensity.verify_gradient][] compares the stored gradient against
 Richardson-extrapolated central differences and records a
-[GradientCheck][]; gradient-based samplers gate on
-[LogDensity.gradient_verified][].
+[GradientCheck][] whose verdict is passed, failed or inconclusive; NUTS
+refuses a failed one.
 
 [whitening][] builds the affine [WhiteningTransform][] that maps a
 unit-Gaussian coordinate ``w`` to the parameter coordinate of a proper
@@ -63,6 +63,7 @@ from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._warnings import warn_user
 from diff_soup.inference.data.deferred import DeferredValues
 from diff_soup.inference.solvers.tangent import deferred_value_and_grad
 from diff_soup.inference.statistics.experiment import _channel_likelihood_view
@@ -90,33 +91,40 @@ GRADIENT_MODES = ("forward", "reverse", None)
 _REVERSE_GATE_RTOL = 1e-6
 
 
+#: A point is too close to a stationary point to audit when the gradient norm is below this
+#: fraction of the gradient norm one standard deviation away (``curvature_scale``).
+_STATIONARY_FRACTION = 0.1
+
+#: An audit is inconclusive when the probe's own noise is at least this fraction of the
+#: gradient norm.
+_NOISE_FRACTION = 0.5
+
+_GRADIENT_VERDICTS = ("passed", "failed", "inconclusive")
+
+
 @dataclasses.dataclass(frozen=True)
 class GradientCheck:
-    """The recorded outcome of one finite-difference gradient audit.
+    """The outcome of one finite-difference audit of a target's gradient.
 
-    The pass criterion is the whole-vector relative disagreement
-    ``norm_rel_error`` — the measure a gradient consumer actually feels
-    (proposals and optimizer steps take the gradient as a vector, so a small
-    deviation on a component that is tiny next to the dominant ones cannot
-    change behavior). The per-component ``max_rel_error`` is kept as a
-    diagnostic: it exposes which directions the finite-difference probe and
-    the stored gradient disagree on, even when that disagreement is too
-    small in vector terms to matter.
+    `verdict` is `"passed"` when the vector relative error, less the probe's own noise, is
+    within `rtol`, and `"failed"` when it is not. It is `"inconclusive"` when that error
+    means nothing: the probe's noise is half the gradient norm or more, or the point is so
+    close to a stationary point that the gradient is below a tenth of `curvature_scale`.
 
     Attributes:
         at: The point the gradient was checked at.
-        gradient: The stored (AD) gradient at ``at``.
+        gradient: The target's gradient at `at`.
         fd_gradient: The Richardson-extrapolated central-difference gradient.
-        fd_spread: Per-component disagreement between the two central-
-            difference step levels — the probe's own resolving power; gaps
-            inside it cannot be attributed to the gradient.
-        norm_rel_error: ``‖gradient − fd‖ / max(‖gradient‖, ‖fd‖)`` — the
-            quantity ``passed`` is judged on.
-        max_rel_error: Largest per-component relative disagreement
-            (diagnostic only).
+        fd_spread: The per-component difference between the two step sizes, the probe's
+            resolution.
+        norm_rel_error: `|gradient - fd_gradient| / max(|gradient|, |fd_gradient|)`.
+        max_rel_error: The largest per-component relative difference.
         rtol: The tolerance the check was run against.
-        passed: Whether the vector-level disagreement, less the probe's
-            noise allowance, is within ``rtol``.
+        passed: Whether `verdict` is `"passed"`.
+        cosine: The cosine of the angle between `gradient` and `fd_gradient`.
+        curvature_scale: The typical gradient norm one standard deviation from a
+            stationary point, from the diagonal curvature at `at`.
+        verdict: `"passed"`, `"failed"` or `"inconclusive"`.
     """
 
     at: Array
@@ -127,6 +135,27 @@ class GradientCheck:
     max_rel_error: float
     rtol: float
     passed: bool
+    cosine: float = float("nan")
+    curvature_scale: float = float("nan")
+    verdict: str = ""
+
+    def __post_init__(self):
+        """Fill `verdict` from `passed` for a check built without one."""
+        if not self.verdict:
+            object.__setattr__(self, "verdict", "passed" if self.passed else "failed")
+        if self.verdict not in _GRADIENT_VERDICTS:
+            raise ValueError(f"GradientCheck verdict must be one of {_GRADIENT_VERDICTS}.")
+
+    def describe(self, coordinate: str = "z") -> str:
+        """The audit point and its numbers, as one line of text."""
+        point = np.array2string(np.asarray(self.at), precision=4, threshold=8, separator=", ")
+        return (
+            f"at {coordinate}={point}: vector relative error {self.norm_rel_error:.3e} "
+            f"against tolerance {self.rtol:.1e}, gradient norm "
+            f"{float(np.linalg.norm(np.asarray(self.gradient))):.3e}, finite-difference norm "
+            f"{float(np.linalg.norm(np.asarray(self.fd_gradient))):.3e}, cosine "
+            f"{self.cosine:+.3f}, curvature scale {self.curvature_scale:.3e}"
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -223,31 +252,22 @@ class LogDensity:
         return self.gradient_check is not None and self.gradient_check.passed
 
     def verify_gradient(self, at: Any = None, rtol: float = 1e-3) -> GradientCheck:
-        """Audit the stored gradient against central finite differences.
+        """Audit the gradient against central finite differences, and record the check.
 
-        Each component is probed with Richardson-extrapolated central
-        differences (two shrinking steps, so smooth truncation error cancels
-        to fourth order). The pass criterion is vector-level: the norm of
-        the disagreement, less the probe's own noise allowance (the
-        disagreement between the two step levels), must be within ``rtol``
-        of the gradient norm. That is the measure a gradient consumer
-        feels — a percent-level deviation on a component that is tiny next
-        to the dominant ones cannot change a proposal or a step, and
-        finite differences of a numerically solved density carry solver
-        truncation noise that is not gradient error. The per-component
-        relative disagreement is kept on the check as a diagnostic. The
-        resulting [GradientCheck][] is recorded on the target and
-        returned.
+        Each component is probed at two step sizes and Richardson-extrapolated. The check
+        judges the vector relative error, less the probe's noise, against `rtol`. At or
+        near a stationary point, such as a MAP fit, a relative error means nothing and the
+        verdict is `"inconclusive"`; audit away from the mode instead.
 
         Args:
-            at: The point to audit at; defaults to [init][].
-            rtol: Largest acceptable vector-relative disagreement.
+            at: The point to audit at, in the target's coordinate; `init` by default.
+            rtol: The largest acceptable vector relative error.
 
         Returns:
-            The recorded [GradientCheck][].
+            The recorded [`GradientCheck`][diff_soup.inference.statistics.GradientCheck].
 
         Raises:
-            ValueError: If the target has no gradient (``gradient=None``).
+            ValueError: If the target was built with `gradient=None`.
         """
         if self._grad is None:
             raise ValueError(
@@ -261,22 +281,28 @@ class LogDensity:
         def scalar(z: np.ndarray) -> float:
             return float(self._fn(jnp.asarray(z)))
 
+        # The value from the same function the differences evaluate, for the curvature.
+        f0 = scalar(z0)
+
+        def pair(j: int, step: float) -> tuple:
+            zp = z0.copy()
+            zp[j] += step
+            zm = z0.copy()
+            zm[j] -= step
+            return scalar(zp), scalar(zm)
+
         fd = np.zeros_like(z0)
         spread = np.zeros_like(z0)
+        curvature = np.zeros_like(z0)
         for j in range(z0.size):
             h = 1e-4 * max(1.0, abs(float(z0[j])))
-
-            def central(step: float, j: int = j) -> float:
-                zp = z0.copy()
-                zp[j] += step
-                zm = z0.copy()
-                zm[j] -= step
-                return (scalar(zp) - scalar(zm)) / (2.0 * step)
-
-            coarse = central(h)
-            fine = central(0.5 * h)
+            plus, minus = pair(j, h)
+            coarse = (plus - minus) / (2.0 * h)
+            fine_plus, fine_minus = pair(j, 0.5 * h)
+            fine = (fine_plus - fine_minus) / h
             fd[j] = (4.0 * fine - coarse) / 3.0
             spread[j] = abs(fine - coarse)
+            curvature[j] = abs(plus + minus - 2.0 * f0) / (h * h)
 
         scale = max(
             float(np.max(np.abs(grad), initial=0.0)), float(np.max(np.abs(fd), initial=0.0))
@@ -284,13 +310,26 @@ class LogDensity:
         denom = np.maximum(np.maximum(np.abs(grad), np.abs(fd)), max(1e-8 * scale, 1e-300))
         max_rel_error = float(np.max(np.abs(grad - fd) / denom, initial=0.0))
 
-        norm_scale = max(float(np.linalg.norm(grad)), float(np.linalg.norm(fd)), 1e-300)
+        grad_norm = float(np.linalg.norm(grad))
+        fd_norm = float(np.linalg.norm(fd))
+        norm_scale = max(grad_norm, fd_norm, 1e-300)
         norm_rel_error = float(np.linalg.norm(grad - fd)) / norm_scale
-        # Gap the probe itself cannot resolve: the Richardson-level spread,
-        # judged at the same 50x factor the library's finite-difference
-        # contracts use.
+        cosine = float(grad @ fd) / max(grad_norm * fd_norm, 1e-300)
+        # The gap the probe cannot resolve: the spread of its two step sizes, at the 50x
+        # factor of the library's finite-difference contracts.
         noise_allowance = 50.0 * float(np.linalg.norm(spread)) / norm_scale
-        passed = norm_rel_error <= float(rtol) + noise_allowance
+        # For a Gaussian, the expected squared gradient one standard deviation from the
+        # mode along a random direction is the mean diagonal curvature.
+        curvature_scale = float(np.sqrt(np.mean(curvature))) if z0.size else 0.0
+        if (
+            noise_allowance >= _NOISE_FRACTION
+            or max(grad_norm, fd_norm) < _STATIONARY_FRACTION * curvature_scale
+        ):
+            verdict = "inconclusive"
+        elif norm_rel_error <= float(rtol) + noise_allowance:
+            verdict = "passed"
+        else:
+            verdict = "failed"
 
         check = GradientCheck(
             at=jnp.asarray(z0),
@@ -300,7 +339,10 @@ class LogDensity:
             norm_rel_error=norm_rel_error,
             max_rel_error=max_rel_error,
             rtol=float(rtol),
-            passed=bool(passed),
+            passed=verdict == "passed",
+            cosine=cosine,
+            curvature_scale=curvature_scale,
+            verdict=verdict,
         )
         object.__setattr__(self, "gradient_check", check)
         return check
@@ -934,8 +976,8 @@ def sample(
         problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] with a `MAP`
             objective, or a target from `posterior_target`, which takes no `fit`.
         fit: The `MAP` fit the chains start from.
-        kernel: `"nuts"` for the No-U-Turn sampler, or `"rmh"` for random-walk Metropolis, which
-            needs no gradient.
+        kernel: `"nuts"` for the No-U-Turn sampler, which first audits the gradient at a perturbed
+            chain start, or `"rmh"` for random-walk Metropolis, which needs no gradient.
         chains: The number of chains.
         draws: The number of draws kept per chain.
         warmup: The number of steps before the kept draws, at least 1 for NUTS, which adapts
@@ -1016,6 +1058,60 @@ def sample(
     )
 
 
+#: The audit [sample][] runs before NUTS asks this many times the solvers' largest ``rtol``
+#: of the gradient, within the bounds below. A forward-sensitivity gradient and finite
+#: differences of an adaptive solve differ by about ten times the solver tolerance.
+_AUDIT_RTOL_PER_SOLVER_RTOL = 100.0
+_AUDIT_RTOL_BOUNDS = (1e-3, 1e-1)
+
+
+def _audit_rtol(problem: Any) -> float:
+    """The audit tolerance for a target of ``problem``, scaled with its solvers' ``rtol``."""
+    tolerances = []
+    for experiment in getattr(getattr(problem, "study", None), "experiments", ()):
+        rtol = getattr(getattr(experiment, "solver", None), "rtol", None)
+        if rtol is not None:
+            tolerances.append(float(np.max(np.asarray(rtol, dtype=np.float64))))
+    low, high = _AUDIT_RTOL_BOUNDS
+    if not tolerances:
+        return low
+    return float(min(high, max(low, _AUDIT_RTOL_PER_SOLVER_RTOL * max(tolerances))))
+
+
+def _audit_chain_start(
+    logdensity: LogDensity,
+    key: Array,
+    whitening: Optional["WhiteningTransform"],
+    init: Any,
+) -> GradientCheck:
+    """Audit the gradient at a perturbed chain start, and once more if inconclusive.
+
+    The start moves one standard deviation along a random direction of the whitened
+    coordinate, or ``_CHAIN_JITTER`` of the target's coordinate without whitening. The
+    directions come from ``key`` folded apart from the chains' own keys.
+    """
+    center = jnp.asarray(logdensity.init if init is None else init)
+    rtol = _audit_rtol(logdensity._problem)
+    check = None
+    for attempt in range(2):
+        direction = jax.random.normal(
+            jax.random.fold_in(key, _AUDIT_STREAM + attempt), center.shape, dtype=center.dtype
+        )
+        direction = direction / jnp.linalg.norm(direction)
+        if whitening is None:
+            point = center + _CHAIN_JITTER * direction
+        else:
+            point = whitening.forward(whitening.inverse(center) + direction)
+        check = logdensity.verify_gradient(at=point, rtol=rtol)
+        if check.verdict != "inconclusive":
+            break
+    return check
+
+
+#: The stream ``key`` is folded into for the audit directions, apart from the chains'.
+_AUDIT_STREAM = 7919
+
+
 def _sample_target(
     logdensity: LogDensity,
     *,
@@ -1038,11 +1134,13 @@ def _sample_target(
     ``2.38 / sqrt(dim)``, the optimal scaling for a unit-covariance Gaussian:
     pass ``whitening=`` so the chains run where the target really has unit
     scale, or leave it out only for targets that are already roughly unit
-    scale. ``"nuts"`` additionally needs a trustworthy gradient: it is
-    admitted only once the target's gradient audit
-    ([LogDensity.verify_gradient][]) has passed — when no audit is stored
-    yet it is run here once — and the sampler then consumes the stored
-    (audited) gradient itself. NUTS step size and diagonal mass matrix come
+    scale. ``"nuts"`` also needs a gradient that agrees with finite
+    differences. Without a stored passed or failed audit, the gradient is
+    audited ([LogDensity.verify_gradient][]) at a chain start one standard
+    deviation from the initial point, and at a second one if that is
+    inconclusive, against a tolerance scaled with the solvers' ``rtol``. A
+    failed audit refuses NUTS and an inconclusive one warns. The sampler
+    then uses the target's stored gradient. NUTS step size and diagonal mass matrix come
     from blackjax window adaptation.
 
     Warmup: ``num_warmup`` transitions per chain are discarded for
@@ -1117,7 +1215,7 @@ def _sample_target(
             of range, ``chain_map="devices"`` was asked for a chain count that
             is not a multiple of the local device count, or ``kernel="nuts"``
             was requested for a target whose gradient audit failed or that has
-            no gradient at all — ``kernel="rmh"`` needs no gradient.
+            no gradient at all.
         TypeError: If ``whitening`` is not a [WhiteningTransform][].
         ConfigurationError: If ``chain_map="devices"`` runs on two or more
             local devices and an experiment of the target's problem solves
@@ -1167,16 +1265,21 @@ def _sample_target(
             raise ValueError(
                 "sample kernel='nuts' requires a target with a gradient; gradient=None supports kernel='rmh'."
             )
-        if logdensity.gradient_check is None:
-            logdensity.verify_gradient()
-        if not logdensity.gradient_verified:
-            check = logdensity.gradient_check
+        check = logdensity.gradient_check
+        if check is None or check.verdict == "inconclusive":
+            check = _audit_chain_start(logdensity, key, whitening, init)
+        if check.verdict == "failed":
             raise ValueError(
-                "sample: kernel='nuts' is admitted only after a passing gradient "
-                f"audit, but the recorded audit failed (vector relative error "
-                f"{check.norm_rel_error:.3e} against tolerance {check.rtol:.1e}). "
-                "Fix the target's gradient before using NUTS, or use "
-                "kernel='rmh', which needs no gradient."
+                "sample: kernel='nuts' needs a gradient that agrees with finite differences, "
+                f"and the audit failed {check.describe(logdensity._coordinate)}. Fix the "
+                "target's gradient, or use kernel='rmh', which needs no gradient."
+            )
+        if check.verdict == "inconclusive":
+            warn_user(
+                "sample: the gradient audit was inconclusive at two chain starts, so NUTS "
+                f"runs on an unaudited gradient; the last audit was "
+                f"{check.describe(logdensity._coordinate)}.",
+                UserWarning,
             )
 
     import blackjax

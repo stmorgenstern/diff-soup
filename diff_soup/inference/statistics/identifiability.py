@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.fitting.inference_problem import _is_structural_schema
+from diff_soup.inference.fitting._layout import require_layout
 from diff_soup.inference.fitting.result import OptResult
 from diff_soup.inference.statistics.estimation import EstimationProblem
 from diff_soup.inference.statistics.measurement import require_likelihoods
@@ -133,51 +133,16 @@ def _schema_coordinates(schema: Any, n_params: int) -> tuple[IdentifiabilityCoor
     return tuple(by_column)  # type: ignore[arg-type]
 
 
-def _schema_signature(schema: Any) -> tuple:
-    """Return the handle/owner/column structure a fingerprint is meant to label."""
-    return tuple(
-        (
-            entry.handle.identity,
-            int(entry.size),
-            tuple(
-                (occurrence.owner, tuple(int(column) for column in occurrence.columns))
-                for occurrence in entry.occurrences
-            ),
-        )
-        for entry in schema.entries
-    )
-
-
 def _require_problem_schema(problem: Any, schema: Any, *, where: str) -> None:
-    """Require a fit schema that labels this problem's own coordinates.
+    """Require a fit whose columns hold the same handles and owners as ``problem``'s.
 
-    A structural schema records one problem's own handle-to-column layout
-    rather than the content of a declaration, so its fingerprint is never
-    comparable with a Study fingerprint. The handle/owner/column structure is
-    what validates such a schema; two declaration fingerprints are compared
-    directly.
-
-    Args:
-        problem: The estimation problem the fit is being reused on.
-        schema: The fit's parameter schema.
-        where: The verb name the message speaks for.
+    The fit is only a point here, so a fit of the same layout under another solver
+    setting, data set or starting value is accepted.
 
     Raises:
-        ValueError: If the two schemas label different structures, or two
-            declaration fingerprints disagree.
+        ValueError: If the two layouts differ.
     """
-    problem_schema = problem.parameter_schema
-    if _schema_signature(schema) != _schema_signature(problem_schema):
-        raise ValueError(
-            f"{where}: OptResult labels a different handle/owner/column structure "
-            "than this problem; pass a fit produced from this problem."
-        )
-    if not _is_structural_schema(schema) and schema.fingerprint != problem_schema.fingerprint:
-        raise ValueError(
-            f"{where}: OptResult carries parameter schema fingerprint "
-            f"{schema.fingerprint!r}, but this problem's schema fingerprint is "
-            f"{problem_schema.fingerprint!r}."
-        )
+    require_layout(problem, schema, where=where)
 
 
 def _scale_block(value: Any, size: int, *, label: str) -> np.ndarray:
@@ -381,9 +346,6 @@ def identifiability(
             f"identifiability: fit objective is {type(fit.objective).__name__!r}, but the "
             f"problem objective is {expected_objective!r}."
         )
-    fit_fingerprint = dict(fit.info).get("uq", {}).get("study_fingerprint")
-    if fit_fingerprint is not None and fit_fingerprint != problem.study.fingerprint:
-        raise ValueError("identifiability: OptResult Study provenance does not match the problem.")
     if int(fit.n_failed_segments) != 0:
         raise ValueError(
             "identifiability refuses a fit with failed forward-solve segments; "

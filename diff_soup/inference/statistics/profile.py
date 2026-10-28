@@ -914,7 +914,7 @@ def _profile_engine(
 
 
 def _validate_fit(problem: EstimationProblem, fit: OptResult) -> None:
-    """Require the exact Study/schema/objective that produced ``fit``."""
+    """Require a converged fit of this problem's parameter layout and objective."""
     if fit.parameter_schema is None:
         raise ValueError(
             "profile requires an OptResult with handle-based parameter schema "
@@ -929,9 +929,6 @@ def _validate_fit(problem: EstimationProblem, fit: OptResult) -> None:
             f"profile: fit objective is {type(fit.objective).__name__!r}, but the problem "
             f"objective is {expected_objective!r}."
         )
-    fit_fingerprint = dict(fit.info).get("uq", {}).get("study_fingerprint")
-    if fit_fingerprint is not None and fit_fingerprint != problem.study.fingerprint:
-        raise ValueError("profile: OptResult Study provenance does not match the problem.")
     if int(fit.n_failed_segments) != 0:
         raise ValueError(
             "profile refuses a fit with failed forward-solve segments; failed "

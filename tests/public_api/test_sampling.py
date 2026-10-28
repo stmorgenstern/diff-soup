@@ -73,6 +73,53 @@ def test_predict_returns_bands_from_a_fit_and_from_draws(sampled):
     np.testing.assert_allclose(noisy["mean"].sd ** 2 - latent["mean"].sd ** 2, 0.02**2, rtol=1e-9)
 
 
+def test_a_fit_at_one_solver_tolerance_starts_the_posterior_at_another(sampled):
+    """posterior_target(problem, fit) takes a fit of the same recipe solved at another tolerance."""
+    decay, problem, fit, _ = sampled
+    # The solver tolerance under test, not a bound: measured, 1.0.0 refused this start with
+    # a schema fingerprint ValueError, CPU workstation 2026-10-28, bugfix/we1fix/m.py
+    coarse = inf.InferenceProblem(
+        decay_experiment(decay, noise=NOISE, rtol=1e-4, atol=1e-4),
+        parameters=decay.rate,
+        objective=inf.MAP(),
+    )
+    own = inf.statistics.posterior_target(problem, fit)
+    np.testing.assert_array_equal(inf.statistics.posterior_target(coarse, fit).init, own.init)
+
+
+def test_the_gradient_audit_at_the_map_is_inconclusive():
+    """At an unbounded MAP the gradient is noise, so the audit neither passes nor fails."""
+    decay = decay_recipe(
+        "sampling_stationary", rate_bounds=None, rate_prior=inf.NormalPrior(mean=0.5, scale=0.3)
+    )
+    problem = inf.InferenceProblem(
+        decay_experiment(decay, noise=NOISE), parameters=decay.rate, objective=inf.MAP()
+    )
+    fit = small_fit(problem, inf.LevenbergMarquardt(max_steps=30))
+    # measured norm_rel_error 0.973 at the MAP, which 1.0.0 reported as passed, CPU
+    # workstation 2026-10-28, bugfix/we1fix/m.py
+    check = inf.statistics.posterior_target(problem, fit).verify_gradient()
+    assert not check.passed and check.verdict == "inconclusive"
+
+
+def test_nuts_samples_a_fit_solved_at_a_loose_tolerance():
+    """sample(problem, fit, kernel="nuts") runs on a fit whose solver tolerance is 1e-4."""
+    decay = decay_recipe("sampling_loose", rate_prior=inf.NormalPrior(mean=0.5, scale=0.3))
+    # 1.0.0 audited at the MAP and refused at 9.1e-3 against 1e-3; the audit at a chain
+    # start passes at 1.5e-3 against 1e-2, CPU workstation 2026-10-28, bugfix/we1fix/m3.py
+    problem = inf.InferenceProblem(
+        # The solver tolerance under test, not a bound (measured effect above)
+        decay_experiment(decay, noise=NOISE, rtol=1e-4, atol=1e-4),
+        parameters=decay.rate,
+        objective=inf.MAP(),
+    )
+    fit = small_fit(problem, inf.LevenbergMarquardt(max_steps=30))
+    draws = inf.sample(
+        problem, fit, kernel="nuts", key=jax.random.key(3), chains=1, draws=5, warmup=5
+    )
+    assert draws[decay.rate].shape == (1, 5) and bool(jnp.all(jnp.isfinite(draws.values)))
+
+
 @pytest.mark.requires_cudss
 def test_sample_runs_on_the_cudss_backend():
     """A problem solved with cuDSS samples in one call like the dense one."""

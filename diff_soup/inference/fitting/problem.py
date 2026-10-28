@@ -10,7 +10,6 @@ import math
 import os
 import time
 import types
-import warnings
 import weakref
 from typing import Any, NamedTuple
 
@@ -19,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._warnings import warn_user
 from diff_soup.inference.engine import _batched, _transport
 from diff_soup.inference.engine._ledger import Ledger
 from diff_soup.inference.engine._levels import (
@@ -221,18 +221,27 @@ class InferenceProblem(EstimationProblem):
         return record
 
     def with_start(self, start: Any) -> InferenceProblem:
-        """Reuse this compiled problem with a new fitted-parameter starting point."""
-        import numpy as np
+        """This problem, compiled once, started at another point.
 
-        schema = getattr(start, "parameter_schema", None)
-        if schema is not None and not schema.fingerprint.startswith("structural:"):
-            if schema.fingerprint != self.parameter_schema.fingerprint:
-                raise ValueError(
-                    "InferenceProblem start carries a different parameter schema fingerprint."
-                )
-        values = np.asarray(getattr(start, "params", start))
+        Args:
+            start: A flat vector in this problem's column order, a mapping from every fitted
+                handle to its value, or an `OptResult` whose columns hold the same handles.
+                A fit under another solver tolerance or starting value is accepted.
+
+        Returns:
+            The problem with `x0` set to `start`.
+
+        Raises:
+            ValueError: If `start` has another parameter layout or shape.
+        """
+        from diff_soup.inference.fitting._layout import resolve_point
+
+        values = np.asarray(resolve_point(self, start, where="InferenceProblem.with_start"))
         if values.shape != self.x0.shape:
-            raise ValueError(f"start has shape {values.shape}; expected {self.x0.shape}.")
+            raise ValueError(
+                f"InferenceProblem.with_start: start has shape {values.shape}; expected "
+                f"{self.x0.shape}."
+            )
         result = copy.copy(self)
         object.__setattr__(result, "_x0", values)
         return result
@@ -574,11 +583,10 @@ class LoweredStudy(InferenceProblem):
             )
         _RUNS.append(True)
         if device is not None:
-            warnings.warn(
+            warn_user(
                 f"device={device!r} is ignored in a run of {world.size} processes: each process "
                 "evaluates its lanes on its one visible device, jax.devices()[0].",
                 UserWarning,
-                stacklevel=4,
             )
         transport = _transport.Transport(world)
         plan = build_plan(self.study, joint, chunk=chunk, device=None)
