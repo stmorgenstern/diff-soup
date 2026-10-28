@@ -1625,11 +1625,10 @@ class DecisionWindowBuild:
             ranks.append(rank)
             if rank < n_state:
                 notes.append(
-                    f"optsolve: window {w} observation block is rank-deficient "
-                    f"({rank}/{n_state}): the window state is "
-                    "under-determined by the observable alone (expected for "
-                    "distribution / marginal observables). The continuity rows + "
-                    "manifold init make it observable through the dynamics."
+                    f"optsolve: the data inside window {w} determine {rank} of its "
+                    f"{n_state} start values; the continuity rows and the solve at the "
+                    "starting parameters hold the rest, so the fitted window start stays "
+                    "near that solve. Expected with few probes or integral observables."
                 )
 
         # Continuity-defect at the solution.  The design's WRMS in literal

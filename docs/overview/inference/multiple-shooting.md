@@ -84,7 +84,11 @@ result.diagnostics.continuity_defect_wrms   # one defect per window, in state un
 ```
 
 The window starts are initialized from one solve at the starting
-parameters. `result.window_states` holds their fitted values, and
+parameters. With few probes of a large state, the data inside a window
+determine only some of its start values; the rest are held by the
+continuity rows and stay near that first solve, so multiple shooting does
+not by itself rescue a start the single shot cannot. `result.window_states`
+holds their fitted values, and
 `result.params` leads with the parameters. For a DAE, only the
 differential part of the state is fitted per window and the algebraic
 part is recovered from it
