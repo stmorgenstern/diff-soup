@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1 (unreleased)
+## 1.1.0 (unreleased)
 
 Fixes and additions from the first round of tutorials written against 1.0.0. Entry ids refer to the
 issue ledger of that effort.
@@ -122,7 +122,7 @@ issue ledger of that effort.
 ### Planned for the next release
 
 - Explicit parameters: `theta` as `{"p": {name: array}, "fn": {name: module}}`, a public view over the
-  1.0.1 key-path table, with a design document first (private channel for the non-parameter arrays,
+  1.1.0 key-path table, with a design document first (private channel for the non-parameter arrays,
   names for family members and replicates, migration of saved fits, semver).
 - A tiled Gauss-Newton Jacobian for multiple shooting and Levenberg-Marquardt; a refinement target for
   `Precision.fp32_ir`; boundary facets on TET10, HEX20 and HEX27; the WIRE coordinate network.
