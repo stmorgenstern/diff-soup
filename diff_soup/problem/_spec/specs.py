@@ -60,6 +60,9 @@ class FieldSpec:
     # (``q.<name>`` returns a plain array — the default behaviour).
     quad: bool = False
 
+    def __repr__(self) -> str:
+        return f"FieldSpec({self.name!r}, mass={self.mass!r})"
+
 
 @dataclass(frozen=True)
 class GlobalVarSpec:
@@ -83,6 +86,9 @@ class GlobalVarSpec:
     initial: Any = 0.0
     mass: Literal["algebraic", "differential"] = "algebraic"
     scale: Optional[float] = None
+
+    def __repr__(self) -> str:
+        return f"GlobalVarSpec({self.name!r}, mass={self.mass!r})"
 
 
 @dataclass(frozen=True, eq=False)
@@ -124,6 +130,9 @@ class ParamSpec:
         """Compare declaration identity without invoking array equality."""
         return isinstance(other, ParamSpec) and self.identity == other.identity
 
+    def __repr__(self) -> str:
+        return f"ParamSpec({self.name!r}, learnable={self.learnable!r})"
+
 
 @dataclass(frozen=True, eq=False)
 class FunctionSpec:
@@ -162,6 +171,9 @@ class FunctionSpec:
     def __eq__(self, other: object) -> bool:
         """Compare declaration identity without comparing callable leaves."""
         return isinstance(other, FunctionSpec) and self.identity == other.identity
+
+    def __repr__(self) -> str:
+        return f"FunctionSpec({self.name!r}, learnable={self.learnable!r})"
 
 
 @dataclass(frozen=True)
