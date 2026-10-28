@@ -107,7 +107,7 @@ def _warning_sites(tmp_path, body, pattern):
 
 def test_a_float32_cpu_solve_warns_at_the_users_own_line(tmp_path):
     """The two float32 warnings of a solve name the user's script, not a diff_soup, equinox or
-    jax file."""
+    jax file, and a float32 grid solve leaks no float64 request."""
     body = (
         "import jax.numpy as jnp\n"
         "import numpy as np\n"
@@ -124,6 +124,22 @@ def test_a_float32_cpu_solve_warns_at_the_users_own_line(tmp_path):
     script, sites = _warning_sites(tmp_path, body, r"jax_enable_x64=False|a float32 problem")
     assert len(sites) == 2
     assert set(sites) == {str(script)}
+
+    # With x64 off a float32 grid solve raises no JAX "Explicitly requested dtype float64" warning
+    # from inside diff_soup.
+    grid = (
+        "import jax.numpy as jnp\n"
+        "import numpy as np\n"
+        "import diff_soup as ds\n"
+        "spec = ds.problem('heat').domain('line', ds.cartesian_grid_1d(16, 0.0, 2.0 * np.pi, method='fvm'))\n"
+        "spec.field('T', mass='differential', scale=1.0, init=lambda x: 0.3 + jnp.sin(x))\n"
+        "spec.equation(writes='T', reads=('T',))(lambda q: 0.5 * q.ops.laplacian(q['T']))\n"
+        "spec.bc.periodic('T')\n"
+        "ds.pdesolve(spec.build(precision=ds.Precision.fp32_ir()), ds.JNDF.stock(linear='dense'),\n"
+        "            (0.0, 0.4), spec.assemble_state({}), saveat=ds.SaveAt(t1=True))\n"
+    )
+    _, leaks = _warning_sites(tmp_path, grid, "Explicitly requested dtype")
+    assert leaks == []
 
 
 def test_an_omitted_field_scale_warns_at_the_users_own_line(tmp_path):

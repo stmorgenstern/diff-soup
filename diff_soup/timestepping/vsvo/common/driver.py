@@ -1170,7 +1170,7 @@ def _loop_init(
     # mode); ``None`` otherwise so the default fp64 solve carries no counters.
     _prec = getattr(engine, "precision", None)
     _reports_reduced = getattr(_prec, "solve_mode", "fp64") in ("fp32", "fp32_ir", "adaptive")
-    reduced_zero = jnp.zeros((), jnp.float64) if _reports_reduced else None
+    reduced_zero = jnp.zeros((), jnp.result_type(float)) if _reports_reduced else None
 
     # The explicit grid is consumed once, front to back. Accepted-step output
     # instead owns a direct-write prefix and may seed its first slot with the
@@ -2630,12 +2630,12 @@ def _loop_fns(
                 state.ir_refinement_steps
                 if state.ir_refinement_steps is None or report.ir_refinement_steps is None
                 else state.ir_refinement_steps
-                + jnp.asarray(report.ir_refinement_steps, jnp.float64)
+                + jnp.asarray(report.ir_refinement_steps, jnp.result_type(float))
             ),
             fp64_fallbacks=(
                 state.fp64_fallbacks
                 if state.fp64_fallbacks is None or report.fp64_fallbacks is None
-                else state.fp64_fallbacks + jnp.asarray(report.fp64_fallbacks, jnp.float64)
+                else state.fp64_fallbacks + jnp.asarray(report.fp64_fallbacks, jnp.result_type(float))
             ),
             multirhs_solves=(
                 state.multirhs_solves
@@ -2715,7 +2715,7 @@ def _finalize(
     _linear_name = getattr(type(_backend), "backend_name", None) if _backend is not None else None
     _solve_mode = getattr(getattr(engine, "precision", None), "solve_mode", None)
     _adjoint_ckpts = getattr(adjoint, "checkpoints", None)
-    _zero_f64 = jnp.zeros((), jnp.float64)
+    _zero_f64 = jnp.zeros((), jnp.result_type(float))
 
     stats = SolverStats(
         accepts=final.accepts,

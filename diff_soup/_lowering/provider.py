@@ -2462,6 +2462,7 @@ def _initial_lambda(eqset: EquationSet, dtype) -> jax.Array:
     ``init`` seeds the slice; the slices line up with
     ``_build_global_layout_entries``'s global-row order.
     """
+    dtype = jax.dtypes.canonicalize_dtype(dtype)
     if not eqset.constraints:
         return jnp.zeros((0,), dtype=dtype)
     parts = []
@@ -2492,6 +2493,8 @@ def _capture_component_forms(eqset: EquationSet, probe_f, state_size: int, n_lam
     residual once, eagerly, at a generic positive state (the family pass's
     convention), on a grid and on a mesh alike.
     """
+
+    dtype = jax.dtypes.canonicalize_dtype(dtype)
 
     def evaluate():
         n_u, n_l = max(int(state_size), 1), max(int(n_lam), 1)

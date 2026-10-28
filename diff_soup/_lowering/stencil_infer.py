@@ -227,6 +227,7 @@ def _make_batched_jvp(f_of_u, compute_dtype):
     import jax
     import jax.numpy as jnp
 
+    compute_dtype = jax.dtypes.canonicalize_dtype(compute_dtype)
     batched = jax.jit(
         jax.vmap(
             lambda u, lam, t, v: jax.jvp(lambda uu: f_of_u(uu, lam, t), (u,), (v,))[1],
@@ -280,8 +281,10 @@ def _infer_stencil_offsets(
         Dict mapping ``(comp_name, write_name, read_name)`` to an integer
         offset array ``(n_offsets, ndim)`` or ``None`` (dense).
     """
+    import jax
     import jax.numpy as jnp
 
+    compute_dtype = jax.dtypes.canonicalize_dtype(compute_dtype)
     blocks = _eligible_blocks(eqset)
     if not blocks:
         return {}
