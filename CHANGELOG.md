@@ -65,6 +65,10 @@ issue ledger of that effort.
 
 ### Additions
 
+- `ds.compile(problem, solver, t_span, y0, ...)` compiles a `pdesolve` call without running it; the
+  returned `CompiledSolve` runs on new `t_span`, `y0`, `theta` and `lambda0` of the same shapes and
+  dtypes and reports `compile_seconds`, `cost_analysis()` and `memory_analysis()`. Save times must be
+  `SaveAt(ts=..., ordered=True)`. (A-7)
 - `theta[handle]` reads a parameter's value and `theta.replace(handle, value)` (or a mapping) writes it;
   parameters are located by key path, so a theta that went through `jax.tree.map`, a device transfer
   or a tracer still takes `ds.default_theta(problem, {handle: value})`. (R-1)
