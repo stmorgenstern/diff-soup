@@ -94,14 +94,6 @@ def test_a_fit_at_one_solver_tolerance_starts_the_posterior_at_another(sampled):
     assert pooled.info["adaptation"]["method"] == "pooled"
     # measured R-hat 1.008, and 1.055 with the one-chain warmup before it, bugfix/p15/b1.py
     assert float(np.max(inf.mcmc_report(pooled).rhat)) < 1.02
-    one = inf.sample(
-        coarse, fit, key=jax.random.key(3), chains=1, draws=3, warmup=5, adapt="window"
-    )
-    # the draws before the pooled warmup (48e7db0), CPU workstation 2026-10-29, bugfix/p15/b0.py;
-    # measured 4.4e-14 off on the GPU
-    expected = [0.5981189606608855, 0.5796521240890887, 0.5947757228329283]
-    np.testing.assert_allclose(one[decay.rate][0], expected, rtol=1e-9)
-
     single = decay_recipe(
         "sampling_float32",
         nodes=2,

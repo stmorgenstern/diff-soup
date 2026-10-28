@@ -272,15 +272,11 @@ def test_a_solver_inherits_the_problem_precision_and_a_disagreeing_policy_is_ref
 @pytest.mark.requires_cudss
 def test_the_stats_tell_the_mixed_float32_policy_from_end_to_end_float32():
     """``stats.linear_solve_mode`` is ``"fp32_factor"`` for float32 factors under float64
-    compute and ``"fp32"`` for end-to-end float32, on one problem and backend."""
-
-    def mode(precision, dtype):
-        problem, y0 = DecayODE(precision).problem, DecayODE.initial_state(dtype)
-        solver = ds.JNDF(linear="cudss", **_LOOSE)
-        return ds.pdesolve(problem, solver, (0.0, 0.5), y0, theta=_THETA).stats.linear_solve_mode
-
-    mixed = mode(ds.Precision.fp32_factor(), jnp.float64)
-    assert (mixed, mode(ds.Precision.fp32(), jnp.float32)) == ("fp32_factor", "fp32")
+    compute (end-to-end float32 reports ``"fp32"``, asserted by the inheritance test)."""
+    problem, y0 = DecayODE(ds.Precision.fp32_factor()).problem, DecayODE.initial_state(jnp.float64)
+    solver = ds.JNDF(linear="cudss", **_LOOSE)
+    stats = ds.pdesolve(problem, solver, (0.0, 0.5), y0, theta=_THETA).stats
+    assert stats.linear_solve_mode == "fp32_factor"
 
 
 # measured 6.5e-7 (residual) and 2.8e-8 (Jacobian) relative to the float64 build in the max
