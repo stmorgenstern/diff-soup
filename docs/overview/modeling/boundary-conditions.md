@@ -15,6 +15,10 @@ Every condition takes exactly one selector:
   selector.
 - `axis=` with `side=`: one face of a structured grid, `side="low"`
   or `"high"` along that axis.
+  A per-cell `value=` or `value_fn=` array on a face is in storage
+  order with the face axis dropped. That is the order of
+  `grid.meshgrid()` without that axis, for example `X[:, 0]` for
+  `axis=1, side="low"` on a 2D grid.
 
 On grids, boundary locations are selected by node index, as in the
 running example's two pinned ends from
@@ -82,7 +86,8 @@ For a scalar field \(u\) with outward unit normal \(n\):
   feeds a grid face, the Danckwerts condition
   \(v c - D \, \partial c / \partial n = v c_{in}\). The face carries
   the total flux \(v c_{in}\) into the domain, so it pairs with
-  `div_advect`, which carries no flux in through a face.
+  `div_advect`, which carries no flux in through a face under either
+  scheme.
 - `spec.bc.periodic(var, axes=(0,))` wraps the field on the listed
   axes of its cartesian grid, every axis when `axes` is omitted. The
   other faces take any other condition, and every field sharing the

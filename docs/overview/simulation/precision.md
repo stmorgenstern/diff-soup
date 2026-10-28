@@ -124,6 +124,12 @@ fine grid: about 1e-4 on PFHub benchmark 6 at 201x200 nodes, against
 `atol=1e-6`. `Precision.fp32_ir()` or `Precision.fp64()` initializes in
 float64.
 
+On a GPU, an end-to-end `fp32` fit is not bitwise reproducible from run
+to run, because cuDSS and XLA float32 reductions are not deterministic.
+Step counts and the stop status can differ, and the fitted values agree
+to the solver tolerance. `fp32_ir` and `fp64` give reproducible step
+counts.
+
 ## Backends
 
 The reduced modes run on the cuDSS backend, which the `"auto"`

@@ -143,7 +143,8 @@ class _BCNamespace:
             axis: Grid axis of the face, with `side`, on a structured grid.
             side: `"low"` or `"high"`, the end of `axis` the face sits at.
             component: Index of the one value to fix at each node of a vector field, or `None` for every value.
-            value: Constant value, a scalar or one entry per selected location.
+            value: Constant value, a scalar or one entry per selected location, in storage
+                order with a face axis dropped.
             value_fn: Value as a function of dimensional time, `lambda t: ...`.
             fn: Value as a function of the boundary view and dimensional time, `lambda q, t: ...`.
         """
@@ -190,7 +191,8 @@ class _BCNamespace:
             node_indices: Node indices, the index spelling of `on`.
             axis: Grid axis of the face, with `side`, on a structured grid.
             side: `"low"` or `"high"`, the end of `axis` the face sits at.
-            value: Constant value, a scalar or one entry per selected location.
+            value: Constant value, a scalar or one entry per selected location, in storage
+                order with a face axis dropped.
             value_fn: Value as a function of dimensional time, `lambda t: ...`.
             fn: Value as a function of the boundary view and dimensional time, `lambda q, t: ...`.
             name: Name that `spec.constraint.flux_total(from_bc=...)` refers to, on a finite-element mesh only.
@@ -269,7 +271,8 @@ class _BCNamespace:
             node_indices: Node indices, the index spelling of `on`.
             axis: Grid axis of the face, with `side`, on a structured grid.
             side: `"low"` or `"high"`, the end of `axis` the face sits at.
-            value: Constant derivative, a scalar or one entry per selected location.
+            value: Constant derivative, a scalar or one entry per selected location, in storage
+                order with a face axis dropped.
             value_fn: Derivative as a function of dimensional time, `lambda t: ...`.
             fn: Refused, since a derivative that depends on the field is a Robin condition, `spec.bc.robin`.
         """
@@ -384,7 +387,8 @@ class _BCNamespace:
             side: `"low"` or `"high"`, the end of `axis` the face sits at.
             alpha: Coefficient of `u`, a constant or a function of time.
             beta: Coefficient of the normal derivative, a constant or a function of time, never zero.
-            value: Constant value, a scalar or one entry per selected location.
+            value: Constant value, a scalar or one entry per selected location, in storage
+                order with a face axis dropped.
             value_fn: Value as a function of dimensional time, `lambda t: ...`.
             fn: Value as a function of the boundary view and dimensional time, `lambda q, t: ...`.
         """
