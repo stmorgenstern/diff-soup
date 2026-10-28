@@ -790,12 +790,19 @@ def dispatch_advect_upwind(domain: Domain, u: Array, velocity, bcs: "Sequence | 
     raise NotImplementedError(f"advect_upwind is not implemented for {type(domain).__name__}.")
 
 
-def dispatch_div_advect(domain: Domain, u: Array, velocity, bcs: "Sequence | None" = None):
-    """Route the conservative upwind advection ``div(v u)`` to the grid kernels.
+def dispatch_div_advect(
+    domain: Domain,
+    u: Array,
+    velocity,
+    bcs: "Sequence | None" = None,
+    scheme: str = "central",
+):
+    """Route the conservative advection ``div(v u)`` to the grid kernels.
 
-    Each face carries the upwind flux; a boundary face carries only an outgoing
-    flux, so an inflow enters through ``spec.bc.inflow``. ``"fvm"`` and ``"fdm"``
-    grids share the kernel, which weights each face by ``face_area / cell_volume``.
+    Each interior face carries the central or the upwind flux; a boundary face
+    carries only an outgoing flux, so an inflow enters through ``spec.bc.inflow``.
+    ``"fvm"`` and ``"fdm"`` grids share the kernel, which weights each face by
+    ``face_area / cell_volume``.
 
     Args:
         domain: A cartesian [Grid1D][] or [GridND][].
@@ -803,10 +810,13 @@ def dispatch_div_advect(domain: Domain, u: Array, velocity, bcs: "Sequence | Non
         velocity: A constant, or a per-axis sequence of constants or cell arrays.
         bcs: Optional [PeriodicBC][diff_soup.domains.grid.advection.bcs.PeriodicBC]
             tags; any other condition is rejected.
+        scheme: ``"central"`` or ``"upwind"``.
 
     Returns:
         ``div(v u)`` at the cells, matching ``u``'s layout.
     """
+    if scheme not in ("central", "upwind"):
+        raise ValueError(f'div_advect: scheme must be "central" or "upwind"; got {scheme!r}.')
     _reject_staggered(domain, "div_advect")
     dt = domain.discretization_type
     if dt not in ("fvm", "fdm"):
@@ -825,11 +835,11 @@ def dispatch_div_advect(domain: Domain, u: Array, velocity, bcs: "Sequence | Non
         periodic_axes.add(int(bc.axis))
     if isinstance(domain, Grid1D):
         (v0,) = normalize_velocity(velocity, 1, (domain.n,), op_name="div_advect")
-        return div_advect_1d(domain, u, v0, periodic=(0 in periodic_axes))
+        return div_advect_1d(domain, u, v0, periodic=(0 in periodic_axes), scheme=scheme)
     if isinstance(domain, GridND):
         vpa = normalize_velocity(velocity, domain.dim, tuple(domain.shape), op_name="div_advect")
         u_grid = _reshape_to_grid(domain, u)
-        out = div_advect_nd(domain, u_grid, vpa, tuple(sorted(periodic_axes)))
+        out = div_advect_nd(domain, u_grid, vpa, tuple(sorted(periodic_axes)), scheme)
         return out.reshape(-1) if u.ndim == 1 else out
     raise NotImplementedError(f"div_advect is not implemented for {type(domain).__name__}.")
 

@@ -50,11 +50,17 @@ with their metric terms included:
   with one entry per axis, each a constant or one value per cell.
   The return is the operator itself, so a transport equation writes
   the minus sign: `-q.ops.advect_upwind(q.u, v)`.
-- `div_advect(u, velocity)`: the conservative form
+- `div_advect(u, velocity, scheme="central")`: the conservative form
   \(\nabla \cdot (\mathbf{v} u)\), with the same velocity forms.
-  Each face carries its velocity, the mean of its two cells, times
-  the upstream value. A boundary face carries only outflow, so an
-  inlet is fed by [`spec.bc.inflow`](boundary-conditions.md).
+  Under `scheme="central"` (the default) each interior face carries
+  the mean of \(v u\) in its two cells, which is second order and
+  adds no numerical dispersion. Under `scheme="upwind"` it carries the
+  mean velocity of its two cells times the upstream value, which adds
+  a numerical dispersion of \(u h / 2\) along the flow. Central can
+  oscillate when the cell Péclet number \(u h / D\) exceeds 2, so
+  choose upwind when transport dominates on a coarse grid. A boundary
+  face carries only outflow under either scheme, so an inlet is fed by
+  [`spec.bc.inflow`](boundary-conditions.md).
 - `curl(u)`: \(\nabla \times u\) of a vector field with one
   component per axis, in two and three dimensions. In two the curl
   is the scalar \(\partial u_y/\partial x - \partial u_x/\partial y\),

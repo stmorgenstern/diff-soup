@@ -1,12 +1,12 @@
-r"""First-order upwind advection on collocated (cell/node-centered) cartesian grids.
+r"""Upwind and central advection on collocated (cell/node-centered) cartesian grids.
 
 These kernels approximate the advective term :math:`\mathbf{v}\cdot\nabla u`
 directly on a collocated grid — the field and every velocity component live at
 the same cell centers / nodes.  The value is differenced in place, one axis at
 a time.  [div_advect_1d][diff_soup.domains.grid.advection.collocated.div_advect_1d]
 and [div_advect_nd][diff_soup.domains.grid.advection.collocated.div_advect_nd]
-give the conservative form :math:`\nabla\cdot(\mathbf{v} u)` from upwind face
-fluxes.  A velocity is a constant per axis or a cell-centred field per axis.
+give the conservative form :math:`\nabla\cdot(\mathbf{v} u)` from upwind or
+central face fluxes.  A velocity is a constant per axis or a cell-centred field per axis.
 
 Because the advective (non-conservative) form reads only nodal values and the
 distance between adjacent collocation points, the numerics are identical for the
@@ -14,7 +14,7 @@ finite-volume and finite-difference dispatches — there is no separate flux vs.
 stencil form as there is for diffusion.  A single kernel therefore serves both
 ``method="fvm"`` and ``method="fdm"`` cartesian grids.
 
-Upwind rule (per axis, for the term :math:`v\,\partial u/\partial x`):
+Upwind rule of the advective form (per axis, for the term :math:`v\,\partial u/\partial x`):
 
 * ``v >= 0`` uses the backward difference ``(u[i] - u[i-1]) / h`` (information
   travels from the low side);
@@ -45,7 +45,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
@@ -243,12 +242,15 @@ def div_advect_1d(
     velocity: Float[Array, "..."],
     *,
     periodic: bool = False,
+    scheme: str = "central",
 ) -> Float[Array, "n"]:
-    r"""Conservative first-order upwind approximation of :math:`\partial (v c)/\partial x`.
+    r"""Conservative approximation of :math:`\partial (v c)/\partial x`.
 
-    Each face carries the flux ``v_f c_up``: ``v_f`` is the velocity at the face
-    (the mean of the two neighbouring cell velocities for a velocity field) and
-    ``c_up`` the value of the cell upstream of it. A boundary face carries the
+    Under ``"upwind"`` each interior face carries the flux ``v_f c_up``: ``v_f`` is
+    the velocity at the face (the mean of the two neighbouring cell velocities for
+    a velocity field) and ``c_up`` the value of the cell upstream of it. Under
+    ``"central"`` it carries the mean of the two neighbouring cell fluxes ``v c``,
+    which is second order. Under either scheme a boundary face carries the
     outgoing flux ``v_b c_b`` when the flow leaves through it and nothing when the
     flow enters, so an inflow comes only from a boundary condition. The cell
     value is the net outflow times ``face_area / cell_volume``, which conserves
@@ -259,6 +261,7 @@ def div_advect_1d(
         c: Field values, shape ``(n,)``.
         velocity: Advection speed, a constant or one value per cell.
         periodic: If ``True``, the two end faces are one face, wrapped.
+        scheme: ``"central"`` or ``"upwind"``, the interior face flux.
 
     Returns:
         ``d(v c)/dx`` at each cell, shape ``(n,)``, in ``c``'s dtype.
@@ -275,9 +278,14 @@ def div_advect_1d(
     def upwind(vf, left, right):
         return jnp.maximum(vf, 0.0) * left + jnp.minimum(vf, 0.0) * right
 
-    inner = upwind(v_inner, c[:-1], c[1:])
-    if periodic:
+    if scheme == "central":
+        vc = v * c
+        inner = 0.5 * (vc[:-1] + vc[1:])
+        wrap = 0.5 * (vc[-1] + vc[0])
+    else:
+        inner = upwind(v_inner, c[:-1], c[1:])
         wrap = upwind(v_wrap, c[-1], c[0])
+    if periodic:
         low, high = wrap, wrap
     else:
         low = jnp.minimum(v_low, 0.0) * c[0]
@@ -292,8 +300,9 @@ def div_advect_nd(
     c: Float[Array, "..."],
     velocity_per_axis: tuple[Array, ...],
     periodic_axes: tuple[int, ...] = (),
+    scheme: str = "central",
 ) -> Float[Array, "..."]:
-    r"""Conservative upwind :math:`\nabla\cdot(\mathbf{v} c)` on an N-D grid.
+    r"""Conservative :math:`\nabla\cdot(\mathbf{v} c)` on an N-D grid.
 
     The sum over axes of
     [div_advect_1d][diff_soup.domains.grid.advection.collocated.div_advect_1d],
@@ -304,6 +313,7 @@ def div_advect_nd(
         c: Field values, grid-shaped.
         velocity_per_axis: One entry per axis, a constant or a grid-shaped field.
         periodic_axes: Axes whose end faces wrap.
+        scheme: ``"central"`` or ``"upwind"``, the interior face flux.
 
     Returns:
         ``div(v c)`` at each cell, grid-shaped, in ``c``'s dtype.
@@ -313,7 +323,9 @@ def div_advect_nd(
         ax = grid.axes[d]
         per = d in periodic_axes
         out = out + sweep_axis(
-            lambda col, vcol, _ax=ax, _per=per: div_advect_1d(_ax, col, vcol, periodic=_per),
+            lambda col, vcol, _ax=ax, _per=per: div_advect_1d(
+                _ax, col, vcol, periodic=_per, scheme=scheme
+            ),
             c,
             d,
             velocity_per_axis[d],

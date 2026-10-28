@@ -284,14 +284,16 @@ $$
 which updates the cell average \(u_i\) through the fluxes at its two
 faces (\(A\) the face areas, \(V_i\) the cell volume). The face
 fluxes \(F_{i \pm 1/2}\) require special consideration: centered
-approximations oscillate when transport dominates, so we construct them
-with the upwind methods below.
+face fluxes are second order but oscillate when transport dominates a
+cell, so an upwind form is offered beside them.
 
 ### Upwind advection on ordinary grids
 
 First-order upwind advection is handled at the operator layer, as
 `q.ops.advect_upwind(field, velocity)` on any grid, covered with
-[operators](operators.md).
+[operators](operators.md). The conservative `q.ops.div_advect` uses
+central face fluxes by default and takes `scheme="upwind"`. The
+operators page says when to choose which.
 
 A periodic direction is declared with `spec.bc.periodic` ([boundary
 conditions](boundary-conditions.md)).

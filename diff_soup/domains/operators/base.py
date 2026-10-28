@@ -330,7 +330,7 @@ class AbstractOperator(eqx.Module):
         raise self._capability_error("advect_upwind", "upwind advection assembly")
 
     def div_advect(self, *args, **kwargs):
-        """Conservative upwind advection of a field, called as `div_advect(u, velocity, *, bcs=None, t=None)`.
+        """Conservative advection of a field, called as `div_advect(u, velocity, *, scheme="central", bcs=None, t=None)`.
 
         The base class raises `NotImplementedError`.
         """
@@ -511,16 +511,18 @@ class Operators(AbstractOperator):
         field: _NodealOrField,
         velocity: Any,
         *,
+        scheme: str = "central",
         bcs: "Sequence | None" = None,
         t: "Array | None" = None,
     ) -> Float[Array, "..."]:
-        """First-order upwind advection in conservative form ∇·(v u), on a grid.
+        """Advection in conservative form ∇·(v u), on a grid.
 
-        Each face carries the velocity there, the mean of its two cells, times the upstream value. A boundary face carries only an outgoing flux, so a transport equation writes `-q.ops.div_advect(q.c, v)` and feeds an inlet with `spec.bc.inflow`.
+        Under `"central"` an interior face carries the mean of `v u` in its two cells. Under `"upwind"` it carries the mean velocity of its two cells times the upstream value. A boundary face carries only an outgoing flux, so a transport equation writes `-q.ops.div_advect(q.c, v)` and feeds an inlet with `spec.bc.inflow`.
 
         Args:
             field: The advected field.
             velocity: One constant speed for every axis, or a sequence with one entry per axis, each a constant or one value per cell.
+            scheme: The face flux, `"central"` (default, second order) or `"upwind"` (first order).
             bcs: Periodic conditions only, which problems declare with `spec.bc.periodic`.
             t: Ignored.
 
@@ -529,7 +531,7 @@ class Operators(AbstractOperator):
         """
         del t
         u = self._as_dofs(field)
-        return _d.dispatch_div_advect(self.domain, u, velocity, bcs)
+        return _d.dispatch_div_advect(self.domain, u, velocity, bcs, scheme)
 
     def gradient(self, u: _NodealOrField) -> Float[Array, "..."]:
         """The gradient ∇u, pointwise on a one-dimensional grid.
@@ -1252,9 +1254,11 @@ class _PeriodicOperatorView(AbstractOperator):
         """Upwind advection with the declared periodic wrap merged into ``bcs``."""
         return self._wrappable("advect_upwind")(field, velocity, bcs=self._with_periodic(bcs), t=t)
 
-    def div_advect(self, field, velocity, *, bcs=None, t=None):
+    def div_advect(self, field, velocity, *, scheme="central", bcs=None, t=None):
         """Conservative advection with the declared periodic wrap merged into ``bcs``."""
-        return self._wrappable("div_advect")(field, velocity, bcs=self._with_periodic(bcs), t=t)
+        return self._wrappable("div_advect")(
+            field, velocity, scheme=scheme, bcs=self._with_periodic(bcs), t=t
+        )
 
     # ------------------------------------------------------------------
     # Operators with no periodic stencil: refused, never answered.
