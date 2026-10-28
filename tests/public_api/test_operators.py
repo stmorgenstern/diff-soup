@@ -31,7 +31,9 @@ from diff_soup.domains import (
 # measured at most 5.6e-17 on the orientation, coefficient-length, traced-first and composition
 # checks (0.0 on all but the clockwise lumped mass), workstation CPU 2026-10-28, run one by one;
 # measured at most 8.9e-16 on every stencil, rotation, divergence and residual-row check below
-# (0.0 on the control-unit rows), CPU VM 2026-10-22, pytest tests/public_api/test_operators.py
+# (0.0 on the control-unit rows), CPU VM 2026-10-22, pytest tests/public_api/test_operators.py;
+# measured at most 1.1e-16 on the transport checks (0.0 on all but the inflow balance),
+# workstation CPU 2026-10-28, pytest tests/public_api/test_operators.py -k grid_transport
 _EXACT = 1e-12
 _ROTATION = np.array([1.0, 2.0, 3.0])
 
@@ -294,3 +296,46 @@ def test_a_mesh_field_composes_like_its_explicit_form(form):
         state = spec.assemble_state({"T": jnp.asarray(0.2 + coords[:, 0] - coords[:, 1] ** 2)})
         rows.append(spec.build().physics_residual(state, jnp.zeros(0), jnp.asarray(0.0))[0])
     np.testing.assert_allclose(rows[0], rows[1], rtol=0.0, atol=_EXACT)
+
+
+def _bed_cells(method):
+    grid = cartesian_grid_2d(6, 3, 1.2, 0.6, method=method)
+    coords = np.asarray(grid.node_coordinates())
+    field = jnp.asarray(np.sin(3.0 * coords[:, 0]) + coords[:, 0] * coords[:, 1] ** 2)
+    return grid, coords, field
+
+
+@pytest.mark.parametrize("method", ["fvm", "fdm"])
+@pytest.mark.parametrize("claim", ["equal axes", "no y", "velocity field", "inflow balance"])
+def test_grid_transport_takes_per_axis_dispersion_velocity_fields_and_an_inflow(method, claim):
+    """``div_flux`` with the same cell diffusivity on both axes equals the shared one, and with
+    ``(1.5, 0)`` the 1-D operator along x; ``advect_upwind`` with velocity arrays equal to constants equals the
+    constant form; and with ``-div_advect`` and an inflow ``0.5 * 2`` on the low-x face, the
+    rate of change of the integral is the inflow minus the outflow ``v c`` on the high-x face."""
+    grid, coords, field = _bed_cells(method)
+    ops = Operators(grid)
+    if claim == "equal axes":
+        D = jnp.asarray(1.0 + 0.5 * coords[:, 0])
+        got, expected = ops.div_flux((D, D), field), ops.div_flux(D, field)
+    elif claim == "no y":
+        line = Operators(cartesian_grid_1d(6, 0.0, 1.2, method=method))
+        got = ops.div_flux((1.5, 0.0), field).reshape(6, 3)
+        expected = jax.vmap(lambda c: line.div_flux(1.5, c), in_axes=1, out_axes=1)(
+            field.reshape(6, 3)
+        )
+    elif claim == "velocity field":
+        uniform = (jnp.full(18, 0.3), jnp.full(18, -0.2))
+        got, expected = ops.advect_upwind(field, uniform), ops.advect_upwind(field, (0.3, -0.2))
+    else:
+        speed = jnp.asarray(0.5 + 0.1 * coords[:, 1])
+        spec = ds.problem(f"inflow_{method}").domain("bed", grid)
+        spec.field("c", mass="differential", scale=1.0)
+        spec.equation(writes="c", reads=("c",))(lambda q: -q.ops.div_advect(q.c, (speed, 0.0)))
+        spec.bc.inflow("c", axis=0, side="low", velocity=0.5, value=2.0)
+        rows = spec.build().physics_residual(
+            spec.assemble_state({"c": field}), jnp.zeros(0), jnp.asarray(0.0)
+        )[0]
+        got = jnp.sum(rows * jnp.asarray(grid.cell_volumes))
+        outlet = coords[:, 0] == coords[:, 0].max()
+        expected = 0.5 * 2.0 * 0.6 - jnp.sum((speed * field)[outlet]) * 0.2
+    np.testing.assert_allclose(got, expected, rtol=0.0, atol=_EXACT)

@@ -38,15 +38,23 @@ and three dimensions and on the curvilinear one-dimensional grids
 with their metric terms included:
 
 - `laplacian(u)`: \(\nabla^2 u\).
-- `div_flux(D, u)`: \(\nabla \cdot (D \nabla u)\).
+- `div_flux(D, u)`: \(\nabla \cdot (D \nabla u)\). A tuple
+  `(Dx, Dy, Dz)` gives each axis its own diffusivity, a diagonal
+  dispersion tensor, each entry a scalar or one value per cell.
 - `divergence(v)`: \(\nabla \cdot v\) for a vector of per-node
   values.
 - `advect_upwind(u, velocity)`: the first-order upwind
-  \(\mathbf{v} \cdot \nabla u\) for a constant velocity, with the
-  sign of the velocity choosing the upwind side (a backward
-  difference for \(v \ge 0\), forward for \(v < 0\)). The return is
-  the operator itself, so a transport equation writes the minus sign:
-  `-q.ops.advect_upwind(q.u, v)`.
+  \(\mathbf{v} \cdot \nabla u\), with the sign of the velocity
+  choosing the upwind side (a backward difference for \(v \ge 0\),
+  forward for \(v < 0\)). The velocity is a constant, or a tuple
+  with one entry per axis, each a constant or one value per cell.
+  The return is the operator itself, so a transport equation writes
+  the minus sign: `-q.ops.advect_upwind(q.u, v)`.
+- `div_advect(u, velocity)`: the conservative form
+  \(\nabla \cdot (\mathbf{v} u)\), with the same velocity forms.
+  Each face carries its velocity, the mean of its two cells, times
+  the upstream value. A boundary face carries only outflow, so an
+  inlet is fed by [`spec.bc.inflow`](boundary-conditions.md).
 - `curl(u)`: \(\nabla \times u\) of a vector field with one
   component per axis, in two and three dimensions. In two the curl
   is the scalar \(\partial u_y/\partial x - \partial u_x/\partial y\),

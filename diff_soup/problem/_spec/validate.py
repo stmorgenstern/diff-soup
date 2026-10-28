@@ -34,14 +34,111 @@ class SparsityUnderDeclarationError(ValueError):
     """Raised when an equation reads a field or global it does not declare in ``reads=``."""
 
 
+def _grid_shape(dom):
+    """Cell counts per axis of a structured grid, or ``None`` for any other domain.
+
+    Duck-typed: the ``problem`` layer does not import the ``domains`` layer. A
+    ``GridND`` carries ``shape``, a ``Grid1D`` its cell count ``n``.
+    """
+    if getattr(dom, "discretization_type", None) not in ("fvm", "fdm"):
+        return None
+    shape = getattr(dom, "shape", None)
+    if shape is not None:
+        return tuple(int(n) for n in shape)
+    n = getattr(dom, "n", None)
+    return None if n is None else (int(n),)
+
+
+def _selected_cells(bc, dom, shape):
+    """Flat cell indices a grid condition selects, or ``None`` when unknown here."""
+    face = bc.where.get("face")
+    if face is not None:
+        axis, side = face
+        flat = np.arange(int(np.prod(shape))).reshape(shape)
+        index = [slice(None)] * len(shape)
+        index[axis] = 0 if side == "low" else shape[axis] - 1
+        return flat[tuple(index)].reshape(-1)
+    selector = bc.where.get("selector")
+    if selector is None:
+        return None
+    nodes_for_tag = getattr(dom, "nodes_for_tag", None)
+
+    def on_tags(names):
+        if not callable(nodes_for_tag):
+            return None
+        try:
+            return set().union(*[set(int(i) for i in nodes_for_tag(n)) for n in names])
+        except (KeyError, ValueError):
+            return None
+
+    def combine(a, b, op):
+        return None if a is None or b is None else op(a, b)
+
+    cells = selector.reduce(
+        on_tags=on_tags,
+        on_nodes=lambda idx: set(int(i) for i in np.asarray(idx).reshape(-1)),
+        on_union=lambda a, b: combine(a, b, set.union),
+        on_difference=lambda a, b: combine(a, b, set.difference),
+    )
+    return None if cells is None else np.array(sorted(cells), dtype=np.int64)
+
+
+def _faces_holding(cells, shape) -> list:
+    """The ``(axis, side)`` grid faces that contain every one of ``cells``."""
+    if cells.size == 0 or cells.min() < 0 or cells.max() >= int(np.prod(shape)):
+        return []
+    multi = np.unravel_index(cells, shape)
+    return [
+        (d, side)
+        for d in range(len(shape))
+        for side, end in (("low", 0), ("high", shape[d] - 1))
+        if bool(np.all(multi[d] == end))
+    ]
+
+
+def _validate_grid_faces(spec) -> list[str]:
+    """Checks for conditions stated on grid faces: ``axis=``/``side=``, neumann and inflow."""
+    errors: list[str] = []
+    for bc in spec._bcs:
+        dname = spec._field_domains.get(bc.var)
+        dom = spec._domains.get(dname) if dname is not None else None
+        if dom is None:
+            continue
+        shape = _grid_shape(dom)
+        face = bc.where.get("face")
+        tagged_mesh = hasattr(dom, "boundary_facets")
+        if shape is None and (bc.kind == "inflow" or (bc.kind == "neumann" and not tagged_mesh)):
+            where = "a structured grid" if bc.kind == "inflow" else "a grid or a tagged mesh"
+            errors.append(
+                f"spec.bc.{bc.kind}({bc.var!r}): the condition is imposed on {where}, and "
+                f"{bc.var!r} lives on domain {dname!r}, which is not one. State the flux "
+                "density with spec.bc.flux."
+            )
+            continue
+        if face is None:
+            continue
+        if shape is None:
+            errors.append(
+                f"spec.bc.{bc.kind}({bc.var!r}, axis=, side=): axis= and side= name a face "
+                f"of a structured grid, and domain {dname!r} is not one. Select the "
+                "boundary with on=, tag= or node_indices=."
+            )
+        elif not 0 <= face[0] < len(shape):
+            errors.append(
+                f"spec.bc.{bc.kind}({bc.var!r}, axis={face[0]}): the grid of domain "
+                f"{dname!r} has axes 0 to {len(shape) - 1}."
+            )
+    return errors
+
+
 def _validate_periodic(spec, field_names: set) -> list[str]:
     """Structural checks for ``spec.bc.periodic(...)`` declarations.
 
-    Rejects: a periodic field carrying another boundary condition, a periodic
-    field on a non-cartesian grid, and a grid domain whose fields are only
-    partially declared periodic (periodicity is all-or-none per domain).
-    Returns an empty list when ``spec`` declares no periodic boundary
-    conditions, so it is safe to call unconditionally.
+    Rejects: a periodic field on a non-cartesian grid, an axis the grid does not
+    have, another condition stated on the cells of a periodic face, and a grid
+    domain whose fields are not all periodic on the same axes. Returns an empty
+    list when ``spec`` declares no periodic boundary conditions, so it is safe to
+    call unconditionally.
     """
 
     def _is_cartesian_grid(dom) -> bool:
@@ -61,38 +158,63 @@ def _validate_periodic(spec, field_names: set) -> list[str]:
         return False  # mesh / non-grid domains have no periodicity concept
 
     errors: list[str] = []
-    periodic_vars = {bc.var for bc in spec._bcs if bc.kind == "periodic"}
-    for var in periodic_vars:
-        if var not in field_names:
-            continue  # already reported elsewhere as an unknown-field reference
-        others = sorted({bc.kind for bc in spec._bcs if bc.var == var and bc.kind != "periodic"})
-        if others:
-            errors.append(
-                f"periodic boundary condition on field {var!r} cannot be combined with "
-                f"another boundary condition on the same field (also declared: "
-                f"{', '.join(others)}). Declare only spec.bc.periodic({var!r}) for a fully "
-                f"periodic field."
-            )
-        dname = spec._field_domains.get(var)
+    periodic_axes: dict[str, tuple] = {}
+    for bc in spec._bcs:
+        if bc.kind != "periodic" or bc.var not in field_names:
+            continue  # an unknown field is reported elsewhere
+        dname = spec._field_domains.get(bc.var)
         dom = spec._domains.get(dname) if dname is not None else None
         if dom is not None and not _is_cartesian_grid(dom):
             errors.append(
-                f"periodic boundary condition on field {var!r} requires a cartesian grid "
+                f"periodic boundary condition on field {bc.var!r} requires a cartesian grid "
                 f"domain (cartesian_grid_1d / cartesian_grid_2d / cartesian_grid_3d); field "
-                f"{var!r} lives on domain {dname!r}, which is not a cartesian grid. Use a "
+                f"{bc.var!r} lives on domain {dname!r}, which is not a cartesian grid. Use a "
                 f"cartesian grid for periodic boundaries."
             )
-
-    for dname, dom in spec._domains.items():
-        fields_here = [f for f, d in spec._field_domains.items() if d == dname]
-        periodic_here = [f for f in fields_here if f in periodic_vars]
-        if periodic_here and len(periodic_here) != len(fields_here):
-            missing = sorted(set(fields_here) - set(periodic_here))
+            continue
+        shape = _grid_shape(dom)
+        dim = len(shape) if shape is not None else 1
+        axes = tuple(range(dim)) if bc.axes is None else tuple(bc.axes)
+        if any(a >= dim for a in axes):
             errors.append(
-                f"periodic boundary conditions on domain {dname!r} must cover every field "
-                f"on that domain; field(s) {', '.join(repr(m) for m in missing)} have no "
-                f"periodic boundary condition while others do. Declare spec.bc.periodic for "
-                f"every field on {dname!r}, or none."
+                f"spec.bc.periodic({bc.var!r}, axes={list(axes)}): the grid of domain "
+                f"{dname!r} has axes 0 to {dim - 1}."
+            )
+            continue
+        periodic_axes[bc.var] = tuple(sorted(set(periodic_axes.get(bc.var, ())) | set(axes)))
+
+    for bc in spec._bcs:
+        axes = periodic_axes.get(bc.var)
+        if bc.kind == "periodic" or not axes:
+            continue
+        dom = spec._domains.get(spec._field_domains.get(bc.var))
+        shape = _grid_shape(dom)
+        if shape is None:
+            continue
+        cells = _selected_cells(bc, dom, shape)
+        if cells is None:
+            continue
+        faces = [bc.where["face"]] if bc.where.get("face") is not None else _faces_holding(
+            cells, shape
+        )
+        if faces and all(axis in axes for axis, _ in faces):
+            axis, side = faces[0]
+            errors.append(
+                f"spec.bc.{bc.kind}({bc.var!r}) is stated on the grid face axis={axis}, "
+                f"side={side!r}, but {bc.var!r} is periodic on axis {axis}, which has no "
+                "boundary there. Drop the condition, or leave that axis out of "
+                f"spec.bc.periodic({bc.var!r}, axes=...)."
+            )
+
+    for dname in spec._domains:
+        fields_here = [f for f, d in spec._field_domains.items() if d == dname]
+        declared = {f: periodic_axes.get(f, ()) for f in fields_here}
+        if len(set(declared.values())) > 1:
+            listing = ", ".join(f"{f!r}: {list(a) or 'none'}" for f, a in sorted(declared.items()))
+            errors.append(
+                f"periodic boundary conditions on domain {dname!r} must wrap the same axes "
+                f"for every field on that domain; the periodic axes are {listing}. Declare "
+                f"spec.bc.periodic with the same axes for every field on {dname!r}, or none."
             )
     return errors
 
@@ -278,6 +400,7 @@ def _validate_static(spec) -> list[str]:
         errors.extend(_component_errors(spec, bc))
 
     errors.extend(_validate_periodic(spec, field_names))
+    errors.extend(_validate_grid_faces(spec))
 
     constraint_names: set = set()
     # ``closes=`` has to pair constraints and globals one-to-one: a global

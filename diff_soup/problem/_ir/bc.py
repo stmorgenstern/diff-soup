@@ -43,6 +43,11 @@ class BoundarySpec(eqx.Module):
     Python ints).  For any composed selector both convenience attributes are
     ``None`` — read [selector][] instead.
 
+    ``face`` names one face of a structured grid, ``(axis, side)`` with ``side``
+    ``"low"`` or ``"high"``, when the declaration stated it (``axis=`` and
+    ``side=``). The selector then holds that face's cells. ``None`` leaves the
+    face to be inferred from the selected cells.
+
     ``node_indices`` is stored as a tuple of Python ints rather than a NumPy
     array.  Equinox's static-field check treats both NumPy and JAX arrays as
     "array leaves" and warns on construction; the tuple keeps the field
@@ -55,8 +60,17 @@ class BoundarySpec(eqx.Module):
     selector: Optional[BoundarySet] = eqx.field(static=True, default=None)
     tag: Optional[str] = eqx.field(static=True, default=None)
     node_indices: Optional[tuple[int, ...]] = eqx.field(static=True, default=None)
+    face: Optional[tuple[int, str]] = eqx.field(static=True, default=None)
 
-    def __init__(self, *, selector=None, node_indices=None, tag: str | None = None):
+    def __init__(
+        self,
+        *,
+        selector=None,
+        node_indices=None,
+        tag: str | None = None,
+        face: Optional[tuple[int, str]] = None,
+    ):
+        self.face = None if face is None else (int(face[0]), str(face[1]))
         given = [selector is not None, node_indices is not None, tag is not None]
         if sum(given) != 1:
             raise ValueError("BoundarySpec requires exactly one of selector, tag, or node_indices")

@@ -471,7 +471,7 @@ def boundary_load(
             f"({n_faces}); got shape {tuple(s.shape)}"
         )
 
-    d, layout = _read_fem_operand(mesh, coefficient, op_name, ambiguous="nodal")
+    d, layout = _read_fem_operand(mesh, coefficient, op_name, ambiguous="quad")
     if layout == "quad":
         jxw = _get_fe_space(mesh).jxw
         d_cell = jnp.sum(d * jxw, axis=1) / jnp.sum(jxw, axis=1)

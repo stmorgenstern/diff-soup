@@ -50,28 +50,31 @@ from diff_soup.domains.grid.advection.bcs import PeriodicBC
 from diff_soup.domains.grid.advection.collocated import (
     advect_upwind_1d,
     advect_upwind_nd,
+    div_advect_1d,
+    div_advect_nd,
     normalize_velocity,
 )
 from diff_soup.domains.grid.fdm._kernels import (
-    fdm_apply_flux_bc_1d,
+    fdm_apply_normal_derivative,
     fdm_apply_periodic_bc_1d,
     fdm_apply_periodic_bc_nd,
     fdm_div_flux_1d,
     fdm_div_flux_2d,
     fdm_div_flux_3d,
+    fdm_div_flux_axes,
     fdm_gradient_1d,
     fdm_laplacian_1d,
     fdm_laplacian_2d,
     fdm_laplacian_3d,
 )
 from diff_soup.domains.grid.fvm._kernels import (
-    fvm_apply_flux_bc_1d,
-    fvm_apply_flux_bc_nd,
+    fvm_apply_normal_derivative,
     fvm_apply_periodic_bc_1d,
     fvm_apply_periodic_bc_nd,
     fvm_div_flux_1d,
     fvm_div_flux_2d,
     fvm_div_flux_3d,
+    fvm_div_flux_axes,
     fvm_face_flux_1d,
     fvm_gradient_1d,
     fvm_laplacian_1d,
@@ -96,7 +99,7 @@ from diff_soup.domains.operators._fem_tensor import (
 )
 from diff_soup.domains.operators._field import Field
 from diff_soup.domains.operators._quadfield import QuadField
-from diff_soup.domains.operators.flux_bc import FluxBC
+from diff_soup.domains.operators.flux_bc import FluxBC, _NormalDerivativeBC
 from diff_soup.domains.staggered_grid import StaggeredGrid
 
 # =========================================================================
@@ -535,12 +538,13 @@ def dispatch_laplacian(domain: Domain, u: Array) -> Array:
     raise ValueError(f"Unknown discretization type: {dt!r}")
 
 
-def dispatch_div_flux(domain: Domain, D: ArrayLike, u: Array) -> Array:
+def dispatch_div_flux(domain: Domain, D: "ArrayLike | tuple | list", u: Array) -> Array:
     """Route ``div(D grad u)`` to the FVM, FDM, or FEM backend.
 
     Args:
         domain: Spatial domain selecting the backend.
-        D: Diffusivity (scalar or nodal field).
+        D: Diffusivity, a scalar or a nodal field; on a grid also a per-axis
+            tuple ``(Dx, Dy[, Dz])``, each entry a scalar or a nodal field.
         u: Nodal / cell-centered solution field.
 
     Returns:
@@ -552,11 +556,15 @@ def dispatch_div_flux(domain: Domain, D: ArrayLike, u: Array) -> Array:
         ValueError: If ``domain.discretization_type`` is not recognized.
     """
     _reject_staggered(domain, "div_flux")
+    dt = domain.discretization_type
+    if isinstance(D, (tuple, list)):
+        return _per_axis_div_flux(domain, D, u, dt)
     # Normalize a scalar (constant) diffusivity to a 0-d array so the strictly
     # typed backend kernels (``Float[Array, ...]``) accept it; ``jnp.ndim``-based
     # scalar detection downstream treats a 0-d array exactly like a Python float.
     D = jnp.asarray(D)
-    dt = domain.discretization_type
+    if dt in ("fvm", "fdm"):
+        _check_grid_coefficient(domain, D)
     if dt == "fvm":
         return _fvm_div_flux(domain, D, u)
     elif dt == "fdm":
@@ -564,6 +572,70 @@ def dispatch_div_flux(domain: Domain, D: ArrayLike, u: Array) -> Array:
     elif dt == "fem":
         return _fem_div_flux(domain, D, u)
     raise ValueError(f"Unknown discretization type: {dt!r}")
+
+
+def _tensor_refusal(shape) -> ValueError:
+    return ValueError(
+        f"div_flux: a diffusivity of shape {tuple(shape)} is not a scalar, one value "
+        "per cell or a per-axis tuple. A grid takes a diagonal dispersion tensor as a "
+        "tuple (Dx, Dy[, Dz]), each entry a scalar or one value per cell; a full "
+        "tensor with off-diagonal terms is not supported."
+    )
+
+
+def _check_grid_coefficient(domain: Domain, D: Array) -> None:
+    """Refuse a grid diffusivity that is neither a scalar nor one value per cell."""
+    if D.ndim == 0:
+        return
+    shape = tuple(getattr(domain, "shape", (domain.num_nodes,)))
+    n = int(domain.num_nodes)
+    if D.shape in (shape, (n,)):
+        return
+    if isinstance(domain, Grid1D) and D.shape == (n + 1,):
+        return  # face values
+    raise _tensor_refusal(D.shape)
+
+
+def _per_axis_coefficients(domain: Domain, D) -> tuple:
+    """Check a per-axis diffusivity tuple and shape each entry for the grid kernels."""
+    dim = 1 if isinstance(domain, Grid1D) else domain.dim
+    if len(D) != dim:
+        raise ValueError(
+            f"div_flux: a per-axis diffusivity gives one entry per grid axis, {dim} on "
+            f"this {dim}-dimensional grid; got {len(D)}."
+        )
+    out = []
+    for entry in D:
+        entry = jnp.asarray(entry)
+        _check_grid_coefficient(domain, entry)
+        out.append(entry if isinstance(domain, Grid1D) else _maybe_reshape_coefficient(domain, entry))
+    return tuple(out)
+
+
+def _per_axis_div_flux(domain: Domain, D, u: Array, dt: str) -> Array:
+    """``sum_d d/dx_d (D_d du/dx_d)`` on a grid, one diffusivity per axis."""
+    if dt not in ("fvm", "fdm"):
+        raise ValueError(
+            "div_flux: a per-axis diffusivity tuple is a structured-grid form; on a mesh "
+            "pass a scalar, one value per node or one value per quadrature point."
+        )
+    D_axes = _per_axis_coefficients(domain, D)
+    if isinstance(domain, Grid1D):
+        return fvm_div_flux_1d(domain, u, D_axes[0]) if dt == "fvm" else fdm_div_flux_1d(
+            domain, u, D_axes[0]
+        )
+    u_grid = _reshape_to_grid(domain, u)
+    kernel = fvm_div_flux_axes if dt == "fvm" else fdm_div_flux_axes
+    out = kernel(domain, u_grid, D_axes)
+    return out.reshape(-1) if u.ndim == 1 else out
+
+
+def _axis_coefficient(domain: Domain, D, axis: int):
+    """The diffusivity along ``axis``: the tuple entry, or the shared value, grid-shaped."""
+    if isinstance(D, (tuple, list)):
+        return _per_axis_coefficients(domain, D)[axis]
+    D = jnp.asarray(D)
+    return D if isinstance(domain, Grid1D) else _maybe_reshape_coefficient(domain, D)
 
 
 def dispatch_gradient(domain: Domain, u: Array) -> Array:
@@ -668,8 +740,8 @@ def dispatch_advect_upwind(domain: Domain, u: Array, velocity, bcs: "Sequence | 
     Args:
         domain: A cartesian [Grid1D][] or [GridND][].
         u: Field values (flat ``(num_nodes,)`` or grid-shaped).
-        velocity: Constant scalar speed or a per-axis sequence of constant
-            speeds; a spatially varying velocity array is rejected.
+        velocity: A constant speed, or a per-axis sequence whose entries are
+            constants or cell-centred arrays (a velocity field).
         bcs: Optional boundary tags.  Each
             [PeriodicBC][diff_soup.domains.grid.advection.bcs.PeriodicBC] marks its
             axis periodic; every other axis takes the zero-gradient (outflow)
@@ -681,7 +753,7 @@ def dispatch_advect_upwind(domain: Domain, u: Array, velocity, bcs: "Sequence | 
 
     Raises:
         NotImplementedError: on a non-grid (e.g. FEM) or staggered domain.
-        ValueError: on a spatially varying velocity or an unsupported BC.
+        ValueError: on a velocity of the wrong shape or an unsupported BC.
     """
     _reject_staggered(domain, "advect_upwind")
 
@@ -708,14 +780,58 @@ def dispatch_advect_upwind(domain: Domain, u: Array, velocity, bcs: "Sequence | 
                 )
 
     if isinstance(domain, Grid1D):
-        (v0,) = normalize_velocity(velocity, 1)
+        (v0,) = normalize_velocity(velocity, 1, (domain.n,))
         return advect_upwind_1d(domain, u, v0, periodic=(0 in periodic_axes))
     if isinstance(domain, GridND):
-        vpa = normalize_velocity(velocity, domain.dim)
+        vpa = normalize_velocity(velocity, domain.dim, tuple(domain.shape))
         u_grid = _reshape_to_grid(domain, u)
         out = advect_upwind_nd(domain, u_grid, vpa, tuple(sorted(periodic_axes)))
         return out.reshape(-1) if u.ndim == 1 else out
     raise NotImplementedError(f"advect_upwind is not implemented for {type(domain).__name__}.")
+
+
+def dispatch_div_advect(domain: Domain, u: Array, velocity, bcs: "Sequence | None" = None):
+    """Route the conservative upwind advection ``div(v u)`` to the grid kernels.
+
+    Each face carries the upwind flux; a boundary face carries only an outgoing
+    flux, so an inflow enters through ``spec.bc.inflow``. ``"fvm"`` and ``"fdm"``
+    grids share the kernel, which weights each face by ``face_area / cell_volume``.
+
+    Args:
+        domain: A cartesian [Grid1D][] or [GridND][].
+        u: Field values (flat ``(num_nodes,)`` or grid-shaped).
+        velocity: A constant, or a per-axis sequence of constants or cell arrays.
+        bcs: Optional [PeriodicBC][diff_soup.domains.grid.advection.bcs.PeriodicBC]
+            tags; any other condition is rejected.
+
+    Returns:
+        ``div(v u)`` at the cells, matching ``u``'s layout.
+    """
+    _reject_staggered(domain, "div_advect")
+    dt = domain.discretization_type
+    if dt not in ("fvm", "fdm"):
+        raise NotImplementedError(
+            "div_advect is a structured-grid operator for cartesian FVM/FDM grids; "
+            f"{type(domain).__name__} uses {dt!r} discretization."
+        )
+    periodic_axes: set[int] = set()
+    for bc in bcs or ():
+        if not isinstance(bc, PeriodicBC):
+            raise ValueError(
+                "div_advect takes periodic conditions only (spec.bc.periodic). A face the "
+                "flow leaves through carries the outgoing flux on its own; feed a face the "
+                f"flow enters through with spec.bc.inflow, not a {type(bc).__name__}."
+            )
+        periodic_axes.add(int(bc.axis))
+    if isinstance(domain, Grid1D):
+        (v0,) = normalize_velocity(velocity, 1, (domain.n,), op_name="div_advect")
+        return div_advect_1d(domain, u, v0, periodic=(0 in periodic_axes))
+    if isinstance(domain, GridND):
+        vpa = normalize_velocity(velocity, domain.dim, tuple(domain.shape), op_name="div_advect")
+        u_grid = _reshape_to_grid(domain, u)
+        out = div_advect_nd(domain, u_grid, vpa, tuple(sorted(periodic_axes)))
+        return out.reshape(-1) if u.ndim == 1 else out
+    raise NotImplementedError(f"div_advect is not implemented for {type(domain).__name__}.")
 
 
 # =========================================================================
@@ -1401,7 +1517,7 @@ def dispatch_apply_bcs(
     domain: Domain,
     result: Array,
     u: Array,
-    D: ArrayLike,
+    D: "ArrayLike | tuple | list",
     bcs: "Sequence",
     t: "Array | None" = None,
 ) -> Array:
@@ -1430,67 +1546,72 @@ def dispatch_apply_bcs(
     for bc in bcs:
         if isinstance(bc, FluxBC):
             result = _apply_flux_bc(domain, result, u, D, bc, dt, t)
+        elif isinstance(bc, _NormalDerivativeBC):
+            result = _apply_normal_derivative(domain, result, u, D, bc, dt)
         elif isinstance(bc, PeriodicBC):
             result = _apply_periodic_bc(domain, result, u, D, bc, dt)
     return result
+
+
+def _apply_normal_derivative(domain, result, u, D, bc, dt):
+    """Impose an evaluated outward normal derivative on one grid face."""
+    if not isinstance(domain, (Grid1D, GridND)):
+        raise ConfigurationError(
+            f"a normal-derivative condition reached the operator bank on a "
+            f"{type(domain).__name__}; it is imposed on structured grids only. On a "
+            "mesh, state the flux density with spec.bc.flux."
+        )
+    flat_in = isinstance(domain, GridND) and result.ndim == 1
+    if flat_in:
+        result, u = result.reshape(domain.shape), u.reshape(domain.shape)
+    D_axis = _axis_coefficient(domain, D, bc.axis)
+    if dt == "fvm":
+        value = bc.value if bc.mask is None else bc.value * bc.mask
+        result = fvm_apply_normal_derivative(domain, result, D_axis, bc.axis, bc.side, value)
+    elif dt == "fdm":
+        result = fdm_apply_normal_derivative(
+            domain, result, u, D_axis, bc.axis, bc.side, bc.value, bc.mask
+        )
+    else:
+        raise ValueError(f"Unknown discretization type: {dt!r}")
+    return result.reshape(-1) if flat_in else result
 
 
 def _apply_flux_bc(
     domain: Domain,
     result: Array,
     u: Array,
-    D: ArrayLike,
+    D: "ArrayLike | tuple | list",
     bc,
     dt: str,
     t: Array,
 ) -> Array:
     """Route FluxBC to the correct backend.
 
+    ``flux_fn`` returns the outward normal derivative at each boundary cell; the
+    condition is imposed as a ghost value (finite volume) or a ghost node
+    (finite difference) by [_apply_normal_derivative][].
+
     Raises:
         ValueError: If a grid FluxBC names no ``side``, or the grid's
             discretization type is not recognized.
-        NotImplementedError: If the grid has no flux-BC kernel for its
-            discretization.
         ConfigurationError: If ``domain`` is a mesh; a flux through a tagged
             mesh boundary is declared with ``spec.bc.flux(var, tag=...)``.
     """
-    if isinstance(domain, Grid1D):
+    if isinstance(domain, (Grid1D, GridND)):
+        if dt not in ("fvm", "fdm"):
+            raise ValueError(f"Unknown discretization type: {dt!r}")
         side = bc.side
         if side is None:
             raise _flux_bc_needs_side(domain, bc)
-        u_b = u[0] if side == "low" else u[-1]
-        du_dn = bc.flux_fn(u_b, t)
-
-        if dt == "fvm":
-            return fvm_apply_flux_bc_1d(domain, result, u, D, side, du_dn)
-        elif dt == "fdm":
-            return fdm_apply_flux_bc_1d(domain, result, u, D, side, du_dn)
-        raise ValueError(f"Unknown discretization type: {dt!r}")
-
-    if isinstance(domain, GridND):
-        if dt != "fvm":
-            raise NotImplementedError(
-                f"FluxBC on a {type(domain).__name__} is implemented only for the "
-                f"finite-volume method, and this grid was built with method={dt!r}. "
-                "The finite-volume correction scales the boundary flux by "
-                "face_area / cell_volume, which is not the finite-difference "
-                "ghost-node boundary treatment. Build the grid with method='fvm', "
-                "or impose the condition on a Grid1D, where both kernels exist."
-            )
         axis = bc.axis if bc.axis is not None else 0
-        side = bc.side
-        if side is None:
-            raise _flux_bc_needs_side(domain, bc)
-        flat_in = result.ndim == 1
-        shape = domain.shape
-        if flat_in:
-            result = result.reshape(shape)
-            u_grid = u.reshape(shape)
-        else:
-            u_grid = u
-
-        result = fvm_apply_flux_bc_nd(domain, result, u_grid, D, axis, side, bc.flux_fn, t)
-        return result.reshape(-1) if flat_in else result
+        flat_in = isinstance(domain, GridND) and result.ndim == 1
+        u_grid = u.reshape(domain.shape) if flat_in else u
+        end = 0 if side == "low" else u_grid.shape[axis] - 1
+        u_b = jnp.take(u_grid, end, axis=axis)
+        du_dn = jax.vmap(lambda ub: bc.flux_fn(ub, t))(u_b.reshape(-1)).reshape(u_b.shape)
+        condition = _NormalDerivativeBC(axis=axis, side=side, value=du_dn)
+        return _apply_normal_derivative(domain, result, u, D, condition, dt)
 
     _require_fem(domain, "FluxBC")
     raise _flux_bc_on_mesh(domain, bc)
@@ -1521,7 +1642,7 @@ def _apply_periodic_bc(
     domain: Domain,
     result: Array,
     u: Array,
-    D: ArrayLike,
+    D: "ArrayLike | tuple | list",
     bc,
     dt: str,
 ) -> Array:
@@ -1532,10 +1653,11 @@ def _apply_periodic_bc(
             grid's discretization has no periodic wrap kernel.
     """
     if isinstance(domain, Grid1D):
+        D_1 = _axis_coefficient(domain, D, 0)
         if dt == "fvm":
-            return fvm_apply_periodic_bc_1d(domain, result, u, D)
+            return fvm_apply_periodic_bc_1d(domain, result, u, D_1)
         elif dt == "fdm":
-            return fdm_apply_periodic_bc_1d(domain, result, u, D)
+            return fdm_apply_periodic_bc_1d(domain, result, u, D_1)
         raise _no_periodic_wrap(domain, dt)
 
     if isinstance(domain, GridND):
@@ -1547,13 +1669,11 @@ def _apply_periodic_bc(
             u_grid = u.reshape(shape)
         else:
             u_grid = u
-        D_g = _maybe_reshape_coefficient(domain, D)
-        if dt == "fvm":
-            result = fvm_apply_periodic_bc_nd(domain, result, u_grid, D_g, axes)
-        elif dt == "fdm":
-            result = fdm_apply_periodic_bc_nd(domain, result, u_grid, D_g, axes)
-        else:
+        if dt not in ("fvm", "fdm"):
             raise _no_periodic_wrap(domain, dt)
+        wrap = fvm_apply_periodic_bc_nd if dt == "fvm" else fdm_apply_periodic_bc_nd
+        for axis in axes:
+            result = wrap(domain, result, u_grid, _axis_coefficient(domain, D, axis), (axis,))
         return result.reshape(-1) if flat_in else result
 
     raise _no_periodic_wrap(domain, dt)

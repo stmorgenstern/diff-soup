@@ -63,7 +63,7 @@ from diff_soup.problem._ir import (
     Variable,
     _BoundaryFn,
 )
-from diff_soup.problem._ir.bc import _time_flux_fn
+from diff_soup.problem._ir.bc import _constant_fn, _time_flux_fn
 from diff_soup.problem._ir.constraint import (
     BoundaryIntegralConstraint,
     DifferentialGlobalEquation,
@@ -364,7 +364,18 @@ def _make_flux_fn(value: Any, value_fn: Optional[Callable]) -> Callable:
     return fn
 
 
-def _resolve_where(where: dict[str, Any]) -> BoundarySpec:
+def _resolve_where(where: dict[str, Any], domain=None) -> BoundarySpec:
+    if where.get("face") is not None:
+        from diff_soup._lowering.bcs import _grid_face_cells
+
+        axis, side = where["face"]
+        if getattr(domain, "discretization_type", None) not in ("fvm", "fdm"):
+            raise ValueError(
+                f"axis={axis}, side={side!r} names a face of a structured grid, and this "
+                f"field lives on a {type(domain).__name__}. Select the boundary with on=, "
+                "tag= or node_indices= instead."
+            )
+        return BoundarySpec(node_indices=_grid_face_cells(domain, axis, side), face=(axis, side))
     if "selector" in where and where["selector"] is not None:
         return BoundarySpec(selector=where["selector"])
     if "tag" in where and where["tag"] is not None:
@@ -380,9 +391,25 @@ def _resolve_where(where: dict[str, Any]) -> BoundarySpec:
     raise ValueError("BCSpec.where missing a selector, tag, and node_indices")
 
 
-def _emit_bc(bc: BCSpec, var_map: dict[str, Any]):
+def _inflow_flux_fn(velocity, value, value_fn):
+    """The flux density ``velocity * c_in`` an inflow face carries into the domain."""
+    speed = jnp.asarray(velocity, dtype=float)
+    inlet = _constant_fn(value) if value_fn is None else value_fn
+
+    def flux_fn(view, ctx, t, _speed=speed, _inlet=inlet):  # noqa: ARG001
+        return _speed * jnp.asarray(_inlet(t))
+
+    return flux_fn
+
+
+def _emit_bc(bc: BCSpec, var_map: dict[str, Any], domain=None):
     var = var_map[bc.var]
-    where = _resolve_where(bc.where)
+    where = _resolve_where(bc.where, domain)
+    if bc.kind == "inflow":
+        # Danckwerts ``v c - D dc/dn = v c_in``: the face carries the total flux
+        # ``v c_in`` into the domain, while div_advect carries no flux in through
+        # it and div_flux keeps its natural zero flux there.
+        return FluxBC(var=var, where=where, flux_fn=_inflow_flux_fn(bc.velocity, bc.value, bc.value_fn))
     if bc.kind == "dirichlet":
         return DirichletBC(
             var=var,
@@ -1323,6 +1350,166 @@ def _reject_derivative_returns_in_bundle(rhs: Callable, equation_name: str) -> C
     return _BundledReturnGuard(inner=rhs, equation_name=equation_name)
 
 
+class _NeumannCondition(eqx.Module):
+    """One ``spec.bc.neumann`` declaration, resolved to a grid face.
+
+    ``positions`` are the selected cells' positions in the face (the grid shape
+    with ``axis`` removed, row-major), or ``None`` for the whole face.
+    ``value_fn`` takes dimensional time and returns a scalar or one value per
+    selected cell.
+    """
+
+    field: str = eqx.field(static=True)
+    axis: int = eqx.field(static=True)
+    side: str = eqx.field(static=True)
+    face_shape: tuple[int, ...] = eqx.field(static=True)
+    positions: Optional[tuple[int, ...]] = eqx.field(static=True)
+    time_ref: float = eqx.field(static=True)
+    value_fn: Callable
+
+    def evaluate(self, t):
+        """The operator-level condition at internal time ``t``."""
+        from diff_soup.domains.operators.flux_bc import _NormalDerivativeBC
+
+        value = jnp.asarray(self.value_fn(t * self.time_ref))
+        size = int(np.prod(self.face_shape))
+        if self.positions is None:
+            value = value if value.ndim == 0 else value.reshape(self.face_shape)
+            return _NormalDerivativeBC(axis=self.axis, side=self.side, value=value)
+        where = jnp.asarray(self.positions)
+        face = jnp.zeros((size,), dtype=value.dtype).at[where].set(value)
+        mask = jnp.zeros((size,), dtype=value.dtype).at[where].set(1.0)
+        return _NormalDerivativeBC(
+            axis=self.axis,
+            side=self.side,
+            value=face.reshape(self.face_shape),
+            mask=mask.reshape(self.face_shape),
+        )
+
+
+class _MeshNeumannCondition(eqx.Module):
+    """One ``spec.bc.neumann`` declaration on a tagged mesh, resolved to its facets.
+
+    ``facets`` are the selected rows of ``mesh.boundary_facets()``; ``value_fn``
+    takes dimensional time and returns a scalar or one value per selected facet.
+    """
+
+    field: str = eqx.field(static=True)
+    facets: tuple[int, ...] = eqx.field(static=True)
+    time_ref: float = eqx.field(static=True)
+    value_fn: Callable
+
+    def evaluate(self, t):
+        """The operator-level condition at internal time ``t``."""
+        from diff_soup.domains.operators.flux_bc import _MeshNormalDerivative
+
+        value = jnp.asarray(self.value_fn(t * self.time_ref))
+        return _MeshNormalDerivative(facets=self.facets, value=value)
+
+
+class _OpsContext:
+    """The residual context with ``ops`` replaced; every other attribute forwards."""
+
+    __slots__ = ("_ctx", "ops")
+
+    def __init__(self, ctx, ops) -> None:
+        self._ctx = ctx
+        self.ops = ops
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_ctx"), name)
+
+
+class _NeumannRhs(eqx.Module):
+    """Carry a component's ``spec.bc.neumann`` conditions into its equations' operators.
+
+    Each evaluation hands the wrapped rhs a ``q.ops`` whose ``laplacian`` and
+    ``div_flux``, applied to a conditioned field's own values, impose its outward
+    normal derivative: through a ghost value on a grid, as the natural boundary
+    term ``int D s N_i dS`` on a mesh. The operator supplies its own
+    diffusivity, so the condition holds for any ``D``, ``D(u)`` included.
+    """
+
+    inner: object
+    fields: dict
+    conditions: tuple
+
+    def __call__(self, view, ctx, t):
+        from diff_soup.domains.operators.base import _FieldConditionView
+
+        targets = []
+        for name, variable in self.fields.items():
+            conditions = tuple(c.evaluate(t) for c in self.conditions if c.field == name)
+            targets.append((view[variable], conditions))
+        return self.inner(view, _OpsContext(ctx, _FieldConditionView(ctx.ops, targets)), t)
+
+
+def _neumann_conditions(spec, var_map) -> dict[str, tuple]:
+    """Resolve every ``spec.bc.neumann`` to its grid face or mesh facets, grouped by domain name."""
+    from diff_soup._lowering.bcs import (
+        _grid_face_cells,
+        _grid_face_of,
+        _grid_shape,
+        _resolve_facet_mask,
+        _resolve_selector,
+    )
+
+    time_ref = 1.0 if spec._time_scale is None else float(spec._time_scale)
+    out: dict[str, list] = {}
+    for bc in spec._bcs:
+        if bc.kind != "neumann" or bc.var not in spec._fields:
+            continue
+        dname = spec._field_domains[bc.var]
+        domain = spec._domains[dname]
+        desc = f"spec.bc.neumann({bc.var!r})"
+        value_fn = bc.value_fn if bc.value_fn is not None else _constant_fn(bc.value)
+        if hasattr(domain, "boundary_facets") and bc.where.get("selector") is not None:
+            mask = _resolve_facet_mask(domain, bc.where["selector"], bc_desc=desc)
+            out.setdefault(dname, []).append(
+                _MeshNeumannCondition(
+                    field=bc.var,
+                    facets=tuple(int(i) for i in np.flatnonzero(mask)),
+                    time_ref=time_ref,
+                    value_fn=value_fn,
+                )
+            )
+            continue
+        if getattr(domain, "discretization_type", None) not in ("fvm", "fdm") or not hasattr(
+            domain, "cell_volumes"
+        ):
+            raise ValueError(
+                f"{desc}: the normal derivative is imposed on structured grids and tagged "
+                f"meshes, and {bc.var!r} lives on a {type(domain).__name__}. State the flux "
+                "density D du/dn with spec.bc.flux."
+            )
+        if bc.where.get("face") is not None:
+            face = tuple(bc.where["face"])
+            cells = _grid_face_cells(domain, *face)
+        else:
+            cells = _resolve_selector(domain, bc.where["selector"], want="nodes")
+            face = _grid_face_of(domain, cells, bc_desc=desc)
+        axis, side = face
+        face = _grid_face_of(domain, cells, face=face, bc_desc=desc)
+        shape = _grid_shape(domain)
+        face_shape = tuple(n for k, n in enumerate(shape) if k != axis)
+        multi = np.unravel_index(np.asarray(cells, dtype=np.int64), shape)
+        others = tuple(m for k, m in enumerate(multi) if k != axis)
+        positions = np.ravel_multi_index(others, face_shape) if face_shape else np.zeros(1, int)
+        whole = len(cells) == int(np.prod(face_shape))
+        out.setdefault(dname, []).append(
+            _NeumannCondition(
+                field=bc.var,
+                axis=int(axis),
+                side=side,
+                face_shape=face_shape,
+                positions=None if whole else tuple(int(p) for p in positions),
+                time_ref=time_ref,
+                value_fn=value_fn,
+            )
+        )
+    return {dname: tuple(conditions) for dname, conditions in out.items()}
+
+
 def _build_components(
     spec,
     var_map: dict[str, Any],
@@ -1365,6 +1552,15 @@ def _build_components(
     def _comp_var_map(dname: str) -> dict[str, Any]:
         return _component_var_map(var_map, aliases_by_comp, dname)
 
+    neumann = _neumann_conditions(spec, var_map)
+
+    def _with_neumann(rhs, dname: str):
+        conditions = neumann.get(dname)
+        if not conditions:
+            return rhs
+        fields = {c.field: var_map[c.field] for c in conditions}
+        return _NeumannRhs(inner=rhs, fields=fields, conditions=conditions)
+
     for eqspec in spec._equations:
         if eqspec.writes in spec._globals:
             # Differential-global equations lower to a bordered closing row,
@@ -1398,6 +1594,7 @@ def _build_components(
             learnable_functions=learnable_functions,
             quad_fields=quad_fields,
         )
+        rhs = _with_neumann(rhs, dname)
         rhs = _wrap_derivative_return(rhs, equation_name=eqspec.name, field_name=eqspec.writes)
         eq = Equation(var=var, rhs_fn=rhs, inputs=tuple(inputs), name=eqspec.name)
         by_domain[dname]["eqs"].append(eq)
@@ -1448,6 +1645,7 @@ def _build_components(
             learnable_functions=learnable_functions,
             quad_fields=quad_fields,
         )
+        rhs = _with_neumann(rhs, dname)
         rhs = _reject_derivative_returns_in_bundle(rhs, meqspec.name)
         eq = MultiEquation(vars=out_vars, rhs_fn=rhs, inputs=tuple(inputs), name=meqspec.name)
         by_domain[dname]["eqs"].append(eq)
@@ -1491,12 +1689,14 @@ def _build_components(
         if bcspec.var not in spec._fields:
             raise ValueError(f"BC kind={bcspec.kind!r} references unknown field {bcspec.var!r}")
         dname = spec._field_domains[bcspec.var]
+        domain = spec._domains[dname]
         if bcspec.kind == "periodic":
-            domain = spec._domains[dname]
-            axes = tuple(range(_grid_dim(domain)))
+            axes = bcspec.axes if bcspec.axes is not None else tuple(range(_grid_dim(domain)))
             by_domain[dname]["bcs"].append(PeriodicBC(var=var_map[bcspec.var], axes=axes))
+        elif bcspec.kind == "neumann":
+            continue  # carried by the equations' operators (see _neumann_conditions)
         else:
-            by_domain[dname]["bcs"].append(_emit_bc(bcspec, var_map))
+            by_domain[dname]["bcs"].append(_emit_bc(bcspec, var_map, domain))
 
     components: list[Component] = []
     for dname, payload in by_domain.items():

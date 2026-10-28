@@ -29,6 +29,7 @@ from typing import Any, ClassVar, Union
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float
 
 from diff_soup.domains.base import Domain
@@ -37,6 +38,7 @@ from diff_soup.domains.mesh.fem.assembly import scatter_elem_residual
 from diff_soup.domains.operators._boundary_ops import boundary_integral as _bi
 from diff_soup.domains.operators._boundary_ops import boundary_trace as _bt
 from diff_soup.domains.operators._boundary_ops import surface_flux as _sf
+from diff_soup.domains.operators._fem_scalar import cell_indicator as _cell_indicator
 from diff_soup.domains.operators._fem_scalar import grad as _scalar_grad
 from diff_soup.domains.operators._fem_scalar import integrate_grad
 from diff_soup.domains.operators._quadfield import QuadField
@@ -85,6 +87,7 @@ _CAPABILITY_MEMBERS = frozenset(
         "mass",
         "lumped_mass",
         "advect_upwind",
+        "div_advect",
         "wrap_quad_value",
         "quad_gradient",
         "integrate_shape",
@@ -101,7 +104,7 @@ _ADAPTER_MEMBERS = frozenset({"unwrap_field", "wrap_quad_field"})
 class AbstractOperator(eqx.Module):
     """The base class of an operator bank, which an equation closure reaches as `q.ops`.
 
-    Subclass it for a new discretization, implementing `discretization_type` and the operators it offers, and register it with `spec.domain(name, domain, operators=...)`. Operators it leaves out raise `NotImplementedError`. A bank used under `spec.bc.periodic` must accept `bcs=` on `laplacian`, `div_flux` and `advect_upwind`.
+    Subclass it for a new discretization, implementing `discretization_type` and the operators it offers, and register it with `spec.domain(name, domain, operators=...)`. Operators it leaves out raise `NotImplementedError`. A bank used under `spec.bc.periodic` must accept `bcs=` on `laplacian`, `div_flux`, `advect_upwind` and `div_advect`, and one used under `spec.bc.neumann` on `laplacian` and `div_flux`.
 
     Attributes:
         domain: The domain the bank is bound to.
@@ -326,6 +329,13 @@ class AbstractOperator(eqx.Module):
         """
         raise self._capability_error("advect_upwind", "upwind advection assembly")
 
+    def div_advect(self, *args, **kwargs):
+        """Conservative upwind advection of a field, called as `div_advect(u, velocity, *, bcs=None, t=None)`.
+
+        The base class raises `NotImplementedError`.
+        """
+        raise self._capability_error("div_advect", "conservative advection assembly")
+
 
 class Operators(AbstractOperator):
     """The built-in operator bank, reached in an equation closure as `q.ops`.
@@ -453,8 +463,10 @@ class Operators(AbstractOperator):
     ) -> Float[Array, "..."]:
         """The diffusion term ∇·(D∇u), pointwise on a grid and the weak form -∫ D∇u·∇N_i on a mesh.
 
+        On a grid a tuple `(Dx, Dy[, Dz])` gives each axis its own diffusivity, a diagonal tensor. A full tensor is refused.
+
         Args:
-            D: The diffusivity, a scalar or one value per node, or on a mesh also one per quadrature point.
+            D: The diffusivity, a scalar or one value per node, on a mesh also one per quadrature point, on a grid also one entry per axis.
             u: A scalar field.
             bcs: Flux and periodic conditions applied on a grid, which problems declare with `spec.bc`.
             t: The time passed to a time-dependent flux condition, zero if `None`.
@@ -477,22 +489,47 @@ class Operators(AbstractOperator):
         bcs: "Sequence | None" = None,
         t: "Array | None" = None,
     ) -> Float[Array, "..."]:
-        """First-order upwind advection v·∇u at a constant velocity, on a grid.
+        """First-order upwind advection v·∇u, on a grid.
 
-        The sign of each velocity component picks the upwind side. The result is the operator itself, so a transport equation writes `-q.ops.advect_upwind(q.u, v)`. Boundaries that are not periodic are zero-gradient outflow.
+        The sign of the velocity at each cell picks the upwind side. The result is the operator itself, so a transport equation writes `-q.ops.advect_upwind(q.u, v)`. Boundaries that are not periodic are zero-gradient outflow.
 
         Args:
             field: The advected field.
-            velocity: One constant speed for every axis, or a sequence of one constant speed per axis.
+            velocity: One constant speed for every axis, or a sequence with one entry per axis, each a constant or one value per cell.
             bcs: Periodic conditions only, which problems declare with `spec.bc.periodic`.
-            t: Ignored, since the velocity is constant.
+            t: Ignored.
 
         Returns:
             The advection term, shaped like `field`.
         """
-        del t  # constant velocity: time is not consulted
+        del t
         u = self._as_dofs(field)
         return _d.dispatch_advect_upwind(self.domain, u, velocity, bcs)
+
+    def div_advect(
+        self,
+        field: _NodealOrField,
+        velocity: Any,
+        *,
+        bcs: "Sequence | None" = None,
+        t: "Array | None" = None,
+    ) -> Float[Array, "..."]:
+        """First-order upwind advection in conservative form ∇·(v u), on a grid.
+
+        Each face carries the velocity there, the mean of its two cells, times the upstream value. A boundary face carries only an outgoing flux, so a transport equation writes `-q.ops.div_advect(q.c, v)` and feeds an inlet with `spec.bc.inflow`.
+
+        Args:
+            field: The advected field.
+            velocity: One constant speed for every axis, or a sequence with one entry per axis, each a constant or one value per cell.
+            bcs: Periodic conditions only, which problems declare with `spec.bc.periodic`.
+            t: Ignored.
+
+        Returns:
+            The advection term, shaped like `field`.
+        """
+        del t
+        u = self._as_dofs(field)
+        return _d.dispatch_div_advect(self.domain, u, velocity, bcs)
 
     def gradient(self, u: _NodealOrField) -> Float[Array, "..."]:
         """The gradient ∇u, pointwise on a one-dimensional grid.
@@ -692,6 +729,14 @@ class Operators(AbstractOperator):
             The effective diffusivity, broadcast over `D` and `eps`.
         """
         return _tortuosity_corrected(D, eps, beta=beta)
+
+    def cell_indicator(self, name):
+        """One per cell of a named region of a tagged mesh and zero elsewhere, shape `(n_cells,)`.
+
+        Args:
+            name: A region name in the mesh's `cell_tag_names`.
+        """
+        return _cell_indicator(self.domain, name)
 
     def boundary_integral(self, field, *, tag):
         """The integral of a nodal field over a tagged boundary of a mesh.
@@ -1131,8 +1176,8 @@ class _PeriodicOperatorView(AbstractOperator):
     resolved to — built-in or recipe-supplied via ``operators=`` — so the
     declaration reaches a custom bank exactly as it reaches the built-in one.
 
-    ``laplacian``, ``div_flux`` and ``advect_upwind`` take a boundary-condition
-    list, so the wrap rides in as one
+    ``laplacian``, ``div_flux``, ``advect_upwind`` and ``div_advect`` take a
+    boundary-condition list, so the wrap rides in as one
     [PeriodicBC][diff_soup.domains.grid.advection.bcs.PeriodicBC] per declared
     axis and a spec body such as ``dc/dt = q.ops.laplacian(q.c)`` is periodic
     without naming any boundary condition.
@@ -1207,6 +1252,10 @@ class _PeriodicOperatorView(AbstractOperator):
         """Upwind advection with the declared periodic wrap merged into ``bcs``."""
         return self._wrappable("advect_upwind")(field, velocity, bcs=self._with_periodic(bcs), t=t)
 
+    def div_advect(self, field, velocity, *, bcs=None, t=None):
+        """Conservative advection with the declared periodic wrap merged into ``bcs``."""
+        return self._wrappable("div_advect")(field, velocity, bcs=self._with_periodic(bcs), t=t)
+
     # ------------------------------------------------------------------
     # Operators with no periodic stencil: refused, never answered.
     # ------------------------------------------------------------------
@@ -1218,7 +1267,7 @@ class _PeriodicOperatorView(AbstractOperator):
             f"grid axes {list(self.periodic_axes)}, but {name} differences one-sidedly "
             f"at the ends of each axis instead of wrapping across them, so its result "
             f"would be the non-periodic one. The operators that carry the periodic "
-            f"wrap are laplacian, div_flux and advect_upwind."
+            f"wrap are laplacian, div_flux, advect_upwind and div_advect."
         )
 
     def gradient(self, *args, **kwargs):
@@ -1284,3 +1333,84 @@ class _PeriodicOperatorView(AbstractOperator):
     def as_weak(self, value):
         """Already-integrated weak-form provenance tag, from the composed bank."""
         return self.inner.as_weak(value)
+
+
+class _FieldConditionView:
+    """``q.ops`` view that applies conditions stated on particular fields.
+
+    ``spec.bc.neumann`` fixes the outward normal derivative of one field. The
+    condition reaches the residual through ``laplacian`` and ``div_flux``: when
+    either is applied to that field's own values (``q.<name>``, recognised by
+    identity), the view imposes the field's evaluated conditions with the
+    operator's own diffusivity. On a grid a
+    [_NormalDerivativeBC][diff_soup.domains.operators.flux_bc._NormalDerivativeBC]
+    joins ``bcs``. On a mesh a
+    [_MeshNormalDerivative][diff_soup.domains.operators.flux_bc._MeshNormalDerivative]
+    adds the natural boundary term ``int D s N_i dS``. An operator applied to
+    anything else, or any other member, is the composed bank's own.
+    """
+
+    __slots__ = ("_inner", "_targets")
+
+    def __init__(self, inner, targets) -> None:
+        self._inner = inner
+        self._targets = tuple(targets)
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+    def _conditions(self, u) -> list:
+        values = getattr(u, "nodal", u) if isinstance(u, _Field) else u
+        for array, conditions in self._targets:
+            if values is array or u is array:
+                return list(conditions)
+        return []
+
+    def _call(self, name: str, u, args, kwargs):
+        from diff_soup.domains.mesh.fem._boundary import boundary_load
+        from diff_soup.domains.operators.flux_bc import _MeshNormalDerivative
+
+        method = getattr(self._inner, name)
+        extra = self._conditions(u)
+        on_mesh = [c for c in extra if isinstance(c, _MeshNormalDerivative)]
+        on_grid = [c for c in extra if not isinstance(c, _MeshNormalDerivative)]
+        if on_grid:
+            if not _accepts_bcs(method):
+                raise NotImplementedError(
+                    f"{type(self._inner).__name__}.{name} takes no bcs argument, so the "
+                    "spec.bc.neumann condition on its field cannot be passed to it. An "
+                    "operator bank used under spec.bc.neumann must accept bcs= on "
+                    "laplacian and div_flux."
+                )
+            bcs = kwargs.get("bcs")
+            kwargs = {**kwargs, "bcs": list(bcs) + on_grid if bcs else on_grid}
+        result = method(*args, **kwargs)
+        D = args[0] if name == "div_flux" else 1.0
+        D = getattr(D, "nodal", D) if isinstance(D, _Field) else D
+        if on_mesh and jnp.ndim(D) == 2:
+            # A quadrature-point diffusivity on a mesh with as many cells as nodes
+            # reads as nodal in the boundary load; div_flux reads it as quad.
+            _, layout = _d._read_fem_operand(self.domain, D, "div_flux", ambiguous="quad")
+            _, load_layout = _d._read_fem_operand(self.domain, D, "div_flux", ambiguous="nodal")
+            if layout != load_layout:
+                raise NotImplementedError(
+                    "spec.bc.neumann on a mesh with as many cells as nodes cannot yet read a "
+                    "diffusivity given at the quadrature points; pass it per node or per cell, "
+                    "or state the flux density with spec.bc.flux."
+                )
+        for condition in on_mesh:
+            mask = np.zeros(int(np.asarray(self.domain.boundary_facets()).shape[0]), dtype=bool)
+            mask[list(condition.facets)] = True
+            load = boundary_load(self.domain, mask, condition.value, D, op_name="spec.bc.neumann")
+            result = result + self._inner.as_weak(load)
+        return result
+
+    def laplacian(self, u, **kwargs):
+        """Laplacian with the field's normal-derivative conditions imposed."""
+        return self._call("laplacian", u, (u,), kwargs)
+
+    def div_flux(self, D, u, **kwargs):
+        """Divergence-of-flux with the field's normal-derivative conditions imposed."""
+        return self._call("div_flux", u, (D, u), kwargs)

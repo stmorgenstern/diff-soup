@@ -7,8 +7,9 @@ Owns:
 - ``_ResolvedDirichlet`` / ``_ResolvedFlux`` / ``_ResolvedRobin`` /
   ``_ResolvedTraction`` / ``_ResolvedSymmetry`` / ``_ResolvedBCs``: dataclasses
   describing each BC's resolved DOF indices, value/flux closures, etc.
-- ``_resolve_tag``, ``_resolve_grid_local_indices``, ``_grid_face_factor``:
-  geometry helpers for translating ``BoundarySpec`` into DOF indices.
+- ``_resolve_tag``, ``_resolve_grid_local_indices``, ``_grid_face_of``,
+  ``_grid_face_factor``: geometry helpers for translating ``BoundarySpec`` into
+  DOF indices and per-face weights.
 - ``_wrap_dirichlet_value_fn``: rewraps a value_fn for non-identity Scales.
 - ``_bc_dofs``: top-level entry that assembles ``_ResolvedBCs``.
 - ``_extract_flux_callables`` / ``_extract_robin_callables`` /
@@ -35,7 +36,11 @@ import numpy as np
 from diff_soup._errors import LoweringError
 from diff_soup.domains.grid.core import Grid1D, GridND
 from diff_soup.domains.mesh.core import TaggedMesh
-from diff_soup.domains.mesh.fem._boundary import boundary_face_assembly_for_ids
+from diff_soup.domains.mesh.fem._boundary import (
+    boundary_face_assembly_for_mask,
+    boundary_facet_mask_for_ids,
+    boundary_facet_mask_for_nodes,
+)
 from diff_soup.problem._ir.bc import (
     DirichletBC,
     FluxBC,
@@ -145,33 +150,47 @@ def _face_centroids(domain, face_indices) -> np.ndarray:
     return points[fi].mean(axis=1)
 
 
-def _grid_face_geometry(domain, indices, *, bc_desc: str):
-    """Boundary-face geometry of a one-dimensional grid, for a ``face`` view.
+def _grid_face_geometry(domain, indices, *, bc_desc: str, face=None):
+    """Boundary-face geometry of grid cells on one face, for a ``face`` view.
 
-    A cell of a one-dimensional grid touches the outside world only at the two
-    ends of the line, where it exposes a single outer face: the low end's face
-    points along ``-x``, the high end's along ``+x``. Returns the
-    ``(face_indices, normals, centroids)`` triple the face view reads, each
-    shaped so one boundary cell stands in for one facet — ``(n_cells, 1)`` cell
-    indices, ``(n_cells, 1)`` outward unit normals, and ``(n_cells, 1)`` cell
-    centres. With one index per row the face view's facet mean over
-    ``value[face_indices]`` is the boundary cell's own value.
+    Returns the ``(face_indices, normals, centroids)`` triple the face view
+    reads, each shaped so one boundary cell stands in for one facet:
+    ``(n_cells, 1)`` cell indices, ``(n_cells, dim)`` outward unit normals and
+    ``(n_cells, dim)`` cell centres. With one index per row the face view's
+    facet mean over ``value[face_indices]`` is the boundary cell's own value.
+
+    On a one-dimensional grid each end cell exposes a single outer face: the low
+    end's normal points along ``-x``, the high end's along ``+x``. On a grid of
+    two or three dimensions the cells must lie on one face, named by ``face`` or
+    inferred by [_grid_face_of][diff_soup._lowering.bcs._grid_face_of], and every
+    cell takes that face's normal.
 
     Raises:
-        NotImplementedError: on any grid other than a one-dimensional one.
-        ValueError: when a selected cell is not an end cell, so it exposes no
-            outward boundary face.
+        NotImplementedError: on a domain that is not a structured grid.
+        ValueError: when a selected cell exposes no outward boundary face, or the
+            cells do not lie on exactly one face.
     """
+    idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if isinstance(domain, GridND):
+        axis, side = _grid_face_of(domain, idx, face=face, bc_desc=bc_desc)
+        normals = np.zeros((idx.size, domain.dim), dtype=np.float64)
+        normals[:, axis] = -1.0 if side == "low" else 1.0
+        centres = np.asarray(domain.node_coordinates(), dtype=np.float64)[idx]
+        return idx.reshape(-1, 1).astype(np.int32), normals, centres
     if not isinstance(domain, Grid1D):
         raise NotImplementedError(
             f"{bc_desc}: a field-dependent flux fn(face, t) reads the boundary's "
-            "outward normal and position, which a one-dimensional grid or a tagged "
+            "outward normal and position, which a structured grid or a tagged "
             f"FEM mesh supplies and a {type(domain).__name__} domain does not. State "
-            "the density with value= / value_fn=, or put the field on a "
-            "one-dimensional grid or a tagged FEM mesh."
+            "the density with value= / value_fn=, or put the field on a grid or a "
+            "tagged FEM mesh."
         )
     n = int(domain.num_nodes)
-    idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if face is not None:
+        axis, side = _grid_face_of(domain, idx, face=face, bc_desc=bc_desc)
+        normals = np.full((idx.size, 1), -1.0 if side == "low" else 1.0)
+        centres = np.asarray(domain.nodes, dtype=np.float64)[idx].reshape(-1, 1)
+        return idx.reshape(-1, 1).astype(np.int32), normals, centres
     interior = idx[(idx != 0) & (idx != n - 1)]
     if interior.size:
         raise ValueError(
@@ -631,9 +650,9 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
       ``(face_indices, face_lengths, face_normals)`` triple from
       [boundary_face_assembly_for_ids][diff_soup.domains.mesh.fem._boundary.
       boundary_face_assembly_for_ids] for the resolved set of boundary
-      facets.  Facets are addressed by tag id, so only tag leaves contribute;
-      raw node-index leaves contribute no facets (a face needs its full vertex
-      set, a tagged side, to define a length and an outward normal).
+      facets ([_resolve_facet_mask][diff_soup._lowering.bcs._resolve_facet_mask]):
+      a tag leaf selects its facets, a node leaf the outer facets whose vertices
+      all lie in the node set.
 
     Args:
         domain: The domain to resolve against.  A facet view requires a tagged
@@ -655,8 +674,8 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
     Raises:
         TypeError: If a facet view is requested on a domain that is not a
             tagged FEM mesh; the message names the actual domain type.
-        ValueError: If a facet view resolves to no boundary facets (e.g. the
-            selector named only raw node indices), or if ``want`` is neither
+        ValueError: If a facet view resolves to no boundary facets (e.g. a
+            node set holding no whole facet), or if ``want`` is neither
             ``"nodes"`` nor ``"facets"``.
     """
     if want == "nodes":
@@ -678,23 +697,39 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
                 f"got domain of type {type(domain).__name__}, which has no boundary "
                 "facets to integrate over."
             )
-        id_set = selector.reduce(
-            on_tags=lambda names: set().union(*[set(_ids_for_name(domain, n)) for n in names]),
-            on_nodes=lambda idx: set(),
-            on_union=lambda a, b: a | b,
-            on_difference=lambda a, b: a - b,
+        return boundary_face_assembly_for_mask(
+            domain, _resolve_facet_mask(domain, selector, bc_desc=bc_desc)
         )
-        if not id_set:
-            target = f" for {bc_desc}" if bc_desc else ""
-            raise ValueError(
-                f"boundary target{target} resolved to no boundary facets (it names only "
-                "bare node indices).  A facet-valued target must select a tagged boundary "
-                'set, e.g. on="electrode", so that facet lengths and outward normals are '
-                "defined."
-            )
-        return boundary_face_assembly_for_ids(domain, sorted(id_set))
 
     raise ValueError(f"_resolve_selector: want must be 'nodes' or 'facets', got {want!r}")
+
+
+def _resolve_facet_mask(domain, selector, *, bc_desc=None) -> np.ndarray:
+    """Boolean mask over ``domain.boundary_facets()`` of the facets a selector names.
+
+    A tag leaf selects the facets carrying that name. A node leaf selects the
+    outer boundary facets whose vertices all lie in the node set; an interface
+    facet is never selected by nodes. Unions and differences combine the masks.
+
+    Raises:
+        ValueError: when the selection names no boundary facet.
+    """
+    mask = selector.reduce(
+        on_tags=lambda names: boundary_facet_mask_for_ids(
+            domain, [i for n in names for i in _ids_for_name(domain, n)]
+        ),
+        on_nodes=lambda idx: boundary_facet_mask_for_nodes(domain, idx),
+        on_union=lambda a, b: a | b,
+        on_difference=lambda a, b: a & ~b,
+    )
+    if not mask.any():
+        target = f" for {bc_desc}" if bc_desc else ""
+        raise ValueError(
+            f"boundary target{target} resolved to no boundary facets. A node set "
+            "selects the boundary facets whose vertices all lie in it; select a "
+            'tagged boundary with tag="electrode" or on=ds.tags("electrode") instead.'
+        )
+    return mask
 
 
 def _resolve_grid_local_indices(domain, where) -> np.ndarray:
@@ -718,19 +753,129 @@ def _resolve_grid_local_indices(domain, where) -> np.ndarray:
     return np.unique(indices).astype(np.int32)
 
 
-def _grid_face_factor(domain, indices: np.ndarray) -> np.ndarray:
+_SIDES = ("low", "high")
+
+
+def _grid_shape(domain) -> tuple[int, ...]:
+    """Cell counts per axis of a ``Grid1D`` or ``GridND``."""
+    if isinstance(domain, GridND):
+        return tuple(int(n) for n in domain.shape)
+    return (int(domain.num_nodes),)
+
+
+def _grid_face_cells(domain, axis: int, side: str) -> np.ndarray:
+    """Flat, sorted indices of the cells on one face of a grid, ``(axis, side)``."""
+    shape = _grid_shape(domain)
+    _check_face(shape, (axis, side), bc_desc="grid face")
+    flat = np.arange(int(np.prod(shape)), dtype=np.int64).reshape(shape)
+    index = [slice(None)] * len(shape)
+    index[axis] = 0 if side == "low" else shape[axis] - 1
+    return np.sort(flat[tuple(index)].reshape(-1)).astype(np.int32)
+
+
+def _face_label(face) -> str:
+    return f"axis={face[0]}, side={face[1]!r}"
+
+
+def _check_face(shape, face, *, bc_desc: str) -> None:
+    """Refuse an ``(axis, side)`` pair that names no face of a grid of ``shape``."""
+    axis, side = face
+    if side not in _SIDES:
+        raise ValueError(f"{bc_desc}: side must be 'low' or 'high', got {side!r}.")
+    if not 0 <= int(axis) < len(shape):
+        raise ValueError(
+            f"{bc_desc}: axis={axis} names no axis of this {len(shape)}-dimensional grid "
+            f"(axes 0 to {len(shape) - 1})."
+        )
+
+
+def _grid_face_of(domain, indices, *, face=None, bc_desc: str) -> tuple[int, str]:
+    """The one grid face the selected cells lie on, as ``(axis, side)``.
+
+    A face ``(d, "low")`` holds the cells whose index along axis ``d`` is the
+    first, ``(d, "high")`` the cells whose index is the last. With ``face``
+    given, every cell must lie on it. Without it, the face is inferred: the
+    cells must all lie on exactly one face.
+
+    Raises:
+        ValueError: when a cell lies off the named face, when the cells lie on
+            more than one face at once (only edge or corner cells, or an axis
+            with one cell), or when they lie on no single face (interior cells,
+            or cells from several faces).
+    """
+    shape = _grid_shape(domain)
+    idx = np.asarray(indices, dtype=np.int64).reshape(-1)
+    multi = np.unravel_index(idx, shape)
+
+    def on(f):
+        d, side = f
+        end = 0 if side == "low" else shape[d] - 1
+        return multi[d] == end
+
+    if face is not None:
+        face = (int(face[0]), str(face[1]))
+        _check_face(shape, face, bc_desc=bc_desc)
+        off = idx[~on(face)]
+        if off.size:
+            raise ValueError(
+                f"{bc_desc}: cell {int(off[0])} does not lie on the grid face "
+                f"{_face_label(face)}. Select only cells of that face, or drop axis= "
+                "and side=."
+            )
+        return face
+    faces = [(d, side) for d in range(len(shape)) for side in _SIDES]
+    candidates = [f for f in faces if bool(np.all(on(f)))]
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        names = "; ".join(_face_label(f) for f in candidates)
+        raise ValueError(
+            f"{bc_desc}: the selected cells lie on {len(candidates)} grid faces at once "
+            f"({names}), so the face whose area weights them is ambiguous. Select "
+            "every cell of the face you mean, or name it with axis= and side=."
+        )
+    on_any = np.zeros(idx.shape, dtype=bool)
+    for f in faces:
+        on_any |= on(f)
+    if not bool(np.all(on_any)):
+        bad = int(idx[~on_any][0])
+        raise ValueError(
+            f"{bc_desc}: cell {bad} lies inside the grid, on no boundary face. The "
+            "selection must be cells of one boundary face; name it with axis= and side=."
+        )
+    first_faces = [f for f in faces if bool(on(f)[0])]
+    bad = next(
+        int(idx[k]) for k in range(idx.size) if not any(bool(on(f)[k]) for f in first_faces)
+    )
+    raise ValueError(
+        f"{bc_desc}: cells {int(idx[0])} and {bad} lie on different grid faces. The "
+        "selection must be the cells of one boundary face; declare one condition per "
+        "face, each with axis= and side=."
+    )
+
+
+def _grid_face_factor(domain, indices: np.ndarray, *, face=None, bc_desc=None) -> np.ndarray:
     """Return ``face_area / cell_volume`` at boundary cells of a Grid1D/GridND.
 
     This is the finite-volume weight that turns a flux density through a cell's
-    outer face into the value added to that cell's residual row.  Grid1D reads
-    ``domain.face_areas`` / ``domain.cell_volumes`` directly; GridND uses the
-    tensor-product metrics ``domain.outer_face_areas`` /
-    ``domain.cell_volumes``, so a cell exposing more than one boundary face
-    (a corner or edge cell) carries the sum of those faces and an interior cell
-    carries ``0``.
+    outer face into the value added to that cell's residual row. Each cell is
+    weighted by one face: the face named by ``face`` (``(axis, side)``) or, on a
+    grid of two or three dimensions, the one face the cells lie on
+    ([_grid_face_of][diff_soup._lowering.bcs._grid_face_of]). That face's area
+    at a cell is the axis' end face area times the other axes' cell volumes, so
+    the factor is the end face area over the axis' cell volume at the cell.
+
+    A one-dimensional grid with no ``face`` keeps its end-cell reading: cell 0
+    takes the low face, the last cell the high face.
+
+    Raises:
+        ValueError: when the cells do not lie on exactly one face.
+        TypeError: on a domain that is not a structured grid.
     """
-    n = int(getattr(domain, "num_nodes"))
-    if isinstance(domain, Grid1D):
+    bc_desc = bc_desc or "boundary condition"
+    indices = np.asarray(indices, dtype=np.int64).reshape(-1)
+    if isinstance(domain, Grid1D) and face is None:
+        n = int(domain.num_nodes)
         face_areas = np.asarray(domain.face_areas, dtype=np.float64)
         cell_volumes = np.asarray(domain.cell_volumes, dtype=np.float64)
         out = np.empty(indices.shape, dtype=np.float64)
@@ -748,10 +893,12 @@ def _grid_face_factor(domain, indices: np.ndarray) -> np.ndarray:
                 area = float(face_areas[i])
             out[k] = area / float(cell_volumes[i])
         return out
-    if isinstance(domain, GridND):
-        areas = np.asarray(domain.outer_face_areas, dtype=np.float64)
-        volumes = np.asarray(domain.cell_volumes, dtype=np.float64)
-        return areas[indices] / volumes[indices]
+    if isinstance(domain, (Grid1D, GridND)):
+        axis, side = _grid_face_of(domain, indices, face=face, bc_desc=bc_desc)
+        ax = domain if isinstance(domain, Grid1D) else domain.axes[axis]
+        position = np.unravel_index(indices, _grid_shape(domain))[axis]
+        end_area = float(np.asarray(ax.face_areas, dtype=np.float64)[0 if side == "low" else -1])
+        return end_area / np.asarray(ax.cell_volumes, dtype=np.float64)[position]
     raise TypeError(
         "grid boundary metrics are defined for Grid1D and GridND domains; got "
         f"domain type {type(domain).__name__}"
@@ -784,7 +931,8 @@ def _boundary_integral_measure(domain, selector, *, constraint_desc: str) -> _Bo
     vertices and accumulated at shared nodes. Grids carry no facet table, so a
     selected cell's measure is the area of the boundary face(s) it exposes —
     its ``face_area / cell_volume`` factor times its volume — which makes a
-    grid boundary integral a face-area-weighted sum over the selected cells.
+    grid boundary integral a face-area-weighted sum over the selected cells,
+    each weighted by the one face the selection lies on.
     """
     if isinstance(domain, TaggedMesh):
         face_indices, face_measure, _normals = _resolve_selector(
@@ -809,7 +957,7 @@ def _boundary_integral_measure(domain, selector, *, constraint_desc: str) -> _Bo
     if isinstance(domain, (Grid1D, GridND)):
         nodes = _resolve_selector(domain, selector, want="nodes")
         n_nodes = int(getattr(domain, "num_nodes", nodes.shape[0]))
-        factors = _grid_face_factor(domain, nodes)
+        factors = _grid_face_factor(domain, nodes, bc_desc=constraint_desc)
         volumes = np.asarray(domain.cell_volumes, dtype=np.float64)[nodes]
         return _BoundaryMeasure(
             tag_nodes=nodes.astype(np.int32),
@@ -1061,7 +1209,10 @@ def _value_callback_geometry(bc, comp, eqset):
     else:
         nodes = _resolve_grid_local_indices(domain, bc.where)
         fi, normals, centroids = _grid_face_geometry(
-            domain, nodes, bc_desc=f"{type(bc).__name__} on {bc.var.name!r}"
+            domain,
+            nodes,
+            bc_desc=f"{type(bc).__name__} on {bc.var.name!r}",
+            face=getattr(bc.where, "face", None),
         )
     accessed = _face_flux_accessed_names(
         bc.value_fn,
@@ -1221,11 +1372,14 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                     local = _resolve_grid_local_indices(domain, bc.where)
                     if np.any(local < 0) or np.any(local >= var.size):
                         raise ValueError("FluxBC node index out of range")
-                    factor = _grid_face_factor(domain, local)
+                    face = getattr(bc.where, "face", None)
+                    factor = _grid_face_factor(
+                        domain, local, face=face, bc_desc=f"flux condition on {var.name!r}"
+                    )
                     grid_fi = grid_normals = grid_centroids = None
                     if is_face_flux:
                         grid_fi, grid_normals, grid_centroids = _grid_face_geometry(
-                            domain, local, bc_desc=f"FluxBC on {var.name!r}"
+                            domain, local, bc_desc=f"FluxBC on {var.name!r}", face=face
                         )
                         accessed_names = tuple(
                             sorted(
@@ -1305,7 +1459,12 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
                     )
                 elif isinstance(domain, (Grid1D, GridND)):
                     local = _resolve_grid_local_indices(domain, bc.where)
-                    factor = _grid_face_factor(domain, local)
+                    factor = _grid_face_factor(
+                        domain,
+                        local,
+                        face=getattr(bc.where, "face", None),
+                        bc_desc=f"Robin condition on {var.name!r}",
+                    )
                     robins.append(
                         _ResolvedRobin(
                             callback_geometry=callback_geometry,

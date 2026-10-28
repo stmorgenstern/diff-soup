@@ -3,7 +3,10 @@ r"""First-order upwind advection on collocated (cell/node-centered) cartesian gr
 These kernels approximate the advective term :math:`\mathbf{v}\cdot\nabla u`
 directly on a collocated grid — the field and every velocity component live at
 the same cell centers / nodes.  The value is differenced in place, one axis at
-a time.
+a time.  [div_advect_1d][diff_soup.domains.grid.advection.collocated.div_advect_1d]
+and [div_advect_nd][diff_soup.domains.grid.advection.collocated.div_advect_nd]
+give the conservative form :math:`\nabla\cdot(\mathbf{v} u)` from upwind face
+fluxes.  A velocity is a constant per axis or a cell-centred field per axis.
 
 Because the advective (non-conservative) form reads only nodal values and the
 distance between adjacent collocation points, the numerics are identical for the
@@ -44,6 +47,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float
 
 from diff_soup.domains.grid import Grid1D, GridND
@@ -52,70 +56,97 @@ from diff_soup.domains.grid._dtype import (
     narrow_to_field_dtype,
     to_field_dtype,
 )
+from diff_soup.domains.grid._sweep import sweep_axis
 
 __all__ = [
     "advect_upwind_1d",
     "advect_upwind_nd",
+    "div_advect_1d",
+    "div_advect_nd",
     "normalize_velocity",
 ]
 
 
-def normalize_velocity(velocity: Any, dim: int) -> tuple[Array, ...]:
-    """Resolve a velocity argument to one constant speed per grid axis.
+def normalize_velocity(
+    velocity: Any,
+    dim: int,
+    shape: "tuple[int, ...] | None" = None,
+    *,
+    op_name: str = "advect_upwind",
+) -> tuple[Array, ...]:
+    """Resolve a velocity argument to one entry per grid axis.
 
-    Accepts a single scalar (the same speed on every axis) or a length-``dim``
-    sequence / 1-D array of per-axis constant speeds.  Spatially varying
-    velocity fields are not supported.
+    Accepts a single scalar (the same speed on every axis), a length-``dim``
+    sequence or 1-D array of per-axis scalars, or a length-``dim`` sequence
+    whose entries are scalars or cell-centred arrays (a velocity field, one
+    value per cell, flat or grid-shaped).  On a one-dimensional grid a bare
+    array of one value per cell is the field itself.
 
     Args:
-        velocity: A python/JAX scalar, or a length-``dim`` sequence / 1-D array
-            of per-axis scalars.
+        velocity: The velocity argument as passed to the operator.
         dim: Number of grid axes.
+        shape: The grid shape, which a velocity field must match; ``None``
+            refuses fields.
+        op_name: The operator name used in error messages.
 
     Returns:
-        A ``dim``-tuple of 0-D JAX arrays, one speed per axis.
+        A ``dim``-tuple: a 0-D array per constant axis, a grid-shaped array per
+        field axis.
 
     Raises:
-        ValueError: if ``velocity`` is a sequence of the wrong length, carries a
-            non-scalar (spatially varying) per-axis entry, or is an array whose
-            shape is neither scalar nor ``(dim,)``.
+        ValueError: if ``velocity`` is a sequence of the wrong length, or an
+            entry or array whose shape fits neither form.
     """
+    n_cells = None if shape is None else int(np.prod(shape))
+
+    def as_field(v):
+        if shape is not None and v.ndim == 1 and v.shape[0] == n_cells:
+            return v.reshape(shape)
+        if shape is not None and tuple(v.shape) == tuple(shape):
+            return v
+        return None
+
     if isinstance(velocity, (list, tuple)):
         if len(velocity) != dim:
             raise ValueError(
-                "advect_upwind: a per-axis velocity sequence must give one speed "
-                f"per grid axis (length {dim} for this {dim}-D grid); got length "
-                f"{len(velocity)}."
+                f"{op_name}: a per-axis velocity sequence must give one entry per grid "
+                f"axis (length {dim} for this {dim}-D grid); got length {len(velocity)}."
             )
         comps = []
         for vk in velocity:
             vk_arr = jnp.asarray(vk)
-            if vk_arr.ndim != 0:
+            if vk_arr.ndim == 0:
+                comps.append(vk_arr)
+                continue
+            field = as_field(vk_arr)
+            if field is None:
                 raise ValueError(
-                    "advect_upwind: each per-axis velocity must be a constant scalar; "
-                    f"got an array of shape {tuple(vk_arr.shape)}. Spatially varying "
-                    "velocity fields are not supported — pass one constant speed per axis."
+                    f"{op_name}: each per-axis velocity must be a constant or one value "
+                    f"per cell (shape {tuple(shape) if shape else '(num_nodes,)'}, or "
+                    f"({n_cells},) flat); got an array of shape {tuple(vk_arr.shape)}."
                 )
-            comps.append(vk_arr)
+            comps.append(field)
         return tuple(comps)
 
     v_arr = jnp.asarray(velocity)
     if v_arr.ndim == 0:
         return tuple(v_arr for _ in range(dim))
+    if dim == 1 and as_field(v_arr) is not None and v_arr.shape[0] != 1:
+        return (as_field(v_arr),)
     if v_arr.ndim == 1 and v_arr.shape[0] == dim:
         return tuple(v_arr[k] for k in range(dim))
     raise ValueError(
-        "advect_upwind: velocity must be a constant scalar (the same speed on every "
-        f"axis) or a length-{dim} sequence of per-axis constant speeds for this "
-        f"{dim}-D grid; got an array of shape {tuple(v_arr.shape)}. Spatially varying "
-        "velocity fields are not supported."
+        f"{op_name}: velocity must be a constant (the same speed on every axis) or a "
+        f"length-{dim} sequence with one entry per axis, each a constant or one value "
+        f"per cell; got an array of shape {tuple(v_arr.shape)}. Pass a velocity field "
+        "as a tuple, one array per axis."
     )
 
 
 def advect_upwind_1d(
     grid: Grid1D,
     c: Float[Array, "n"],
-    velocity: Float[Array, ""],
+    velocity: Float[Array, "..."],
     *,
     periodic: bool = False,
 ) -> Float[Array, "n"]:
@@ -124,7 +155,8 @@ def advect_upwind_1d(
     Args:
         grid: 1D collocated grid (``method`` ``"fvm"`` or ``"fdm"``).
         c: Field values at the collocation points, shape ``(n,)``.
-        velocity: Constant scalar advection speed ``v`` (may be signed).
+        velocity: Advection speed ``v`` (may be signed), a constant or one value
+            per cell.
         periodic: If ``True``, neighbours wrap across the domain edge; otherwise
             a zero-gradient (outflow) condition is applied at both boundaries.
 
@@ -182,7 +214,8 @@ def advect_upwind_nd(
     Args:
         grid: N-D cartesian grid.
         c: Field values, grid-shaped ``(nx, ny[, nz])``.
-        velocity_per_axis: One constant scalar speed per axis (see
+        velocity_per_axis: One entry per axis, a constant or a grid-shaped field
+            (see
             [normalize_velocity][diff_soup.domains.grid.advection.collocated.normalize_velocity]).
         periodic_axes: Axes whose neighbours wrap across the domain edge; every
             other axis uses the zero-gradient boundary.
@@ -194,15 +227,95 @@ def advect_upwind_nd(
     out = jnp.zeros_like(c)
     for d in range(grid.dim):
         ax = grid.axes[d]
-        vd = velocity_per_axis[d]
         per = d in periodic_axes
-        c_m = jnp.moveaxis(c, d, 0)
-        sh = c_m.shape
-        c_f = c_m.reshape(sh[0], -1)
-        contrib_f = jax.vmap(
-            lambda col, _vd=vd, _ax=ax, _per=per: advect_upwind_1d(_ax, col, _vd, periodic=_per),
-            in_axes=1,
-            out_axes=1,
-        )(c_f)
-        out = out + jnp.moveaxis(contrib_f.reshape(sh), 0, d)
+        out = out + sweep_axis(
+            lambda col, vcol, _ax=ax, _per=per: advect_upwind_1d(_ax, col, vcol, periodic=_per),
+            c,
+            d,
+            velocity_per_axis[d],
+        )
+    return out
+
+
+def div_advect_1d(
+    grid: Grid1D,
+    c: Float[Array, "n"],
+    velocity: Float[Array, "..."],
+    *,
+    periodic: bool = False,
+) -> Float[Array, "n"]:
+    r"""Conservative first-order upwind approximation of :math:`\partial (v c)/\partial x`.
+
+    Each face carries the flux ``v_f c_up``: ``v_f`` is the velocity at the face
+    (the mean of the two neighbouring cell velocities for a velocity field) and
+    ``c_up`` the value of the cell upstream of it. A boundary face carries the
+    outgoing flux ``v_b c_b`` when the flow leaves through it and nothing when the
+    flow enters, so an inflow comes only from a boundary condition. The cell
+    value is the net outflow times ``face_area / cell_volume``, which conserves
+    the integral up to the boundary fluxes.
+
+    Args:
+        grid: 1D collocated grid.
+        c: Field values, shape ``(n,)``.
+        velocity: Advection speed, a constant or one value per cell.
+        periodic: If ``True``, the two end faces are one face, wrapped.
+
+    Returns:
+        ``d(v c)/dx`` at each cell, shape ``(n,)``, in ``c``'s dtype.
+    """
+    grid = grid_in_field_dtype(grid, c)
+    v = narrow_to_field_dtype(velocity, c)
+    if v.ndim == 0:
+        v_inner = jnp.broadcast_to(v, (grid.n - 1,))
+        v_low, v_high, v_wrap = v, v, v
+    else:
+        v_inner = 0.5 * (v[:-1] + v[1:])
+        v_low, v_high, v_wrap = v[0], v[-1], 0.5 * (v[-1] + v[0])
+
+    def upwind(vf, left, right):
+        return jnp.maximum(vf, 0.0) * left + jnp.minimum(vf, 0.0) * right
+
+    inner = upwind(v_inner, c[:-1], c[1:])
+    if periodic:
+        wrap = upwind(v_wrap, c[-1], c[0])
+        low, high = wrap, wrap
+    else:
+        low = jnp.minimum(v_low, 0.0) * c[0]
+        high = jnp.maximum(v_high, 0.0) * c[-1]
+    flux = jnp.concatenate([low[None], inner, high[None]])
+    area_flux = grid.face_areas * flux
+    return to_field_dtype((area_flux[1:] - area_flux[:-1]) / grid.cell_volumes, c)
+
+
+def div_advect_nd(
+    grid: GridND,
+    c: Float[Array, "..."],
+    velocity_per_axis: tuple[Array, ...],
+    periodic_axes: tuple[int, ...] = (),
+) -> Float[Array, "..."]:
+    r"""Conservative upwind :math:`\nabla\cdot(\mathbf{v} c)` on an N-D grid.
+
+    The sum over axes of
+    [div_advect_1d][diff_soup.domains.grid.advection.collocated.div_advect_1d],
+    each axis with its own velocity entry.
+
+    Args:
+        grid: N-D cartesian grid.
+        c: Field values, grid-shaped.
+        velocity_per_axis: One entry per axis, a constant or a grid-shaped field.
+        periodic_axes: Axes whose end faces wrap.
+
+    Returns:
+        ``div(v c)`` at each cell, grid-shaped, in ``c``'s dtype.
+    """
+    out = jnp.zeros_like(c)
+    for d in range(grid.dim):
+        ax = grid.axes[d]
+        per = d in periodic_axes
+        out = out + sweep_axis(
+            lambda col, vcol, _ax=ax, _per=per: div_advect_1d(_ax, col, vcol, periodic=_per),
+            c,
+            d,
+            velocity_per_axis[d],
+        )
     return out

@@ -205,11 +205,17 @@ class MultiEquationSpec:
 
 @dataclass(frozen=True)
 class BCSpec:
-    """A user-declared boundary condition (lowers to a discriminated IR BC node)."""
+    """A user-declared boundary condition (lowers to a discriminated IR BC node).
+
+    ``where`` holds ``{"selector": BoundarySet}``, or ``{"face": (axis, side)}``
+    for a condition stated on one face of a structured grid.
+    """
 
     kind: Literal[
         "dirichlet",
         "flux",
+        "neumann",
+        "inflow",
         "robin",
         "traction",
         "symmetry",
@@ -235,6 +241,10 @@ class BCSpec:
     # Robin fields
     alpha: Optional[Any] = None
     beta: Optional[Any] = None
+    # Periodic only: the grid axes that wrap; ``None`` wraps every axis.
+    axes: Optional[tuple[int, ...]] = None
+    # Inflow only: the speed of the flow entering through the face.
+    velocity: Optional[Any] = None
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,7 @@ from diff_soup.domains.grid._dtype import (
     narrow_to_field_dtype,
     to_field_dtype,
 )
+from diff_soup.domains.grid._sweep import sweep_axis
 
 __all__ = [
     # 1D operators
@@ -42,6 +43,8 @@ __all__ = [
     # 3D operators
     "fdm_laplacian_3d",
     "fdm_div_flux_3d",
+    "fdm_div_flux_axes",
+    "fdm_apply_normal_derivative",
     "fdm_apply_periodic_bc_nd",
 ]
 
@@ -393,6 +396,25 @@ def fdm_div_flux_3d(
     return r0 + r1 + r2
 
 
+def fdm_div_flux_axes(
+    grid: GridND,
+    c: Float[Array, "..."],
+    D_axes: tuple,
+) -> Float[Array, "..."]:
+    r"""FDM :math:`\sum_d \partial_d (D_d\, \partial_d c)` with one diffusivity per axis.
+
+    The diagonal-tensor form of [fdm_div_flux_2d][] and [fdm_div_flux_3d][]:
+    axis ``d`` is swept with its own ``D_axes[d]``, a scalar or grid-shaped.
+    """
+    out = jnp.zeros_like(c)
+    for d, D in enumerate(D_axes):
+        ax = grid.axes[d]
+        out = out + sweep_axis(
+            lambda col, dcol, _ax=ax: fdm_div_flux_1d(_ax, col, dcol), c, d, jnp.asarray(D)
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # FluxBC / PeriodicBC application (called from dispatch_apply_bcs)
 # ---------------------------------------------------------------------------
@@ -438,6 +460,58 @@ def fdm_apply_flux_bc_1d(
         )
         result = result.at[n - 1].set(to_field_dtype(corrected, result))
     return result
+
+
+def fdm_apply_normal_derivative(
+    grid: "Grid1D | GridND",
+    result: "Array",
+    u: "Array",
+    D: "Array",
+    axis: int,
+    side: str,
+    du_dn: "Array",
+    mask: "Array | None" = None,
+) -> "Array":
+    """Impose a prescribed outward normal derivative on one face of an FDM operator result.
+
+    Each boundary node along ``axis`` gets the ghost node ``u[1] + 2 h du/dn``
+    mirrored across it, and its row of the axis' second difference is rebuilt
+    from that ghost ([fdm_apply_flux_bc_1d][]). On a ``GridND`` the change is
+    the difference between that row and the natural one, added per column, so
+    the other axes' contributions at edge and corner nodes are kept.
+
+    Args:
+        grid: A ``Grid1D`` (``axis`` 0) or a ``GridND``.
+        result: Operator result with the natural boundary rows, grid-shaped.
+        u: Current state, grid-shaped.
+        D: Diffusivity along ``axis``, a scalar or grid-shaped.
+        axis: Axis normal to the face.
+        side: ``"low"`` or ``"high"``.
+        du_dn: Outward normal derivative, a scalar or one value per face node.
+        mask: ``1`` at the face nodes the condition holds on, ``0`` elsewhere,
+            or ``None`` for every face node.
+
+    Returns:
+        ``result`` with the boundary rows replaced.
+    """
+    if isinstance(grid, Grid1D):
+        return fdm_apply_flux_bc_1d(grid, result, u, D, side, du_dn)
+    ax = grid.axes[axis]
+    face_shape = tuple(n for k, n in enumerate(u.shape) if k != axis)
+    value = jnp.broadcast_to(jnp.asarray(du_dn), face_shape)
+    weight = jnp.ones(face_shape) if mask is None else jnp.broadcast_to(mask, face_shape)
+    # Spread the face values along the swept axis so each column carries its own.
+    spread = jnp.expand_dims(value, axis) * jnp.ones_like(u)
+    on = jnp.expand_dims(weight, axis) * jnp.ones_like(u)
+
+    def delta(col, dcol, scol, wcol):
+        plain = fdm_div_flux_1d(ax, col, dcol)
+        ghost = fdm_apply_flux_bc_1d(ax, plain, col, dcol, side, scol[0])
+        return (ghost - plain) * wcol[0]
+
+    D = jnp.asarray(D)
+    D_field = D if D.ndim == u.ndim else jnp.broadcast_to(D, u.shape)
+    return result + sweep_axis(delta, u, axis, D_field, spread, on)
 
 
 def fdm_apply_periodic_bc_1d(

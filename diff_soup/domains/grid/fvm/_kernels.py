@@ -28,6 +28,7 @@ from diff_soup.domains.grid._dtype import (
     narrow_to_field_dtype,
     to_field_dtype,
 )
+from diff_soup.domains.grid._sweep import sweep_axis
 
 __all__ = [
     # 1D operators
@@ -41,6 +42,8 @@ __all__ = [
     "fvm_div_flux_3d",
     "fvm_laplacian_2d",
     "fvm_laplacian_3d",
+    "fvm_div_flux_axes",
+    "fvm_apply_normal_derivative",
     "fvm_apply_periodic_bc_nd",
 ]
 
@@ -489,9 +492,83 @@ def fvm_laplacian_3d(
     return fvm_div_flux_3d(grid, c, jnp.asarray(1.0, c.dtype))
 
 
+def fvm_div_flux_axes(
+    grid: GridND,
+    c: Float[Array, "..."],
+    D_axes: tuple,
+) -> Float[Array, "..."]:
+    r"""FVM :math:`\sum_d \partial_d (D_d\, \partial_d c)` with one diffusivity per axis.
+
+    The diagonal-tensor form of [fvm_div_flux_2d][] and [fvm_div_flux_3d][]:
+    axis ``d`` is swept with its own ``D_axes[d]``.
+
+    Args:
+        grid: 2D or 3D Cartesian grid.
+        c: Scalar field, grid-shaped.
+        D_axes: One diffusivity per axis, each a scalar or grid-shaped.
+
+    Returns:
+        Divergence of diffusive flux, grid-shaped, in ``c``'s dtype.
+    """
+    out = jnp.zeros_like(c)
+    for d, D in enumerate(D_axes):
+        ax = grid.axes[d]
+        out = out + sweep_axis(
+            lambda col, dcol, _ax=ax: fvm_div_flux_1d(_ax, col, dcol), c, d, jnp.asarray(D)
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # FluxBC / PeriodicBC application (called from dispatch_apply_bcs)
 # ---------------------------------------------------------------------------
+
+
+def fvm_apply_normal_derivative(
+    grid: "Grid1D | GridND",
+    result: Float[Array, "..."],
+    D: Float[ArrayLike, "..."],
+    axis: int,
+    side: str,
+    du_dn: Float[ArrayLike, "..."],
+) -> Float[Array, "..."]:
+    """Add the flux of a prescribed outward normal derivative through one boundary face.
+
+    A ghost value ``u_cell + h du/dn`` beyond the face gives the face gradient
+    ``du/dn``, so the face carries ``D_b du/dn`` into the domain, with ``D_b``
+    the boundary cell's diffusivity (a face value on a ``Grid1D`` given face
+    diffusivities). The boundary cell gains that flux times
+    ``face_area / cell_volume``.
+
+    Args:
+        grid: A ``Grid1D`` (``axis`` 0) or a ``GridND``.
+        result: Operator result with zero-flux boundaries, grid-shaped.
+        D: Diffusivity along ``axis``, a scalar or grid-shaped (``(n + 1,)``
+            face values on a ``Grid1D`` also accepted).
+        axis: Axis normal to the face.
+        side: ``"low"`` or ``"high"``.
+        du_dn: Outward normal derivative, a scalar or one value per face cell.
+
+    Returns:
+        ``result`` with the boundary flux added.
+    """
+    ax = grid if isinstance(grid, Grid1D) else grid.axes[axis]
+    ax = grid_in_field_dtype(ax, result)
+    n = ax.n
+    end = 0 if side == "low" else n - 1
+    D = jnp.asarray(D)
+    if D.ndim == 0:
+        D_b = D
+    elif isinstance(grid, Grid1D) and D.shape == (n + 1,):
+        D_b = D[0] if side == "low" else D[-1]
+    else:
+        D_b = jnp.take(D, end, axis=axis)
+    area = ax.face_areas[0] if side == "low" else ax.face_areas[-1]
+    flux = area * D_b * du_dn / ax.cell_volumes[end]
+    index = [slice(None)] * result.ndim
+    index[axis] = end
+    face = result[tuple(index)]
+    return result.at[tuple(index)].add(to_field_dtype(jnp.broadcast_to(flux, face.shape), result))
 
 
 def fvm_apply_flux_bc_1d(
@@ -504,20 +581,11 @@ def fvm_apply_flux_bc_1d(
 ) -> Float[Array, "n"]:
     """Apply FluxBC to a 1D FVM operator result.
 
-    Adds ``D * du_dn * face_area / cell_volume`` to the boundary cell.
+    Adds ``D * du_dn * face_area / cell_volume`` to the boundary cell, with
+    ``du_dn`` the outward normal derivative.
     """
-    grid = grid_in_field_dtype(grid, result)
-    D_b = D if jnp.ndim(D) == 0 else (D[0] if side == "low" else D[-1])
-    phys_flux = D_b * du_dn
-    if side == "low":
-        result = result.at[0].add(
-            to_field_dtype(-grid.face_areas[0] * phys_flux / grid.cell_volumes[0], result)
-        )
-    else:
-        result = result.at[-1].add(
-            to_field_dtype(grid.face_areas[-1] * phys_flux / grid.cell_volumes[-1], result)
-        )
-    return result
+    del u
+    return fvm_apply_normal_derivative(grid, result, D, 0, side, du_dn)
 
 
 def fvm_apply_flux_bc_nd(
@@ -536,35 +604,16 @@ def fvm_apply_flux_bc_nd(
         domain: Grid on which the operator is assembled.
         result: Existing operator result to which the BC correction is added.
         u: Current state array.
-        D: Diffusivity at the boundary (scalar or array).
+        D: Diffusivity, a scalar or grid-shaped.
         axis: Axis along which the boundary lies.
         side: ``"low"`` or ``"high"``.
         du_dn_fn: Callable ``(u_boundary, t) -> du/dn``.
         t: Current time (passed to ``du_dn_fn``).
     """
-    ax_grid = grid_in_field_dtype(domain.axes[axis], result)
-    shape = domain.shape
-    idx = [slice(None)] * len(shape)
-    D_val = jnp.asarray(D)
-
-    if side == "low":
-        idx[axis] = 0
-        u_b = u[tuple(idx)]
-        du_dn = jax.vmap(lambda ub: du_dn_fn(ub, t))(u_b.ravel()).reshape(u_b.shape)
-        D_b = D_val if D_val.ndim == 0 else D_val
-        phys_flux = D_b * du_dn
-        correction = -ax_grid.face_areas[0] * phys_flux / ax_grid.cell_volumes[0]
-        result = result.at[tuple(idx)].add(to_field_dtype(correction, result))
-    else:
-        idx[axis] = shape[axis] - 1
-        u_b = u[tuple(idx)]
-        du_dn = jax.vmap(lambda ub: du_dn_fn(ub, t))(u_b.ravel()).reshape(u_b.shape)
-        D_b = D_val if D_val.ndim == 0 else D_val
-        phys_flux = D_b * du_dn
-        correction = ax_grid.face_areas[-1] * phys_flux / ax_grid.cell_volumes[-1]
-        result = result.at[tuple(idx)].add(to_field_dtype(correction, result))
-
-    return result
+    end = 0 if side == "low" else domain.shape[axis] - 1
+    u_b = jnp.take(u, end, axis=axis)
+    du_dn = jax.vmap(lambda ub: du_dn_fn(ub, t))(u_b.ravel()).reshape(u_b.shape)
+    return fvm_apply_normal_derivative(domain, result, D, axis, side, du_dn)
 
 
 def fvm_apply_periodic_bc_1d(
