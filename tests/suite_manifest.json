@@ -1,22 +1,22 @@
 {
   "budgets": {
     "test_files": 43,
-    "test_functions": 365,
-    "collected_tests": 640,
-    "source_lines": 13021
+    "test_functions": 400,
+    "collected_tests": 700,
+    "source_lines": 14200
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
-      "functions": 148,
-      "collected": 272,
-      "lines": 4800
+      "functions": 165,
+      "collected": 300,
+      "lines": 5300
     },
     "contracts": {
       "files": 17,
-      "functions": 148,
-      "collected": 253,
-      "lines": 5112
+      "functions": 165,
+      "collected": 285,
+      "lines": 5600
     },
     "performance_contracts": {
       "files": 2,
