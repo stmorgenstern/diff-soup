@@ -43,9 +43,10 @@ def heat(q):
 ```
 
 `ds.default_theta(problem)` returns the problem's parameter pytree,
-whose leaves are the problem's array coefficients, the declared
-learnable parameters among them. `jax.jacfwd` pushes one tangent per
-parameter direction through the solve:
+which holds every floating-point array of the problem: the declared
+parameters and functions, the mass diagonal and the initial
+multipliers. `jax.jacfwd` pushes one tangent per parameter direction
+through the solve:
 
 ```python
 theta = ds.default_theta(problem)
@@ -116,6 +117,12 @@ def loss_D(D_value):
 
 dloss_dD = jax.grad(loss_D)(0.1)
 ```
+
+`theta[D]` reads the value `theta` holds for `D`, and
+`theta.replace(D, value)` returns a copy with `D` set, the same as
+`ds.default_theta(problem, {D: value})`. Theta holds `D` once for each
+equation that reads it, so `grads[D]` is in general not `dloss_dD`.
+Build `theta` inside the loss, as above.
 
 An array parameter is set the same way, with an array as the value.
 `default_theta` works under `jax.jacfwd`, `jax.grad` with

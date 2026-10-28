@@ -71,6 +71,7 @@ from diff_soup.inference.statistics.profile import profile
 from diff_soup.inference.statistics.report import function_report
 from diff_soup.inference.statistics.sample import Draws, sample
 from diff_soup.inference.statistics.study import Study, balance_owners
+from diff_soup.problem.parameters import ParameterSchema
 
 # The integrator's first-step policy at a window restart, declared on
 # ``Multishoot(first_step=...)``: ``FirstStep.auto()``, ``.fixed(dt)``,
@@ -114,6 +115,7 @@ __all__ = [
     "JacScale",
     "ConstantScale",
     "OptResult",
+    "ParameterSchema",
     "TerminationStatus",
     "OptDiagnostics",
     "LogCallback",

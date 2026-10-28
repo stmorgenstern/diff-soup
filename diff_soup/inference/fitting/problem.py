@@ -157,6 +157,24 @@ class InferenceProblem(EstimationProblem):
             for identifier, (lane, process) in zip(self.study.experiment_ids, lanes)
         }
 
+    def values(self, x: Any) -> Any:
+        """Return the parameter values a flat vector in this problem's fit order holds.
+
+        ```python
+        values = problem.values(info.params)
+        values[rate]
+        ```
+
+        Args:
+            x: A vector in the fit's order, such as `fit.params`, `StepInfo.params` or a checkpoint's vector.
+
+        Returns:
+            A read-only mapping from each fitted parameter to its value, as `fit[rate]` reads it.
+        """
+        from diff_soup.inference.fitting.inference_problem import parameter_values
+
+        return parameter_values(self.parameter_schema, x)
+
     def inventory(self) -> dict:
         """Describe the layout of the parameters and the data as one JSON-serializable dict.
 

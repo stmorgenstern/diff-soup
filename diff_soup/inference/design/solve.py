@@ -38,6 +38,7 @@ from jaxtyping import Array
 from diff_soup._warnings import warn_user
 from diff_soup.inference.fitting._forward_seam import parameter_handle_leaf_ids
 from diff_soup.inference.fitting._path_filter import parameters_at
+from diff_soup.problem._registry import theta_leaf_keys, theta_mask
 
 __all__ = ["SensitivityRun", "sensitivity_solve"]
 
@@ -75,8 +76,7 @@ def _mask_for(base_theta: Any, selectors: tuple, set_name: str, *, problem: Any 
                 "selectable parameter array. Recipe parameters analyzed or "
                 "designed here must be declared with learnable=True."
             )
-        leaf_ids = frozenset().union(*handle_ids)
-        mask = jax.tree.map(lambda leaf: id(leaf) in leaf_ids, base_theta)
+        mask = theta_mask(base_theta, frozenset().union(*handle_ids))
         if not any(jax.tree_util.tree_leaves(mask)):
             raise ValueError(
                 f"sensitivity_solve: {set_name} handles do not belong to this "
@@ -402,8 +402,8 @@ def sensitivity_solve(
             for handle in selectors
         ]
         names = []
-        for leaf in jax.tree_util.tree_leaves(selected):
-            name = next(name for name, ids in owners if id(leaf) in ids)
+        for leaf, key in zip(jax.tree_util.tree_leaves(selected), theta_leaf_keys(selected)):
+            name = next(name for name, keys in owners if key in keys)
             size = int(jnp.size(leaf))
             names.extend((name,) if size == 1 else tuple(f"{name}[{i}]" for i in range(size)))
         return tuple(names)

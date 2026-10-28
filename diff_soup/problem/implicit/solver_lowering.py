@@ -8,7 +8,7 @@ constructions.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Optional
 
 import equinox as eqx
@@ -18,6 +18,7 @@ import numpy as np
 
 from diff_soup.linear import SparseTopology
 from diff_soup.problem._cache import BoundedContentCache
+from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
 from diff_soup.problem.implicit._coo import coo_matvec
 from diff_soup.problem.implicit.operator import MassOperator
 from diff_soup.problem.implicit.problems import ImplicitProblem, MassProblem
@@ -33,9 +34,48 @@ __all__ = [
 
 
 class _IRTheta(eqx.Module):
-    """Dynamic Recipe leaves in the historical ``theta.inner`` shape."""
+    """The parameter values a solve takes as `theta`: every floating-point array of a built problem.
+
+    It holds the declared parameters and functions, the mass diagonal, the
+    initial multipliers and the family member parameters. Read and set a
+    declared parameter by the object `spec.param` or `spec.function` returned.
+
+    ```python
+    theta = ds.default_theta(problem)
+    theta[D]                    # the value of D
+    theta = theta.replace(D, 0.2)
+    ```
+    """
 
     inner: object
+    table: Optional[ThetaTable] = eqx.field(static=True, default=None)
+
+    def __getitem__(self, parameter):
+        """Return a parameter's value, or a function's module holding its learnable arrays.
+
+        Theta holds a parameter once for each equation that reads it, so
+        `grads[D]` of a gradient is in general not the derivative with respect
+        to `D`. Differentiate through `theta.replace(D, x)` instead.
+
+        Raises:
+            TypeError: If `parameter` is not one returned by `spec.param` or `spec.function`.
+            ValueError: If the problem does not declare `parameter`, or it holds no array.
+        """
+        return theta_value(self, parameter, caller="theta[...]")
+
+    def replace(self, parameter, value=None):
+        """Return a copy with one parameter, or several, set to new values.
+
+        Pass `replace(D, value)` or a mapping `replace({D: value, k: other})`.
+        The rules for values are those of
+        [`default_theta`][diff_soup.problem.default_theta].
+
+        Raises:
+            TypeError: If a key is not a parameter, or a value is not numeric or is complex for a real parameter.
+            ValueError: If the problem does not declare a parameter or it holds no array, or a value is `None` or does not fit.
+        """
+        values = parameter if value is None and isinstance(parameter, Mapping) else {parameter: value}
+        return theta_replace(self, values, caller="theta.replace")
 
 
 def augmented_rhs_sparsity(topology, n_u: int, n_lam: int):
@@ -400,9 +440,9 @@ _IR_SOLVER_PROBLEMS = BoundedContentCache(capacity=_IR_SOLVER_PROBLEM_CACHE_CAPA
 
 
 def default_theta_from_ir(problem):
-    """Partition current inexact IR leaves for the explicit theta channel."""
+    """Partition a lowered problem's inexact leaves into theta, with the problem's path table."""
     theta, _static = eqx.partition(problem, eqx.is_inexact_array)
-    return _IRTheta(inner=theta)
+    return _IRTheta(inner=theta, table=theta_table(problem))
 
 
 def _static_equal(a, b) -> bool:

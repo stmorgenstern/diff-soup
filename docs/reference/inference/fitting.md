@@ -17,6 +17,7 @@ parameters](../../overview/inference/fitting.md).
       members:
         - placement
         - inventory
+        - values
         - param_group_names
 
 ::: diff_soup.inference.MLE

@@ -682,7 +682,12 @@ class LoweredProblem(eqx.Module):
         return jnp.concatenate(pieces) if pieces else jnp.zeros(0)
 
     def default_theta(self):
-        """Return the declared parameter values, the pytree a solve takes as `theta`."""
+        """Return the pytree a solve takes as `theta`, holding every floating-point array of the problem.
+
+        That is the declared parameters and functions, the mass diagonal, the
+        initial multipliers and the family member parameters. `theta[D]` reads
+        a declared parameter and `theta.replace(D, value)` sets it.
+        """
         from diff_soup.problem.implicit.solver_lowering import default_theta_from_ir
 
         return default_theta_from_ir(self)

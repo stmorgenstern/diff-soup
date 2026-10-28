@@ -35,7 +35,7 @@ import copy
 import dataclasses
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Optional, Union
 
 import equinox as eqx
@@ -373,12 +373,12 @@ def _resolve_parameters(parameters: Optional[ParameterGroups], problem: Any) -> 
       order a joint problem gives its shared and per-experiment blocks. Declared
       names and explicit
       [LearnableSelector][diff_soup.inference.fitting.learnables.LearnableSelector]
-      values are resolved to leaf identity, while legacy model names retain their
+      values are resolved to slot keys of the problem's path table, while legacy model names retain their
       path-token matching behavior. Thus, a declared learnable whose public name is
       not a θ-leaf path token still resolves.
     * ``groups`` is a tuple of ``(group_name, kind, leaf_ids, tokens)`` records in
-      declaration order (locals first, then shared). ``leaf_ids`` are the leaf
-      identities a selector, a Recipe handle, or a declared-learnable name resolved
+      declaration order (locals first, then shared). ``leaf_ids`` are the slot
+      keys a selector, a Recipe handle, or a declared-learnable name resolved
       to; ``tokens`` are the plain names left to path-token matching. A group can
       carry both when it mixes declared learnables with path tokens.
     """
@@ -471,6 +471,45 @@ def _resolve_parameters(parameters: Optional[ParameterGroups], problem: Any) -> 
     else:
         theta_selection = None
     return theta_selection, tuple(groups)
+
+
+class ParameterValues(Mapping):
+    """The parameter values a flat vector in a fit's order holds, read by parameter.
+
+    Returned by `InferenceProblem.values(x)`. `values[rate]` is the value `fit[rate]`
+    reads, and a parameter that varies by experiment gives a mapping by experiment.
+    """
+
+    def __init__(self, schema: Any, x: Any):
+        """Read `x` through `schema`, a fit's parameter schema."""
+        self._schema = schema
+        self._x = x
+
+    def __getitem__(self, parameter: Any) -> Any:
+        """Return the value of `parameter`."""
+        return self._schema.value(parameter, self._x)
+
+    def __iter__(self):
+        """Iterate over the fitted parameters in the fit's order."""
+        return iter(self._schema.handles)
+
+    def __len__(self) -> int:
+        """Return the number of fitted parameters."""
+        return len(self._schema.entries)
+
+    def __repr__(self) -> str:
+        """Name the fitted parameters."""
+        return f"ParameterValues({[handle.name for handle in self._schema.handles]})"
+
+
+def parameter_values(schema: Any, x: Any) -> ParameterValues:
+    """Return the read-only view of `x` through `schema`, refusing a problem with none."""
+    if schema is None:
+        raise ValueError(
+            "values: this inference problem fits no declared parameters, so a flat "
+            "vector has no parameter values to read."
+        )
+    return ParameterValues(schema, x)
 
 
 # Marks a ParameterSchema whose fingerprint labels one inference problem's own fitted
@@ -574,7 +613,7 @@ def _recipe_parameter_schema(problem: Any, parameters: ParameterGroups, seam: An
 def _group_columns(seam: Any, groups: tuple) -> tuple:
     """Map each parameter group to its flat-vector column indices.
 
-    A group owns a column when that column's source θ-leaf identity is one the group
+    A group owns a column when that column's source θ-leaf slot key is one the group
     resolved (a selector, a Recipe handle, or a declared-learnable name — which
     resolves declared learnables whose public name is not a θ-leaf token), or when one
     of the group's remaining plain names appears in that column's path-token set (the
@@ -1076,7 +1115,7 @@ def _resolve_spec_declared_bounds(inference_problem: Any, problem: Any):
 
     A declared bound binds a column when its parameter is a decision variable of
     this inference problem — learnable and selected into the flat vector. Columns are
-    found by leaf identity through its stable Recipe handle (a declared
+    found by slot key through its stable Recipe handle (a declared
     parameter's public name need not be a θ-leaf path token). A bounded learnable intentionally
     omitted by a nonempty
     [ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups]
@@ -2192,6 +2231,17 @@ class InferenceProblem:
         if not ids:
             return ()
         return tuple(i for i, leaf_id in enumerate(self._seam.theta_leaf_ids) if leaf_id in ids)
+
+    def values(self, x: Any) -> ParameterValues:
+        """Return the parameter values a flat vector in this problem's fit order holds.
+
+        Args:
+            x: A vector in the fit's order, such as `fit.params`, `StepInfo.params` or a checkpoint's vector.
+
+        Returns:
+            A read-only mapping from each fitted parameter to its value.
+        """
+        return parameter_values(self.parameter_schema, x)
 
     @property
     def theta_names(self) -> tuple:

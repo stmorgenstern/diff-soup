@@ -21,11 +21,15 @@ from diff_soup.inference.fitting.series import Component, Series
 _SOLVER = ds.JNDF.stock(linear="dense")
 
 
-def _decay(name="decay_handles", rate=0.4, cells=3, **keywords):
+def _decay(name="decay_handles", rate=0.4, cells=3, twice=False, **keywords):
+    """``u' = -rate u``; ``twice`` adds ``v' = -rate v``, so theta holds ``rate`` twice."""
     spec = ds.problem(name).domain("line", ds.cartesian_grid_1d(cells, 0.0, 1.0, method="fvm"))
     spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
     handle = spec.param("rate", value=rate, learnable=True, **keywords)
     spec.equation(writes="u", reads=("u",))(lambda q: -q.p.rate * q.u)
+    if twice:
+        spec.field("v", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+        spec.equation(writes="v", reads=("v",))(lambda q: -q.p.rate * q.v)
     return spec, handle
 
 
@@ -226,7 +230,8 @@ def test_a_function_takes_a_whole_module_whose_arrays_replace_the_declared_ones(
 
 def test_problems_equal_in_content_each_set_and_fit_their_own_parameter():
     """Two builds that differ only in bounds are two problems sharing one solver view; after
-    the second is used, the first's ``default_theta`` and fit still select its own parameter."""
+    the second is used, the first's ``default_theta`` and fit still select its own parameter.
+    A theta whose arrays went through ``tree_map`` is still set and analyzed by parameter."""
     first_spec, first = _decay("content_equal")
     second_spec, second = _decay("content_equal", bounds=(0.0, 5.0))
     first_problem, second_problem = first_spec.build(), second_spec.build()
@@ -236,6 +241,19 @@ def test_problems_equal_in_content_each_set_and_fit_their_own_parameter():
     groups = ParameterGroups(local={"rate": first})
     fit = _inference(first_problem, first_spec.assemble_state({}), parameters=groups)
     assert fit.theta_names == ("rate",)
+    mapped = jax.tree.map(lambda leaf: leaf + 0.0, ds.default_theta(first_problem))
+    assert float(mapped.replace(first, 0.5)[first]) == 0.5
+    run = inf.sensitivity_solve(
+        first_problem,
+        (0.0, 0.2),
+        first_spec.assemble_state({}),
+        wrt=(first,),
+        saveat=ds.SaveAt(ts=jnp.array([0.2])),
+        solver=_SOLVER,
+        theta=mapped,
+    )
+    # d u(0.2) / d rate = -0.2 exp(-0.08); measured 1.8e-5 off it, CPU workstation 2026-10-28
+    np.testing.assert_allclose(run.sensitivities()[0, :, 0], -0.2 * np.exp(-0.08), atol=1e-4)
 
 
 def test_default_theta_refuses_a_parameter_without_arrays_and_wrong_keys_or_values():
@@ -291,13 +309,35 @@ def test_a_problem_spec_reprs_by_its_name():
 
 def test_pdesolve_refuses_a_theta_that_is_not_the_problems_pytree():
     """``pdesolve(theta={handle: value})`` and a theta of another shape raise naming
-    ``default_theta`` instead of failing inside the solver with a pytree error."""
-    spec, rate = _decay()
+    ``default_theta``; ``theta[rate]`` reads the parameter two equations read, and a solve and
+    its gradient through ``theta.replace(rate, x)`` see both equations' copies set."""
+    spec, rate = _decay("decay_twice", twice=True)
     problem = spec.build()
     y0 = spec.assemble_state({})
     with pytest.raises(ValueError, match="default_theta"):
         ds.pdesolve(problem, _SOLVER, (0.0, 0.1), y0, theta={rate: 0.5})
     with pytest.raises(ValueError, match="default_theta"):
         ds.pdesolve(problem, _SOLVER, (0.0, 0.1), y0, theta=jnp.array(0.5))
-    good = ds.default_theta(problem, {rate: 0.5})
-    assert ds.pdesolve(problem, _SOLVER, (0.0, 0.1), y0, theta=good).ys.shape[-1] == 3
+    theta = ds.default_theta(problem)
+    assert float(theta[rate]) == 0.4
+
+    def final(theta):
+        solution = ds.pdesolve(
+            problem, _SOLVER, (0.0, 0.1), y0, theta=theta, adjoint=ds.CheckpointAdjoint()
+        )
+        return solution.ys[-1]
+
+    # measured 2.5e-6 off exp(-0.05) on all six rows, CPU workstation 2026-10-28
+    np.testing.assert_allclose(final(theta.replace(rate, 0.5)), np.exp(-0.05), atol=1e-5)
+
+    def loss(x):
+        replaced = theta.replace(rate, x)
+        return final(replaced).sum() + replaced[rate] ** 2
+
+    # 6 exp(-0.1 rate) + rate^2; measured 3.5e-5 off its derivative, CPU workstation 2026-10-28.
+    # One copy left unset would halve the solve's part (0.29 off), a doubled read adds 1.0.
+    exact = -0.6 * np.exp(-0.05) + 1.0
+    np.testing.assert_allclose(jax.grad(loss)(0.5), exact, atol=1e-4)
+    reference = jax.grad(lambda x: final(ds.default_theta(problem, {rate: x})).sum())(0.5)
+    # measured 3.5e-5, the same solve without the rate^2 term, CPU workstation 2026-10-28
+    np.testing.assert_allclose(reference, exact - 1.0, atol=1e-4)

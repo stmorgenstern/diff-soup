@@ -65,7 +65,8 @@ def test_clusters_and_a_mesh_free_layout_pass_through_to_the_joint(decay):
 
 
 def test_the_flat_order_follows_the_declared_parameters():
-    """parameters=(source, rate) orders x0, theta_names, the fit and the posterior that way."""
+    """parameters=(source, rate) orders x0, theta_names, the fit, problem.values(x) and the
+    posterior that way."""
     decay = decay_recipe(
         "inference_problem_order",
         source=True,
@@ -82,6 +83,7 @@ def test_the_flat_order_follows_the_declared_parameters():
     posterior = inf.laplace(problem, fit, curvature="expected")
     for column, handle in enumerate((decay.source, decay.rate)):
         assert float(fit[handle]) == float(fit.params[column])
+        assert float(problem.values(fit.params)[handle]) == float(fit.params[column])
         assert float(posterior[handle].mean) == float(fit.params[column])
 
 
