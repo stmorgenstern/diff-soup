@@ -142,7 +142,9 @@ draws = ds.inference.sample(est, fit, key=jax.random.PRNGKey(0), chains=2, draws
 - `chains=` is the number of chains, each started from a perturbed
   copy of the fit.
 - `draws=` is the number of draws kept per chain, and `warmup=` the
-  number discarded first, during which NUTS adapts.
+  number of steps before them. The random-walk chains discard their
+  warmup steps. NUTS spends them on one adaptation run from the fit, on
+  one chain, then starts every chain from its perturbed copy of the fit.
 - `preconditioner="laplace"` scales the proposals of either kernel by
   the Laplace approximation of
   [standard errors and covariance](statistical-estimation.md#standard-errors-and-covariance),

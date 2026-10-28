@@ -86,9 +86,55 @@ __all__ = [
 
 GRADIENT_MODES = ("forward", "reverse", None)
 
-# Relative agreement demanded between reverse- and forward-mode gradients at
-# the initial point before a reverse-mode target is admitted.
-_REVERSE_GATE_RTOL = 1e-6
+#: A solver-backed target's gradient is held to this many times its solvers' largest
+#: ``rtol``, within the bounds below: by the audit [sample][] runs before NUTS, and by the
+#: reverse-mode gate. A forward-sensitivity gradient and finite differences of an adaptive
+#: solve differ by about ten times the solver tolerance.
+_GRADIENT_RTOL_PER_SOLVER_RTOL = 100.0
+_GRADIENT_RTOL_BOUNDS = (1e-3, 1e-1)
+
+#: The least ``rtol`` a float32 solve is credited with. Measured: reverse and forward
+#: gradients of float32 solves at rtol 1e-6 differ by 4.9e-3 of the gradient norm at the MAP
+#: and 9.0e-3 one sd away (inverse Cahn-Hilliard notebook, RTX 4070 Ti), and by 1.5e-2 at a
+#: decay MAP (CPU), workstation 2026-10-28, bugfix/we1b/ch.py and c2.py.
+_FLOAT32_SOLVE_RTOL = 1e-3
+
+#: The agreement demanded of reverse- and forward-mode gradients of a target with no solver,
+#: by the floating width of the target: both are exact up to rounding.
+_REVERSE_GATE_RTOL = {64: 1e-6, 32: 1e-3}
+
+
+def _solver_rtol(source: Any) -> tuple[Optional[float], bool]:
+    """The largest solver ``rtol`` behind ``source``, and whether any of its solves is float32.
+
+    ``source`` is an inference problem, whose study's experiments are read, or one
+    experiment. The ``rtol`` is ``None`` when no solver exposes one.
+    """
+    experiments = getattr(getattr(source, "study", None), "experiments", None)
+    if experiments is None:
+        experiments = () if source is None else (source,)
+    tolerances = []
+    single = False
+    for experiment in experiments:
+        rtol = getattr(getattr(experiment, "solver", None), "rtol", None)
+        if rtol is not None:
+            tolerances.append(float(np.max(np.asarray(rtol, dtype=np.float64))))
+        precision = getattr(getattr(experiment, "model", None), "precision", None)
+        dtype = getattr(precision, "compute_dtype", None)
+        if dtype is not None and jnp.finfo(dtype).bits < 64:
+            single = True
+    return (max(tolerances) if tolerances else None), single
+
+
+def _gradient_rtol(source: Any) -> Optional[float]:
+    """The tolerance a gradient of a target of ``source`` is held to, or ``None`` without a solver."""
+    rtol, single = _solver_rtol(source)
+    if rtol is None:
+        return None
+    if single:
+        rtol = max(rtol, _FLOAT32_SOLVE_RTOL)
+    low, high = _GRADIENT_RTOL_BOUNDS
+    return float(min(high, max(low, _GRADIENT_RTOL_PER_SOLVER_RTOL * rtol)))
 
 
 #: A point is too close to a stationary point to audit when the gradient norm is below this
@@ -158,13 +204,15 @@ class GradientCheck:
         )
 
 
-@dataclasses.dataclass(frozen=True)
+# eq=False: a target compares and hashes by identity, so `jax.jit(target)` and
+# `eqx.filter_jit(target)` take it as a static callable instead of hashing its arrays.
+@dataclasses.dataclass(frozen=True, eq=False)
 class LogDensity:
     """A normalized log-density target with its coordinates and gradient.
 
-    Calling the object evaluates the scalar log density;
-    [value_and_grad][] additionally returns the gradient when one was
-    built. The target is frozen — [verify_gradient][] records its audit
+    Calling the object evaluates the scalar log density, and `jax.jit(target)`
+    compiles that call. [value_and_grad][] also returns the gradient when one
+    was built. The target is frozen — [verify_gradient][] records its audit
     result in place, and everything else is read-only.
 
     Attributes:
@@ -356,6 +404,7 @@ class LogDensity:
         names: Any = None,
         _coordinate: str = "x",
         gradient: Optional[str] = "forward",
+        _source: Any = None,
     ) -> "LogDensity":
         """Wrap a user-supplied log-density callable as a sampling target.
 
@@ -399,7 +448,9 @@ class LogDensity:
         names = tuple(names) if names is not None else tuple(f"theta[{i}]" for i in range(n))
         if len(names) != n:
             raise ValueError(f"LogDensity.from_callable: {len(names)} names for {n} parameters.")
-        grad_fn = _build_gradient(fn, init, gradient, caller="LogDensity.from_callable")
+        grad_fn = _build_gradient(
+            fn, init, gradient, caller="LogDensity.from_callable", source=_source
+        )
         return cls(
             _coordinate=_coordinate,
             names=names,
@@ -426,7 +477,7 @@ def _kept_data(experiment: Any, scored: tuple) -> dict:
 
 
 def _build_gradient(
-    fn: Callable, init: Array, gradient: Optional[str], *, caller: str
+    fn: Callable, init: Array, gradient: Optional[str], *, caller: str, source: Any = None
 ) -> Optional[Callable]:
     """Build the gradient of a scalar target under the declared mode.
 
@@ -435,26 +486,46 @@ def _build_gradient(
     ``init`` — a failing or disagreeing reverse pass raises with the reason
     (composable forward-sensitivity solver runs support ``jax.jacfwd``
     only). ``None`` returns ``None`` (a gradient-free target).
+
+    The two agree when the norm of their difference is within a tolerance times the larger
+    norm, or times one when both norms are below one. The tolerance of a target of a
+    solver-backed ``source`` (a problem or an experiment) is the one ``_gradient_rtol``
+    gives it; a target with no solver is held to rounding of its own dtype.
     """
     if gradient == "forward":
         return jax.jacfwd(fn)
     if gradient == "reverse":
-        forward_grad = np.asarray(jax.jacfwd(fn)(init), dtype=float)
+        forward = jax.jacfwd(fn)(init)
         try:
-            reverse_grad = np.asarray(jax.grad(fn)(init), dtype=float)
+            reverse = jax.grad(fn)(init)
         except Exception as exc:
             raise ValueError(
                 f"{caller}: the reverse-mode gradient failed at the initial "
                 f"point ({exc}). Composable forward-sensitivity solver runs "
                 "support jax.jacfwd only; build with gradient='forward'."
             ) from exc
-        atol = _REVERSE_GATE_RTOL * max(1.0, float(np.max(np.abs(forward_grad), initial=0.0)))
-        if not np.allclose(reverse_grad, forward_grad, rtol=_REVERSE_GATE_RTOL, atol=atol):
+        rtol = _gradient_rtol(source)
+        if rtol is None:
+            dtypes = (jnp.result_type(x) for x in (init, forward, reverse))
+            narrowest = min(
+                (jnp.finfo(d).bits for d in dtypes if jnp.issubdtype(d, jnp.floating)), default=64
+            )
+            rtol = _REVERSE_GATE_RTOL[64 if narrowest >= 64 else 32]
+            basis = f"no solver, {narrowest}-bit target"
+        else:
+            solver_rtol, single = _solver_rtol(source)
+            basis = f"solver rtol {solver_rtol:.1e}" + (", float32 solve" if single else "")
+        forward_grad = np.asarray(forward, dtype=float)
+        reverse_grad = np.asarray(reverse, dtype=float)
+        scale = max(float(np.linalg.norm(forward_grad)), float(np.linalg.norm(reverse_grad)), 1.0)
+        difference = float(np.linalg.norm(reverse_grad - forward_grad)) / scale
+        if not difference <= rtol:
             raise ValueError(
-                f"{caller}: the reverse-mode gradient disagrees with the "
-                f"forward-assembled gradient at the initial point (reverse "
-                f"{reverse_grad}, forward {forward_grad}). Reverse mode is not "
-                "trustworthy for this target; build with gradient='forward'."
+                f"{caller}: the reverse-mode gradient disagrees with the forward-assembled "
+                f"gradient at the initial point by {difference:.3e} of its norm, against the "
+                f"tolerance {rtol:.1e} ({basis}). Reverse mode is not trustworthy for this "
+                f"target; build with gradient='forward'. Reverse {reverse_grad}, forward "
+                f"{forward_grad}."
             )
         return jax.grad(fn)
     return None
@@ -609,7 +680,7 @@ def log_posterior(
             x = p12n.transform(z)
             return log_likelihood(x) + prior.log_prob(x) + jnp.sum(p12n.log_abs_det_jacobian(z))
 
-    grad_fn = _build_gradient(fn, init, gradient, caller="log_posterior")
+    grad_fn = _build_gradient(fn, init, gradient, caller="log_posterior", source=experiment)
 
     return LogDensity(
         _coordinate=coordinate,
@@ -980,8 +1051,8 @@ def sample(
             chain start, or `"rmh"` for random-walk Metropolis, which needs no gradient.
         chains: The number of chains.
         draws: The number of draws kept per chain.
-        warmup: The number of steps before the kept draws, at least 1 for NUTS, which adapts
-            during them.
+        warmup: The number of steps before the kept draws. Random-walk chains discard them.
+            For NUTS, at least 1: the length of one adaptation run from the fit, on one chain.
         key: The JAX random key that fixes the draws.
         preconditioner: `"laplace"` to scale the proposals by the Laplace approximation at the
             fit, or `None` to run without it.
@@ -1058,24 +1129,10 @@ def sample(
     )
 
 
-#: The audit [sample][] runs before NUTS asks this many times the solvers' largest ``rtol``
-#: of the gradient, within the bounds below. A forward-sensitivity gradient and finite
-#: differences of an adaptive solve differ by about ten times the solver tolerance.
-_AUDIT_RTOL_PER_SOLVER_RTOL = 100.0
-_AUDIT_RTOL_BOUNDS = (1e-3, 1e-1)
-
-
 def _audit_rtol(problem: Any) -> float:
     """The audit tolerance for a target of ``problem``, scaled with its solvers' ``rtol``."""
-    tolerances = []
-    for experiment in getattr(getattr(problem, "study", None), "experiments", ()):
-        rtol = getattr(getattr(experiment, "solver", None), "rtol", None)
-        if rtol is not None:
-            tolerances.append(float(np.max(np.asarray(rtol, dtype=np.float64))))
-    low, high = _AUDIT_RTOL_BOUNDS
-    if not tolerances:
-        return low
-    return float(min(high, max(low, _AUDIT_RTOL_PER_SOLVER_RTOL * max(tolerances))))
+    rtol = _gradient_rtol(problem)
+    return _GRADIENT_RTOL_BOUNDS[0] if rtol is None else rtol
 
 
 def _audit_chain_start(

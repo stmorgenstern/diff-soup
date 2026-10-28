@@ -9,11 +9,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import diff_soup as ds
 from diff_soup import inference as inf
 from tests.support.inference import NOISE, decay_experiment, decay_recipe, small_fit
 from tests.support.programs import primitive_names
@@ -102,8 +104,9 @@ def test_the_gradient_audit_at_the_map_is_inconclusive():
     assert not check.passed and check.verdict == "inconclusive"
 
 
-def test_nuts_samples_a_fit_solved_at_a_loose_tolerance():
-    """sample(problem, fit, kernel="nuts") runs on a fit whose solver tolerance is 1e-4."""
+def test_the_gradient_checks_admit_a_tolerance_limited_solve():
+    """sample(problem, fit, kernel="nuts") runs on a fit whose solver tolerance is 1e-4, and
+    posterior_target(problem, fit, gradient="reverse") builds on a float32 solve at 1e-6."""
     decay = decay_recipe("sampling_loose", rate_prior=inf.NormalPrior(mean=0.5, scale=0.3))
     # 1.0.0 audited at the MAP and refused at 9.1e-3 against 1e-3; the audit at a chain
     # start passes at 1.5e-3 against 1e-2, CPU workstation 2026-10-28, bugfix/we1fix/m3.py
@@ -118,6 +121,24 @@ def test_nuts_samples_a_fit_solved_at_a_loose_tolerance():
         problem, fit, kernel="nuts", key=jax.random.key(3), chains=1, draws=5, warmup=5
     )
     assert draws[decay.rate].shape == (1, 5) and bool(jnp.all(jnp.isfinite(draws.values)))
+
+    single = decay_recipe(
+        "sampling_float32",
+        nodes=2,
+        rate_prior=inf.NormalPrior(mean=0.5, scale=0.3),
+        precision=ds.Precision.fp32(),
+    )
+    # 1.0.0 held reverse and forward to 1e-6 and refused; measured difference 1.3e-3 at the
+    # MAP against the float32 tolerance 1e-1, CPU workstation 2026-10-28, bugfix/we1b/c3.py
+    problem = inf.InferenceProblem(
+        # The solver tolerance under test, not a bound (measured effect above)
+        decay_experiment(single, noise=NOISE, rtol=1e-6, atol=1e-6),
+        parameters=single.rate,
+        objective=inf.MAP(),
+    )
+    fit = small_fit(problem, inf.LevenbergMarquardt(max_steps=30))
+    target = inf.statistics.posterior_target(problem, fit, gradient="reverse")
+    assert target.gradient == "reverse"
 
 
 @pytest.mark.requires_cudss
@@ -228,7 +249,8 @@ def test_chains_and_robust_gradients_over_two_devices_refuse_native_factor_stora
 
 @pytest.mark.parametrize("gradient", ("forward", "reverse"))
 def test_value_and_gradient_come_from_one_derivative_pass(gradient):
-    """A target's value and gradient trace the density once, not once each."""
+    """A target's value and gradient trace the density once, not once each, and jax.jit
+    compiles the target itself."""
 
     def log_density(x):
         return -0.5 * jnp.sum((x - 1.0) ** 2) + jnp.sin(x[0] * x[1])
@@ -238,3 +260,7 @@ def test_value_and_gradient_come_from_one_derivative_pass(gradient):
     separate = primitive_names(lambda x: (log_density(x), jax.grad(log_density)(x)), point)
     assert primitive_names(target.value_and_grad, point).count("sin") == 1
     assert separate.count("sin") == 2
+    # 1.0.0 hashed the target's arrays and raised TypeError, CPU workstation 2026-10-28,
+    # bugfix/we1b/c1.py; measured 0.0 difference after the fix
+    assert float(jax.jit(target)(point)) == float(target(point))
+    assert float(eqx.filter_jit(target)(point)) == float(target(point))
