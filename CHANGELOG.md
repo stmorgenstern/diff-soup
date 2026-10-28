@@ -65,6 +65,15 @@ issue ledger of that effort.
 
 ### Additions
 
+- `ds.inference.approx.WIRE`, a coordinate network with the real Gabor-wavelet activation
+  `cos(omega_0 z) exp(-(s_0 z)^2)` (Saragadam et al. 2023), the same interface as `SIREN`
+  (`from_domain`, `bounds`, `transform`, `learnable_paths`); defaults `omega_0=20`, `s_0=10`. (WE2-6)
+- `ExperimentSet.log_posterior` builds (it read observations through an internal-only method and passed
+  a keyword `LogDensity.from_callable` does not take). (R-37)
+- `posterior_target(gradient="reverse")`, `log_posterior` and `LogDensity.from_callable` hold the
+  reverse/forward agreement check to 100 times the solvers' largest `rtol` (between 1e-3 and 1e-1, a
+  float32 solve counting as 1e-3) and compare one percent away from the start, where the gradient is not
+  noise; `jax.jit(target)` compiles a `LogDensity`. (WE1-5, WE1-6)
 - `ds.compile(problem, solver, t_span, y0, ...)` compiles a `pdesolve` call without running it; the
   returned `CompiledSolve` runs on new `t_span`, `y0`, `theta` and `lambda0` of the same shapes and
   dtypes and reports `compile_seconds`, `cost_analysis()` and `memory_analysis()`. Save times must be

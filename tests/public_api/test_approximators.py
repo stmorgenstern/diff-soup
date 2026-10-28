@@ -104,7 +104,7 @@ def test_sparse_legendre_coefficients_of_a_two_field_law_are_recovered():
     np.testing.assert_allclose(fit[law].coeffs, truth, rtol=0.05)
 
 
-@pytest.mark.parametrize("kind", ["FourierFeatureNet", "SIREN"])
+@pytest.mark.parametrize("kind", ["FourierFeatureNet", "SIREN", "WIRE"])
 def test_coordinate_nets_normalize_their_bounds_and_take_them_from_a_domain(kind):
     """A bounded coordinate net equals the plain net on [-1, 1]; from_domain reads the bounds."""
     cls = getattr(approx, kind)

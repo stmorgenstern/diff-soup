@@ -33,7 +33,7 @@ Usage example::
 
 from diff_soup.inference._abc import Basis
 from diff_soup.inference.approx.chebyshev import ChebyshevExpansion
-from diff_soup.inference.approx.coordinate_nets import SIREN, FourierFeatureNet
+from diff_soup.inference.approx.coordinate_nets import SIREN, WIRE, FourierFeatureNet
 from diff_soup.inference.approx.grf import (
     GRFBasis,
     GRFGenerator,
@@ -59,6 +59,7 @@ __all__ = [
     "Basis",
     "FourierFeatureNet",
     "SIREN",
+    "WIRE",
     "ICNN",
     "MonotoneMLP",
     "Transform",
