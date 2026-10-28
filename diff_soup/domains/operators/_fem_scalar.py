@@ -30,6 +30,8 @@ __all__ = [
     "reaction_elem",
     "mass_elem",
     "div_flux_elem",
+    # Region coefficients
+    "cell_indicator",
 ]
 
 
@@ -214,3 +216,28 @@ def div_flux_elem(
         raise ValueError(f"D_q must have 1 or 3 dimensions, got ndim={jnp.ndim(D_q)}")
 
     return integrate_grad(grads_e, jxw, flux_q)
+
+
+# ---------------------------------------------------------------------------
+# Region coefficients
+# ---------------------------------------------------------------------------
+
+
+def cell_indicator(domain, name: str) -> Float[Array, " n_cells"]:
+    """One per cell of a named region of a tagged mesh and zero elsewhere.
+
+    A weighted sum such as ``0.1 * ind_a + 1.0 * ind_b`` is a per-cell
+    coefficient for ``div_flux``, ``mass`` and ``integrate``.
+
+    Raises:
+        TypeError: If ``domain`` carries no cell regions.
+        KeyError: If the mesh names no region ``name``.
+    """
+    method = getattr(domain, "cell_indicator", None)
+    if method is None or getattr(domain, "cell_tags", None) is None:
+        raise TypeError(
+            f"cell_indicator({name!r}): a {type(domain).__name__} domain carries no cell "
+            "regions. Build a TaggedMesh with cell_tags and cell_tag_names, for example "
+            "with polygons_to_tagged_mesh or read_mesh of a gmsh file with physical surfaces."
+        )
+    return method(name)

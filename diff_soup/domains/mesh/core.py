@@ -11,7 +11,9 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 import equinox as eqx
+import jax.numpy as jnp
 import numpy as np
+from jaxtyping import Array, Float
 
 from diff_soup.domains.base import Domain
 from diff_soup.domains.grid.core import CoordSystem
@@ -456,7 +458,7 @@ def box_mesh(
 ) -> Mesh:
     """Build a structured mesh of the box `[0, lx] x [0, ly] x [0, lz]`.
 
-    `ele_type="TET4"` splits each cell into six tetrahedra. Boundary tags, named `"x_min"`, `"x_max"`, `"y_min"`, `"y_max"`, `"z_min"` and `"z_max"`, need `"TET4"`.
+    `ele_type="TET4"` splits each cell into six tetrahedra. With tags, the faces are named `"x_min"`, `"x_max"`, `"y_min"`, `"y_max"`, `"z_min"` and `"z_max"`.
 
     Args:
         nx: The number of cells along x.
@@ -471,9 +473,6 @@ def box_mesh(
 
     Returns:
         A [Mesh][diff_soup.domains.Mesh], or a `TaggedMesh` when tagged.
-
-    Raises:
-        ValueError: If `with_boundary_tags=True` with `ele_type="HEX8"`.
     """
     if int(nx) < 1 or int(ny) < 1 or int(nz) < 1:
         raise ValueError(
@@ -532,62 +531,31 @@ def box_mesh(
     if not with_boundary_tags:
         return Mesh(points=points, cells=cells, ele_type=ele_type, periodic_axes=periodic_axes)
 
-    # Tag boundary faces by axis-aligned position.
+    # Tag boundary faces by axis-aligned position.  Each side is a grid of
+    # quads (a, b, c, d) in cyclic order; a TET4 box splits each along its
+    # a-c diagonal, the diagonal its tetrahedra use.
     tag_names = {1: "x_min", 2: "x_max", 3: "y_min", 4: "y_max", 5: "z_min", 6: "z_max"}
     faces_list = []
     tags_list = []
-
-    def _tri_faces_x(i_const: int, tag: int):
-        """Boundary triangles on the x = const face (i fixed)."""
-        for j in range(ny):
-            for k in range(nz):
-                # Quad nodes at this face: idx[i_const, j..j+1, k..k+1]
-                a = int(idx[i_const, j, k])
-                b = int(idx[i_const, j + 1, k])
-                c = int(idx[i_const, j + 1, k + 1])
-                d = int(idx[i_const, j, k + 1])
-                faces_list.append((a, b, c))
-                tags_list.append(tag)
-                faces_list.append((a, c, d))
-                tags_list.append(tag)
-
-    def _tri_faces_y(j_const: int, tag: int):
-        for i in range(nx):
-            for k in range(nz):
-                a = int(idx[i, j_const, k])
-                b = int(idx[i + 1, j_const, k])
-                c = int(idx[i + 1, j_const, k + 1])
-                d = int(idx[i, j_const, k + 1])
-                faces_list.append((a, b, c))
-                tags_list.append(tag)
-                faces_list.append((a, c, d))
-                tags_list.append(tag)
-
-    def _tri_faces_z(k_const: int, tag: int):
-        for i in range(nx):
-            for j in range(ny):
-                a = int(idx[i, j, k_const])
-                b = int(idx[i + 1, j, k_const])
-                c = int(idx[i + 1, j + 1, k_const])
-                d = int(idx[i, j + 1, k_const])
-                faces_list.append((a, b, c))
-                tags_list.append(tag)
-                faces_list.append((a, c, d))
-                tags_list.append(tag)
-
-    if ele_type != "TET4":
-        raise ValueError(
-            "box_mesh: with_boundary_tags is available for ele_type='TET4'. A "
-            "HEX8 box would carry an empty boundary-facet table, so no boundary "
-            "could be selected by name; build it with ele_type='TET4', or with "
-            "with_boundary_tags=False."
-        )
-    _tri_faces_x(0, 1)  # x_min
-    _tri_faces_x(nx, 2)  # x_max
-    _tri_faces_y(0, 3)  # y_min
-    _tri_faces_y(ny, 4)  # y_max
-    _tri_faces_z(0, 5)  # z_min
-    _tri_faces_z(nz, 6)  # z_max
+    sides = (
+        (idx[0, :, :], 1),
+        (idx[nx, :, :], 2),
+        (idx[:, 0, :], 3),
+        (idx[:, ny, :], 4),
+        (idx[:, :, 0], 5),
+        (idx[:, :, nz], 6),
+    )
+    for side, tag in sides:
+        a, b = side[:-1, :-1].ravel(), side[1:, :-1].ravel()
+        c, d = side[1:, 1:].ravel(), side[:-1, 1:].ravel()
+        if ele_type == "HEX8":
+            quads = np.stack((a, b, c, d), axis=-1)
+        else:
+            quads = np.stack(
+                (np.stack((a, b, c), axis=-1), np.stack((a, c, d), axis=-1)), axis=1
+            ).reshape(-1, 3)
+        faces_list.extend(quads.tolist())
+        tags_list.extend([tag] * quads.shape[0])
     boundary_faces = np.asarray(faces_list, dtype=np.int32)
     boundary_tags = np.asarray(tags_list, dtype=np.int32)
     return TaggedMesh(
@@ -601,22 +569,53 @@ def box_mesh(
     )
 
 
-class TaggedMesh(Mesh):
-    """A [Mesh][diff_soup.domains.Mesh] whose boundary facets carry integer tags, optionally named.
+def _checked_cell_tags(cell_tags, cell_tag_names, num_cells: int):
+    """Validate and normalise the cell-region tags of a tagged mesh."""
+    if cell_tags is None:
+        if cell_tag_names:
+            raise ValueError(
+                "TaggedMesh: cell_tag_names names regions, but cell_tags is None; pass "
+                "one integer tag per cell as cell_tags"
+            )
+        return None, None
+    tags = np.asarray(cell_tags)
+    if tags.ndim != 1 or tags.shape[0] != num_cells or tags.dtype.kind not in "iu":
+        raise ValueError(
+            f"TaggedMesh: cell_tags holds one integer per cell, shape ({num_cells},); got "
+            f"shape {tags.shape} of dtype {tags.dtype}"
+        )
+    tags = tags.astype(np.int32)
+    names = None
+    if cell_tag_names is not None:
+        names = {str(k): int(v) for k, v in cell_tag_names.items()}
+        present = set(np.unique(tags).tolist())
+        absent = sorted(k for k, v in names.items() if v not in present)
+        if absent:
+            raise ValueError(
+                f"TaggedMesh: cell_tag_names maps {absent} to tags no cell carries; the "
+                f"cell tags present are {sorted(present)}"
+            )
+    return tags, names
 
-    Boundary conditions select facets by name, as `tag="rim"` or with [`ds.tags`][diff_soup.problem.tags]. Facet integrals, such as flux conditions and boundary operators, support `LINE2`, `TRI3` and `TET4` elements.
+
+class TaggedMesh(Mesh):
+    """A [Mesh][diff_soup.domains.Mesh] whose boundary facets, and optionally cells, carry integer tags.
+
+    Boundary conditions select facets by name, as `tag="rim"` or with [`ds.tags`][diff_soup.problem.tags]. Facet integrals, such as flux conditions and boundary operators, support `LINE2`, `TRI3`, `TRI6`, `QUAD4`, `QUAD8`, `TET4` and `HEX8` elements. Cell tags name regions, and `cell_indicator` turns one into a piecewise coefficient.
 
     Args:
         points: The node coordinates, shape `(num_nodes, dim)`.
         cells: The node indices of each element, one row per element.
         ele_type: The element type.
-        boundary_edges: The boundary edges of a two-dimensional mesh, as pairs of node indices.
-        boundary_faces: The boundary faces of a three-dimensional mesh as node triples, or the boundary nodes of a one-dimensional mesh.
+        boundary_edges: The boundary edges of a two-dimensional mesh, each as its two end nodes, then its midside node on a quadratic mesh.
+        boundary_faces: The boundary faces of a three-dimensional mesh by their corners in cyclic order, or the boundary nodes of a one-dimensional mesh.
         boundary_tags: One integer tag per boundary edge or face, in the same order.
         tag_names: The name of each tag, such as `{1: "left"}`.
         tag_groups: Group names that each select several tags, such as `{"boundary": (1, 2)}`.
         periodic_axes: As for [Mesh][diff_soup.domains.Mesh].
         coord_system: As for [Mesh][diff_soup.domains.Mesh].
+        cell_tags: One integer tag per cell, shape `(num_cells,)`, or `None` (the default) for no regions.
+        cell_tag_names: The tag of each region name, such as `{"soup": 1, "bowl": 2}`.
     """
 
     boundary_edges: np.ndarray
@@ -624,6 +623,8 @@ class TaggedMesh(Mesh):
     boundary_tags: np.ndarray
     tag_names: Optional[Dict[int, str]] = eqx.field(static=True, default=None)
     tag_groups: Optional[Dict[str, Tuple[int, ...]]] = eqx.field(static=True, default=None)
+    cell_tags: Optional[np.ndarray] = None
+    cell_tag_names: Optional[Dict[str, int]] = eqx.field(static=True, default=None)
 
     def __init__(
         self,
@@ -637,12 +638,18 @@ class TaggedMesh(Mesh):
         tag_groups=None,
         periodic_axes=(),
         coord_system: CoordSystem = CoordSystem.CARTESIAN,
+        cell_tags=None,
+        cell_tag_names=None,
     ):
-        """Build a mesh with physical-group tags on boundary entities.
+        """Build a mesh with physical-group tags on boundary entities and cells.
 
         Missing ``boundary_edges`` / ``boundary_faces`` / ``boundary_tags`` default
         to empty int32 arrays so the mesh is still valid (just with no tagged
         boundaries).
+
+        Raises:
+            ValueError: If ``cell_tags`` does not hold one integer per cell, or a
+                name in ``cell_tag_names`` maps to a tag no cell carries.
         """
         super().__init__(
             points, cells, ele_type, periodic_axes=periodic_axes, coord_system=coord_system
@@ -662,6 +669,30 @@ class TaggedMesh(Mesh):
             if tag_groups is None
             else {str(k): tuple(int(t) for t in v) for k, v in tag_groups.items()}
         )
+        self.cell_tags, self.cell_tag_names = _checked_cell_tags(
+            cell_tags, cell_tag_names, self.num_cells
+        )
+
+    def cell_indicator(self, name: str) -> Float[Array, " num_cells"]:
+        """Return one per cell of a named region and zero elsewhere.
+
+        Pass the result, or a weighted sum of several, wherever an operator takes a value per cell, such as `D` in `q.ops.div_flux`.
+
+        Args:
+            name: A name in `cell_tag_names`.
+
+        Returns:
+            A JAX array of shape `(num_cells,)` in the default float dtype.
+
+        Raises:
+            KeyError: If the mesh names no region `name`.
+        """
+        names = self.cell_tag_names or {}
+        if name not in names:
+            raise KeyError(
+                f"this mesh names no cell region {name!r}; available region names: {sorted(names)}"
+            )
+        return jnp.asarray(np.asarray(self.cell_tags) == names[name], dtype=jnp.result_type(float))
 
     def _entities_for_ids(self, entities: np.ndarray, ids) -> np.ndarray:
         """Return the rows of *entities* whose tag id is one of *ids*.

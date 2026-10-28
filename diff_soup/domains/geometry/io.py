@@ -33,6 +33,37 @@ _MESHIO_TO_DS: Dict[str, str] = {
 # Reverse mapping: diff_soup ele_type -> meshio cell type
 _DS_TO_MESHIO: Dict[str, str] = {v: k for k, v in _MESHIO_TO_DS.items()}
 
+# Topological dimension of each meshio cell type read as cells or facets.
+_CELL_DIM: Dict[str, int] = {
+    "vertex": 0,
+    "line": 1,
+    "line3": 1,
+    "triangle": 2,
+    "triangle6": 2,
+    "quad": 2,
+    "quad8": 2,
+    "quad9": 2,
+    "tetra": 3,
+    "tetra10": 3,
+    "hexahedron": 3,
+    "hexahedron20": 3,
+    "hexahedron27": 3,
+}
+
+# The meshio facet type of each diff_soup element type.
+_FACET_TYPES: Dict[str, tuple] = {
+    "LINE2": ("vertex",),
+    "TRI3": ("line",),
+    "QUAD4": ("line",),
+    "TRI6": ("line3",),
+    "QUAD8": ("line3",),
+    "TET4": ("triangle",),
+    "HEX8": ("quad",),
+    "TET10": ("triangle6",),
+    "HEX20": ("quad8",),
+    "HEX27": ("quad9",),
+}
+
 
 # ======================================================================
 # Reading
@@ -47,12 +78,16 @@ def read_mesh(
     """Read a mesh file using meshio.
 
     Supports any format meshio handles (``.msh``, ``.vtk``, ``.vtu``,
-    ``.inp``, ``.xdmf``, etc.).
+    ``.inp``, ``.xdmf``, etc.).  Every cell block of the element type is read.
+    A gmsh ``.msh`` file with physical groups gives a
+    [TaggedMesh][diff_soup.domains.mesh.TaggedMesh]: the groups one dimension
+    below the cells tag the boundary facets, and the groups of the cells'
+    own dimension become ``cell_tags`` and ``cell_tag_names``.
 
     Args:
         path: Path to the mesh file.
-        ele_type: diff_soup element type override (e.g. ``"TRI3"``).  If ``None``,
-            auto-detected from the first cell block in the file.
+        ele_type: diff_soup element type to read (e.g. ``"TRI3"``).  If ``None``,
+            the cells of the highest dimension in the file.
 
     Returns:
         Mesh or TaggedMesh
@@ -61,8 +96,9 @@ def read_mesh(
             [Mesh][diff_soup.domains.mesh.Mesh].
 
     Raises:
-        ValueError: if the file contains no supported cell types, or the
-            specified ``ele_type`` has no matching cells.
+        ValueError: if the file contains no supported cell types, the
+            specified ``ele_type`` has no matching cells, or the highest
+            dimension mixes two element types and ``ele_type`` is not given.
     """
     meshio = import_optional("meshio")
 
@@ -75,86 +111,78 @@ def read_mesh(
     if points.shape[1] == 3 and np.allclose(points[:, 2], 0.0):
         points = points[:, :2]
 
-    # --- Determine cell block to use ---
+    blocks = list(mesh_data.cells)
     if ele_type is not None:
-        # User-specified: find matching cell block
         meshio_type = _DS_TO_MESHIO.get(ele_type)
         if meshio_type is None:
             raise ValueError(
                 f"Unknown ele_type {ele_type!r}. Supported: {list(_DS_TO_MESHIO.keys())}"
             )
-        block = None
-        for cb in mesh_data.cells:
-            if cb.type == meshio_type:
-                block = cb
-                break
-        if block is None:
+        if not any(cb.type == meshio_type for cb in blocks):
             raise ValueError(
                 f"No cell block of type {meshio_type!r} found in {path}. "
-                f"Available: {[cb.type for cb in mesh_data.cells]}"
+                f"Available: {[cb.type for cb in blocks]}"
             )
         ds_ele_type = ele_type
     else:
-        # Auto-detect from first supported cell block
-        block = None
-        ds_ele_type = None
-        for cb in mesh_data.cells:
-            if cb.type in _MESHIO_TO_DS:
-                block = cb
-                ds_ele_type = _MESHIO_TO_DS[cb.type]
-                break
-        if block is None:
+        supported = [cb.type for cb in blocks if cb.type in _MESHIO_TO_DS]
+        if not supported:
             raise ValueError(
                 f"No supported cell types found in {path}. "
-                f"Available: {[cb.type for cb in mesh_data.cells]}. "
+                f"Available: {[cb.type for cb in blocks]}. "
                 f"Supported: {list(_MESHIO_TO_DS.keys())}"
             )
+        top = max(_CELL_DIM[t] for t in supported)
+        top_types = sorted({t for t in supported if _CELL_DIM[t] == top})
+        if len(top_types) > 1:
+            raise ValueError(f"{path} mixes {top_types} cells; pass ele_type= to read one kind")
+        meshio_type = top_types[0]
+        ds_ele_type = _MESHIO_TO_DS[meshio_type]
 
-    cells = np.asarray(block.data, dtype=np.int32)
+    physical = mesh_data.cell_data.get("gmsh:physical")
 
-    # --- Check for gmsh physical groups (tagged mesh) ---
+    def gather(types):
+        index = [i for i, cb in enumerate(blocks) if cb.type in types]
+        if not index:
+            return None, None
+        data = np.concatenate([np.asarray(blocks[i].data, dtype=np.int64) for i in index])
+        if physical is None:
+            return data, None
+        tags = np.concatenate([np.asarray(physical[i], dtype=np.int64) for i in index])
+        return data, tags
+
+    cells, cell_tags = gather((meshio_type,))
+    facets, facet_tags = gather(_FACET_TYPES.get(ds_ele_type, ()))
+
     is_gmsh = path.suffix.lower() == ".msh"
-    if is_gmsh and mesh_data.field_data:
-        # meshio stores physical groups in field_data:
-        #   field_data[name] = [physical_tag, topological_dim]
-        # and cell_sets or cell_sets_dict for group membership.
-        #
-        # Extract 1D (edge) physical groups for boundary tagging.
-        tag_names: Dict[int, str] = {}
-        for name, (phys_tag, topo_dim) in mesh_data.field_data.items():
-            tag_names[int(phys_tag)] = name
+    if not is_gmsh or physical is None:
+        return Mesh(points=points, cells=cells.astype(np.int32), ele_type=ds_ele_type)
 
-        # Find boundary edge cells (1D line elements)
-        edge_cells = None
-        edge_block_idx = None
-        for idx, cb in enumerate(mesh_data.cells):
-            if cb.type == "line":
-                edge_cells = np.asarray(cb.data, dtype=np.int32)
-                edge_block_idx = idx
-                break
-
-        if edge_cells is not None and edge_block_idx is not None:
-            # Get per-cell physical tags for the edge block
-            # meshio stores this in cell_data["gmsh:physical"]
-            edge_tags = None
-            if "gmsh:physical" in mesh_data.cell_data:
-                phys_data = mesh_data.cell_data["gmsh:physical"]
-                if edge_block_idx < len(phys_data):
-                    edge_tags = np.asarray(phys_data[edge_block_idx], dtype=np.int32)
-
-            if edge_tags is None:
-                edge_tags = np.zeros(edge_cells.shape[0], dtype=np.int32)
-
-            return TaggedMesh(
-                points=points,
-                cells=cells,
-                ele_type=ds_ele_type,
-                boundary_edges=edge_cells,
-                boundary_tags=edge_tags,
-                tag_names=tag_names,
-            )
-
-    return Mesh(points=points, cells=cells, ele_type=ds_ele_type)
+    # field_data[name] = [physical_tag, topological_dim]; gmsh numbers the
+    # physical groups of each dimension separately.
+    dim = _CELL_DIM[meshio_type]
+    facet_names: Dict[int, str] = {}
+    region_names: Dict[str, int] = {}
+    present = set(np.unique(cell_tags).tolist())
+    for name, (phys_tag, topo_dim) in mesh_data.field_data.items():
+        if int(topo_dim) == dim - 1:
+            facet_names[int(phys_tag)] = name
+        elif int(topo_dim) == dim and int(phys_tag) in present:
+            region_names[name] = int(phys_tag)
+    if facets is None:
+        facets = np.empty((0, dim if dim > 1 else 1), dtype=np.int64)
+        facet_tags = np.empty((0,), dtype=np.int64)
+    table = {"boundary_edges" if dim == 2 else "boundary_faces": facets.astype(np.int32)}
+    return TaggedMesh(
+        points=points,
+        cells=cells.astype(np.int32),
+        ele_type=ds_ele_type,
+        boundary_tags=facet_tags.astype(np.int32),
+        tag_names=facet_names or None,
+        cell_tags=cell_tags.astype(np.int32),
+        cell_tag_names=region_names or None,
+        **table,
+    )
 
 
 # ======================================================================

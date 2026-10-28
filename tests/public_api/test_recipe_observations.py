@@ -137,3 +137,41 @@ def test_constraints_globals_and_scales_survive_authoring_and_meet_at_the_bounda
     np.testing.assert_allclose(g, 1.5, rtol=_EXACT)
     observed = scaled.observe(internal, jnp.asarray(0.0), jnp.asarray([0.5]))
     np.testing.assert_allclose([observed["mean_u"], observed["load_gap"]], [6.0, 4.0], rtol=_EXACT)
+
+
+def _region_problem(plate, conductivity):
+    spec = ds.problem(f"regions_{id(conductivity)}").domain("plate", plate)
+    spec.field("T", mass="differential", scale=1.0)
+    spec.equation(writes="T", reads=("T",))(lambda q: q.ops.div_flux(conductivity, q.T))
+    region_a = plate.cell_indicator("a")
+    spec.observe.scalar(name="area_a", fn=lambda q: jnp.sum(q.ops.integrate(region_a)))
+    problem = spec.build()
+    x, y = plate.points[:, 0], plate.points[:, 1]
+    state = spec.assemble_state({"T": jnp.asarray(np.sin(x) + y**2)})
+    residual = problem.physics_residual(state, jnp.zeros((0,)), jnp.asarray(0.0))[0]
+    return residual, problem.observe(state, jnp.asarray(0.0), jnp.zeros((0,)))["area_a"]
+
+
+def test_a_region_coefficient_and_a_region_integral_read_the_cell_tags():
+    """On a 2 x 1 plate whose cells left of ``x = 1`` are tagged ``"a"``, the conductivity
+    ``0.1 cell_indicator("a") + cell_indicator("b")`` gives the residual of the explicit per-cell
+    array, and an observation integrating ``cell_indicator("a")`` returns the area 1 of ``a``."""
+    plain = ds.domains.rectangle_mesh(4, 2, 2.0, 1.0, ele_type="TRI3", with_boundary_tags=True)
+    left = plain.points[plain.cells].mean(axis=1)[:, 0] < 1.0
+    plate = ds.domains.TaggedMesh(
+        plain.points,
+        plain.cells,
+        "TRI3",
+        boundary_edges=plain.boundary_edges,
+        boundary_tags=plain.boundary_tags,
+        tag_names=plain.tag_names,
+        cell_tags=np.where(left, 1, 2),
+        cell_tag_names={"a": 1, "b": 2},
+    )
+    regions = 0.1 * plate.cell_indicator("a") + plate.cell_indicator("b")
+    by_region, area = _region_problem(plate, regions)
+    by_cell, _ = _region_problem(plate, np.where(left, 0.1, 1.0))
+    np.testing.assert_allclose(by_region, by_cell, rtol=_EXACT)
+    # measured 0.0 on both the residual and the area, workstation CPU 2026-10-28,
+    # pytest tests/public_api/test_recipe_observations.py::test_a_region_coefficient_and_a_region_integral_read_the_cell_tags
+    np.testing.assert_allclose(area, 1.0, rtol=1e-12)

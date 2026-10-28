@@ -42,6 +42,8 @@ discretization decides how the operator bank evaluates each operator. See
 
 ::: diff_soup.domains.box_mesh
 
+::: diff_soup.domains.geometry.polygons_to_tagged_mesh
+
 ---
 
 ### Mesh types
@@ -55,6 +57,7 @@ discretization decides how the operator bank evaluates each operator. See
       members:
         - facets_for_tag
         - facets_for_name
+        - cell_indicator
 
 ---
 

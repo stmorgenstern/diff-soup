@@ -99,6 +99,9 @@ Every route returns a mesh you register with `spec.domain`:
   boundary polygon from a mask (`pixel_size` sets the physical scale,
   `epsilon_factor` how aggressively the contour is simplified), and
   `polygon_to_mesh` or `polygon_to_tagged_mesh` triangulates it.
+- From several polygons: `polygons_to_tagged_mesh({"soup": soup, "bowl": bowl},
+  mesh_size=...)` meshes named regions into one mesh whose regions share
+  their interface edges ([regions](#regions)).
 - Named solids: `cylinder_mesh`, `sphere_mesh`, and `box_mesh_tet`
   generate tetrahedral meshes directly.
 - Structured meshes: `rectangle_mesh` and `box_mesh`, from the
@@ -123,9 +126,32 @@ quadratic `TRI6` elements.
 - The structured factories name their tags `"left"`, `"right"`,
   `"bottom"`, `"top"` (rectangles) and `"x_min"` through `"z_max"`
   (boxes).
+- `polygons_to_tagged_mesh` names each region's outer edges after the
+  region, and the edges two regions share after both, sorted and joined
+  by `|` (`"bowl|soup"`).
 - Declarations select tags by name (`tag="rim"`) or by a composable
   expression: `on=ds.tags("boundary") - ds.tags("rim")` is every
   boundary edge except the rim group.
+
+### Regions
+
+A mesh can also tag its cells, which splits it into named regions.
+`TaggedMesh(..., cell_tags=..., cell_tag_names={"soup": 1, "bowl": 2})`
+takes one integer per cell, `polygons_to_tagged_mesh` tags each cell
+with its polygon, and `read_mesh` reads the physical surfaces of a gmsh
+file. `mesh.cell_indicator("soup")` is one on the soup's cells and zero
+elsewhere, so a piecewise coefficient is a weighted sum of indicators:
+
+```python
+from diff_soup.domains.geometry import polygons_to_tagged_mesh
+
+mesh = polygons_to_tagged_mesh({"soup": soup, "bowl": bowl}, mesh_size=2.0)
+k = 0.1 * mesh.cell_indicator("soup") + 1.0 * mesh.cell_indicator("bowl")
+
+@spec.equation(writes="u", reads=("u",))
+def cool(q):
+    return q.ops.div_flux(k, q.u)           # one conductivity per cell
+```
 
 ### Example: a bowl of soup
 

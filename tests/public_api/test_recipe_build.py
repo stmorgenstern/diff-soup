@@ -11,7 +11,7 @@ import pytest
 from jax.numpy import where
 
 import diff_soup as ds
-from diff_soup.domains import Operators, interval_mesh, rectangle_mesh
+from diff_soup.domains import Operators, TaggedMesh, box_mesh, interval_mesh, rectangle_mesh
 from diff_soup.inference import approx
 from diff_soup.utils import (
     build_padded_color_arrays,
@@ -406,3 +406,49 @@ def test_the_residual_form_keeps_a_condition_on_the_field_it_writes(condition):
     # measured 0.0 for all three conditions, workstation CPU 2026-10-28,
     # pytest tests/public_api/test_recipe_build.py::test_the_residual_form_keeps_a_condition_on_the_field_it_writes
     np.testing.assert_allclose(residual, explicit, atol=1e-12)
+
+
+def _tri6_square():
+    """Two six-node triangles on the unit square, the left side tagged."""
+    points = np.array(
+        [[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0], [1, 0.5], [0.5, 0.5], [0, 0.5], [0.5, 1]], float
+    )
+    cells = np.array([[0, 1, 2, 4, 5, 6], [0, 2, 3, 6, 8, 7]])
+    return TaggedMesh(
+        points, cells, "TRI6", boundary_edges=[[3, 0, 7]], boundary_tags=[1], tag_names={1: "left"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("mesh", "side", "loads"),
+    [
+        (
+            lambda: rectangle_mesh(2, 2, 1.0, 1.0, with_boundary_tags=True),
+            "left",
+            {0: 0.25, 1: 0.5, 2: 0.25},
+        ),
+        (_tri6_square, "left", {0: 1 / 6, 7: 2 / 3, 3: 1 / 6}),
+        (
+            lambda: box_mesh(1, 1, 1, 1.0, 1.0, 1.0, with_boundary_tags=True),
+            "x_min",
+            dict.fromkeys(range(4), 0.25),
+        ),
+    ],
+    ids=["quad4", "tri6", "hex8"],
+)
+def test_a_flux_on_a_quadrilateral_quadratic_or_hexahedral_mesh_loads_its_consistent_share(
+    mesh, side, loads
+):
+    """A flux density 2 through a unit side of a QUAD4, TRI6 or HEX8 mesh adds ``2 int N_i dS`` to
+    each side node's residual row and nothing elsewhere, so the injected total is 2."""
+    domain = mesh()
+    spec = ds.problem(f"inflow_{domain.ele_type}").domain("plate", domain)
+    spec.field("T", mass="differential", scale=1.0)
+    spec.equation(writes="T", reads=("T",))(lambda q: q.ops.laplacian(q.T))
+    spec.bc.flux("T", tag=side, value=2.0)
+    residual = _residual(spec.build(), spec.assemble_state({}))
+    expected = np.zeros(domain.num_nodes)
+    expected[list(loads)] = 2.0 * np.array(list(loads.values()))
+    # measured 0.0 on all three meshes (total 2.0), workstation CPU 2026-10-28,
+    # pytest tests/public_api/test_recipe_build.py::test_a_flux_on_a_quadrilateral_quadratic_or_hexahedral_mesh_loads_its_consistent_share
+    np.testing.assert_allclose(residual, expected, atol=1e-12)
