@@ -68,7 +68,7 @@ from diff_soup._warnings import warn_user
 from diff_soup.inference.data.deferred import DeferredValues
 from diff_soup.inference.solvers.tangent import deferred_value_and_grad
 from diff_soup.inference.statistics.experiment import _channel_likelihood_view
-from diff_soup.inference.statistics.laplace import LaplacePosterior
+from diff_soup.inference.statistics.laplace import LaplacePosterior, _credited_rtol, _solver_rtol
 from diff_soup.inference.statistics.parameters import Transform
 from diff_soup.inference.statistics.priors import GaussianPrior, Prior
 from diff_soup.inference.statistics.report import IdentifiedSubspace
@@ -94,46 +94,16 @@ GRADIENT_MODES = ("forward", "reverse", None)
 _GRADIENT_RTOL_PER_SOLVER_RTOL = 100.0
 _GRADIENT_RTOL_BOUNDS = (1e-3, 1e-1)
 
-#: The least ``rtol`` a float32 solve is credited with. Measured: reverse and forward
-#: gradients of float32 solves at rtol 1e-6 differ by 4.9e-3 of the gradient norm at the MAP
-#: and 9.0e-3 one sd away (inverse Cahn-Hilliard notebook, RTX 4070 Ti), and by 1.5e-2 at a
-#: decay MAP (CPU), workstation 2026-10-28, bugfix/we1b/ch.py and c2.py.
-_FLOAT32_SOLVE_RTOL = 1e-3
-
 #: The agreement demanded of reverse- and forward-mode gradients of a target with no solver,
 #: by the floating width of the target: both are exact up to rounding.
 _REVERSE_GATE_RTOL = {64: 1e-6, 32: 1e-3}
 
 
-def _solver_rtol(source: Any) -> tuple[Optional[float], bool]:
-    """The largest solver ``rtol`` behind ``source``, and whether any of its solves is float32.
-
-    ``source`` is an inference problem, whose study's experiments are read, or one
-    experiment. The ``rtol`` is ``None`` when no solver exposes one.
-    """
-    experiments = getattr(getattr(source, "study", None), "experiments", None)
-    if experiments is None:
-        experiments = () if source is None else (source,)
-    tolerances = []
-    single = False
-    for experiment in experiments:
-        rtol = getattr(getattr(experiment, "solver", None), "rtol", None)
-        if rtol is not None:
-            tolerances.append(float(np.max(np.asarray(rtol, dtype=np.float64))))
-        precision = getattr(getattr(experiment, "model", None), "precision", None)
-        dtype = getattr(precision, "compute_dtype", None)
-        if dtype is not None and jnp.finfo(dtype).bits < 64:
-            single = True
-    return (max(tolerances) if tolerances else None), single
-
-
 def _gradient_rtol(source: Any) -> Optional[float]:
     """The tolerance a gradient of a target of ``source`` is held to, or ``None`` without a solver."""
-    rtol, single = _solver_rtol(source)
+    rtol = _credited_rtol(source)
     if rtol is None:
         return None
-    if single:
-        rtol = max(rtol, _FLOAT32_SOLVE_RTOL)
     low, high = _GRADIENT_RTOL_BOUNDS
     return float(min(high, max(low, _GRADIENT_RTOL_PER_SOLVER_RTOL * rtol)))
 

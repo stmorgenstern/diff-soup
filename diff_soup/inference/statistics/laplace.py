@@ -70,10 +70,22 @@ _NULL_TOL = 1e-10
 # Relative tolerance for rejecting a materially asymmetric curvature input.
 _SYMMETRY_RTOL = 1e-8
 
-# Stationarity tolerance on the Newton decrement sqrt(g^T H^-1 g) at a fit. The log joint
-# at the exact mode is about half its square above the fit's value, 0.005 at this bound,
-# which bounds the error the fit's point adds to a Laplace log evidence.
-_STATIONARITY_TOL = 0.1
+#: The least ``rtol`` a float32 solve is credited with. Measured: reverse and forward
+#: gradients of float32 solves at rtol 1e-6 differ by 4.9e-3 of the gradient norm at the MAP
+#: and 9.0e-3 one sd away (inverse Cahn-Hilliard notebook, RTX 4070 Ti), and by 1.5e-2 at a
+#: decay MAP (CPU), workstation 2026-10-28, bugfix/we1b/ch.py and c2.py.
+_FLOAT32_SOLVE_RTOL = 1e-3
+
+#: The Newton decrement ``sqrt(g^T H^-1 g)`` a MAP fit may leave is this many times its
+#: credited solver ``rtol``, within the bounds below. The log joint at the exact mode is
+#: about half the decrement's square above the fit's, so the bounds cost a Laplace log
+#: evidence at most 0.005 and 0.125. Measured: converged decay MAP fits leave 1e-7 to 7e-3
+#: at rtol 1e-2 to 1e-8, float64 and float32 (CPU); converged inverse Cahn-Hilliard fits
+#: leave 0.19 to 0.25 at rtol 1e-4 in float32 and stall there on refits (tolerance 0.4);
+#: non-stationary decay points leave 0.92 (two LM steps) and 2.1 (fit + 0.05),
+#: workstation 2026-10-28, bugfix/fpass/f4.py and notebooks/final/examples/probe*_we1.py.
+_STATIONARITY_PER_SOLVER_RTOL = 400.0
+_STATIONARITY_BOUNDS = (0.1, 0.5)
 
 
 @dataclass(frozen=True)
@@ -646,6 +658,47 @@ def _evidence_refusal(problem: EstimationProblem) -> str | None:
     return None
 
 
+def _solver_rtol(source: Any) -> tuple[Optional[float], bool]:
+    """The largest solver ``rtol`` behind ``source``, and whether any of its solves is float32.
+
+    ``source`` is an inference problem, whose study's experiments are read, or one
+    experiment. The ``rtol`` is ``None`` when no solver exposes one.
+    """
+    experiments = getattr(getattr(source, "study", None), "experiments", None)
+    if experiments is None:
+        experiments = () if source is None else (source,)
+    tolerances = []
+    single = False
+    for experiment in experiments:
+        rtol = getattr(getattr(experiment, "solver", None), "rtol", None)
+        if rtol is not None:
+            tolerances.append(float(np.max(np.asarray(rtol, dtype=np.float64))))
+        precision = getattr(getattr(experiment, "model", None), "precision", None)
+        dtype = getattr(precision, "compute_dtype", None)
+        if dtype is not None and jnp.finfo(dtype).bits < 64:
+            single = True
+    return (max(tolerances) if tolerances else None), single
+
+
+def _credited_rtol(source: Any) -> Optional[float]:
+    """The solver ``rtol`` behind ``source``, at least ``_FLOAT32_SOLVE_RTOL`` for a float32 solve."""
+    rtol, single = _solver_rtol(source)
+    if rtol is None or not single:
+        return rtol
+    return max(rtol, _FLOAT32_SOLVE_RTOL)
+
+
+def _stationarity_tolerance(problem: EstimationProblem) -> tuple[float, Optional[str]]:
+    """The Newton decrement a fit of ``problem`` may leave, and the solve it comes from."""
+    low, high = _STATIONARITY_BOUNDS
+    rtol = _credited_rtol(problem)
+    if rtol is None:
+        return low, None
+    solver_rtol, single = _solver_rtol(problem)
+    basis = f"solver rtol {solver_rtol:.0e} in {'float32' if single else 'float64'}"
+    return float(min(high, max(low, _STATIONARITY_PER_SOLVER_RTOL * rtol))), basis
+
+
 def _negative_log_joint_gradient(problem: EstimationProblem, point: Any, terms: tuple) -> Any:
     """The gradient of the negative log likelihood plus the negative log prior at ``point``.
 
@@ -767,8 +820,11 @@ def _laplace_facade(
     gradient = _negative_log_joint_gradient(problem, point, (residual, info.whitened_jacobian))
     factor = np.asarray(posterior.precision_factor, dtype=float)
     decrement = float(np.linalg.norm(np.linalg.solve(factor, gradient)))
+    tolerance, basis = _stationarity_tolerance(problem)
     object.__setattr__(posterior, "mode_gradient_norm", decrement)
-    object.__setattr__(posterior, "stationarity_tolerance", _STATIONARITY_TOL)
+    object.__setattr__(posterior, "stationarity_tolerance", tolerance)
+    if basis is not None:
+        posterior.provenance["stationarity_basis"] = basis
     object.__setattr__(posterior, "_evidence_prior", _DeclaredPrior(problem))
     return posterior
 

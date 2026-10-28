@@ -443,7 +443,10 @@ ds.inference.laplace(est_map, fit_map).log_evidence     # the same value
 
 - The priors are the ones declared on the handles. A maximum-likelihood
   fit has no normalized prior and is refused.
-- A fit that has not reached a stationary point is refused.
+- A fit that has not reached a stationary point is refused. The check
+  tolerates a Newton decrement of 400 times the solver `rtol`, between
+  0.1 and 0.5, and credits a float32 solve with an `rtol` of at least
+  1e-3.
 
 Uncertainty across the experiments of a population fit is estimated by
 `ds.inference.cluster_covariance` and `ds.inference.bootstrap`
