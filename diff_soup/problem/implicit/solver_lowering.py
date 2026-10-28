@@ -44,7 +44,7 @@ class _IRTheta(eqx.Module):
     theta = ds.default_theta(problem)
     theta[D]                    # the value of D
     theta = theta.replace(D, 0.2)
-    jax.grad(loss)(theta).gradient(D)   # dloss/dD
+    ds.parameter_gradient(jax.grad(loss)(theta), D)   # dloss/dD
     ```
     """
 
@@ -54,30 +54,14 @@ class _IRTheta(eqx.Module):
     def __getitem__(self, parameter):
         """Return a parameter's value, or a function's module holding its learnable arrays.
 
-        On a gradient of theta, read `D` with `grads.gradient(D)`, not `grads[D]`.
+        On a gradient of theta, read `D` with
+        [`parameter_gradient`][diff_soup.problem.parameter_gradient], not `grads[D]`.
 
         Raises:
             TypeError: If `parameter` is not one returned by `spec.param` or `spec.function`.
             ValueError: If the problem does not declare `parameter`, or it holds no array.
         """
         return theta_value(self, parameter, caller="theta[...]")
-
-    def gradient(self, parameter):
-        """Return the gradient with respect to a parameter, read from a gradient of theta.
-
-        `jax.grad(loss)(theta).gradient(D)` is `dloss/dD` with the shape of `D`, or
-        for a function a module of the gradients of its learnable arrays. Theta
-        holds `D` once for each equation that reads it, and this sums those
-        copies, so on theta itself it returns that many times `D`. A tuple
-        `gradient((D, k))` returns a dictionary keyed by parameter.
-
-        Raises:
-            TypeError: If `parameter` is not one returned by `spec.param` or `spec.function`.
-            ValueError: If the problem does not declare `parameter`, or it holds no array.
-        """
-        if isinstance(parameter, tuple):
-            return {each: self.gradient(each) for each in parameter}
-        return theta_value(self, parameter, caller="theta.gradient", total=True)
 
     def replace(self, parameter, value=None):
         """Return a copy with one parameter, or several, set to new values.

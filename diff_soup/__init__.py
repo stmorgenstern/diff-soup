@@ -108,6 +108,7 @@ from diff_soup.problem import (
     VarRef,
     default_theta,
     lower,
+    parameter_gradient,
     tags,
     topology_report,
 )
@@ -220,6 +221,7 @@ __all__ = [
     "ParameterSet",
     "lower",
     "default_theta",
+    "parameter_gradient",
     "learnables",
     # ---- Layer 2: the solver problem model ----
     "MassProblem",

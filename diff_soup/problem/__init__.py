@@ -130,6 +130,32 @@ def default_theta(problem, values=None):
     return theta_replace(theta, values, caller="default_theta")
 
 
+def parameter_gradient(grads, handle):
+    """Return the gradient with respect to a parameter, read from a gradient of theta.
+
+    `ds.parameter_gradient(jax.grad(loss)(theta), D)` is `dloss/dD` in the shape
+    of `D`, or for a function a module of the gradients of its learnable arrays.
+    Theta holds `D` once for each equation that reads it, and this sums those
+    copies, so on theta itself it returns that many times `D`.
+
+    Args:
+        grads: A gradient of theta, such as `jax.grad(loss)(theta)`.
+        handle: A parameter returned by `spec.param` or `spec.function`, or a tuple of them.
+
+    Returns:
+        The gradient with respect to `handle`, or for a tuple a dictionary keyed by parameter.
+
+    Raises:
+        TypeError: If `handle` is not one returned by `spec.param` or `spec.function`.
+        ValueError: If the problem does not declare `handle`, or it holds no array.
+    """
+    from diff_soup.problem._registry import theta_value
+
+    if isinstance(handle, tuple):
+        return {each: parameter_gradient(grads, each) for each in handle}
+    return theta_value(grads, handle, caller="parameter_gradient", total=True)
+
+
 __all__ = [
     # Builder + lowering
     "ProblemSpec",
@@ -138,6 +164,7 @@ __all__ = [
     "lower",
     # Default differentiable-parameter pytree accessor
     "default_theta",
+    "parameter_gradient",
     # Boundary-set selectors (where a BC / boundary integral applies)
     "BoundarySet",
     "tags",
