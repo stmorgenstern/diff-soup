@@ -45,7 +45,7 @@ class RESULT(eqxi.Enumeration):  # pyright: ignore[reportGeneralTypeIssues]
     SINGULAR = "Operator / factor detected singular."
     INCONSISTENT_IC = "Initial state violates algebraic/Schur constraints."
     ACCURACY_LIMIT = (
-        "Requested tolerances are tighter than double precision can resolve at "
+        "Requested tolerances are tighter than the working precision can resolve at "
         "the current solution's magnitude; loosen atol/rtol."
     )
     UNKNOWN = "Incomplete / unknown."

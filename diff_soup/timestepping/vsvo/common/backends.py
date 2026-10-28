@@ -52,6 +52,13 @@ _FP32_END_TO_END_CORRECTOR_OPTIONS: dict[str, object] = {
 }
 
 
+# A mixed fp64-state/fp32-factor policy (``Precision.fp32_factor()``) keeps its
+# float64 residual gate and solves its float32 factors unrefined, as the preset
+# promises: a native cuDSS refinement step would add a second triangular solve
+# and a matrix product to every corrector solve.
+_FP32_MIXED_CORRECTOR_OPTIONS: dict[str, object] = {"ir_nsteps": 0}
+
+
 def resolve_backend(linear: Any) -> Any:
     """Resolve a CONCRETE linear-backend name to a process-global instance.
 
@@ -261,7 +268,8 @@ def linear_analyze_options(precision: Any, options: Optional[dict] = None) -> Op
     accuracy is guarded by the outer nonlinear corrector and
     trajectory-failure sentinel; it therefore skips both native refinement
     and the otherwise-costly fp64 fresh-factor residual measurement. A mixed
-    fp64-state/fp32-factor policy retains the checked linear gate. Caller
+    fp64-state/fp32-factor policy retains the checked linear gate and also
+    pins native refinement off, so its factors solve unrefined. Caller
     options always win. The fp64 path returns ``options`` unchanged so its
     compiled program is byte-for-byte unaffected.
 
@@ -278,7 +286,9 @@ def linear_analyze_options(precision: Any, options: Optional[dict] = None) -> Op
     elif mode == "fp32":
         compute_dtype = jnp.dtype(getattr(precision, "compute_dtype", jnp.float64))
         defaults = (
-            _FP32_END_TO_END_CORRECTOR_OPTIONS if compute_dtype == jnp.dtype(jnp.float32) else {}
+            _FP32_END_TO_END_CORRECTOR_OPTIONS
+            if compute_dtype == jnp.dtype(jnp.float32)
+            else _FP32_MIXED_CORRECTOR_OPTIONS
         )
     else:
         defaults = {}

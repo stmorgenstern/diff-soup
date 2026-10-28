@@ -64,6 +64,7 @@
     "tests/contracts/test_implicit_layer.py": "diff_soup.problem.implicit",
     "tests/contracts/test_linear_primitive.py": "diff_soup.linear._primitive",
     "tests/contracts/test_second_order_ad.py": "diff_soup.timestepping.vsvo",
+    "tests/contracts/test_second_order_ad_precision.py": "diff_soup.timestepping.vsvo",
     "tests/contracts/test_structural_fitting.py": "diff_soup.inference.solvers",
     "tests/contracts/test_recipe_handles.py": "diff_soup.inference.fitting",
     "tests/contracts/test_linear_structured.py": "diff_soup.problem._ir._low_rank",

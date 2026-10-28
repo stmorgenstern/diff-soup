@@ -69,3 +69,17 @@ def test_the_full_precision_checkpoint_gradient_equals_the_reference(reference):
     same gradient."""
     gradient = np.asarray(jax.grad(loss(ds.CheckpointAdjoint()))(THETA))
     assert _relative(gradient, reference[1]) <= _FULL_BOUND
+
+
+def test_the_mixed_float32_factor_policy_solves_its_corrector_systems_unrefined():
+    """`Precision.fp32_factor()` promises unrefined float32 factors behind a float64 residual
+    gate. On 1.0.0 the mixed policy handed cuDSS no analyze options, so `ir_nsteps=None`
+    became one native refinement step per corrector solve (ledger P-1: fp32_factor slower
+    than fp64 for the same work). Both mixed policies now pin native refinement off; fp64
+    leaves the caller's options untouched."""
+    from diff_soup.timestepping.vsvo.common.backends import linear_analyze_options
+
+    assert linear_analyze_options(ds.Precision.fp32_factor())["ir_nsteps"] == 0
+    assert linear_analyze_options(ds.Precision.fp32_ir())["ir_nsteps"] == 0
+    assert linear_analyze_options(ds.Precision.fp32_factor(), {"ir_nsteps": 2})["ir_nsteps"] == 2
+    assert linear_analyze_options(ds.Precision.fp64(), None) is None
