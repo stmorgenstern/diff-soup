@@ -287,3 +287,17 @@ def test_declarations_from_one_array_or_one_module_stay_distinct():
 def test_a_problem_spec_reprs_by_its_name():
     """A ``ProblemSpec`` prints as its constructor call, not as its declaration tables."""
     assert repr(ds.problem("heat")) == "ProblemSpec('heat')"
+
+
+def test_pdesolve_refuses_a_theta_that_is_not_the_problems_pytree():
+    """``pdesolve(theta={handle: value})`` and a theta of another shape raise naming
+    ``default_theta`` instead of failing inside the solver with a pytree error."""
+    spec, rate = _decay()
+    problem = spec.build()
+    y0 = spec.assemble_state({})
+    with pytest.raises(ValueError, match="default_theta"):
+        ds.pdesolve(problem, _SOLVER, (0.0, 0.1), y0, theta={rate: 0.5})
+    with pytest.raises(ValueError, match="default_theta"):
+        ds.pdesolve(problem, _SOLVER, (0.0, 0.1), y0, theta=jnp.array(0.5))
+    good = ds.default_theta(problem, {rate: 0.5})
+    assert ds.pdesolve(problem, _SOLVER, (0.0, 0.1), y0, theta=good).ys.shape[-1] == 3
