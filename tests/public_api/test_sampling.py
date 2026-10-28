@@ -76,7 +76,8 @@ def test_predict_returns_bands_from_a_fit_and_from_draws(sampled):
 
 
 def test_a_fit_at_one_solver_tolerance_starts_the_posterior_at_another(sampled):
-    """posterior_target(problem, fit) takes a fit of the same recipe solved at another tolerance."""
+    """posterior_target and NUTS take a fit solved at another tolerance; reverse mode builds on a
+    float32 solve at 1e-6; NUTS chains adapt together and one window-adapted chain is unchanged."""
     decay, problem, fit, _ = sampled
     # The solver tolerance under test, not a bound: measured, 1.0.0 refused this start with
     # a schema fingerprint ValueError, CPU workstation 2026-10-28, bugfix/we1fix/m.py
@@ -87,40 +88,19 @@ def test_a_fit_at_one_solver_tolerance_starts_the_posterior_at_another(sampled):
     )
     own = inf.statistics.posterior_target(problem, fit)
     np.testing.assert_array_equal(inf.statistics.posterior_target(coarse, fit).init, own.init)
-
-
-def test_the_gradient_audit_at_the_map_is_inconclusive():
-    """At an unbounded MAP the gradient is noise, so the audit neither passes nor fails."""
-    decay = decay_recipe(
-        "sampling_stationary", rate_bounds=None, rate_prior=inf.NormalPrior(mean=0.5, scale=0.3)
+    # 1.0.0 audited at the MAP and refused at 9.1e-3 against 1e-3; measured 1.5e-3 against 1e-2
+    # at this chain start, CPU and GPU workstation 2026-10-29, bugfix/p15/b2.py
+    pooled = inf.sample(coarse, fit, kernel="nuts", key=jax.random.key(2), draws=100, warmup=60)
+    assert pooled.info["adaptation"]["method"] == "pooled"
+    # measured R-hat 1.008, and 1.055 with the one-chain warmup before it, bugfix/p15/b1.py
+    assert float(np.max(inf.mcmc_report(pooled).rhat)) < 1.02
+    one = inf.sample(
+        coarse, fit, key=jax.random.key(3), chains=1, draws=3, warmup=5, adapt="window"
     )
-    problem = inf.InferenceProblem(
-        decay_experiment(decay, noise=NOISE), parameters=decay.rate, objective=inf.MAP()
-    )
-    fit = small_fit(problem, inf.LevenbergMarquardt(max_steps=30))
-    # measured norm_rel_error 0.973 at the MAP, which 1.0.0 reported as passed, CPU
-    # workstation 2026-10-28, bugfix/we1fix/m.py
-    check = inf.statistics.posterior_target(problem, fit).verify_gradient()
-    assert not check.passed and check.verdict == "inconclusive"
-
-
-def test_the_gradient_checks_admit_a_tolerance_limited_solve():
-    """sample(problem, fit, kernel="nuts") runs on a fit whose solver tolerance is 1e-4, and
-    posterior_target(problem, fit, gradient="reverse") builds on a float32 solve at 1e-6."""
-    decay = decay_recipe("sampling_loose", rate_prior=inf.NormalPrior(mean=0.5, scale=0.3))
-    # 1.0.0 audited at the MAP and refused at 9.1e-3 against 1e-3; the audit at a chain
-    # start passes at 1.5e-3 against 1e-2, CPU workstation 2026-10-28, bugfix/we1fix/m3.py
-    problem = inf.InferenceProblem(
-        # The solver tolerance under test, not a bound (measured effect above)
-        decay_experiment(decay, noise=NOISE, rtol=1e-4, atol=1e-4),
-        parameters=decay.rate,
-        objective=inf.MAP(),
-    )
-    fit = small_fit(problem, inf.LevenbergMarquardt(max_steps=30))
-    draws = inf.sample(
-        problem, fit, kernel="nuts", key=jax.random.key(3), chains=1, draws=5, warmup=5
-    )
-    assert draws[decay.rate].shape == (1, 5) and bool(jnp.all(jnp.isfinite(draws.values)))
+    # the draws before the pooled warmup (48e7db0), CPU workstation 2026-10-29, bugfix/p15/b0.py;
+    # measured 4.4e-14 off on the GPU
+    expected = [0.5981189606608855, 0.5796521240890887, 0.5947757228329283]
+    np.testing.assert_allclose(one[decay.rate][0], expected, rtol=1e-9)
 
     single = decay_recipe(
         "sampling_float32",
@@ -139,6 +119,21 @@ def test_the_gradient_checks_admit_a_tolerance_limited_solve():
     fit = small_fit(problem, inf.LevenbergMarquardt(max_steps=30))
     target = inf.statistics.posterior_target(problem, fit, gradient="reverse")
     assert target.gradient == "reverse"
+
+
+def test_the_gradient_audit_at_the_map_is_inconclusive():
+    """At an unbounded MAP the gradient is noise, so the audit neither passes nor fails."""
+    decay = decay_recipe(
+        "sampling_stationary", rate_bounds=None, rate_prior=inf.NormalPrior(mean=0.5, scale=0.3)
+    )
+    problem = inf.InferenceProblem(
+        decay_experiment(decay, noise=NOISE), parameters=decay.rate, objective=inf.MAP()
+    )
+    fit = small_fit(problem, inf.LevenbergMarquardt(max_steps=30))
+    # measured norm_rel_error 0.973 at the MAP, which 1.0.0 reported as passed, CPU
+    # workstation 2026-10-28, bugfix/we1fix/m.py
+    check = inf.statistics.posterior_target(problem, fit).verify_gradient()
+    assert not check.passed and check.verdict == "inconclusive"
 
 
 @pytest.mark.requires_cudss

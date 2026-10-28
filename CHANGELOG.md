@@ -7,6 +7,13 @@ issue ledger of that effort.
 
 ### Behaviour changes
 
+- `sample(kernel="nuts")` adapts during `warmup` and keeps each chain's adapted state, so the kept draws
+  start adapted. `adapt=` chooses how: `"pooled"` (the default for several chains: ChEES, one step size
+  and diagonal mass matrix from all batched chains), `"window"` (Stan's schedule per chain),
+  `"step_size"` or `None` (a fixed `step_size`); `mass="dense"`, `step_size=` and `max_tree_depth=` are
+  new; `warmup` defaults to 200 (was 500); `draws.info["adaptation"]` records what ran. One chain with
+  `adapt="window"` (the one-chain default) draws what it drew before for a given key and warmup.
+  Requires blackjax 1.7 or newer. (WE1-7)
 - `NewtonTrustRegion(hessian=)` defaults to `"auto"`: the Gauss-Newton matrix whenever the problem
   has residual rows (every `InferenceProblem` and `LeastSquaresProblem`, including non-Gaussian
   likelihoods, which lower to signed deviance rows), the exact Hessian otherwise; `optsolve` and

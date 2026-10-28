@@ -53,6 +53,7 @@ with per-parameter chi-square evidence in an [SbcReport][].
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from typing import Any, Callable, Optional
 
 import equinox as eqx
@@ -842,10 +843,20 @@ def whitening(source: Any) -> WhiteningTransform:
 #: unit-scale target (pass a whitening transform for anything anisotropic).
 _RW_OPTIMAL_SCALE = 2.38
 
-#: Standard deviation of the per-chain overdispersed start jitter, applied in
-#: the sampling coordinate (the whitened ``w`` when a whitening transform is
-#: given, the target's own coordinate otherwise).
+#: Standard deviation of the per-chain start jitter, applied in the sampling
+#: coordinate (the whitened ``w`` when a whitening transform is given, the
+#: target's own coordinate otherwise): half a Laplace standard deviation per
+#: coordinate, so the starts lie inside the posterior, not around it.
 _CHAIN_JITTER = 0.5
+
+#: Adam's learning rate for the ChEES trajectory-length criterion of the pooled
+#: NUTS warmup, the value of Hoffman, Radul and Sountsov (2021).
+_CHEES_LEARNING_RATE = 0.025
+
+#: The most parameters ``mass="dense"`` adapts a dense mass matrix for.
+_DENSE_MASS_MAX = 50
+
+_NUTS_ADAPTATIONS = ("pooled", "window", "step_size", None)
 
 #: How [sample][] spreads its chains over the target: ``"vmap"`` evaluates
 #: every chain in one batched call, ``"sequential"`` runs them one after
@@ -892,8 +903,8 @@ class Draws:
     Attributes:
         values: The draws, shaped `(chains, draws, parameters)`.
         names: The label of each parameter column of `values`.
-        info: Sampler statistics per draw, `acceptance_rate`, and for NUTS `is_divergent` and
-            `num_integration_steps`.
+        info: Sampler statistics per draw, `acceptance_rate`, and for NUTS `is_divergent`,
+            `num_integration_steps` and the `adaptation` record.
         chain_map: How the chains ran, `"vmap"`, `"sequential"` or `"devices"`.
     """
 
@@ -1053,7 +1064,11 @@ def sample(
     kernel: str = "nuts",
     chains: int = 4,
     draws: int = 1000,
-    warmup: int = 500,
+    warmup: int = 200,
+    adapt: Optional[str] = "pooled",
+    mass: str = "diag",
+    step_size: Optional[float] = None,
+    max_tree_depth: int = 10,
     key: Array,
     preconditioner: Any = "laplace",
     curvature: str = "observed",
@@ -1062,8 +1077,9 @@ def sample(
 ) -> Draws:
     """Draw from the posterior of a `MAP` problem with MCMC, with the chains started near the fit.
 
-    Each chain starts from a perturbed copy of the fit, and every draw is in the parameters' own
-    coordinates. It is refused in a run of several processes.
+    Each chain starts from the fit plus random noise of half a standard deviation per coordinate,
+    and every draw is in the parameters' own coordinates. It is refused in a run of several
+    processes.
 
     Args:
         problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] with a `MAP`
@@ -1073,8 +1089,15 @@ def sample(
             chain start, or `"rmh"` for random-walk Metropolis, which needs no gradient.
         chains: The number of chains.
         draws: The number of draws kept per chain.
-        warmup: The number of steps before the kept draws. Random-walk chains discard them.
-            For NUTS, at least 1: the length of one adaptation run from the fit, on one chain.
+        warmup: The number of steps before the kept draws, which random-walk chains discard and
+            NUTS chains spend adapting, keeping their last state.
+        adapt: How NUTS adapts, `"pooled"` from all chains at once, `"window"` each chain alone,
+            `"step_size"` the step size alone, or `None` not at all.
+        mass: The mass matrix NUTS adapts, `"diag"` or `"dense"`, which needs `adapt="window"`
+            and at most 50 parameters.
+        step_size: The NUTS step size adaptation starts from, 1.0 when `None`, and the fixed one
+            with `adapt=None`.
+        max_tree_depth: The most times a NUTS trajectory doubles in one draw.
         key: The JAX random key that fixes the draws.
         preconditioner: `"laplace"` to scale the proposals by the Laplace approximation at the
             fit, or `None` to run without it.
@@ -1145,6 +1168,10 @@ def sample(
         chains=chains,
         num_steps=draws,
         num_warmup=warmup,
+        adapt=adapt,
+        mass=mass,
+        step_size=step_size,
+        max_tree_depth=max_tree_depth,
         whitening=white,
         chain_map=chain_map,
         **kernel_options,
@@ -1200,7 +1227,11 @@ def _sample_target(
     num_steps: int,
     whitening: Optional[WhiteningTransform] = None,
     init: Any = None,
-    num_warmup: int = 500,
+    num_warmup: int = 200,
+    adapt: Optional[str] = "pooled",
+    mass: str = "diag",
+    step_size: Optional[float] = None,
+    max_tree_depth: int = 10,
     nuts_target_acceptance: float = 0.8,
     chain_map: Optional[str] = None,
 ) -> Draws:
@@ -1219,24 +1250,22 @@ def _sample_target(
     deviation from the initial point, and at a second one if that is
     inconclusive, against a tolerance scaled with the solvers' ``rtol``. A
     failed audit refuses NUTS and an inconclusive one warns. The sampler
-    then uses the target's stored gradient. NUTS step size and diagonal mass matrix come
-    from blackjax window adaptation.
+    then uses the target's stored gradient.
 
     Warmup: ``num_warmup`` transitions per chain are discarded for
-    ``"rmh"`` (burn-in). For ``"nuts"``, ``num_warmup`` is the length of the
-    window-adaptation run, executed once from the un-jittered initial point;
-    its draws are likewise discarded and every chain then runs ``num_steps``
-    transitions with the adapted parameters.
+    ``"rmh"`` (burn-in). For ``"nuts"`` they adapt the kernel as ``adapt``
+    says (see ``_run_nuts``), and each chain's kept draws continue from its
+    state at the end of the warmup.
 
     Randomness is threaded deterministically from ``key``: it is split once
     into (adaptation, jitter, chains) keys; chain ``c`` starts at the initial
     point plus ``0.5 * N(0, I)`` jitter in the sampling coordinate, drawn
-    from the ``c``-th split of the jitter key (overdispersed starts), and
-    consumes the ``c``-th split of the chains key for its transitions. The
-    same ``key`` therefore reproduces ``Draws.positions`` bit for bit, and
-    every chain evolves under its own independent key stream. Each chain's
-    key and start are fixed before the chains run, so every ``chain_map``
-    draws the same chains.
+    from the ``c``-th split of the jitter key (starts inside the posterior,
+    half a whitened standard deviation per coordinate), and consumes the
+    ``c``-th split of the chains key. The same ``key`` therefore reproduces
+    ``Draws.positions`` bit for bit, and every chain evolves under its own
+    independent key stream. Each chain's key and start are fixed before the
+    chains run, so every ``chain_map`` draws the same chains.
 
     ``chain_map`` decides how those chains reach the target. ``"vmap"``
     evaluates them as one batched call — the fastest route whenever the target
@@ -1275,7 +1304,11 @@ def _sample_target(
         init: Starting point in the target's coordinate; defaults to
             ``logdensity.init``.
         num_warmup: Warmup transitions per the kernel-specific behavior
-            above (default 500).
+            above (default 200).
+        adapt: The NUTS adaptation, as in [sample][]; ignored by ``"rmh"``.
+        mass: The NUTS mass matrix, as in [sample][].
+        step_size: The initial or fixed NUTS step size, as in [sample][].
+        max_tree_depth: The NUTS trajectory doublings per draw, as in [sample][].
         nuts_target_acceptance: The acceptance probability NUTS adaptation
             tunes its step size toward (default 0.8). Raise it (e.g. 0.95 or
             0.98) when the report shows divergent transitions — curved
@@ -1322,11 +1355,14 @@ def _sample_target(
         raise ValueError(f"sample: chains must be a positive integer; got {chains}.")
     if num_steps < 1:
         raise ValueError(f"sample: num_steps must be a positive integer; got {num_steps}.")
-    if num_warmup < 0 or (kernel == "nuts" and num_warmup < 1):
+    if num_warmup < 0 or (kernel == "nuts" and adapt is not None and num_warmup < 1):
         raise ValueError(
             f"sample: num_warmup must be non-negative (and at least 1 for "
             f"kernel='nuts', where it sizes the adaptation run); got {num_warmup}."
         )
+    if kernel == "nuts":
+        dim = int(jnp.size(logdensity.init if init is None else init))
+        _check_nuts_options(adapt, mass, step_size, max_tree_depth, dim)
     nuts_target_acceptance = float(nuts_target_acceptance)
     if not 0.0 < nuts_target_acceptance < 1.0:
         raise ValueError(
@@ -1404,35 +1440,26 @@ def _sample_target(
         positions = pos[:, num_warmup:]
         info = {"acceptance_rate": acceptance[:, num_warmup:]}
     else:
-        adaptation = blackjax.window_adaptation(
-            blackjax.nuts, target_fn, target_acceptance_rate=nuts_target_acceptance
+        (positions, acceptance, divergent, integration_steps), adaptation = _run_nuts(
+            target_fn,
+            start,
+            starts,
+            key_adapt,
+            chain_keys,
+            chain_map,
+            num_steps=num_steps,
+            num_warmup=num_warmup,
+            adapt=adapt,
+            mass=mass,
+            step_size=step_size,
+            max_tree_depth=max_tree_depth,
+            target_acceptance=nuts_target_acceptance,
         )
-        (_, adapted), _ = adaptation.run(key_adapt, start, num_steps=num_warmup)
-        algorithm = blackjax.nuts(target_fn, **adapted)
-
-        def run_chain(rng_key: Array, position: Array) -> tuple:
-            state = algorithm.init(position)
-
-            def step(st, k):
-                st, step_info = algorithm.step(k, st)
-                return st, (
-                    st.position,
-                    step_info.acceptance_rate,
-                    step_info.is_divergent,
-                    step_info.num_integration_steps,
-                )
-
-            _, collected = jax.lax.scan(step, state, jax.random.split(rng_key, num_steps))
-            return collected
-
-        pos, acceptance, divergent, integration_steps = _run_chains(
-            run_chain, chain_keys, starts, chain_map
-        )
-        positions = pos
         info = {
             "acceptance_rate": acceptance,
             "is_divergent": divergent,
             "num_integration_steps": integration_steps,
+            "adaptation": adaptation,
         }
 
     if whitening is not None:
@@ -1449,6 +1476,184 @@ def _sample_target(
         _problem=logdensity._problem,
         chain_map=chain_map,
     )
+
+
+def _check_nuts_options(
+    adapt: Optional[str], mass: str, step_size: Optional[float], max_tree_depth: int, dim: int
+) -> None:
+    """Refuse a NUTS warmup setting [sample][] does not take, naming the accepted ones."""
+    if adapt not in _NUTS_ADAPTATIONS:
+        raise ValueError(f"sample: adapt must be one of {_NUTS_ADAPTATIONS}; got {adapt!r}.")
+    if mass not in ("diag", "dense"):
+        raise ValueError(f"sample: mass must be 'diag' or 'dense'; got {mass!r}.")
+    if mass == "dense" and adapt != "window":
+        raise ValueError(
+            f"sample: mass='dense' is adapted by adapt='window' only; got adapt={adapt!r}."
+        )
+    if mass == "dense" and dim > _DENSE_MASS_MAX:
+        raise ValueError(
+            f"sample: mass='dense' adapts at most {_DENSE_MASS_MAX} parameters, and this "
+            f"posterior has {dim}; use mass='diag'."
+        )
+    if step_size is not None and not (np.isfinite(step_size) and step_size > 0):
+        raise ValueError(f"sample: step_size must be positive; got {step_size}.")
+    if int(max_tree_depth) != max_tree_depth or max_tree_depth < 1:
+        raise ValueError(
+            f"sample: max_tree_depth must be a positive integer; got {max_tree_depth}."
+        )
+
+
+def _run_nuts(
+    target_fn: Callable,
+    start: Array,
+    starts: Array,
+    key_adapt: Array,
+    chain_keys: Array,
+    chain_map: str,
+    *,
+    num_steps: int,
+    num_warmup: int,
+    adapt: Optional[str],
+    mass: str,
+    step_size: Optional[float],
+    max_tree_depth: int,
+    target_acceptance: float,
+) -> tuple:
+    """Adapt NUTS over ``num_warmup`` steps as ``adapt`` says, then draw ``num_steps`` per chain.
+
+    ``"pooled"`` runs blackjax's ChEES adaptation over the batched chains (one step size and one
+    diagonal mass matrix from all of them) and hands both to NUTS; it needs ``chain_map="vmap"``
+    and a blackjax whose ChEES estimates a mass matrix, and otherwise adapts each chain as
+    ``"window"``. ``"window"`` (Stan's schedule), ``"step_size"`` (dual averaging, identity mass)
+    and ``None`` (fixed step) run inside each chain, so they obey ``chain_map`` as the draws do.
+    Every chain's kept draws continue from its warmup state, except one chain under
+    ``"window"``, which adapts from ``start`` and draws from its jittered start as before this
+    release, so a key keeps its draws.
+
+    Returns:
+        ``(positions, acceptance, divergent, integration_steps)`` with leading
+            ``(chains, num_steps)`` axes, and the ``info["adaptation"]`` record.
+    """
+    import blackjax
+    from blackjax.adaptation.base import get_filter_adapt_info_fn
+
+    chains, dim = (int(n) for n in starts.shape)
+    initial_step = 1.0 if step_size is None else float(step_size)
+    identity = jnp.ones((dim,), dtype=start.dtype)
+    method = adapt
+    if adapt == "pooled" and (
+        chains == 1
+        or chain_map != "vmap"
+        or "mass_matrix_estimation" not in inspect.signature(blackjax.chees_adaptation).parameters
+    ):
+        method = "window"
+
+    def nuts(parameters: dict) -> Any:
+        return blackjax.nuts(
+            target_fn,
+            parameters["step_size"],
+            parameters["inverse_mass_matrix"],
+            max_num_doublings=max_tree_depth,
+        )
+
+    def draw(algorithm: Any, state: Any, rng_key: Array) -> tuple:
+        def step(st, k):
+            st, step_info = algorithm.step(k, st)
+            return st, (
+                st.position,
+                step_info.acceptance_rate,
+                step_info.is_divergent,
+                step_info.num_integration_steps,
+            )
+
+        return jax.lax.scan(step, state, jax.random.split(rng_key, num_steps))[1]
+
+    def window() -> Any:
+        return blackjax.window_adaptation(
+            blackjax.nuts,
+            target_fn,
+            is_mass_matrix_diagonal=mass == "diag",
+            initial_step_size=initial_step,
+            target_acceptance_rate=target_acceptance,
+            adaptation_info_fn=get_filter_adapt_info_fn(),
+            max_num_doublings=max_tree_depth,
+        )
+
+    def fixed_mass_warmup(rng_key: Array, position: Array) -> tuple:
+        # Dual averaging of the step size alone ("step_size"), or plain steps (None).
+        da_init, da_update, da_final = blackjax.adaptation.step_size.dual_averaging_adaptation(
+            target_acceptance
+        )
+        kernel = blackjax.nuts.build_kernel()
+
+        def step(carry, k):
+            state, da = carry
+            size = initial_step if method is None else jnp.exp(da.log_step_size)
+            state, step_info = kernel(
+                k, state, target_fn, size, identity, max_num_doublings=max_tree_depth
+            )
+            if method is not None:
+                da = da_update(da, step_info.acceptance_rate)
+            return (state, da), None
+
+        carry = (blackjax.nuts.init(position, target_fn), da_init(initial_step))
+        (state, da), _ = jax.lax.scan(step, carry, jax.random.split(rng_key, num_warmup))
+        size = initial_step if method is None else da_final(da)
+        return state, {"step_size": size, "inverse_mass_matrix": identity}
+
+    if method == "window" and chains == 1:
+        (_, parameters), _ = window().run(key_adapt, start, num_steps=num_warmup)
+        algorithm = nuts(parameters)
+        collected = _run_chains(
+            lambda k, p: draw(algorithm, algorithm.init(p), k), chain_keys, starts, chain_map
+        )
+        step_sizes = jnp.full((chains,), parameters["step_size"])
+    elif method == "pooled":
+        import optax
+
+        chees = blackjax.chees_adaptation(
+            target_fn,
+            chains,
+            target_acceptance_rate=target_acceptance,
+            max_leapfrog_steps=2**max_tree_depth,
+            mass_matrix_estimation="diagonal",
+            adaptation_info_fn=get_filter_adapt_info_fn(),
+        )
+        optimizer = optax.adam(_CHEES_LEARNING_RATE)
+
+        @jax.jit
+        def pooled(rng_key: Array, positions: Array) -> tuple:
+            (states, found), _ = chees.run(rng_key, positions, initial_step, optimizer, num_warmup)
+            return states.position, {
+                key: found[key] for key in ("step_size", "inverse_mass_matrix")
+            }
+
+        positions, parameters = pooled(key_adapt, starts)
+        algorithm = nuts(parameters)
+        collected = _run_chains(
+            lambda k, p: draw(algorithm, algorithm.init(p), k), chain_keys, positions, chain_map
+        )
+        step_sizes = jnp.full((chains,), parameters["step_size"])
+    else:
+
+        def run_chain(rng_key: Array, position: Array) -> tuple:
+            key_warm, key_draw = jax.random.split(rng_key)
+            if method == "window":
+                state, parameters = window().run(key_warm, position, num_steps=num_warmup)[0]
+            else:
+                state, parameters = fixed_mass_warmup(key_warm, position)
+            return draw(nuts(parameters), state, key_draw), parameters["step_size"]
+
+        collected, step_sizes = _run_chains(run_chain, chain_keys, starts, chain_map)
+    adaptation = {
+        "method": method,
+        "step_size": step_sizes,
+        "mass": mass if method in ("pooled", "window") else "identity",
+        "max_tree_depth": int(max_tree_depth),
+        "warmup": num_warmup,
+        "acceptance_rate": float(jnp.mean(collected[1])),
+    }
+    return collected, adaptation
 
 
 # ---------------------------------------------------------------------------
