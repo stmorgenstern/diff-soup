@@ -446,13 +446,13 @@ def build_forward_seam(problem: Any, theta: Any) -> ForwardSeam:
         TypeError: If ``theta`` is none of the above.
     """
     solver_problem = coerce_forward_problem(problem)
-    theta0 = solver_problem.default_theta()
+    source, theta0 = _own_default_theta(problem, solver_problem)
     if isinstance(theta, GroupedThetaSelection):
         leaf_filter = _grouped_leaf_filter(problem, theta0, theta)
     elif _is_name_spec(theta):
         leaf_filter, _all_names = names_to_theta_mask(theta0, theta)
     elif theta is None:
-        leaf_filter = _declared_leaf_filter(problem, solver_problem, theta0)
+        leaf_filter = _declared_leaf_filter(source, theta0)
     else:
         raise TypeError(
             "optsolve: the theta selection must be None, a tuple of learnable "
@@ -490,8 +490,23 @@ def build_forward_seam(problem: Any, theta: Any) -> ForwardSeam:
     )
 
 
-def _declared_leaf_filter(problem: Any, solver_problem: Any, theta0: Any) -> Any:
-    """Return the θ mask selecting the model's declared learnables.
+def _own_default_theta(problem: Any, solver_problem: Any) -> tuple:
+    """Return ``(source, theta0)``: the problem whose leaves ``theta0`` holds, and ``theta0``.
+
+    A problem equal in content to one presented earlier is served that one's
+    solver view, whose ``default_theta()`` holds the other problem's array
+    objects. Selections match leaves by identity on ``problem``, so ``theta0``
+    comes from ``problem``'s own ``default_theta()`` when it has one.
+    """
+    own = getattr(problem, "default_theta", None)
+    if problem is not solver_problem and callable(own):
+        return problem, own()
+    source = getattr(solver_problem, "source", None)
+    return (source if source is not None else problem), solver_problem.default_theta()
+
+
+def _declared_leaf_filter(source: Any, theta0: Any) -> Any:
+    """Return the θ mask selecting the declared learnables of ``source``, the owner of ``theta0``'s leaves.
 
     Membership follows the declaration, not the leaf's type: a parameter is
     fitted because it was declared ``learnable=True`` (or because the model
@@ -501,8 +516,7 @@ def _declared_leaf_filter(problem: Any, solver_problem: Any, theta0: Any) -> Any
     """
     from diff_soup.inference.fitting.learnables import declared_learnable_leaf_ids
 
-    source = getattr(solver_problem, "source", None)
-    ids = declared_learnable_leaf_ids(source if source is not None else problem)
+    ids = declared_learnable_leaf_ids(source)
     if not ids:
         raise ValueError(
             "optsolve: the problem declares no learnable parameters, so there is no "

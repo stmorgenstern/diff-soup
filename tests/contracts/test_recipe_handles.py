@@ -1,5 +1,6 @@
 """Recipe handles: identity across same-named recipes and templates, parameter schemas,
-structural copies, selection by group names, field slices, and rebuilt boundary signals."""
+structural copies, selection by group names, field slices, rebuilt boundary signals, and
+the values and refusals of default_theta."""
 
 from __future__ import annotations
 
@@ -20,10 +21,10 @@ from diff_soup.inference.fitting.series import Component, Series
 _SOLVER = ds.JNDF.stock(linear="dense")
 
 
-def _decay(name="decay_handles", rate=0.4, cells=3):
+def _decay(name="decay_handles", rate=0.4, cells=3, **keywords):
     spec = ds.problem(name).domain("line", ds.cartesian_grid_1d(cells, 0.0, 1.0, method="fvm"))
     spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
-    handle = spec.param("rate", value=rate, learnable=True)
+    handle = spec.param("rate", value=rate, learnable=True, **keywords)
     spec.equation(writes="u", reads=("u",))(lambda q: -q.p.rate * q.u)
     return spec, handle
 
@@ -200,3 +201,89 @@ def test_same_named_or_rewritten_recipes_keep_their_own_handles_and_signals():
     second_spec.build()
     with pytest.raises(ValueError, match="declared on this problem"):
         ds.default_theta(first_problem, {second: 0.5})
+
+
+def _has_leaf(theta, value):
+    """Whether some theta leaf has ``value``'s shape and equals it exactly."""
+    leaves = jax.tree_util.tree_leaves(theta)
+    return any(
+        jnp.shape(leaf) == jnp.shape(value) and bool(jnp.all(leaf == value)) for leaf in leaves
+    )
+
+
+def test_a_function_takes_a_whole_module_whose_arrays_replace_the_declared_ones():
+    """``default_theta`` places a module's arrays into a declared function, in order, and
+    refuses a module of another structure by the function's name."""
+    problem, reaction, _ = _reaction()
+    other = eqx.nn.MLP(1, "scalar", 1, 0, key=jax.random.PRNGKey(2))
+    theta = ds.default_theta(problem, {reaction: other})
+    arrays = jax.tree_util.tree_leaves(eqx.filter(other, eqx.is_array))
+    assert all(_has_leaf(theta, leaf) for leaf in arrays)
+    wider = eqx.nn.MLP(2, "scalar", 1, 0, key=jax.random.PRNGKey(2))
+    with pytest.raises(ValueError, match="'reaction' must have the structure"):
+        ds.default_theta(problem, {reaction: wider})
+
+
+def test_problems_equal_in_content_each_set_and_fit_their_own_parameter():
+    """Two builds that differ only in bounds are two problems sharing one solver view; after
+    the second is used, the first's ``default_theta`` and fit still select its own parameter."""
+    first_spec, first = _decay("content_equal")
+    second_spec, second = _decay("content_equal", bounds=(0.0, 5.0))
+    first_problem, second_problem = first_spec.build(), second_spec.build()
+    assert first_problem is not second_problem
+    assert _has_leaf(ds.default_theta(second_problem, {second: 0.5}), 0.5)
+    assert _has_leaf(ds.default_theta(first_problem, {first: 0.5}), 0.5)
+    groups = ParameterGroups(local={"rate": first})
+    fit = _inference(first_problem, first_spec.assemble_state({}), parameters=groups)
+    assert fit.theta_names == ("rate",)
+
+
+def test_default_theta_refuses_a_parameter_without_arrays_and_wrong_keys_or_values():
+    """A parameter or function that holds no array, a ``None`` value, a name for a key, a
+    complex value and a wrongly shaped value are refused, naming the parameter."""
+    captured = jnp.array(0.5)
+    spec = ds.problem("refusals").domain("line", ds.cartesian_grid_1d(2, 0.0, 1.0, method="fvm"))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    rate = spec.param("rate", value=0.4)
+    table = spec.param("table", value={"x": 0.5})
+    drive = spec.function("drive", lambda t: captured + 0.0 * t)
+    with pytest.raises(ValueError, match="'fitted', learnable=True.*holds no"):
+        spec.function("fitted", lambda t: captured + 0.0 * t, learnable=True)
+    spec.equation(writes="u", reads=("u",))(
+        lambda q: -(q.p.rate + q.p.table["x"] + q.fn.drive(q.t)) * q.u
+    )
+    problem = spec.build()
+    for key, value, error, match in (
+        (table, {"x": 1.0}, ValueError, "'table' holds no"),
+        (drive, 2.0, ValueError, "'drive' holds no"),
+        (rate, None, ValueError, "'rate' is None"),
+        ("rate", 1.0, TypeError, "keys must be parameters"),
+        (rate, 1.0 + 2.0j, TypeError, "'rate' is complex"),
+        (rate, jnp.ones(2), ValueError, r"'rate' has an array of shape \(2,\)"),
+    ):
+        with pytest.raises(error, match=match):
+            ds.default_theta(problem, {key: value})
+
+
+def test_declarations_from_one_array_or_one_module_stay_distinct():
+    """Two fixed parameters declared from one array, and two learnable functions declared
+    from one module, are set independently by ``default_theta``."""
+    shared = jnp.full(2, 0.5)
+    network = eqx.nn.MLP("scalar", "scalar", 1, 0, key=jax.random.PRNGKey(3))
+    spec = ds.problem("aliases").domain("line", ds.cartesian_grid_1d(2, 0.0, 1.0, method="fvm"))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    a = spec.param("a", value=shared)
+    spec.param("b", value=shared)
+    first = spec.function("first", network, learnable=True, pointwise=True)
+    spec.function("second", network, learnable=True, pointwise=True)
+    spec.equation(writes="u", reads=("u",))(
+        lambda q: -(q.p.a + q.p.b) * q.u + q.fn.first(q.u) + q.fn.second(q.u)
+    )
+    problem = spec.build()
+    assert _has_leaf(ds.default_theta(problem, {a: 0.0}), shared)
+    assert _has_leaf(ds.default_theta(problem, {first: 0.0}), network.layers[0].weight)
+
+
+def test_a_problem_spec_reprs_by_its_name():
+    """A ``ProblemSpec`` prints as its constructor call, not as its declaration tables."""
+    assert repr(ds.problem("heat")) == "ProblemSpec('heat')"

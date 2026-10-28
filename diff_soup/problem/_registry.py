@@ -181,13 +181,14 @@ def handle_declarations(problem: Any, handle: Any) -> tuple:
     )
 
 
-def handle_leaf_ids(problem: Any, handle: Any) -> frozenset:
-    """Return the ``id()`` set of ``problem``'s current theta leaves owned by ``handle``.
+def declared_handle_value(problem: Any, handle: Any) -> tuple[str, Any]:
+    """Return ``(kind, value)``: ``handle``'s declaration kind and ``problem``'s current value for it.
 
     Resolves through the registry by handle identity, so a handle from a
-    structurally identical Recipe rebuild still finds the live declaration's
-    current array objects. Works for any declared parameter or function
-    handle, learnable or not.
+    structurally identical Recipe rebuild still finds the live declaration. The
+    value is read from ``problem``'s own closures, so its array leaves are the
+    objects ``problem``'s theta holds. A function's value is the whole declared
+    callable, not its partition.
 
     Args:
         problem: A lowered problem.
@@ -216,13 +217,40 @@ def handle_leaf_ids(problem: Any, handle: Any) -> frozenset:
     namespace_values = params if kind in ("scalar", "array") else functions
     if namespace_values is not None and match.name in namespace_values:
         value = namespace_values[match.name]
+    return kind, value
+
+
+def handle_leaves(problem: Any, handle: Any) -> tuple:
+    """Return ``problem``'s current theta leaves owned by ``handle``, in pytree order.
+
+    A function owns the inexact leaves at its declared learnable paths (every
+    inexact leaf when it declares none); a parameter owns the inexact leaves of
+    its value. Works for any declared parameter or function handle, learnable
+    or not.
+
+    Args:
+        problem: A lowered problem.
+        handle: A Recipe handle returned by ``spec.param(...)`` or
+            ``spec.function(...)``.
+
+    Raises:
+        ValueError: If ``handle`` was not declared on ``problem``.
+    """
+    kind, value = declared_handle_value(problem, handle)
     if kind == "function":
         from diff_soup.problem.parameters import _function_parameter_partition
 
         value, _ = _function_parameter_partition(value)
-    return frozenset(
-        id(leaf) for leaf in jax.tree_util.tree_leaves(value) if eqx.is_inexact_array(leaf)
-    )
+    return tuple(leaf for leaf in jax.tree_util.tree_leaves(value) if eqx.is_inexact_array(leaf))
+
+
+def handle_leaf_ids(problem: Any, handle: Any) -> frozenset:
+    """Return the ``id()`` set of [handle_leaves][diff_soup.problem._registry.handle_leaves].
+
+    Raises:
+        ValueError: If ``handle`` was not declared on ``problem``.
+    """
+    return frozenset(id(leaf) for leaf in handle_leaves(problem, handle))
 
 
 def reset_registry() -> None:
