@@ -59,9 +59,16 @@ Key design decisions:
   projection ``Bᵀ`` of the weighted mismatch, and the part the subspace cannot
   represent is reported rather than dropped.
 
-* **Dense Gauss-Newton ceiling.**  The Jacobian is computed by ``jacfwd``
-  over the full ``x``.  The block-bidiagonal continuity structure is not
-  exploited, and it cannot usefully be: the window transition operator of a
+* **Window-block Jacobian.**  A window's solve reads only the parameters and
+  its own start, so
+  [residual_and_jacobian][diff_soup.inference.fitting._windows_dv.DecisionWindowBuild.residual_and_jacobian]
+  pushes ``n_theta + n_state`` tangents through the solves, each block
+  coordinate seeded in every window at once, instead of one tangent per
+  decision variable.
+
+* **Dense Gauss-Newton ceiling.**  The Jacobian is stored dense.  The
+  block-bidiagonal continuity structure is not exploited in the step
+  solve, and it cannot usefully be: the window transition operator of a
   parabolic problem is dense even though its spatial Jacobian is sparse, so
   condensing or a banded normal-equation solve would gain nothing.  A smaller
   decision vector is the lever, which is what ``StateBasis`` provides.  A warning
@@ -801,7 +808,24 @@ class DecisionWindowBuild:
         ends, any_failed, steps = self._propagate_segments(
             theta_p, starts, parallel=parallel_segments
         )
-        pool = self._state_pool(ends, starts)
+        stack = self._rows_from(
+            theta_p, state_block, starts, anchors, targets, weight, ends, any_failed
+        )
+        return (stack, steps) if with_steps else stack
+
+    def _rows_from(
+        self,
+        theta_p: Any,
+        state_block: jax.Array,
+        starts: jax.Array,
+        anchors: jax.Array,
+        targets: jax.Array,
+        weight: Optional[jax.Array],
+        saved: jax.Array,
+        any_failed: jax.Array,
+    ) -> jax.Array:
+        """The residual stack from the windows' saved states, stamped when a solve failed."""
+        pool = self._state_pool(saved, starts)
         rows = [
             self._obs_rows_from(theta_p, pool, targets, weight),
             self._continuity_rows_from(state_block, anchors, pool),
@@ -809,8 +833,127 @@ class DecisionWindowBuild:
         if self.state_prior_weight > 0.0:
             rows.append(self._state_prior_rows_from(state_block, anchors))
         stack = jnp.concatenate(rows)
-        stack = jnp.where(any_failed, jnp.full_like(stack, self._sentinel), stack)
-        return (stack, steps) if with_steps else stack
+        return jnp.where(any_failed, jnp.full_like(stack, self._sentinel), stack)
+
+    def residual_and_jacobian(self, x: jax.Array, *, tile: Any = "full") -> tuple:
+        """The residual stack at ``x`` and its Jacobian, with one solve tangent per block column.
+
+        A window's solve reads the parameters and its own start, nothing else.
+        One tangent seeded at coordinate ``c`` of every window start therefore
+        gives column ``c`` of every window's block at once, so the solves carry
+        ``n_theta + n_state`` tangents instead of one per decision variable.
+        The rows are then differentiated along every decision variable, each
+        with its own window's part of the solve tangents, which needs no solve.
+        The result equals ``jacfwd`` of
+        [residual][diff_soup.inference.fitting._windows_dv.DecisionWindowBuild.residual].
+
+        Args:
+            x: The decision vector.
+            tile: How many tangents are pushed at once, through the solves and
+                then through the rows: 8 to 128, or `"full"` for all of them.
+
+        Returns:
+            ``(residual, jacobian)`` with the Jacobian of shape ``(n_rows, x.size)``.
+        """
+        from diff_soup.inference.solvers.tangent import normalize_tangent_tile
+
+        layout = self.layout
+        plan = self._plan
+        x = jnp.asarray(x)
+        dtype = x.dtype
+        y0 = self.y0
+        anchors = self._anchor_stack
+        targets = jnp.asarray(self.series.values)
+        weight = None if self.series.weight is None else jnp.asarray(self.series.weight)
+        n_theta, n_state = layout.n_theta, layout.n_state
+        n_blocks = layout.n_decision_windows
+        theta_flat = layout.theta_of(x)
+        state_block = layout.state_blocks(x)
+
+        def propagate(theta_flat, state_block):
+            starts = self._start_stack_from(state_block, y0, anchors)
+            saved, failed, _steps = self._propagate_segments(self.seam.theta_of(theta_flat), starts)
+            return saved, failed
+
+        def rows(point, saved, failed):
+            block = layout.state_blocks(point)
+            starts = self._start_stack_from(block, y0, anchors)
+            return self._rows_from(
+                self._theta_pytree(point), block, starts, anchors, targets, weight, saved, failed
+            )
+
+        def in_tiles(apply, inputs, count, out_axes=0):
+            """``apply`` vmapped over the leading axis of ``inputs``, ``tile`` rows at a time.
+
+            An output with ``out_axes`` ``None`` does not depend on the batch and
+            is returned once.
+            """
+            width = normalize_tangent_tile(tile, count)
+            n_tiles = -(-count // width)
+            padded = tuple(
+                jnp.pad(a, [(0, n_tiles * width - count)] + [(0, 0)] * (a.ndim - 1)) for a in inputs
+            )
+            mapped = jax.vmap(apply, out_axes=out_axes)
+            if n_tiles == 1:
+                return mapped(*padded)
+            tiled = tuple(a.reshape((n_tiles, width) + a.shape[1:]) for a in padded)
+            out = jax.lax.map(lambda batch: mapped(*batch), tiled)
+            single = not isinstance(out, tuple)
+            out = (out,) if single else out
+            axes = out_axes if isinstance(out_axes, tuple) else (out_axes,) * len(out)
+            out = tuple(
+                a[0] if axis is None else a.reshape((n_tiles * width,) + a.shape[2:])[:count]
+                for a, axis in zip(out, axes)
+            )
+            return out[0] if single else out
+
+        # The solve tangents: one per parameter, then one per block coordinate,
+        # seeded at that coordinate of every window start.
+        n_seeds = n_theta + (n_state if n_blocks else 0)
+        seed_theta = jnp.eye(n_seeds, n_theta, dtype=dtype)
+        seed_block = jnp.broadcast_to(
+            jnp.eye(n_seeds, n_state, k=-n_theta, dtype=dtype)[:, None, :],
+            (n_seeds, n_blocks, n_state),
+        )
+
+        def push(d_theta, d_block):
+            (saved, failed), (d_saved, _) = jax.jvp(
+                propagate, (theta_flat, state_block), (d_theta, d_block)
+            )
+            return saved, failed, d_saved
+
+        saved, failed, d_saved = in_tiles(
+            push, (seed_theta, seed_block), n_seeds, out_axes=(None, None, 0)
+        )
+
+        # Decision variable j reads its seed's tangent where its window's solve
+        # saved it, and zero in every other window.
+        width = int(x.shape[0])
+        index = np.arange(width)
+        block_of = (index - n_theta) // max(n_state, 1)
+        seed_of = np.where(index < n_theta, index, n_theta + (index - n_theta) % max(n_state, 1))
+        window_of = np.where(index < n_theta, -1, layout.first_state_window + block_of)
+        saved_window = jnp.asarray(np.repeat(plan.seg_window, plan.save_width))
+        basis = jnp.eye(width, dtype=dtype)
+
+        def column(direction, seed, window):
+            keep = (window < 0) | (saved_window == window)
+            d_seed = d_saved[seed]
+            d_saved_j = jnp.where(
+                jnp.reshape(keep, keep.shape + (1,) * (d_seed.ndim - 1)), d_seed, 0
+            )
+            return jax.jvp(
+                lambda point, states: rows(point, states, failed),
+                (x, saved),
+                (direction, d_saved_j),
+            )[1]
+
+        columns = in_tiles(
+            column,
+            (basis, jnp.asarray(seed_of), jnp.asarray(window_of)),
+            width,
+        )
+        return rows(x, saved, failed), columns.T
 
     def _lift_state_block(
         self,

@@ -21,7 +21,7 @@ method.  Construct the solver and call [LevenbergMarquardt.solve][diff_soup.infe
 from __future__ import annotations
 
 import time
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import equinox as eqx
 import jax
@@ -51,10 +51,6 @@ from diff_soup.inference.solvers.factorization import (
     cholesky_factor,
     solve_augmented_qr,
     solve_factorized_normal,
-)
-from diff_soup.inference.solvers.tangent import (
-    jacfwd_from_pushforward,
-    linearize_value,
 )
 
 # A failed evaluation of the trial predicate ``problem.is_valid``: the compiled program
@@ -214,6 +210,7 @@ class LevenbergMarquardt(OptSolver):
         max_step_norm: The longest step allowed, or `0` for no limit.
         linear_solver: `"cholesky"`, `"qr"`, `"solve"`, or `"auto"` for QR in single precision with a full Jacobian and Cholesky otherwise.
         x_scale: The parameter scaling of the damping, `JacScale()` by default.
+        jacobian_tile: How many Jacobian directions are formed at once: 8 to 128, `"full"`, or `"auto"`, whole when that fits the free memory.
         callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
     """
 
@@ -232,6 +229,7 @@ class LevenbergMarquardt(OptSolver):
     max_step_norm: float = eqx.field(static=True, default=5.0)
     linear_solver: str = eqx.field(static=True, default="auto")
     x_scale: XScale = eqx.field(default_factory=JacScale)
+    jacobian_tile: Any = eqx.field(static=True, default="auto")
     callbacks: tuple = eqx.field(static=True, default=())
 
     def solve(self, problem, *, callbacks=()) -> OptResult:
@@ -274,7 +272,6 @@ class LevenbergMarquardt(OptSolver):
             _gauss_newton = problem.gauss_newton
             _value = problem.value
         else:
-            _r_fn = problem.residual
             _rj_fn = problem.residual_and_jacobian
         if self.linear_solver not in ("auto", "cholesky", "qr", "solve"):
             raise ConfigurationError(
@@ -336,11 +333,21 @@ class LevenbergMarquardt(OptSolver):
 
         has_reg = reg is not None and reg.residual(x).shape[0] > 0
 
+        # The residual Jacobian, whole under jacobian_tile="auto" when it fits in the
+        # free memory, else in tiles; the problem's structured Jacobian when it has one.
+        jacobian = None
+        if not (use_reduced or use_lanes):
+            from diff_soup.inference.fitting.inference_problem import checked_residual_jacobian
+
+            jacobian = checked_residual_jacobian(
+                problem, x, self.jacobian_tile, knob="jacobian_tile"
+            )
+
         # --- Evaluation helpers (JAX arrays, no numpy mid-loop) -----------
 
         def eval_rj(x_jax):
             """Residual + Jacobian, with regularisation, all on device."""
-            r_pde, J_pde = _rj_fn(x_jax)
+            r_pde, J_pde = (_rj_fn if jacobian.tile == "full" else jacobian)(x_jax)
             ok = jnp.all(jnp.isfinite(r_pde))
             if has_reg:
                 r = jnp.concatenate([r_pde, reg.residual(x_jax)])
@@ -350,15 +357,14 @@ class LevenbergMarquardt(OptSolver):
             return r, J, r_pde, ok
 
         def eval_r_linearized(x_jax):
-            """Evaluate a trial once and retain its forward linearization."""
-            r_pde, pushforward = linearize_value(_r_fn, x_jax)
+            """Evaluate a trial once, with its Jacobian."""
+            r_pde, J_pde = jacobian(x_jax)
             ok = jnp.all(jnp.isfinite(r_pde))
             r = jnp.concatenate([r_pde, reg.residual(x_jax)]) if has_reg else r_pde
-            return 0.5 * jnp.sum(r**2), r_pde, ok, pushforward
+            return 0.5 * jnp.sum(r**2), r_pde, ok, J_pde
 
-        def eval_rj_linearized(x_jax, r_pde, pushforward):
-            """Materialize an accepted Jacobian without repeating its primal."""
-            J_pde = jacfwd_from_pushforward(pushforward, x_jax, r_pde)
+        def eval_rj_linearized(x_jax, r_pde, J_pde):
+            """An accepted trial's Jacobian, kept from its evaluation."""
             if has_reg:
                 return (
                     jnp.concatenate([r_pde, reg.residual(x_jax)]),
@@ -508,9 +514,7 @@ class LevenbergMarquardt(OptSolver):
                     elif use_lanes:
                         cost_trial_j, trial_jtr, trial_jtj, trial_ok = eval_lanes(x_trial)
                     else:
-                        cost_trial_j, trial_r, trial_ok, trial_pushforward = eval_r_linearized(
-                            x_trial
-                        )
+                        cost_trial_j, trial_r, trial_ok, trial_jacobian = eval_r_linearized(x_trial)
                     cost_trial = float(local_value(cost_trial_j))
                     trial_ok = bool(local_value(trial_ok))
                 except _EVALUATION_FAILURES:
@@ -545,7 +549,7 @@ class LevenbergMarquardt(OptSolver):
                     elif use_lanes:
                         Jtr_red, JtJ_red = trial_jtr, trial_jtj
                     else:
-                        r, J = eval_rj_linearized(x, trial_r, trial_pushforward)
+                        r, J = eval_rj_linearized(x, trial_r, trial_jacobian)
                 except _EVALUATION_FAILURES:
                     # The step stays accepted and the next step's model uses the
                     # statistics of the previous point. On the dense path the
@@ -678,6 +682,7 @@ class LevenbergMarquardt(OptSolver):
             info={
                 "trial_predicate_rejections": trial_predicate_rejections,
                 "linear_solver": resolved_linear_solver,
+                "jacobian_tile": None if jacobian is None else jacobian.tile,
                 **({} if stall_reason is None else {"stall_reason": stall_reason}),
                 **final_arrays,
             },

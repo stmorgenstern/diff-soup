@@ -94,10 +94,11 @@ differential part of the state is fitted per window and the algebraic
 part is recovered from it
 ([consistent initialization](../simulation/consistent-init.md)).
 
-With the window starts fitted, `ds.inference.optsolve` defaults to
-`ds.inference.NewtonTrustRegion(hessian="gauss-newton")`. The memory of the
-exact Hessian grows with the square of the decision vector, and a few
-hundred entries can already exceed the device.
+`ds.inference.NewtonTrustRegion` steps on the Gauss-Newton matrix here, as
+it does for every fit with residual rows
+([solvers](solvers.md#newton-trust-region)). The memory of the exact
+Hessian grows with the square of the decision vector, and a few hundred
+entries can already exceed the device.
 
 ## Options
 
@@ -117,6 +118,10 @@ The options, with their defaults:
 - Each window is solved once per evaluation, saving its frames on the
   way, so a fit integrates the horizon once however many frames a window
   holds.
+- A window's solve reads only the parameters and its own start. Its
+  Jacobian therefore pushes one tangent per parameter and one per entry
+  of a window start through all the windows at once, not one per
+  decision variable.
 - The windows solve as one batch. A `jax.vmap` over parameter values
   of the likelihood joins that batch, and so do the chains of
   [`ds.inference.sample`](mcmc.md#run-the-sampler).

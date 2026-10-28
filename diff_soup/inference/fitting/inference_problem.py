@@ -842,6 +842,24 @@ def _free_device_memory(device: Any) -> Optional[int]:
     return int(limit) - int(stats.get("bytes_in_use", 0))
 
 
+def _memory_need_and_free(compiled: Any) -> Optional[tuple]:
+    """``(need, free, platform)`` of a compiled evaluation, or ``None`` when unmeasured."""
+    try:
+        analysis = compiled.memory_analysis()
+    except Exception:  # not every backend implements the analysis
+        return None
+    if analysis is None:
+        return None
+    need = int(getattr(analysis, "temp_size_in_bytes", 0) or 0) + int(
+        getattr(analysis, "output_size_in_bytes", 0) or 0
+    )
+    device = jax.local_devices()[0]
+    free = _free_device_memory(device)
+    if free is None:
+        return None
+    return need, free, device.platform
+
+
 def _check_hessian_memory(compiled: Any, width: int, tile: Any) -> None:
     """Raise `_HessianMemoryError` when a compiled Hessian needs more than the free memory.
 
@@ -849,19 +867,10 @@ def _check_hessian_memory(compiled: Any, width: int, tile: Any) -> None:
     parameters in tiles of ``tile`` directions. A backend that reports no
     memory figures passes.
     """
-    try:
-        analysis = compiled.memory_analysis()
-    except Exception:  # not every backend implements the analysis
+    measured = _memory_need_and_free(compiled)
+    if measured is None or measured[0] <= _HESSIAN_MEMORY_SHARE * measured[1]:
         return
-    if analysis is None:
-        return
-    need = int(getattr(analysis, "temp_size_in_bytes", 0) or 0) + int(
-        getattr(analysis, "output_size_in_bytes", 0) or 0
-    )
-    device = jax.local_devices()[0]
-    free = _free_device_memory(device)
-    if free is None or need <= _HESSIAN_MEMORY_SHARE * free:
-        return
+    need, free, platform = measured
     gib = 2.0**30
     how = "whole" if tile in (None, "full") else f"in tiles of {tile} directions"
     smaller = (
@@ -869,12 +878,41 @@ def _check_hessian_memory(compiled: Any, width: int, tile: Any) -> None:
     )
     raise _HessianMemoryError(
         f"The exact Hessian over {width} parameters, formed {how}, needs "
-        f"{need / gib:.1f} GiB and the {device.platform} device has {free / gib:.1f} GiB "
+        f"{need / gib:.1f} GiB and the {platform} device has {free / gib:.1f} GiB "
         f"free. With NewtonTrustRegion pass {smaller}"
         'hessian="gauss-newton", or subproblem="cg" with '
         "x_scale=ds.inference.ConstantScale(...). For laplace and information, "
         'use the expected curvature (curvature="expected", kind="expected").'
     )
+
+
+class _JacobianMemoryError(ConfigurationError):
+    """The Gauss-Newton residual Jacobian needs more memory than the device has free."""
+
+
+def _jacobian_memory_reporter(knob: str) -> Callable:
+    """The memory check of a residual Jacobian whose tile the option ``knob`` sets."""
+
+    def check(compiled: Any, width: int, tile: Any) -> None:
+        measured = _memory_need_and_free(compiled)
+        if measured is None or measured[0] <= _HESSIAN_MEMORY_SHARE * measured[1]:
+            return
+        need, free, platform = measured
+        gib = 2.0**30
+        how = "whole" if tile in (None, "full") else f"in tiles of {tile} directions"
+        smaller = (
+            f"Pass a smaller {knob}= (8 or 16), or d"
+            if tile in (None, "full") or int(tile) > 8
+            else "D"
+        )
+        raise _JacobianMemoryError(
+            f"The Gauss-Newton residual Jacobian over {width} parameters, formed {how}, "
+            f"needs {need / gib:.1f} GiB and the {platform} device has {free / gib:.1f} GiB "
+            f"free. {smaller}eclare a ds.inference.StateBasis or fewer windows to shrink "
+            "the decision vector."
+        )
+
+    return check
 
 
 #: Set while a concrete check compiles: an enclosing check measures every
@@ -891,11 +929,15 @@ class _MemoryCheckedHessian:
     compiles it, so the call reuses that compilation. A traced input (the
     Hessian inside another jitted function) is measured on its shape, which
     costs a second compilation, unless an enclosing check is compiling it.
+    ``report(compiled, width, tile)`` raises when the evaluation does not fit;
+    the exact Hessian's check by default, a residual Jacobian's through
+    `_jacobian_memory_reporter`.
     """
 
-    def __init__(self, fn: Callable, *, tile: Any = "full"):
+    def __init__(self, fn: Callable, *, tile: Any = "full", report: Callable = None):
         self._fn = fn if hasattr(fn, "lower") else jax.jit(fn)
         self.tile = tile
+        self._report = _check_hessian_memory if report is None else report
         self._checked: set = set()
 
     def lower(self, *args, **kwargs):
@@ -903,7 +945,7 @@ class _MemoryCheckedHessian:
         return self._fn.lower(*args, **kwargs)
 
     def check(self, x: Any) -> None:
-        """Compile for ``x`` and raise `_HessianMemoryError` when it does not fit."""
+        """Compile for ``x`` and raise the memory error of the evaluation when it does not fit."""
         shape = tuple(np.shape(x))
         if len(shape) != 1 or shape[0] <= _HESSIAN_GUARD_MIN_WIDTH:
             return
@@ -918,12 +960,124 @@ class _MemoryCheckedHessian:
             compiled = self._fn.lower(point).compile()
         finally:
             _ENCLOSING_CHECK.active = enclosing
-        _check_hessian_memory(compiled, shape[0], self.tile)
+        self._report(compiled, shape[0], self.tile)
         self._checked.add(key)
 
     def __call__(self, x: Any):
         self.check(x)
         return self._fn(x)
+
+
+#: The tiles ``"auto"`` tries for a residual Jacobian that does not fit whole, widest first.
+_AUTO_JACOBIAN_TILES = (32, 16, 8)
+
+
+class _TiledJacobian:
+    """A jitted ``x -> (residual, jacobian)`` that can also be formed in tiles.
+
+    ``build(tile)`` returns the evaluation pushing ``tile`` tangents at a time;
+    calling the object evaluates it with every tangent at once. The solvers
+    read [at_tile][diff_soup.inference.fitting.inference_problem._TiledJacobian.at_tile]
+    to tile a structured Jacobian instead of tiling the residual's directions.
+    """
+
+    def __init__(self, build: Callable):
+        self._build = build
+        self._jitted: dict = {}
+
+    def at_tile(self, tile: Any) -> Callable:
+        """The jitted evaluation in tiles of ``tile`` tangents, built once per tile."""
+        key = "full" if tile is None else tile
+        if key not in self._jitted:
+            self._jitted[key] = jax.jit(self._build(key))
+        return self._jitted[key]
+
+    def lower(self, x: Any):
+        """Lower the whole evaluation, as `jax.jit(...).lower` does."""
+        return self.at_tile("full").lower(x)
+
+    def __call__(self, x: Any):
+        return self.at_tile("full")(x)
+
+
+def checked_residual_jacobian(problem: Any, x: Any, tile: Any, *, knob: str) -> Any:
+    """``x -> (residual, jacobian)`` of a least-squares problem, memory-checked at ``x``.
+
+    The problem's structured Jacobian (a `_TiledJacobian`, such as fitted
+    window starts give) is used when it has one, else the residual's forward
+    Jacobian. ``tile`` is an int, ``"full"``, or ``"auto"``: whole when the
+    compiled evaluation fits in the free device memory, else the widest of
+    `_AUTO_JACOBIAN_TILES` that fits. The result's ``tile`` names the tile
+    used. ``knob`` is the solver option the memory error names.
+
+    Raises:
+        ConfigurationError: If no candidate tile fits.
+    """
+    from diff_soup.inference.solvers.tangent import value_and_jacfwd_tiled
+
+    at_tile = getattr(problem.residual_and_jacobian, "at_tile", None)
+    residual = problem.residual
+
+    def evaluation(chosen):
+        if at_tile is not None:
+            return at_tile(chosen)
+        return jax.jit(lambda point: value_and_jacfwd_tiled(residual, point, tile=chosen))
+
+    width = int(np.shape(x)[0])
+    if tile == "auto":
+        candidates = ["full"] + [t for t in _AUTO_JACOBIAN_TILES if t < width]
+    else:
+        candidates = ["full" if tile is None else tile]
+    report = _jacobian_memory_reporter(knob)
+    error = None
+    for candidate in candidates:
+        checked = _MemoryCheckedHessian(evaluation(candidate), tile=candidate, report=report)
+        try:
+            checked.check(x)
+        except _JacobianMemoryError as exc:
+            error = exc
+            continue
+        return checked
+    raise error
+
+
+def _estimation_window_jacobian(problem: Any) -> Optional[_TiledJacobian]:
+    """The structured Jacobian of an estimation problem over fitted window starts, or ``None``.
+
+    Its residual is the data rows of its data problem followed by the MAP prior
+    rows; the data rows take the data problem's window-block Jacobian.
+    """
+    data = getattr(problem, "diagnostic_problem", None)
+    blocks = getattr(problem, "_prior_blocks", None)
+    if data is None or data is problem or blocks is None:
+        return None
+    if not getattr(data, "fits_window_states", False) or data.batched_r_fn is not None:
+        return None
+    data_jacobian = data.stacked_rj_fn
+    if not isinstance(data_jacobian, _TiledJacobian):
+        return None
+
+    def prior_rows(x):
+        return jnp.concatenate(
+            [jnp.zeros((0,), dtype=x.dtype)] + [prior.residual(x[c]) for c, prior in blocks]
+        )
+
+    def build(tile):
+        data_rows = data_jacobian._build(tile)
+
+        def residual_and_jacobian(x):
+            residual, jacobian = data_rows(x)
+            if not blocks:
+                return residual, jacobian
+            rows = prior_rows(x)
+            return (
+                jnp.concatenate((residual, rows)),
+                jnp.concatenate((jacobian, jax.jacfwd(prior_rows)(x)), axis=0),
+            )
+
+        return residual_and_jacobian
+
+    return _TiledJacobian(build)
 
 
 def lower_residual_problem(
@@ -995,6 +1149,10 @@ def lower_residual_problem(
         residual_and_jacobian = getattr(problem, "stacked_rj_fn", None)
     if residual is None or residual_and_jacobian is None:
         residual, residual_and_jacobian = build_stacked_residual_fns(tuple(problem.segment_fns))
+    # Fitted window starts: the data rows take the window-block Jacobian.
+    window_jacobian = _estimation_window_jacobian(problem)
+    if window_jacobian is not None:
+        residual_and_jacobian = window_jacobian
     if getattr(evaluator, "loss_fn", None) is None:
         evaluator = _ResidualSeams(residual)
 
@@ -2081,10 +2239,22 @@ class InferenceProblem:
             def rj_fn(x):
                 return value_and_jacfwd(r_fn, x)
 
+            if self._dv_build is not None:
+                # One solve tangent per block column, not per decision variable.
+                build = self._forward_window_build()
+                rj_fn = _TiledJacobian(
+                    lambda tile: lambda x: build.residual_and_jacobian(x, tile=tile)
+                )
+
             _set = object.__setattr__
             _set(self, "_stacked_r", r_fn)
             _set(self, "_stacked_rj", rj_fn)
         return self._stacked_r
+
+    def _forward_window_build(self) -> Any:
+        """The window build whose ``residual`` is the forward seam's, as ``stacked_r_fn`` evaluates it."""
+        (residual,) = self._residual_seam("forward")[0]
+        return residual.__self__
 
     @property
     def stacked_rj_fn(self) -> Callable:

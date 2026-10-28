@@ -237,9 +237,10 @@ result = ds.inference.optsolve(infproblem, ds.inference.LevenbergMarquardt())
 ```
 
 - `optimizer=` is the optimization algorithm. The default is
-  `ds.inference.NewtonTrustRegion()`; `ds.inference.LevenbergMarquardt()`
-  is the damped least-squares choice
-  ([optimization solvers](solvers.md)).
+  `ds.inference.NewtonTrustRegion()`, which steps on the Gauss-Newton
+  matrix of the residual rows; `NewtonTrustRegion(hessian="true")` steps
+  on the exact Hessian. `ds.inference.LevenbergMarquardt()` is the damped
+  least-squares choice ([optimization solvers](solvers.md)).
 - `callbacks=` lets you monitor the progress of the optimization run.
   `ds.inference.LogCallback()` prints one line per step, and
   `ds.inference.LogCallback(log_file=...)` also writes those lines to a

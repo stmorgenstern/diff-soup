@@ -41,10 +41,25 @@ def lm_fit(single):
 
 
 def test_levenberg_marquardt_recovers_the_rate_of_a_single_experiment(single, lm_fit):
-    """LevenbergMarquardt on one experiment ends converged at the true rate."""
+    """LevenbergMarquardt on one experiment ends converged at the true rate, and on fitted window
+    starts a Jacobian formed 8 directions at a time steps as the whole one does."""
     decay, _ = single
     assert lm_fit.converged
     np.testing.assert_allclose(float(lm_fit[decay.rate]), TRUE_RATE, atol=_RATE_ATOL)
+    wide = decay_recipe("fits_decay_windows", nodes=12)
+    windows = inf.InferenceProblem(
+        decay_experiment(wide),
+        parameters=wide.rate,
+        trajectory=inf.Multishoot(inf.Windows.uniform(2)),
+    )
+    whole, tiled = (
+        small_fit(windows, inf.LevenbergMarquardt(max_steps=20, jacobian_tile=tile))
+        for tile in ("full", 8)
+    )
+    assert (whole.info["jacobian_tile"], tiled.info["jacobian_tile"]) == ("full", 8)
+    # 13 decision variables, 11 steps each; measured 0.0 worst difference, workstation CPU
+    # 2026-10-28, pytest tests/public_api/test_fits.py
+    np.testing.assert_allclose(tiled.params, whole.params, rtol=0.0, atol=1e-12)
 
 
 def test_the_result_reports_point_status_steps_handle_values_and_final_rows(single, lm_fit):

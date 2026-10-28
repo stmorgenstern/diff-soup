@@ -31,9 +31,10 @@ gradient, and \(H\) its Hessian, the three solvers differ in the
 curvature they carry.
 
 - `NewtonTrustRegion` (recommended) minimizes a quadratic model of
-  \(\mathcal{L}\) inside a trust region, with the true Hessian \(H\)
-  from the second-order sensitivities or its Gauss-Newton approximation
-  \(J^\top J\), with \(J\) the Jacobian of the residual. It is the method
+  \(\mathcal{L}\) inside a trust region, with the Gauss-Newton
+  approximation \(J^\top J\) of the Hessian, with \(J\) the Jacobian of
+  the residual, or the true Hessian \(H\) from the second-order
+  sensitivities. It is the method
   of SciPy's `trust-exact` and `trust-ncg` (Nocedal and Wright, 2006).
 - `LevenbergMarquardt` takes damped Gauss-Newton steps, with the
   curvature \(J^\top J\) from one forward-mode Jacobian per step
@@ -60,9 +61,12 @@ result.trust_region.radius_history
 The options, with their defaults:
 
 - `max_steps=50` is the step budget.
-- `hessian="true"` uses the true Hessian. `"gauss-newton"` uses the
-  Gauss-Newton Hessian approximation \(J^\top J\), from one forward-mode
-  Jacobian.
+- `hessian="auto"` uses the Gauss-Newton approximation \(J^\top J\),
+  from one forward-mode Jacobian, whenever the objective is a sum of
+  squared residual rows, as every `InferenceProblem` is. An
+  `OptimizationProblem` without residual rows gets the true Hessian, and
+  `"gauss-newton"` or `"true"` forces either. `hessian="true"` restores
+  the exact Hessian of previous releases.
 - `subproblem="auto"` solves the trust-region subproblem exactly, at
   every size under the default `x_scale`. It switches to conjugate
   gradients above `dense_cutoff=64` parameters only for a true Hessian
@@ -97,21 +101,23 @@ The options, with their defaults:
   recomputed, with quasi-Newton (SR1) updates between refreshes.
   `"every"` recomputes it at every step, and an integer `k` every
   `k`-th step.
-- `hessian_tile="auto"` sets how many directions of the true Hessian
-  are formed at once, and with it the memory the Hessian takes. `"auto"`
-  forms it whole up to `dense_cutoff` parameters and 32 directions at a
-  time above, or 16 or 8 when 32 does not fit the device. An integer
-  from 8 to 128, or `"full"`, fixes it.
-- A true Hessian that does not fit the device stops the fit before its
-  first step, with an error naming `hessian_tile=`,
-  `hessian="gauss-newton"`, and `subproblem="cg"`.
+- `hessian_tile="auto"` sets how many directions of the true Hessian,
+  or of the Gauss-Newton Jacobian, are formed at once, and with it the
+  memory they take. `"auto"` forms the Hessian whole up to
+  `dense_cutoff` parameters and the Jacobian whole when it fits the
+  device, else either 32, 16 or 8 directions at a time. An integer from
+  8 to 128, or `"full"`, fixes it.
+- A true Hessian or a Jacobian that does not fit the device stops the
+  fit before its first step. The error names the smaller tiles, and for
+  the Hessian also `hessian="gauss-newton"` and `subproblem="cg"`.
 - `cg_max_iter=None` is the conjugate-gradient budget, the parameter
   count when unset.
 - `callbacks=()` attaches callbacks to the solver, merged with those
   passed to `ds.inference.optsolve` ([run the fit](fitting.md#run-the-fit)).
 
 `result.info` records the `hessian`, `hessian_composition`,
-`subproblem`, `hessian_tile`, and `linear_solver` settings the run used. The
+`subproblem`, `hessian_tile`, and `linear_solver` settings the run used,
+with `hessian_tile` the Jacobian's under Gauss-Newton. The
 trust-region radius after every step is in
 `result.trust_region.radius_history`.
 
@@ -148,6 +154,10 @@ The options, with their defaults:
   of its column of \(J\), and `ds.inference.ConstantScale(scale=s)`
   scales by \(1/s^2\), with `s` the typical magnitude of the
   parameters, one scalar or one entry per parameter.
+- `jacobian_tile="auto"` sets how many directions of \(J\) are formed
+  at once: whole when that fits the device, else 32, 16 or 8. An
+  integer from 8 to 128, or `"full"`, fixes it, and
+  `result.info["jacobian_tile"]` reports the choice.
 - `linear_solver="auto"` factors the damped normal equations by
   Cholesky under float64, and solves the equivalent least-squares
   system by QR under float32. `"qr"` forces QR and is unavailable for a

@@ -7,6 +7,19 @@ issue ledger of that effort.
 
 ### Behaviour changes
 
+- `NewtonTrustRegion(hessian=)` defaults to `"auto"`: the Gauss-Newton matrix whenever the problem
+  has residual rows (every `InferenceProblem` and `LeastSquaresProblem`, including non-Gaussian
+  likelihoods, which lower to signed deviance rows), the exact Hessian otherwise; `optsolve` and
+  `constrained_optsolve` fit with Gauss-Newton by default. `hessian="true"` restores the exact
+  Hessian of previous releases. (owner decision)
+- The Gauss-Newton Jacobian is tiled: `NewtonTrustRegion(hessian_tile=)` applies to it and
+  `LevenbergMarquardt(jacobian_tile=)` is new; under `"auto"` it is formed whole when it fits the free
+  device memory, else 32, 16 or 8 directions at a time, a Jacobian that cannot fit stops the fit before
+  its first step, and `result.info` records the tile. With fitted window starts one tangent per
+  parameter and per window-start entry goes through all windows at once: an 803-variable
+  FitzHugh-Nagumo Jacobian takes 7 s instead of 31 s on CPU (0.8 s instead of 3.3 s on GPU) with a
+  quarter of the memory, bitwise unchanged. An integer `hessian_tile` was ignored by the Gauss-Newton
+  Jacobian before. (R-27, U-3)
 - `spec.observe.spatial_mean` and `spec.observe.boundary_mean` now average `fn`'s nodal values
   (volume-weighted over the domain; face-area or facet-measure weighted over `tag`) and return a
   scalar. A `fn` that returns a scalar is refused at build; one that already averaged per node is
