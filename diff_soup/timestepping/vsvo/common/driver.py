@@ -2713,7 +2713,11 @@ def _finalize(
     # ran against.
     _backend = getattr(engine, "backend", None)
     _linear_name = getattr(type(_backend), "backend_name", None) if _backend is not None else None
-    _solve_mode = getattr(getattr(engine, "precision", None), "solve_mode", None)
+    _precision = getattr(engine, "precision", None)
+    _solve_mode = getattr(_precision, "solve_mode", None)
+    if _solve_mode == "fp32" and np.dtype(_precision.compute_dtype).itemsize > 4:
+        # Float32 factors under float64 compute: the fp32_factor policy, not end-to-end fp32.
+        _solve_mode = "fp32_factor"
     _adjoint_ckpts = getattr(adjoint, "checkpoints", None)
     _zero_f64 = jnp.zeros((), jnp.result_type(float))
 

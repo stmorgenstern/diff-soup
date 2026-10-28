@@ -60,14 +60,16 @@ issue ledger of that effort.
   one value per cell; any other length raises. (5)
 - The mixed `Precision.fp32_factor()` policy solves its float32 factors unrefined, as documented;
   it was running a hidden cuDSS refinement step on every corrector solve. (P-1)
+- `stats.linear_solve_mode` reports `"fp32_factor"` for the mixed policy (float32 factors under
+  float64 compute) and keeps `"fp32"` for end-to-end float32; 1.0.0 reported `"fp32"` for both. (P13)
 
 ### Additions
 
 - `theta[handle]` reads a parameter's value and `theta.replace(handle, value)` (or a mapping) writes it;
   parameters are located by key path, so a theta that went through `jax.tree.map`, a device transfer
   or a tracer still takes `ds.default_theta(problem, {handle: value})`. (R-1)
-- `theta.gradient(handle)` reads `dloss/dhandle` from `jax.grad(loss)(theta)`, summing the copies of a
-  parameter that several equations read. (P14)
+- `ds.parameter_gradient(grads, handle)` reads `dloss/dhandle` from `grads = jax.grad(loss)(theta)`,
+  summing the copies of a parameter that several equations read. (P14)
 - `est.values(x)[handle]` reads parameters from any vector in the fit coordinate; `ParameterSchema` is
   exported from `ds.inference`. (WE1-4)
 - `recipe.spec(**inputs)` returns the `ProblemSpec` a recipe authors, so `spec.assemble_state({})`
@@ -98,10 +100,11 @@ issue ledger of that effort.
 
 ### Docs
 
-- Precision modes: the mixed modes owe their accuracy to the float64 residual; the stiff-tolerance
-  limits of float32 factors (P-1). `step_tol` and `cost_tol` default to `1e-8` in float64 (R-24).
-  `subproblem="auto"`, `linear_solver="auto"` and `hessian_tile` as the code behaves (C-1, R-28).
-  `converged` means a local stopping test passed (C-5).
+- Precision modes: the mixed modes owe their accuracy to the float64 residual; `fp32_ir` is the
+  recommended mixed mode and `fp32_factor` its bare variant; `fp64` for tight tolerances on
+  ill-conditioned DAEs; measured speeds (P-1). `step_tol` and `cost_tol` default to `1e-8` in
+  float64 (R-24). `subproblem="auto"`, `linear_solver="auto"` and `hessian_tile` as the code
+  behaves (C-1, R-28). `converged` means a local stopping test passed (C-5).
 
 ### Planned for the next release
 

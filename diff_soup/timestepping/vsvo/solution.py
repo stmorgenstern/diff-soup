@@ -72,7 +72,7 @@ class SolverStats(eqx.Module):
         linear_backend: Name of the linear backend the solve ran on, `"dense"`, `"klu"`, `"superlu"` or `"cudss"`, or `None`.
         adjoint: Class name of the differentiation strategy.
         adjoint_checkpoints: Configured checkpoint count of the strategy, or `None`.
-        linear_solve_mode: Linear solve mode of the precision policy.
+        linear_solve_mode: Linear solve mode the solve ran in, `"fp64"`, `"fp32_ir"`, `"fp32_factor"` (float32 factors, float64 compute), `"fp32"` (end-to-end float32) or `"adaptive"`.
     """
 
     accepts: Array
