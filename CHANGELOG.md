@@ -7,6 +7,13 @@ issue ledger of that effort.
 
 ### Behaviour changes
 
+- `spec.bc.neumann` imposes the normal derivative `du/dn = s` on FVM, FDM and FEM; it was an alias of
+  `spec.bc.flux` (`D du/dn = s`). `name=` and `cross_facet=` stay on `flux`. (R-14)
+- On 2D and 3D grids, flux, Robin and Neumann conditions and boundary integrals weight each selected
+  cell by one face. A node selection that spans several faces, or holds only edge or corner cells,
+  raises instead of over-counting. (R-29)
+- The operator-level `FluxBC` had the wrong sign on the low side of an FVM grid and crashed with a
+  per-cell `D` on a 2D grid; both are fixed, and `FluxBC` works on 2D/3D FDM grids. (R-35)
 - `NewtonTrustRegion` and `LevenbergMarquardt` end `STALLED` (`converged=False`) when a step or
   cost test passes on a step the trust radius or damping held short while the model still predicts a
   decrease. `result.info["stall_reason"]` says why (`radius_collapsed`, `evaluation_noise` or
@@ -48,6 +55,13 @@ issue ledger of that effort.
 
 ### Additions
 
+- Grid transport: velocity fields in `q.ops.advect_upwind`, the conservative `q.ops.div_advect`,
+  a per-axis `(Dx, Dy, Dz)` in `q.ops.div_flux`, `axis=`/`side=` on `spec.bc.dirichlet`, `flux`,
+  `robin` and `neumann`, and `spec.bc.inflow(axis=, side=, velocity=, value=)` (Danckwerts with
+  `div_advect`). `fn=` callbacks work on one face of a 2D/3D grid. (WE2-5, R-29)
+- `spec.bc.periodic(var, axes=(0,))`: periodic on some axes, other conditions on the rest. (A-1)
+- `q.ops.cell_indicator(name)`; mesh conditions by `node_indices` select the facets whose vertices
+  all lie in the set. (4, R-32)
 - The residual form `q.dt(...)` works on meshes and keeps the boundary conditions of the field it
   writes, on grids too; a Dirichlet condition on that field is allowed. (1, R-9, R-10)
 - `TaggedMesh(cell_tags=, cell_tag_names=)`, `TaggedMesh.cell_indicator(name)`,
