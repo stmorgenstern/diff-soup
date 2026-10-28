@@ -497,7 +497,8 @@ result.diagnostics.theta_singular_values   # one singular value near zero
 The weights of a learnable function (`spec.function(..., learnable=True)`)
 are left out of the test, since a network's weights are not determined
 one at a time. A fit of weights alone records a note in `warnings`
-instead.
+instead, and `theta_singular_values` and `jacobian_cond` cover the other
+parameters only.
 
 The Fisher information, profile likelihoods, and design sensitivities
 behind these numbers are covered on [identifiability](identifiability.md).

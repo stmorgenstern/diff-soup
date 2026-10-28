@@ -307,8 +307,8 @@ def _attach_diagnostics(result: OptResult, problem: Any) -> OptResult:
     Computed at the converged params from the data residual and Jacobian the
     optimizer recorded there (``info["final_data_residual"]`` /
     ``info["final_data_jacobian"]``); an optimizer that records none costs one
-    extra ``jacfwd`` and one residual evaluation of the residual closures at
-    the solution.  Fires
+    extra ``jacfwd`` over the columns that are not learnable-function weights and
+    one residual evaluation of the residual closures at the solution.  Fires
     [IdentifiabilityWarning][diff_soup.inference.fitting.diagnostics.IdentifiabilityWarning]
     when
     the θ-block is rank-deficient, and records the warning text plus the

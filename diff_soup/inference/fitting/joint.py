@@ -2899,6 +2899,25 @@ class JointInferenceProblem:
         return self._theta_names
 
     @property
+    def function_columns(self) -> tuple:
+        """The columns of the joint theta block that hold learnable-function (network) weights."""
+        layout = self._layout
+        columns: set = set()
+        for index, child in enumerate(self.problems):
+            child_columns = getattr(child, "function_columns", ())
+            if not child_columns:
+                continue
+            # Child theta column -> joint column, as _reconstruct_child_flat scatters them.
+            to_joint = {
+                col: layout.shared_slice[0] + k for k, col in enumerate(layout.shared_cols[index])
+            }
+            to_joint.update(zip(layout.owner_cols[index], layout.child_tied_columns[index]))
+            start = layout.local_slices[index][0]
+            to_joint.update((col, start + k) for k, col in enumerate(layout.local_cols[index]))
+            columns.update(to_joint[col] for col in child_columns if col in to_joint)
+        return tuple(sorted(columns))
+
+    @property
     def is_homogeneous(self) -> bool:
         """Whether the geometry-axis vmap kernel is engaged (vs static concatenation)."""
         return self._homogeneous

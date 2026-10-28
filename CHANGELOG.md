@@ -35,8 +35,11 @@ issue ledger of that effort.
   (WE1-1, R-18)
 - `verify_gradient` returns a verdict (`passed`, `failed`, `inconclusive`); `sample(kernel="nuts")`
   audits the gradient at a jittered chain start and refuses only a failed audit. (WE1-2, R-19)
-- The identifiability check skips learnable-function (network) columns; a fit of network weights alone
-  records a note instead of warning. (10)
+- The identifiability check skips learnable-function (network) columns, on joint (multi-experiment)
+  problems too; a fit of network weights alone records a note instead of warning and builds no
+  diagnostics Jacobian; a fit with scalars beside a network differentiates only the scalar columns.
+  `theta_singular_values`, `jacobian_cond` and `param_group_cond` cover the non-network columns.
+  (10, U-2, R-26)
 - `jax.grad` through a solve with the default forward-only adjoint raises a `ValueError` naming
   `CheckpointAdjoint` instead of JAX's while-loop message. (C-4)
 - `ds.default_theta(problem, values)` validates its keys, values and shapes, takes a whole module for

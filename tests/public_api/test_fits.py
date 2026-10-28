@@ -145,11 +145,12 @@ def test_trust_region_on_a_lowered_study_recovers_shared_and_owner_parameters(jo
     np.testing.assert_allclose(sources, [-0.05, 0.0, 0.05], atol=1e-4)
 
 
-def _network_problem(name, *, blind_rate=False):
+def _network_problem(name, *, blind_rate=False, n_experiments=1):
     """A reaction ``u' = f(u)`` fitted by a tanh network with two identical hidden units.
 
     Identical units have identical Jacobian columns, so the weights are not
     identifiable one by one. ``blind_rate`` adds a scalar ``rate`` the data cannot see.
+    More than one experiment makes a joint fit, each from its own start.
     """
     network = eqx.nn.MLP("scalar", "scalar", 2, 1, activation=jnp.tanh, key=jax.random.PRNGKey(0))
     network = eqx.tree_at(
@@ -169,26 +170,54 @@ def _network_problem(name, *, blind_rate=False):
         blind = 0.0 * q.p.rate if blind_rate else 0.0
         return q.fn.reaction(q.u) + blind
 
-    y0 = spec.assemble_state({})
+    problem = spec.build()
     times = jnp.linspace(0.0, 0.8, 9)
-    data = jax.vmap(lambda t: (y0 - 0.4) * jnp.exp(-0.5 * t) + 0.4)(times)
-    experiment = inf.Experiment(
-        spec.build(), solver(), (0.0, 0.8), y0, (inf.Measurement("u", times, data),)
+
+    def experiment(k):
+        y0 = spec.assemble_state({}) + 0.2 * k
+        data = jax.vmap(lambda t: (y0 - 0.4) * jnp.exp(-0.5 * t) + 0.4)(times)
+        return inf.Experiment(
+            problem, solver(), (0.0, 0.8), y0, (inf.Measurement("u", times, data),)
+        )
+
+    experiments = tuple(experiment(k) for k in range(n_experiments))
+    return inf.InferenceProblem(
+        experiments[0] if n_experiments == 1 else experiments, parameters=handles
     )
-    return inf.InferenceProblem(experiment, parameters=handles)
 
 
-def test_a_network_fit_records_a_note_instead_of_an_identifiability_warning():
-    """optsolve on network weights alone raises no IdentifiabilityWarning and notes the skipped check."""
-    problem = _network_problem("fits_network")
+# Levenberg-Marquardt records the Jacobian it ends on; Optax records none, so
+# the diagnostics build their own over the columns that are not network weights.
+_NETWORK_FITS = pytest.mark.parametrize(
+    ("n_experiments", "optimizer"),
+    [(1, inf.LevenbergMarquardt(max_steps=3)), (2, inf.Optax(optax.adam(1e-2), max_steps=3))],
+    ids=["one-experiment-lm", "two-experiments-optax"],
+)
+
+
+@_NETWORK_FITS
+def test_a_network_fit_records_a_note_instead_of_an_identifiability_warning(
+    n_experiments, optimizer
+):
+    """optsolve on network weights alone, one experiment or a joint, warns nothing and notes the skipped check."""
+    problem = _network_problem(f"fits_network_{n_experiments}", n_experiments=n_experiments)
     with warnings.catch_warnings():
-        warnings.simplefilter("error", inf.fitting.IdentifiabilityWarning)
-        fit = inf.optsolve(problem, inf.LevenbergMarquardt(max_steps=3))
+        warnings.simplefilter("error")
+        fit = inf.optsolve(problem, optimizer)
     assert any("learnable-function weight" in note for note in fit.diagnostics.warnings)
+    # No column is tested, so no Jacobian is built or reported.
+    assert fit.diagnostics.theta_singular_values is None
 
 
-def test_a_blind_scalar_beside_a_network_still_raises_the_identifiability_warning():
+@_NETWORK_FITS
+def test_a_blind_scalar_beside_a_network_still_raises_the_identifiability_warning(
+    n_experiments, optimizer
+):
     """A scalar parameter the data cannot see is named in the warning, network weights or not."""
-    problem = _network_problem("fits_network_blind", blind_rate=True)
+    problem = _network_problem(
+        f"fits_network_blind_{n_experiments}", blind_rate=True, n_experiments=n_experiments
+    )
     with pytest.warns(inf.fitting.IdentifiabilityWarning, match="rate"):
-        inf.optsolve(problem, inf.LevenbergMarquardt(max_steps=3))
+        fit = inf.optsolve(problem, optimizer)
+    # The report covers the one scalar column, not the seven network weights.
+    assert fit.diagnostics.theta_singular_values.shape == (1,)
