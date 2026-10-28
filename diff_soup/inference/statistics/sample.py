@@ -16,7 +16,7 @@ normalized log posterior of a data-bearing
 * gradients are **forward-assembled** by default (``jax.jacfwd`` — the mode
   the solver suite's composable forward-sensitivity runs support).
   ``gradient="reverse"`` is admitted only after a build-time check that
-  reverse mode reproduces the forward gradient at the initial point, and
+  reverse mode reproduces the forward gradient near the initial point, and
   ``gradient=None`` declares a gradient-free target.
 
 Every [LogDensity][] can audit its own gradient:
@@ -419,11 +419,11 @@ class LogDensity:
             init: The starting point, shape ``(n,)``.
             names: Optional per-scalar parameter names (defaults to
                 positional labels).
-            coordinate: The coordinate the density lives in — ``"x"``
+            _coordinate: The coordinate the density lives in, ``"x"``
                 (physical, default) or ``"z"`` (inference).
             gradient: ``"forward"`` (default, ``jax.jacfwd``), ``"reverse"``
                 (``jax.grad``, admitted only after it reproduces the forward
-                gradient at ``init``), or ``None`` (gradient-free).
+                gradient near ``init``), or ``None`` (gradient-free).
 
         Returns:
             The [LogDensity][] target.
@@ -431,7 +431,7 @@ class LogDensity:
         Raises:
             ValueError: For an unknown ``gradient`` or ``coordinate``, a
                 ``names`` length that does not match ``init``, or a
-                reverse-mode gradient that fails or disagrees at ``init``.
+                reverse-mode gradient that fails or disagrees near ``init``.
         """
         if gradient not in GRADIENT_MODES:
             raise ValueError(
@@ -482,12 +482,15 @@ def _build_gradient(
     """Build the gradient of a scalar target under the declared mode.
 
     ``"forward"`` returns ``jax.jacfwd(fn)``. ``"reverse"`` returns
-    ``jax.grad(fn)`` only after it reproduces the forward gradient at
+    ``jax.grad(fn)`` only after it reproduces the forward gradient near
     ``init`` — a failing or disagreeing reverse pass raises with the reason
     (composable forward-sensitivity solver runs support ``jax.jacfwd``
     only). ``None`` returns ``None`` (a gradient-free target).
 
-    The two agree when the norm of their difference is within a tolerance times the larger
+    The check runs at ``_gate_point(init)``, a fixed step of ``_GATE_JITTER`` of
+    ``max(|init|, 1)`` per coordinate, since ``init`` is often a mode, where the gradient is
+    small and the two modes' difference is noise. It falls back to ``init`` when the
+    forward gradient there is not finite. The two agree when the norm of their difference is within a tolerance times the larger
     norm, or times one when both norms are below one. The tolerance of a target of a
     solver-backed ``source`` (a problem or an experiment) is the one ``_gradient_rtol``
     gives it; a target with no solver is held to rounding of its own dtype.
@@ -495,12 +498,16 @@ def _build_gradient(
     if gradient == "forward":
         return jax.jacfwd(fn)
     if gradient == "reverse":
-        forward = jax.jacfwd(fn)(init)
+        at = _gate_point(init)
+        forward = jax.jacfwd(fn)(at)
+        if not bool(jnp.all(jnp.isfinite(forward))):
+            at = init
+            forward = jax.jacfwd(fn)(at)
         try:
-            reverse = jax.grad(fn)(init)
+            reverse = jax.grad(fn)(at)
         except Exception as exc:
             raise ValueError(
-                f"{caller}: the reverse-mode gradient failed at the initial "
+                f"{caller}: the reverse-mode gradient failed near the initial "
                 f"point ({exc}). Composable forward-sensitivity solver runs "
                 "support jax.jacfwd only; build with gradient='forward'."
             ) from exc
@@ -522,13 +529,28 @@ def _build_gradient(
         if not difference <= rtol:
             raise ValueError(
                 f"{caller}: the reverse-mode gradient disagrees with the forward-assembled "
-                f"gradient at the initial point by {difference:.3e} of its norm, against the "
+                f"gradient near the initial point by {difference:.3e} of its norm, against the "
                 f"tolerance {rtol:.1e} ({basis}). Reverse mode is not trustworthy for this "
                 f"target; build with gradient='forward'. Reverse {reverse_grad}, forward "
                 f"{forward_grad}."
             )
         return jax.grad(fn)
     return None
+
+
+#: The reverse-mode gate checks this far from the initial point, relative to
+#: ``max(|init|, 1)`` per coordinate, with signs from a fixed key.
+_GATE_JITTER = 1e-2
+_GATE_KEY = 104729
+
+
+def _gate_point(init: Array) -> Array:
+    """The point the reverse-mode gate compares the two gradients at, the same on every call."""
+    init = jnp.asarray(init)
+    if not jnp.issubdtype(init.dtype, jnp.floating):
+        return init
+    signs = jax.random.rademacher(jax.random.key(_GATE_KEY), init.shape, dtype=init.dtype)
+    return init + _GATE_JITTER * jnp.maximum(jnp.abs(init), 1.0) * signs
 
 
 def _build_value_and_gradient(fn: Callable, gradient: Optional[str]) -> Optional[Callable]:
@@ -586,7 +608,7 @@ def log_posterior(
         gradient: ``"forward"`` (default) assembles the gradient with
             ``jax.jacfwd`` — the mode composable forward-sensitivity solver
             runs support; ``"reverse"`` uses ``jax.grad`` and is admitted
-            only after it reproduces the forward gradient at ``init``;
+            only after it reproduces the forward gradient near ``init``;
             ``None`` builds a gradient-free target.
         parameters: Optional parameter groups selecting the learnable theta
             (as accepted by ``Experiment.predictor``).
@@ -598,7 +620,7 @@ def log_posterior(
         ValueError: If the prior is missing, improper for this use, or sized
             wrong; if no response channel has attached data; if ``gradient``
             is unknown; or if a reverse-mode gradient fails or disagrees
-            with the forward gradient at the initial point.
+            with the forward gradient near the initial point.
     """
     from diff_soup.inference.statistics.measurement import require_likelihoods
 

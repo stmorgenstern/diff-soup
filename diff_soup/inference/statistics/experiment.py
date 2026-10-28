@@ -751,7 +751,9 @@ def _kept_response_data(experiment: Any, channels: tuple) -> dict:
     """Return response data with the same frame selection as prediction."""
     kept = {}
     for channel in channels:
-        values = experiment.observed(channel.name)
+        values = experiment.data[channel.name]
+        if isinstance(values, DeferredValues):
+            values = values.materialize()
         if channel.mask is not None:
             indices = np.flatnonzero(np.asarray(channel.mask, dtype=bool))
             values = jnp.asarray(values)[jnp.asarray(indices)]
@@ -1128,7 +1130,7 @@ class ExperimentSet(eqx.Module):
             target_fn,
             init=init,
             names=names,
-            coordinate=coordinate,
+            _coordinate=coordinate,
             gradient=gradient,
         )
         if to_physical is not None:

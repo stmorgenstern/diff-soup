@@ -97,8 +97,15 @@ _EVIDENCE = 1e-12
 def test_the_laplace_evidence_of_a_map_fit_is_its_closed_form(single):
     """evidence(problem, fit) and laplace(problem, fit).log_evidence equal
     log p(y | mode) + log p(mode) + d/2 log 2 pi - 1/2 log det H, with H the observed
-    information plus the prior precision, so the user restates no prior."""
+    information plus the prior precision, so the user restates no prior. The log posterior
+    of an ExperimentSet of the experiment is log p(y | mode) + log p(mode) at the mode."""
     problem, _, fit, _ = single
+    experiments = inf.statistics.ExperimentSet(problem.study.experiments, independent=True)
+    prior = inf.statistics.GaussianPrior(mean=jnp.array([0.5]), scale=jnp.array([0.3]))
+    # 1.0.0 raised AttributeError ('observed'), then TypeError ('coordinate'); measured 0.0
+    # relative difference after the fix, CPU workstation 2026-10-28, bugfix/we1b/r37.py
+    value = float(experiments.log_posterior(prior=prior)(jnp.asarray(fit.params)))
+    np.testing.assert_allclose(value, fit.log_likelihood + fit.log_prior, rtol=_EVIDENCE)
     curvature = inf.information(problem, at=fit)
     precision = np.asarray(curvature.observed) + np.asarray(curvature.prior_precision)
     closed = (

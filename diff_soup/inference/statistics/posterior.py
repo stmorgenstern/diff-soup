@@ -194,9 +194,10 @@ def posterior_target(
     Sampling maps every draw back to the physical Recipe coordinate. The
     change-of-variables term preserves the posterior probability measure.
 
-    With `gradient="reverse"` the reverse-mode gradient at the start must agree with the
-    forward-mode one within 100 times the solvers' largest `rtol`, kept between 1e-3 and
-    1e-1. A float32 solve counts as `rtol` 1e-3 or more.
+    With `gradient="reverse"` the reverse-mode gradient must agree with the forward-mode one
+    within 100 times the solvers' largest `rtol`, kept between 1e-3 and 1e-1. A float32 solve
+    counts as `rtol` 1e-3 or more. The check moves each coordinate of the start by 1% of
+    `max(|z|, 1)`, away from the mode, where the gradient is noise.
     """
     if not isinstance(problem, EstimationProblem):
         raise TypeError("posterior_target requires an InferenceProblem.")

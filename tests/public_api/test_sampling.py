@@ -128,8 +128,8 @@ def test_the_gradient_checks_admit_a_tolerance_limited_solve():
         rate_prior=inf.NormalPrior(mean=0.5, scale=0.3),
         precision=ds.Precision.fp32(),
     )
-    # 1.0.0 held reverse and forward to 1e-6 and refused; measured difference 1.3e-3 at the
-    # MAP against the float32 tolerance 1e-1, CPU workstation 2026-10-28, bugfix/we1b/c3.py
+    # 1.0.0 held reverse and forward to 1e-6 and refused; measured 1.9e-3 at the gate point
+    # against the float32 tolerance 1e-1, CPU workstation 2026-10-28, bugfix/we1b/c4.py
     problem = inf.InferenceProblem(
         # The solver tolerance under test, not a bound (measured effect above)
         decay_experiment(single, noise=NOISE, rtol=1e-6, atol=1e-6),
