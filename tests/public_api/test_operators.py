@@ -18,6 +18,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.domains import (
+    Mesh,
     Operators,
     box_mesh,
     cartesian_grid_1d,
@@ -27,6 +28,8 @@ from diff_soup.domains import (
     staggered_grid_2d,
 )
 
+# measured at most 5.6e-17 on the orientation, coefficient-length, traced-first and composition
+# checks (0.0 on all but the clockwise lumped mass), workstation CPU 2026-10-28, run one by one;
 # measured at most 8.9e-16 on every stencil, rotation, divergence and residual-row check below
 # (0.0 on the control-unit rows), CPU VM 2026-10-22, pytest tests/public_api/test_operators.py
 _EXACT = 1e-12
@@ -60,7 +63,8 @@ def test_grid_stencils_are_exact_on_low_order_polynomials(method):
 
 def test_the_operator_bank_composes_with_jit_ad_vmap_and_keeps_the_field_dtype():
     """The laplacian runs under jit and vmap, differentiates, and keeps a float32 field
-    float32 on a float64 grid; the grid and the mesh curl are linear under jit, vmap and jvp."""
+    float32 on a float64 grid; the grid and the mesh curl are linear under jit, vmap and jvp,
+    and a fresh mesh traced first still runs eagerly."""
     grid = cartesian_grid_1d(12, 0.0, 1.0, method="fvm")
     ops = Operators(grid)
 
@@ -82,6 +86,7 @@ def test_the_operator_bank_composes_with_jit_ad_vmap_and_keeps_the_field_dtype()
         curl = jax.jit(lambda u, bank=bank: bank.curl(u))
         field = _vortex(np.asarray(domain.node_coordinates()))
         batched = jax.vmap(curl)(jnp.stack((field, 2.0 * field)))
+        np.testing.assert_allclose(bank.curl(field), batched[0], rtol=_EXACT, atol=_EXACT)
         np.testing.assert_allclose(batched[1], 2.0 * curl(field), rtol=_EXACT, atol=_EXACT)
         np.testing.assert_allclose(jax.jvp(curl, (field,), (field,))[1], curl(field), atol=_EXACT)
 
@@ -209,3 +214,83 @@ def test_the_lowered_controls_surface_takes_internal_time():
     ``fn`` at SI ``t = 1``."""
     values = _control_recipe(time_scale=4.0).build().controls(jnp.asarray(0.25))
     np.testing.assert_allclose(values["protocol"], 2.0, rtol=0.0, atol=_EXACT)
+
+
+def test_a_clockwise_element_measures_the_same_positive_mass_as_its_mirror():
+    """Listing each triangle of a unit square clockwise leaves its lumped mass, a sixth of
+    the triangle's area at each corner, unchanged."""
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    ccw = Mesh(points, np.array([[0, 1, 2], [1, 3, 2]]), ele_type="TRI3")
+    cw = Mesh(points, np.array([[0, 2, 1], [1, 2, 3]]), ele_type="TRI3")
+    np.testing.assert_allclose(
+        Operators(cw).lumped_mass(), Operators(ccw).lumped_mass(), rtol=0.0, atol=_EXACT
+    )
+
+
+def _per_cell_coefficient():
+    mesh = rectangle_mesh(3, 2, 1.0, 1.0)
+    ops = Operators(mesh)
+    coords = np.asarray(mesh.node_coordinates())
+    u = jnp.asarray(coords[:, 0] ** 2 + coords[:, 1])
+    n_cells, n_q = ops.interp_to_quad(u).shape
+    return ops, u, jnp.linspace(1.0, 2.0, n_cells), n_q
+
+
+@pytest.mark.parametrize("operator", ["div_flux", "mass", "wrong length"])
+def test_a_one_dimensional_coefficient_is_read_by_its_length(operator):
+    """On a mesh a coefficient with one value per cell equals the same values repeated at each
+    cell's quadrature points, and one with neither a value per node nor a value per cell is
+    refused."""
+    ops, u, per_cell, n_q = _per_cell_coefficient()
+    if operator == "wrong length":
+        with pytest.raises(ValueError, match="num_dofs=12.*n_cells=6"):
+            ops.div_flux(per_cell[:-1], u)
+        return
+    apply = (lambda D: ops.div_flux(D, u)) if operator == "div_flux" else ops.mass
+    at_quad = jnp.repeat(per_cell[:, None], n_q, axis=1)
+    np.testing.assert_allclose(apply(per_cell), apply(at_quad), rtol=0.0, atol=_EXACT)
+
+
+_NODAL = 0.25 + np.arange(16) / 16.0
+_COMPOSED = {
+    "lap + 1": (
+        lambda q: q.ops.laplacian(q.T) + 1.0,
+        lambda q: q.ops.laplacian(q.T) + jnp.ones(16),
+    ),
+    "1 + lap": (
+        lambda q: 1.0 + q.ops.laplacian(q.T),
+        lambda q: jnp.ones(16) + q.ops.laplacian(q.T),
+    ),
+    "constant": (lambda q: 1.0, lambda q: jnp.ones(16)),
+    "power": (lambda q: q.T**2, lambda q: q.T * q.T),
+    "abs": (lambda q: abs(q.T), lambda q: jnp.abs(q.T)),
+    "compare": (
+        lambda q: jnp.where(q.T > 0.5, 1.0, 0.0),
+        lambda q: jnp.where(q.ops.interp_to_quad(q.T) > 0.5, 1.0, 0.0),
+    ),
+    "nodal - T": (
+        lambda q: _NODAL - q.T,
+        lambda q: q.ops.interp_to_quad(jnp.asarray(_NODAL)) - q.T,
+    ),
+    "T * lap": (
+        lambda q: q.T * q.ops.laplacian(q.T),
+        lambda q: q.ops.unwrap_field(q.T) * q.ops.laplacian(q.T),
+    ),
+}
+
+
+@pytest.mark.parametrize("form", list(_COMPOSED), ids=list(_COMPOSED))
+def test_a_mesh_field_composes_like_its_explicit_form(form):
+    """On a mesh a constant joins a residual as the source ``1`` would, and a field read
+    composes with powers, ``abs``, comparisons, nodal arrays and operator outputs: each
+    residual equals the one written with explicit nodal or quadrature arrays."""
+    mesh = rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3")
+    coords = np.asarray(mesh.node_coordinates())
+    rows = []
+    for index, expr in enumerate(_COMPOSED[form]):
+        spec = ds.problem(f"composed_{index}").domain("plate", mesh)
+        spec.field("T", mass="differential", scale=1.0)
+        spec.equation(writes="T", reads=("T",))(expr)
+        state = spec.assemble_state({"T": jnp.asarray(0.2 + coords[:, 0] - coords[:, 1] ** 2)})
+        rows.append(spec.build().physics_residual(state, jnp.zeros(0), jnp.asarray(0.0))[0])
+    np.testing.assert_allclose(rows[0], rows[1], rtol=0.0, atol=_EXACT)

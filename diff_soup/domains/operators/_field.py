@@ -33,6 +33,20 @@ fields ``q.c`` stays a plain cell array (FVM/FDM path unchanged).
 Indexing / length are an ambiguous nodal-vs-quad coercion, so ``Field``
 **raises** on ``f[idx]`` / ``len(f)`` and points the author at ``.nodal``
 (DOF space) or the explicit quad value.
+
+Operands of the arithmetic dunders are read by shape: a one-dimensional array
+with one value per node is interpolated to the quadrature points, and one with
+one value per cell is broadcast over each cell's points, so ``q.T - nodal``
+works.  A weak-form term (an operator output such as ``q.ops.laplacian(u)``)
+is not an array: ``Field`` returns ``NotImplemented`` for it, so the term's
+own reflected method decides.  An already-integrated term is scaled row by row
+by the field's nodal values (``q.T * lap`` equals
+``q.ops.unwrap_field(q.T) * lap``).
+
+A JAX array on the LEFT of a binary operator converts the ``Field`` itself
+through ``__jax_array__`` before Python tries the reflected method, so
+``jnp_array - q.T`` broadcasts a nodal array against the quad array and fails.
+Write ``-(q.T - arr)``, or use a NumPy array, which defers to ``Field``.
 """
 
 from __future__ import annotations
@@ -74,10 +88,31 @@ class Field:
         """Decay to the raw quad array so ``jnp`` ufuncs dispatch through us."""
         return self._q
 
-    @staticmethod
-    def _o(o):
-        """Coerce a ``Field`` operand to its raw quad array; pass others through."""
-        return o._q if isinstance(o, Field) else o
+    def _o(self, o):
+        """Coerce an operand to the quad layout of ``self._q``.
+
+        A ``Field`` gives its quad array. A one-dimensional array is read like
+        every FEM operand (``dispatch._read_fem_operand``): one value per node
+        is interpolated to the quadrature points and one value per cell is
+        broadcast over each cell's points. Anything else passes through.
+        """
+        if isinstance(o, Field):
+            return o._q
+        if not hasattr(o, "shape") or len(o.shape) != 1:
+            return o
+        from diff_soup.domains.operators.dispatch import (
+            _read_fem_operand,
+            dispatch_interp_to_quad,
+        )
+
+        domain = self._ops.domain
+        arr, layout = _read_fem_operand(domain, o, "field arithmetic", strict=False)
+        if layout == "nodal":
+            arr = dispatch_interp_to_quad(domain, arr)
+        elif layout != "quad":
+            return o
+        q = self._q
+        return arr.reshape(arr.shape + (1,) * (q.ndim - 2))
 
     # -- tensor-aware multiply -----------------------------------------
     def _is_component_tensor(self, o):
@@ -105,38 +140,76 @@ class Field:
     def _mul(self, o, reflected: bool = False):
         if isinstance(o, Field):
             return self._q * o._q
-        other = jnp.asarray(o)
+        other = jnp.asarray(self._o(o))
         if self._is_component_tensor(other):
             return _scale(self._q, other)
         return other * self._q if reflected else self._q * other
 
     # -- arithmetic (decay to raw quad arrays) -------------------------
+    # A weak-form term defers: its reflected method knows whether it is
+    # already integrated (see the module docstring).
     def __add__(self, o):
-        return self._q + Field._o(o)
+        if _is_weak_term(o):
+            return NotImplemented
+        return self._q + self._o(o)
 
     def __radd__(self, o):
-        return Field._o(o) + self._q
+        return self._o(o) + self._q
 
     def __sub__(self, o):
-        return self._q - Field._o(o)
+        if _is_weak_term(o):
+            return NotImplemented
+        return self._q - self._o(o)
 
     def __rsub__(self, o):
-        return Field._o(o) - self._q
+        return self._o(o) - self._q
 
     def __mul__(self, o):
+        if _is_weak_term(o):
+            return NotImplemented
         return self._mul(o)
 
     def __rmul__(self, o):
         return self._mul(o, reflected=True)
 
     def __truediv__(self, o):
-        return self._q / Field._o(o)
+        if _is_weak_term(o):
+            return NotImplemented
+        return self._q / self._o(o)
 
     def __rtruediv__(self, o):
-        return Field._o(o) / self._q
+        return self._o(o) / self._q
+
+    def __pow__(self, o):
+        if _is_weak_term(o):
+            return NotImplemented
+        return self._q ** self._o(o)
+
+    def __rpow__(self, o):
+        return self._o(o) ** self._q
 
     def __neg__(self):
         return -self._q
+
+    def __pos__(self):
+        return self._q
+
+    def __abs__(self):
+        return jnp.abs(self._q)
+
+    # Ordered comparisons give a boolean quad array, for ``jnp.where``.
+    # ``==`` and ``!=`` stay identity comparisons, so a Field stays hashable.
+    def __lt__(self, o):
+        return self._q < self._o(o)
+
+    def __le__(self, o):
+        return self._q <= self._o(o)
+
+    def __gt__(self, o):
+        return self._q > self._o(o)
+
+    def __ge__(self, o):
+        return self._q >= self._o(o)
 
     # -- indexing / coercion guard (decision 2) ------------------------
     def __getitem__(self, idx):
@@ -155,6 +228,13 @@ class Field:
 
     def __repr__(self):  # pragma: no cover - debugging aid
         return f"Field(nodal_shape={tuple(self.nodal.shape)})"
+
+
+def _is_weak_term(o) -> bool:
+    """Whether ``o`` is a weak-form residual term (imported late: no cycle)."""
+    from diff_soup.domains.operators.dispatch import _WeakTerm
+
+    return isinstance(o, _WeakTerm)
 
 
 # -- pytree registration -----------------------------------------------------

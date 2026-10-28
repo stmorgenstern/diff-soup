@@ -213,6 +213,40 @@ def _build_periodic_dof_map(
     return dof_map, num_dofs
 
 
+def _check_element_jacobians(jac_det: np.ndarray, ele_type: str) -> None:
+    """Reject elements whose Jacobian determinant vanishes or changes sign.
+
+    Either orientation of a whole element is valid, since the measure takes
+    ``|det J|``. A determinant that is zero, or positive at one quadrature
+    point and negative at another of the same element, means a degenerate or
+    tangled element (a self-crossing ``QUAD4`` or ``HEX8``). No integral over it
+    has a meaning.
+
+    Args:
+        jac_det: The determinant at each quadrature point, shape ``(n_cells, n_q)``.
+        ele_type: The element type, for the message.
+
+    Raises:
+        ValueError: If any element is degenerate or tangled.
+    """
+    if jac_det.size == 0:
+        return
+    scale = float(np.max(np.abs(jac_det)))
+    tiny = 1e-12 * scale
+    degenerate = np.any(np.abs(jac_det) <= tiny, axis=1)
+    tangled = np.any(jac_det > tiny, axis=1) & np.any(jac_det < -tiny, axis=1)
+    bad = np.flatnonzero(degenerate | tangled)
+    if bad.size == 0:
+        return
+    kind = "tangled (its Jacobian changes sign)" if tangled[bad[0]] else "degenerate (zero volume)"
+    raise ValueError(
+        f"{bad.size} {ele_type} element(s) are degenerate or tangled; element "
+        f"{int(bad[0])} is {kind}. Check the node order of these cells: the "
+        f"nodes of each element must follow the reference element's order, "
+        f"either clockwise or counter-clockwise, without crossing."
+    )
+
+
 def make_fe_space(
     mesh: Mesh,
     vec: int = 1,
@@ -278,8 +312,13 @@ def make_fe_space(
     # the volume element is r**p dr, and folding that factor in here is what
     # gives every volume integral in the library — stiffness, consistent and
     # lumped mass, sources, projections, reductions — the coordinate metric
-    # with no kernel of its own to change.
-    jxw = jac_det * quad_weights[None, :]
+    # with no kernel of its own to change.  The measure takes |det J|, so an
+    # element listed clockwise (or a 1D cell listed right to left) measures
+    # the same positive volume as its counter-clockwise twin; ``jac_inv``
+    # already gives the right physical gradients for either orientation.
+    if not isinstance(jac_det, jax.core.Tracer):
+        _check_element_jacobians(np.asarray(jac_det), ele_type)
+    jxw = jnp.abs(jac_det) * quad_weights[None, :]
     if metric_p:
         quad_points = jnp.einsum("qn,cnd->cqd", shape_vals, physical)
         jxw = jxw * quad_points[..., 0] ** metric_p
@@ -349,7 +388,12 @@ def scalar_fe_space(mesh: Mesh) -> FiniteElementSpace:
         holder, space = entry
         if holder() is mesh:
             return space
-    space = make_fe_space(mesh, vec=1, periodic_axes=getattr(mesh, "periodic_axes", ()))
+    # The first call may come from inside a trace (``jax.jit`` of an operator
+    # on a fresh mesh). Evaluating at compile time keeps every cached array
+    # concrete, so the space does not leak that trace's tracers into later
+    # eager or traced calls.
+    with jax.ensure_compile_time_eval():
+        space = make_fe_space(mesh, vec=1, periodic_axes=getattr(mesh, "periodic_axes", ()))
     try:
         _SCALAR_SPACES[key] = (
             weakref.ref(mesh, lambda _ref, key=key: _SCALAR_SPACES.pop(key, None)),

@@ -94,6 +94,7 @@ from diff_soup.domains.operators._fem_tensor import (
     tensor_to_voigt_2d,
     tensor_to_voigt_3d,
 )
+from diff_soup.domains.operators._field import Field
 from diff_soup.domains.operators._quadfield import QuadField
 from diff_soup.domains.operators.flux_bc import FluxBC
 from diff_soup.domains.staggered_grid import StaggeredGrid
@@ -140,8 +141,12 @@ class _WeakTerm:
     ``integrated (+|-) integrated -> integrated``; mixing the two
     integrates the nodal side first (FEM consistent mass) and yields an
     integrated term.  Scalar / array scaling and negation preserve the
-    tag.  The class is deliberately minimal — it is only ever produced and
-    consumed within a single FEM residual trace.
+    tag.  An integrated term scales row by row, so a
+    [Field][diff_soup.domains.operators._field.Field] factor enters through
+    its nodal values and a factor at the quadrature points (or one per
+    cell) is refused; a term not yet integrated multiplies pointwise.  The
+    class is deliberately minimal: it is only ever produced and consumed
+    within a single FEM residual trace.
     """
 
     __slots__ = ("value", "integrated", "_domain")
@@ -162,7 +167,54 @@ class _WeakTerm:
     def _unwrap(other):
         if isinstance(other, _WeakTerm):
             return other.value, other.integrated
+        if isinstance(other, Field):
+            # A quad-native field read sums in at its quadrature values.
+            return other._q, None
         return other, None  # plain array/scalar: provenance unknown -> nodal
+
+    def _scale_by(self, other, op_name: str):
+        """Return the per-row factor for ``self * other`` or ``self / other``.
+
+        An integrated term is a vector of test-function integrals, one per
+        node, so it can only be scaled row by row: by a scalar, a nodal array,
+        or the nodal values of a [Field][diff_soup.domains.operators._field.Field]
+        (the same as scaling by ``q.ops.unwrap_field(field)``). A value at the
+        quadrature points, or one per cell, would have to be multiplied in
+        before the integral was taken, so it is refused.
+
+        A term that is not yet integrated multiplies pointwise: a ``Field``
+        enters at its quadrature values and a nodal value is moved to the
+        quadrature points first when the other side lives there.
+        """
+        if isinstance(other, _WeakTerm):
+            raise TypeError(
+                f"cannot {op_name} two weak-form terms: each is already integrated "
+                "against the test functions. Multiply the integrands instead, for "
+                "example inside div_flux(D, u), or integrate the product with "
+                "q.ops.integrate_shape(...)."
+            )
+        if not self.integrated:
+            if isinstance(other, Field):
+                return other._q
+            return other
+        if isinstance(other, Field):
+            return other.nodal
+        arr = jnp.asarray(other)
+        if self._domain.discretization_type != "fem" or arr.ndim == 0:
+            return arr
+        # Any other factor (a component vector, say) broadcasts as before.
+        _, layout = _read_fem_operand(
+            self._domain, arr, op_name, strict=False, ambiguous="nodal"
+        )
+        if layout == "quad":
+            raise TypeError(
+                f"cannot {op_name} an integrated weak-form term (such as "
+                "q.ops.laplacian(u)) by a value at the quadrature points or one per "
+                "cell: the factor would have to enter before the integral. Put it "
+                "inside the operator (div_flux(D, u) takes D at the quadrature "
+                "points), or scale by a nodal array or a field read such as q.T."
+            )
+        return arr
 
     def _combine(self, other, op):
         o_val, o_integrated = self._unwrap(other)
@@ -193,24 +245,38 @@ class _WeakTerm:
     def __rsub__(self, other):
         return self._combine(other, lambda a, b: b - a)
 
+    def _pointwise(self, factor):
+        """Return ``value`` on the layout of ``factor``: quadrature if it lives there."""
+        value = self.value
+        if (
+            not self.integrated
+            and self._domain.discretization_type == "fem"
+            and jnp.ndim(factor) >= 2
+            and jnp.ndim(value) == 1
+        ):
+            value = dispatch_interp_to_quad(self._domain, value)
+        return value
+
     def __mul__(self, other):
         # Scaling by a scalar / nodal coefficient preserves provenance.
-        o_val, _ = self._unwrap(other)
-        return _WeakTerm(self.value * o_val, self.integrated, self._domain)
+        factor = self._scale_by(other, "multiply")
+        return _WeakTerm(self._pointwise(factor) * factor, self.integrated, self._domain)
 
     def __rmul__(self, other):
-        o_val, _ = self._unwrap(other)
-        return _WeakTerm(o_val * self.value, self.integrated, self._domain)
+        factor = self._scale_by(other, "multiply")
+        return _WeakTerm(factor * self._pointwise(factor), self.integrated, self._domain)
 
     def __truediv__(self, other):
-        o_val, _ = self._unwrap(other)
-        return _WeakTerm(self.value / o_val, self.integrated, self._domain)
+        factor = self._scale_by(other, "divide")
+        return _WeakTerm(self._pointwise(factor) / factor, self.integrated, self._domain)
 
     def __neg__(self):
         return _WeakTerm(-self.value, self.integrated, self._domain)
 
 
-def _integrate_nodal_or_quad(domain: Domain, value: Array) -> Array:
+def _integrate_nodal_or_quad(
+    domain: Domain, value: ArrayLike, op_name: str = "integrate", ambiguous: str = "raise"
+) -> Array:
     """Lift a still-nodal-or-quad bare operand to an integrated weak-form vector.
 
     Used in the ``_WeakTerm`` mixed-provenance branch (and ``_as_integrated``)
@@ -221,12 +287,16 @@ def _integrate_nodal_or_quad(domain: Domain, value: Array) -> Array:
     ([dispatch_integrate_scalar_at_quad][]), while a strong-form nodal source
     (leading axis ``num_dofs``) gets the nodal consistent-mass action
     ([_fem_mass_action][]).  This mirrors the same shape discrimination
-    [finalize_residual][] applies to a standalone bare array.
+    [finalize_residual][] applies to a standalone bare array.  The shape is
+    read by [_read_fem_operand][]: a constant integrates as a nodal constant
+    and a per-cell value as a value at the quadrature points.
     """
-    arr = jnp.asarray(value)
-    if _is_quad_shaped(domain, arr):
-        return dispatch_integrate_scalar_at_quad(domain, arr)
-    return _fem_mass_action(domain, arr)
+    arr, layout = _read_fem_operand(domain, value, op_name, ambiguous=ambiguous)
+    if layout == "quad":
+        return _fem_quad_action(domain, arr)
+    if layout == "scalar":
+        arr = jnp.broadcast_to(arr, (_get_fe_space(domain).num_dofs,))
+    return _fem_mass_action(domain, arr, op_name)
 
 
 # The GENERAL per-equation residual finalizer (not FEM-specific despite the
@@ -272,7 +342,7 @@ def finalize_residual(domain: Domain, term) -> Array:
         value = term.value
         if domain.discretization_type != "fem":
             return value
-        return value if term.integrated else _fem_mass_action(domain, value)
+        return value if term.integrated else _integrate_nodal_or_quad(domain, value, "residual")
     # Plain array on FEM: distinguish a quad-shaped value (leading axes
     # ``(n_cells, n_q[, ...])`` — integrated via the quad action ``int f N_i``)
     # from a strong-form *nodal* source (leading axis ``num_dofs``, scalar
@@ -281,48 +351,114 @@ def finalize_residual(domain: Domain, term) -> Array:
     # is ambiguous (a nodal vector field is also 2-D), so dispatch on the leading
     # axis sizes against the FE space.  Identity on grids (lumped mass == 1).
     if domain.discretization_type == "fem":
-        arr = jnp.asarray(term)
-        if arr.ndim >= 2 and _is_quad_shaped(domain, arr):
-            return dispatch_integrate_scalar_at_quad(domain, arr)
-        n_dofs = _get_fe_space(domain).num_dofs
-        if arr.shape[0] != n_dofs:
-            raise ValueError(
-                f"residual shape {tuple(arr.shape)} is neither a nodal vector "
-                f"(leading axis num_dofs={n_dofs}) nor a quad value "
-                f"(leading axes (n_cells, n_q)); cannot integrate. If this is a "
-                f"hand-assembled weak form, tag it with q.ops.as_weak(...)."
-            )
-        return _fem_mass_action(domain, arr)
+        return _integrate_nodal_or_quad(domain, term, "residual")
     return term
 
 
-def _is_quad_shaped(domain: Domain, arr: Array) -> bool:
-    """True iff ``arr``'s leading axes are ``(n_cells, n_q[, ...])``.
+def _read_fem_operand(
+    domain: Domain,
+    value: ArrayLike,
+    op_name: str,
+    *,
+    strict: bool = True,
+    ambiguous: str = "raise",
+) -> tuple[Array, str]:
+    """Read an FEM operand by its shape, the one rule every FEM operator uses.
 
-    Discriminates a quadrature-point value from a nodal vector/tensor field
-    (which is also ``ndim >= 2`` but leads with ``num_dofs``).  On a mesh whose
-    cell count happens to equal its DOF count, an array can satisfy both
-    readings at once; the shape then carries no answer and the caller has to
-    say which it meant.
+    A 0-d value is a constant (layout ``"scalar"``). A one-dimensional array of
+    length ``num_dofs`` is nodal (``"nodal"``). One of length ``n_cells`` holds
+    one value per cell and is broadcast to that cell's quadrature points
+    (``"quad"``). An array of two or more dimensions is ``"quad"`` when its
+    leading axes are ``(n_cells, n_q)`` and ``"nodal"`` when its leading axis is
+    ``num_dofs``.
+
+    A one-dimensional array that fits both lengths (a fully periodic ``QUAD4``
+    or ``HEX8`` mesh has as many cells as DOFs) is read as nodal, since a field
+    read such as ``q.T`` reaches the operators as its nodal array; give a
+    per-cell value there with the shape ``(n_cells, n_q)``.
+
+    Args:
+        domain: FEM mesh domain.
+        value: The operand.
+        op_name: The operator, for the message.
+        strict: Raise on any other shape. If `False`, return layout ``"other"``.
+        ambiguous: What an array of two or more dimensions that fits both
+            readings is: ``"raise"``, ``"quad"`` or ``"nodal"``.
+
+    Returns:
+        The operand as an array, with a per-cell value broadcast to
+        ``(n_cells, n_q)``, and its layout.
 
     Raises:
-        ValueError: If ``arr``'s shape matches the quadrature reading *and* the
-            nodal reading, so the intended integral is ambiguous.
+        ValueError: If the shape fits no reading and `strict` is set, or fits
+            both and `ambiguous` is ``"raise"``.
     """
+    arr = jnp.asarray(value)
+    if arr.ndim == 0:
+        return arr, "scalar"
     fe = _get_fe_space(domain)
+    n_dofs = fe.num_dofs
     n_cells = fe.shape_grads.shape[0]
     n_q = fe.shape_vals.shape[0]
-    quad_shaped = arr.ndim >= 2 and arr.shape[0] == n_cells and arr.shape[1] == n_q
-    if quad_shaped and n_cells == fe.num_dofs:
+    nodal = arr.shape[0] in (n_dofs, fe.num_total_nodes)
+    if arr.ndim == 1:
+        if nodal:
+            return arr, "nodal"
+        if arr.shape[0] == n_cells:
+            return jnp.broadcast_to(arr[:, None], (n_cells, n_q)), "quad"
+        if not strict:
+            return arr, "other"
         raise ValueError(
-            f"residual shape {tuple(arr.shape)} reads both as a quadrature value "
-            f"(n_cells={n_cells}, n_q={n_q}) and as a nodal field "
-            f"(num_dofs={fe.num_dofs}) on this mesh, so the integration rule is "
-            f"ambiguous. Integrate a quadrature value with "
-            f"q.ops.integrate_shape(...) or tag an already-integrated "
-            f"weak form with q.ops.as_weak(...)."
+            f"{op_name}: a one-dimensional operand on this mesh holds one value per "
+            f"node (length num_dofs={n_dofs}) or one per cell (length "
+            f"n_cells={n_cells}); got length {arr.shape[0]}."
         )
-    return quad_shaped
+    quad = arr.shape[0] == n_cells and arr.shape[1] == n_q
+    if quad and nodal:
+        if ambiguous == "raise":
+            raise ValueError(
+                f"{op_name}: shape {tuple(arr.shape)} reads both as a quadrature value "
+                f"(n_cells={n_cells}, n_q={n_q}) and as a nodal field "
+                f"(num_dofs={n_dofs}) on this mesh, so the integration rule is "
+                f"ambiguous. Integrate a quadrature value with "
+                f"q.ops.integrate_shape(...) or tag an already-integrated "
+                f"weak form with q.ops.as_weak(...)."
+            )
+        return arr, ambiguous
+    if quad:
+        return arr, "quad"
+    if nodal:
+        return arr, "nodal"
+    if not strict:
+        return arr, "other"
+    hint = (
+        " If this is a hand-assembled weak form, tag it with q.ops.as_weak(...)."
+        if op_name == "residual"
+        else ""
+    )
+    raise ValueError(
+        f"{op_name}: shape {tuple(arr.shape)} is neither nodal (leading axis "
+        f"num_dofs={n_dofs}) nor a value at the quadrature points (leading axes "
+        f"(n_cells, n_q) = ({n_cells}, {n_q})).{hint}"
+    )
+
+
+def _require_nodal(domain: Domain, u: ArrayLike, op_name: str) -> Array:
+    """Return `u` if it holds one value per node, else raise.
+
+    A gather ``u[fe.dof_cells]`` clamps out-of-range indices, so a field of the
+    wrong length would otherwise give a wrong answer without an error.
+
+    Raises:
+        ValueError: If `u` is not nodal.
+    """
+    arr, layout = _read_fem_operand(domain, u, op_name, strict=False, ambiguous="nodal")
+    if layout != "nodal":
+        raise ValueError(
+            f"{op_name}: the field must hold one value per node (leading axis "
+            f"num_dofs={_get_fe_space(domain).num_dofs}); got shape {tuple(jnp.shape(u))}."
+        )
+    return arr
 
 
 def dispatch_integrate(domain: Domain, expr: Array) -> Array:
@@ -744,6 +880,7 @@ def _get_fe_space(domain):
 def _fem_laplacian(domain: Domain, u: Array) -> Array:
     """FEM Laplacian backend: assemble ``-K u`` (weak form, IBP sign flipped)."""
     fe = _get_fe_space(domain)
+    u = _require_nodal(domain, u, "laplacian")
     cell_u = u[fe.dof_cells]  # (n_cells, n_nodes_per_cell)
     # stiffness_action_elem returns K_e @ u_e = int grad(u) . grad(N_i) dOmega
     # (positive stiffness action; the residual of -nabla^2 u).  The weak form
@@ -758,31 +895,29 @@ def _fem_laplacian(domain: Domain, u: Array) -> Array:
 def _fem_div_flux(domain: Domain, D: ArrayLike, u: Array) -> Array:
     """FEM ``div(D grad u)`` backend: assemble negative diffusion stiffness."""
     fe = _get_fe_space(domain)
+    u = _require_nodal(domain, u, "div_flux")
     cell_u = u[fe.dof_cells]  # (n_cells, n_nodes_per_cell)
 
     n_cells = fe.dof_cells.shape[0]
     n_q = fe.shape_vals.shape[0]
-    # D may be scalar, nodal, or quad-sampled (strong-form authoring: pointwise
-    # math on a quad-native ``Field`` decays to a raw ``(n_cells, n_q)`` array).
-    if jnp.ndim(D) == 0:
-        # Scalar D: broadcast
+    # D may be scalar, nodal, per-cell, or quad-sampled (strong-form authoring:
+    # pointwise math on a quad-native ``Field`` decays to a raw
+    # ``(n_cells, n_q)`` array).  A per-cell D broadcasts to the quad points.
+    D, layout = _read_fem_operand(domain, D, "div_flux", ambiguous="quad")
+    if layout == "scalar":
         f_elem = jax.vmap(lambda grads, jxw, u_e: diffusion_elem(grads, jxw, D, u_e))(
             fe.shape_grads, fe.jxw, cell_u
         )
-    elif jnp.shape(D) == (n_cells, n_q):
-        # Quad-sampled D: already at quadrature points — use directly (full
-        # quadrature accuracy for nonlinear mobilities; no nodal round-trip).
-        f_elem = jax.vmap(diffusion_elem)(fe.shape_grads, fe.jxw, D, cell_u)
-    elif jnp.ndim(D) == 1:
-        # Nodal D: gather to elements, interpolate to quad points
-        cell_D = D[fe.dof_cells]  # (n_cells, n_nodes_per_cell)
-        D_q = jnp.einsum("qn,cn->cq", fe.shape_vals, cell_D)  # (n_cells, n_q)
+    elif D.ndim == 1 or D.shape == (n_cells, n_q):
+        # Nodal D is interpolated to the quad points; quad-sampled D is used
+        # directly (full quadrature accuracy for nonlinear mobilities).
+        D_q = dispatch_interp_to_quad(domain, D) if layout == "nodal" else D
         f_elem = jax.vmap(diffusion_elem)(fe.shape_grads, fe.jxw, D_q, cell_u)
     else:
         raise ValueError(
             "div_flux(D, u) on FEM: D must be a scalar, a nodal array "
-            f"(num_dofs,), or a quad-sampled array ({n_cells}, {n_q}); got "
-            f"shape {jnp.shape(D)}."
+            f"({fe.num_dofs},), a per-cell array ({n_cells},), or a quad-sampled "
+            f"array ({n_cells}, {n_q}); got shape {jnp.shape(D)}."
         )
 
     # diffusion_elem returns int D grad(u) . grad(N_i) dOmega (positive
@@ -851,11 +986,11 @@ def dispatch_mass(domain: Domain, u: Array) -> Array:
     if dt in ("fvm", "fdm"):
         return u
     if dt == "fem":
-        return _integrate_nodal_or_quad(domain, u)
+        return _integrate_nodal_or_quad(domain, u, "mass")
     raise ValueError(f"Unknown discretization type: {dt!r}")
 
 
-def _fem_mass_action(domain: Domain, u: Array) -> Array:
+def _fem_mass_action(domain: Domain, u: ArrayLike, op_name: str = "mass") -> Array:
     """Consistent mass matrix action for FEM: int N_i N_j u_j dOmega.
 
     Handles a scalar nodal field ``(n_nodes,)`` and a vector/tensor nodal
@@ -866,7 +1001,7 @@ def _fem_mass_action(domain: Domain, u: Array) -> Array:
     have it integrated on FEM exactly like a scalar source.
     """
     fe = _get_fe_space(domain)
-    u = jnp.asarray(u)
+    u = _require_nodal(domain, u, op_name)
 
     def _scalar_action(col):
         cell_u = col[fe.dof_cells]
@@ -1198,6 +1333,7 @@ def dispatch_interp_to_quad(domain: Domain, u: Array) -> Array:
     """
     _require_fem(domain, "interp_to_quad")
     fe = _get_fe_space(domain)
+    u = _require_nodal(domain, u, "interp_to_quad")
     # cell_u: (n_cells, n_nodes_per_cell) for scalar,
     #         (n_cells, n_nodes_per_cell, *component_dims) for vector/tensor.
     cell_u = u[fe.dof_cells]
@@ -1210,7 +1346,7 @@ def dispatch_interp_to_quad(domain: Domain, u: Array) -> Array:
     return jnp.einsum("qn,cn...->cq...", fe.shape_vals, cell_u)
 
 
-def dispatch_integrate_scalar_at_quad(domain: Domain, f_q: Array) -> Array:
+def dispatch_integrate_scalar_at_quad(domain: Domain, f_q: ArrayLike) -> Array:
     """Integrate a quad-point field against shape functions: ``int f_q N_i dOmega``.
 
     FEM-only: consumes quadrature-point values, which only exist on FEM.
@@ -1230,7 +1366,12 @@ def dispatch_integrate_scalar_at_quad(domain: Domain, f_q: Array) -> Array:
         ``(num_dofs, *component_dims)`` for vector/tensor inputs.
     """
     _require_fem(domain, "integrate_scalar_at_quad")
+    # A constant, a per-cell value or a nodal value is read by its shape.
+    return _integrate_nodal_or_quad(domain, f_q, "integrate_shape", ambiguous="quad")
 
+
+def _fem_quad_action(domain: Domain, f_q: Array) -> Array:
+    """Integrate a value at the quadrature points: ``int f_q N_i dOmega``."""
     fe = _get_fe_space(domain)
 
     def _scalar_integrate(f_scalar_q):

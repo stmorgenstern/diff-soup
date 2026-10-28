@@ -5,7 +5,7 @@ Converts boundary polygons (from [mask_to_polygon][diff_soup.domains.geometry.ma
 to triangulated [Mesh][diff_soup.domains.mesh.Mesh] objects ready for FEM
 assembly.
 
-Meshing runs on ``gmsh``, which installs with diff_soup.
+Meshing needs ``gmsh`` from the ``mesh`` extra, ``pip install "diff-soup[mesh]"``.
 """
 
 from __future__ import annotations
@@ -17,6 +17,23 @@ import numpy as np
 from diff_soup._optional import import_optional
 from diff_soup.domains.geometry.mask import mask_to_polygon
 from diff_soup.domains.mesh import Mesh, TaggedMesh
+
+
+def _ccw_loop(polygon: List[Tuple[float, float]], line_tags: List[int]) -> List[int]:
+    """Return the gmsh curve-loop tags that traverse *polygon* counter-clockwise.
+
+    gmsh orients each triangle like the loop it meshes, so a clockwise polygon
+    (an OpenCV contour, for one) would give clockwise triangles. The measure is
+    orientation-free, but a counter-clockwise mesh is the convention every
+    other factory follows. Reversing the loop reverses each line by sign, so
+    the line tags, and the physical groups that hold them, are unchanged.
+    """
+    xy = np.asarray(polygon, dtype=np.float64)
+    x, y = xy[:, 0], xy[:, 1]
+    signed_area = 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+    if signed_area < 0.0:
+        return [-lt for lt in reversed(line_tags)]
+    return list(line_tags)
 
 
 def polygon_to_mesh(
@@ -31,6 +48,7 @@ def polygon_to_mesh(
     Args:
         polygon: Ordered list of ``(x, y)`` vertices defining the domain boundary.
             The polygon is automatically closed (last vertex connected to first).
+            Either orientation works; the triangles always come out counter-clockwise.
             Must have at least 3 vertices.
         mesh_size: Target element size in physical units.  Smaller values produce finer
             meshes with more elements.
@@ -84,8 +102,8 @@ def polygon_to_mesh(
             tag = gmsh.model.geo.addLine(point_tags[i], point_tags[(i + 1) % n])
             line_tags.append(tag)
 
-        # Curve loop + plane surface
-        loop_tag = gmsh.model.geo.addCurveLoop(line_tags)
+        # Curve loop + plane surface, counter-clockwise (see _ccw_loop)
+        loop_tag = gmsh.model.geo.addCurveLoop(_ccw_loop(polygon, line_tags))
         gmsh.model.geo.addPlaneSurface([loop_tag])
 
         gmsh.model.geo.synchronize()
@@ -373,6 +391,7 @@ def polygon_to_tagged_mesh(
 
     Args:
         polygon: Ordered ``(x, y)`` vertices defining the domain boundary (auto-closed).
+            Either orientation works; the triangles always come out counter-clockwise.
         mesh_size: Target element size.
         segment_tags: Optional list of integer tags, one per polygon edge.  Ids may
             repeat to group edges into one region.  If ``None``, edges are tagged
@@ -447,8 +466,8 @@ def polygon_to_tagged_mesh(
             lt = gmsh.model.geo.addLine(point_tags[i], point_tags[(i + 1) % n_verts])
             line_tags.append(lt)
 
-        # Curve loop + surface
-        loop_tag = gmsh.model.geo.addCurveLoop(line_tags)
+        # Curve loop + surface, counter-clockwise (see _ccw_loop)
+        loop_tag = gmsh.model.geo.addCurveLoop(_ccw_loop(polygon, line_tags))
         gmsh.model.geo.addPlaneSurface([loop_tag])
         gmsh.model.geo.synchronize()
 

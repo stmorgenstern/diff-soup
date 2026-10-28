@@ -51,7 +51,7 @@ class Mesh(Domain):
 
     Args:
         points: The node coordinates, shape `(num_nodes, dim)`.
-        cells: The node indices of each element, one row per element.
+        cells: The node indices of each element, one row per element. A row may run clockwise or counter-clockwise.
         ele_type: The element type, such as `"LINE2"`, `"TRI3"`, `"QUAD4"`, `"TET4"` or `"HEX8"`.
         periodic_axes: Axes whose opposite boundaries are identified as periodic, in two or more dimensions.
         coord_system: The [CoordSystem][diff_soup.domains.CoordSystem], which must be Cartesian unless the mesh is one-dimensional.

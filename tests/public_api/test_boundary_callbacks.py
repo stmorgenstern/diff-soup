@@ -19,7 +19,8 @@ _TIGHT = {"rtol": 1e-8, "atol": 1e-10}
 # tests/public_api/test_boundary_callbacks.py::test_a_facet_flux_closes_its_total_and_a_traction_reads_the_facet_normal
 # tests/public_api/test_boundary_callbacks.py::test_a_member_flux_reads_member_and_problem_parameters
 # measured 0.0 on the residual, derivative, Robin, facet-total, traction and member-flux
-# comparisons it bounds, CPU VM 2026-10-22, pytest on the four node ids above
+# comparisons it bounds, CPU VM 2026-10-22, pytest on the four node ids above; measured 0.0
+# on test_a_flux_on_a_clockwise_mesh_equals_the_flux_on_its_mirror, workstation CPU 2026-10-28
 _EXACT = 1e-12
 # measured 1.3e-8 relative between the fitted and the generating knot values, CPU VM 2026-10-22,
 # pytest tests/public_api/test_boundary_callbacks.py::test_a_dirichlet_function_callback_fits_a_learnable_signal
@@ -231,4 +232,32 @@ def test_a_member_flux_reads_member_and_problem_parameters():
     )
     np.testing.assert_allclose(
         problem.family_view("particles").field(f, "c_s"), expected, atol=_EXACT
+    )
+
+
+def _flux_rows(cells):
+    """Residual of ``laplacian(T) = 0`` with a unit inflow on the right edge of a two-triangle
+    unit square, at ``T = x + 2 y``."""
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    mesh = ds.domains.TaggedMesh(
+        points,
+        np.asarray(cells),
+        ele_type="TRI3",
+        boundary_edges=np.array([[1, 3]]),
+        boundary_tags=np.array([2]),
+        tag_names={2: "right"},
+    )
+    spec = ds.problem("square_inflow").domain("square", mesh)
+    spec.field("T", mass="differential", scale=1.0)
+    spec.equation(writes="T", reads=("T",))(lambda q: q.ops.laplacian(q.T))
+    spec.bc.flux("T", tag="right", value=1.0)
+    state = spec.assemble_state({"T": jnp.asarray(points[:, 0] + 2.0 * points[:, 1])})
+    return spec.build().physics_residual(state, jnp.zeros(0), jnp.asarray(0.0))[0]
+
+
+def test_a_flux_on_a_clockwise_mesh_equals_the_flux_on_its_mirror():
+    """Listing every triangle clockwise leaves the residual of a flux condition unchanged:
+    the interior rows keep their sign relative to the boundary inflow."""
+    np.testing.assert_allclose(
+        _flux_rows([[0, 2, 1], [1, 2, 3]]), _flux_rows([[0, 1, 2], [1, 3, 2]]), atol=_EXACT
     )
