@@ -17,6 +17,7 @@ def on_post_page(output, page, config):
     files = _FILES.get("files")
 
     def fix(match):
+        """Return the matched link pointing at the rendered page, or unchanged."""
         target = posixpath.normpath(
             posixpath.join(posixpath.dirname(page.file.src_uri), match.group(1))
         )
@@ -32,5 +33,6 @@ _FILES = {}
 
 
 def on_files(files, config):
+    """Keep the site's file collection for `on_post_page`."""
     _FILES["files"] = files
     return files

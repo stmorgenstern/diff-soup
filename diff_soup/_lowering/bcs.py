@@ -859,9 +859,7 @@ def _grid_face_of(domain, indices, *, face=None, bc_desc: str) -> tuple[int, str
             "selection must be cells of one boundary face; name it with axis= and side=."
         )
     first_faces = [f for f in faces if bool(on(f)[0])]
-    bad = next(
-        int(idx[k]) for k in range(idx.size) if not any(bool(on(f)[k]) for f in first_faces)
-    )
+    bad = next(int(idx[k]) for k in range(idx.size) if not any(bool(on(f)[k]) for f in first_faces))
     raise ValueError(
         f"{bc_desc}: cells {int(idx[0])} and {bad} lie on different grid faces. The "
         "selection must be the cells of one boundary face; declare one condition per "

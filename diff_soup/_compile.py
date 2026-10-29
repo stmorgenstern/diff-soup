@@ -81,6 +81,7 @@ class CompiledSolve:
     """
 
     def __init__(self, executable, treedefs, statics, save_times, out_static, seconds):
+        """Hold the compiled executable and what its inputs must look like."""
         self._executable = executable
         self._treedefs = treedefs
         self._statics = statics

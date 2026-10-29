@@ -2635,7 +2635,8 @@ def _loop_fns(
             fp64_fallbacks=(
                 state.fp64_fallbacks
                 if state.fp64_fallbacks is None or report.fp64_fallbacks is None
-                else state.fp64_fallbacks + jnp.asarray(report.fp64_fallbacks, jnp.result_type(float))
+                else state.fp64_fallbacks
+                + jnp.asarray(report.fp64_fallbacks, jnp.result_type(float))
             ),
             multirhs_solves=(
                 state.multirhs_solves

@@ -2490,7 +2490,6 @@ def _capture_component_forms(eqset: EquationSet, probe_f, state_size: int, n_lam
     residual once, eagerly, at a generic positive state (the family pass's
     convention), on a grid and on a mesh alike.
     """
-
     dtype = jax.dtypes.canonicalize_dtype(dtype)
 
     def evaluate():

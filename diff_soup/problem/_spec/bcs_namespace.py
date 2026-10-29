@@ -62,8 +62,7 @@ def _where(
     given = [on is not None, tag is not None, node_indices is not None, axis is not None]
     if sum(given) != 1:
         raise ValueError(
-            f"spec.bc.{kind}: provide exactly one of on= / tag= / node_indices= / "
-            "axis= with side="
+            f"spec.bc.{kind}: provide exactly one of on= / tag= / node_indices= / axis= with side="
         )
     if axis is not None:
         if side not in ("low", "high"):

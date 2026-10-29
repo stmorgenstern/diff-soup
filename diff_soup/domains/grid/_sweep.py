@@ -34,7 +34,9 @@ def sweep_axis(kernel: Callable, c: Array, axis: int, *coefficients) -> Array:
     batched = tuple(jnp.ndim(k) == c.ndim for k in coefficients)
     columns = [moved.reshape(shape[0], -1)]
     for k, is_field in zip(coefficients, batched):
-        columns.append(jnp.moveaxis(jnp.asarray(k), axis, 0).reshape(shape[0], -1) if is_field else k)
+        columns.append(
+            jnp.moveaxis(jnp.asarray(k), axis, 0).reshape(shape[0], -1) if is_field else k
+        )
     in_axes = (1,) + tuple(1 if is_field else None for is_field in batched)
     out = jax.vmap(kernel, in_axes=in_axes, out_axes=1)(*columns)
     return jnp.moveaxis(out.reshape(shape), 0, axis)

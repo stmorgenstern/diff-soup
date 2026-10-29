@@ -253,6 +253,9 @@ filterwarnings = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The docs notebooks are executed once and committed with their outputs; their code
+# follows the tutorial style, not the library's lint rules.
+extend-exclude = ["docs/**/*.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "D"]

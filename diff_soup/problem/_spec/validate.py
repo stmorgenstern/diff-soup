@@ -194,8 +194,8 @@ def _validate_periodic(spec, field_names: set) -> list[str]:
         cells = _selected_cells(bc, dom, shape)
         if cells is None:
             continue
-        faces = [bc.where["face"]] if bc.where.get("face") is not None else _faces_holding(
-            cells, shape
+        faces = (
+            [bc.where["face"]] if bc.where.get("face") is not None else _faces_holding(cells, shape)
         )
         if faces and all(axis in axes for axis, _ in faces):
             axis, side = faces[0]

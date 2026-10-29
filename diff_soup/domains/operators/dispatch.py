@@ -211,9 +211,7 @@ class _WeakTerm:
         if self._domain.discretization_type != "fem" or arr.ndim == 0:
             return arr
         # Any other factor (a component vector, say) broadcasts as before.
-        _, layout = _read_fem_operand(
-            self._domain, arr, op_name, strict=False, ambiguous="nodal"
-        )
+        _, layout = _read_fem_operand(self._domain, arr, op_name, strict=False, ambiguous="nodal")
         if layout == "quad":
             raise TypeError(
                 f"cannot {op_name} an integrated weak-form term (such as "
@@ -613,7 +611,9 @@ def _per_axis_coefficients(domain: Domain, D) -> tuple:
     for entry in D:
         entry = jnp.asarray(entry)
         _check_grid_coefficient(domain, entry)
-        out.append(entry if isinstance(domain, Grid1D) else _maybe_reshape_coefficient(domain, entry))
+        out.append(
+            entry if isinstance(domain, Grid1D) else _maybe_reshape_coefficient(domain, entry)
+        )
     return tuple(out)
 
 
@@ -626,8 +626,10 @@ def _per_axis_div_flux(domain: Domain, D, u: Array, dt: str) -> Array:
         )
     D_axes = _per_axis_coefficients(domain, D)
     if isinstance(domain, Grid1D):
-        return fvm_div_flux_1d(domain, u, D_axes[0]) if dt == "fvm" else fdm_div_flux_1d(
-            domain, u, D_axes[0]
+        return (
+            fvm_div_flux_1d(domain, u, D_axes[0])
+            if dt == "fvm"
+            else fdm_div_flux_1d(domain, u, D_axes[0])
         )
     u_grid = _reshape_to_grid(domain, u)
     kernel = fvm_div_flux_axes if dt == "fvm" else fdm_div_flux_axes

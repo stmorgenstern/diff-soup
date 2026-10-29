@@ -21,7 +21,7 @@ _INSTALL_HINTS: dict[str, str] = {
     # PyPI package name for ``cv2`` (the import is ``cv2`` but the package
     # is ``opencv-python``).
     "cv2": "pip install opencv-python",
-    "meshio": "pip install \"diff-soup[mesh]\"",
+    "meshio": 'pip install "diff-soup[mesh]"',
     "optax": "pip install optax",
 }
 

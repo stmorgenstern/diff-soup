@@ -409,7 +409,9 @@ def _emit_bc(bc: BCSpec, var_map: dict[str, Any], domain=None):
         # Danckwerts ``v c - D dc/dn = v c_in``: the face carries the total flux
         # ``v c_in`` into the domain, while div_advect carries no flux in through
         # it and div_flux keeps its natural zero flux there.
-        return FluxBC(var=var, where=where, flux_fn=_inflow_flux_fn(bc.velocity, bc.value, bc.value_fn))
+        return FluxBC(
+            var=var, where=where, flux_fn=_inflow_flux_fn(bc.velocity, bc.value, bc.value_fn)
+        )
     if bc.kind == "dirichlet":
         return DirichletBC(
             var=var,
