@@ -2,155 +2,92 @@
 
 ## 1.1.0 (unreleased)
 
-Fixes and additions from the first round of tutorials written against 1.0.0. Entry ids refer to the
-issue ledger of that effort.
+New [tutorials](https://stmorgenstern.github.io/diff-soup/tutorials/) and [worked examples](https://stmorgenstern.github.io/diff-soup/examples/), and the fixes and features found and added while writing them.
 
-### Behaviour changes
+### Breaking changes
 
-- `sample(kernel="nuts")` adapts during `warmup` and keeps each chain's adapted state, so the kept draws
-  start adapted. `adapt=` chooses how: `"pooled"` (the default for several chains: ChEES, one step size
-  and diagonal mass matrix from all batched chains), `"window"` (Stan's schedule per chain),
-  `"step_size"` or `None` (a fixed `step_size`); `mass="dense"`, `step_size=` and `max_tree_depth=` are
-  new; `warmup` defaults to 200 (was 500); `draws.info["adaptation"]` records what ran. One chain with
-  `adapt="window"` (the one-chain default) draws what it drew before for a given key and warmup.
-  Requires blackjax 1.7 or newer. (WE1-7)
-- `NewtonTrustRegion(hessian=)` defaults to `"auto"`: the Gauss-Newton matrix whenever the problem
-  has residual rows (every `InferenceProblem` and `LeastSquaresProblem`, including non-Gaussian
-  likelihoods, which lower to signed deviance rows), the exact Hessian otherwise; `optsolve` and
-  `constrained_optsolve` fit with Gauss-Newton by default. `hessian="true"` restores the exact
-  Hessian of previous releases. (owner decision)
-- The Gauss-Newton Jacobian is tiled: `NewtonTrustRegion(hessian_tile=)` applies to it and
-  `LevenbergMarquardt(jacobian_tile=)` is new; under `"auto"` it is formed whole when it fits the free
-  device memory, else 32, 16 or 8 directions at a time, a Jacobian that cannot fit stops the fit before
-  its first step, and `result.info` records the tile. With fitted window starts one tangent per
-  parameter and per window-start entry goes through all windows at once: an 803-variable
-  FitzHugh-Nagumo Jacobian takes 7 s instead of 31 s on CPU (0.8 s instead of 3.3 s on GPU) with a
-  quarter of the memory, bitwise unchanged. An integer `hessian_tile` was ignored by the Gauss-Newton
-  Jacobian before. (R-27, U-3)
-- `spec.observe.spatial_mean` and `spec.observe.boundary_mean` now average `fn`'s nodal values
-  (volume-weighted over the domain; face-area or facet-measure weighted over `tag`) and return a
-  scalar. A `fn` that returns a scalar is refused at build; one that already averaged per node is
-  averaged again. `boundary_mean(tag=)` must name a tag the domain resolves. 1.0.0 recorded the label
-  only. (A-6)
-- `spec.bc.neumann` imposes the normal derivative `du/dn = s` on FVM, FDM and FEM; it was an alias of
-  `spec.bc.flux` (`D du/dn = s`). `name=` and `cross_facet=` stay on `flux`. (R-14)
-- On 2D and 3D grids, flux, Robin and Neumann conditions and boundary integrals weight each selected
-  cell by one face. A node selection that spans several faces, or holds only edge or corner cells,
-  raises instead of over-counting. (R-29)
-- The operator-level `FluxBC` had the wrong sign on the low side of an FVM grid and crashed with a
-  per-cell `D` on a 2D grid; both are fixed, and `FluxBC` works on 2D/3D FDM grids. (R-35)
-- `NewtonTrustRegion` and `LevenbergMarquardt` end `STALLED` (`converged=False`) when a step or
-  cost test passes on a step the trust radius or damping held short while the model still predicts a
-  decrease. `result.info["stall_reason"]` says why (`radius_collapsed`, `evaluation_noise` or
-  `invalid_trials`). A cost-tolerance stop now needs a gain ratio above 0.25. (R-25, C-5)
-- Fitted window starts (`Multishoot` with `Windows.uniform` or `Windows.at`) solve each window once
-  per evaluation, saving its frames, instead of once per observed frame. With 110 frames in 5 windows
-  the integrated time drops from 1265 to 110, the residual is 14x and the Gauss-Newton Jacobian 12.6x
-  faster, with much less memory. Fitted values are unchanged up to the solver tolerance. (R-21)
-- `optsolve` on a problem with fitted window starts defaults to
-  `NewtonTrustRegion(hessian="gauss-newton")`. `hessian_tile` defaults to `"auto"`: the true Hessian
-  is formed whole up to `dense_cutoff` parameters and 32, 16 or 8 directions at a time above, as the
-  device allows; a Hessian that cannot fit the device stops the fit before its first step with a
-  `ConfigurationError` naming the alternatives. (C-1, R-23)
-- `optsolve(checkpoint=)` resumes `LevenbergMarquardt` and `NewtonTrustRegion` fits from their saved
-  steps and refuses a directory written by a fit of other parameters. (R-20)
-- A fit seeds `with_start`, `posterior_target`, `information(at=)`, `identifiability`, `profile`,
-  `predict` and `OptResult.load(problem=)` when its parameter layout matches, so a rebuilt recipe or
-  another solver tolerance no longer refuses it; a mapping `{handle: value}` is accepted as a start.
-  (WE1-1, R-18)
-- `verify_gradient` returns a verdict (`passed`, `failed`, `inconclusive`); `sample(kernel="nuts")`
-  audits the gradient at a jittered chain start and refuses only a failed audit. (WE1-2, R-19)
-- The identifiability check skips learnable-function (network) columns, on joint (multi-experiment)
-  problems too; a fit of network weights alone records a note instead of warning and builds no
-  diagnostics Jacobian; a fit with scalars beside a network differentiates only the scalar columns.
-  `theta_singular_values`, `jacobian_cond` and `param_group_cond` cover the non-network columns.
-  (10, U-2, R-26)
-- `jax.grad` through a solve with the default forward-only adjoint raises a `ValueError` naming
-  `CheckpointAdjoint` instead of JAX's while-loop message. (C-4)
-- `ds.default_theta(problem, values)` validates its keys, values and shapes, takes a whole module for
-  a function, and refuses a handle that owns no array; two problems equal in content no longer share
-  one set of overrides; fixed parameters declared from one array, and functions declared from one
-  module, are copied. (7, R-1, R-2, R-3, R-4, R-5)
-- `pdesolve(theta=)` refuses a theta that is not the problem's parameter pytree, naming
-  `ds.default_theta`. (R-5)
-- Meshes: element volumes use `|det J|`, so a clockwise polygon, mask or hand-built mesh gives
-  positive measures and the right sign on flux and Robin terms; a tangled element raises; HRZ lumping
-  raises instead of skipping elements. (2)
-- FEM operators read a one-dimensional coefficient by its length: `num_dofs` is nodal, `n_cells` is
-  one value per cell; any other length raises. (5)
-- The mixed `Precision.fp32_factor()` policy solves its float32 factors unrefined, as documented;
-  it was running a hidden cuDSS refinement step on every corrector solve. (P-1)
-- `stats.linear_solve_mode` reports `"fp32_factor"` for the mixed policy (float32 factors under
-  float64 compute) and keeps `"fp32"` for end-to-end float32; 1.0.0 reported `"fp32"` for both. (P13)
+- `spec.observe.{spatial_mean,boundary_mean}` now average. `fn` returns one value per node, weighted by cell volume or facet measure. Previously the name was only a label. A scalar-valued `fn` is now refused.
 
-### Additions
+  ```python
+  # Before (1.0.0): fn computed the mean
+  spec.observe.spatial_mean(name="T_avg", fn=lambda q: jnp.mean(q.T))
+  # After: fn returns nodal values
+  spec.observe.spatial_mean(name="T_avg", fn=lambda q: q.T)
+  ```
 
-- `read_mesh` reads TET10 meshes in the basis's node order (meshio's `tetra10` swaps two mid-edge
-  nodes), so they are no longer reported as tangled. (R-39)
-- `ds.inference.approx.WIRE`, a coordinate network with the real Gabor-wavelet activation
-  `cos(omega_0 z) exp(-(s_0 z)^2)` (Saragadam et al. 2023), the same interface as `SIREN`
-  (`from_domain`, `bounds`, `transform`, `learnable_paths`); defaults `omega_0=20`, `s_0=10`. (WE2-6)
-- `ExperimentSet.log_posterior` builds (it read observations through an internal-only method and passed
-  a keyword `LogDensity.from_callable` does not take). (R-37)
-- `posterior_target(gradient="reverse")`, `log_posterior` and `LogDensity.from_callable` hold the
-  reverse/forward agreement check to 100 times the solvers' largest `rtol` (between 1e-3 and 1e-1, a
-  float32 solve counting as 1e-3) and compare one percent away from the start, where the gradient is not
-  noise; `jax.jit(target)` compiles a `LogDensity`. (WE1-5, WE1-6)
-- `ds.compile(problem, solver, t_span, y0, ...)` compiles a `pdesolve` call without running it; the
-  returned `CompiledSolve` runs on new `t_span`, `y0`, `theta` and `lambda0` of the same shapes and
-  dtypes and reports `compile_seconds`, `cost_analysis()` and `memory_analysis()`. Save times must be
-  `SaveAt(ts=..., ordered=True)`. (A-7)
-- `theta[handle]` reads a parameter's value and `theta.replace(handle, value)` (or a mapping) writes it;
-  parameters are located by key path, so a theta that went through `jax.tree.map`, a device transfer
-  or a tracer still takes `ds.default_theta(problem, {handle: value})`. (R-1)
-- `ds.parameter_gradient(grads, handle)` reads `dloss/dhandle` from `grads = jax.grad(loss)(theta)`,
-  summing the copies of a parameter that several equations read. (P14)
-- `est.values(x)[handle]` reads parameters from any vector in the fit coordinate; `ParameterSchema` is
-  exported from `ds.inference`. (WE1-4)
-- `recipe.spec(**inputs)` returns the `ProblemSpec` a recipe authors, so `spec.assemble_state({})`
-  renders the declared `init=`. (8, R-8)
-- `grid.coordinates` (per-axis cell-centre arrays) and `grid.meshgrid()` (arrays of shape `grid.shape`
-  in field storage order) on both grid classes. (D-2)
-- `c * q.dt(field)` on a mesh accepts one value of `c` per cell. (U-1)
-- Grid transport: velocity fields in `q.ops.advect_upwind`, the conservative `q.ops.div_advect`,
-  a per-axis `(Dx, Dy, Dz)` in `q.ops.div_flux`, `axis=`/`side=` on `spec.bc.dirichlet`, `flux`,
-  `robin` and `neumann`, and `spec.bc.inflow(axis=, side=, velocity=, value=)` (Danckwerts with
-  `div_advect`). `fn=` callbacks work on one face of a 2D/3D grid. (WE2-5, R-29)
-- `spec.bc.periodic(var, axes=(0,))`: periodic on some axes, other conditions on the rest. (A-1)
-- `q.ops.cell_indicator(name)`; mesh conditions by `node_indices` select the facets whose vertices
-  all lie in the set. (4, R-32)
-- The residual form `q.dt(...)` works on meshes and keeps the boundary conditions of the field it
-  writes, on grids too; a Dirichlet condition on that field is allowed. (1, R-9, R-10)
-- `TaggedMesh(cell_tags=, cell_tag_names=)`, `TaggedMesh.cell_indicator(name)`,
-  `polygons_to_tagged_mesh({name: polygon}, ...)` with a conforming interface, and `read_mesh`
-  region groups. (4, R-15)
-- Flux, Robin and traction conditions, `surface_measure`, `q.ops.boundary_integral` and `spec.bc.neumann`
-  on QUAD4, TRI6, QUAD8, HEX8, TET4, TET10, HEX20 and HEX27 meshes; each face node carries its
-  consistent share (zero at a TET10 corner, negative at a HEX20 corner). (R-17)
-- `Field` on a mesh composes with weak terms and nodal arrays and supports `**`, `abs` and
-  comparisons; a scalar joins a residual on a mesh. (R-12, R-13)
-- `ds.inference.evidence(est, fit)` and `laplace(est, fit).log_evidence`. (WE1-3)
-- `Measurement(observe="name")` names a `spec.observe` declaration. (C-2)
-- `information`, `laplace`, `identifiability` and `predict` on a multiple-shooting fit. (R-22)
-- `ProblemSpec` and the recipe handles print short reprs. (A-5)
-- `meshio` joins the `[mesh]` extra. (R-16)
+- `spec.bc.neumann` now imposes `du/dn = s` on FVM, FDM and FEM. Previously it was an alias of `spec.bc.flux`, which imposes `D du/dn = s`. `name=` and `cross_facet=` are now on `flux` only.
 
-### Docs
+  ```python
+  # Before (1.0.0): neumann was an alias of flux
+  spec.bc.neumann("u", on="left", value=s)      # imposed D du/dn = s
+  # After: say which one you mean
+  spec.bc.flux("u", on="left", value=s)         # D du/dn = s
+  spec.bc.neumann("u", on="left", value=s)      # du/dn = s
+  ```
 
-- End-to-end `Precision.fp32()` initialization failures explain themselves: the `INCONSISTENT_IC`
-  message and `check_consistent_init` say that float32 rounding of the residual can exceed the
-  initialization tolerance and name `Precision.fp32_ir()` and `Precision.fp64()`; on PFHub benchmark 6
-  at 201x200 nodes the float32 floor is about 1e-4 against `atol=1e-6`. (R-33)
-- Precision modes: the mixed modes owe their accuracy to the float64 residual; `fp32_ir` is the
-  recommended mixed mode and `fp32_factor` its bare variant; `fp64` for tight tolerances on
-  ill-conditioned DAEs; measured speeds (P-1). `step_tol` and `cost_tol` default to `1e-8` in
-  float64 (R-24). `subproblem="auto"`, `linear_solver="auto"` and `hessian_tile` as the code
-  behaves (C-1, R-28). `converged` means a local stopping test passed (C-5).
+- Grid boundary conditions and boundary integrals in 2D and 3D now weight each selected cell by one face. Previously edge and corner cells were counted more than once. A selection spanning several faces now raises. Pick one with `axis=` and `side=`.
+- Fixed the sign of flux and Robin terms on clockwise meshes, which includes every `mask_to_mesh` mesh. Element volumes now use `|det J|`. A tangled element now raises.
+- FEM operators now read a 1D coefficient by its length: `num_dofs` values are nodal and `n_cells` values are per cell. Previously a per-cell array was read as nodal.
+- The residual form `q.dt(...)` now works on meshes (previously its coefficients were dropped), and keeps the boundary conditions of the field it writes on grids and meshes alike.
+- `NewtonTrustRegion` and `LevenbergMarquardt` now end `STALLED` (`converged=False`) when the trust radius or damping holds a step short of a stopping test. Previously these fits reported converged. `result.info["stall_reason"]` says why.
+- `NewtonTrustRegion(hessian=)` now defaults to `"auto"`, which picks Gauss-Newton on any problem with residual rows, including every `InferenceProblem`. `optsolve` and `constrained_optsolve` follow. Previously the default was the true Hessian. Pass `hessian="true"` to get it back.
+- `NewtonTrustRegion(hessian_tile=)` now defaults to `"auto"`, and a true Hessian or Gauss-Newton Jacobian too large for the device stops the fit before its first step with a `ConfigurationError`. Previously the default was `"full"`.
+- `sample(kernel="nuts")` now adapts all chains together (`adapt="pooled"`, `warmup=200`), and each chain keeps its adapted state. Previously one chain adapted for 500 steps and the others started from a perturbed fit. `chains=1, adapt="window", warmup=500` reproduces the old draws.
+- Identifiability checks now skip network columns, including on multi-experiment problems, so a network-only fit no longer warns. `theta_singular_values`, `jacobian_cond` and `param_group_cond` now cover the non-network columns only.
+- `stats.linear_solve_mode` now reports `"fp32_factor"` for `Precision.fp32_factor()`. Previously it reported `"fp32"`, which now means end-to-end float32 only.
 
-### Planned for the next release
+### Features
 
-- Explicit parameters: `theta` as `{"p": {name: array}, "fn": {name: module}}`, a public view over the
-  1.1.0 key-path table, with a design document first (private channel for the non-parameter arrays,
-  names for family members and replicates, migration of saved fits, semver).
-- A tiled Gauss-Newton Jacobian for multiple shooting and Levenberg-Marquardt; a refinement target for
-  `Precision.fp32_ir`; boundary facets on TET10, HEX20 and HEX27; the WIRE coordinate network.
+- Added `ds.compile`, which compiles a `pdesolve` call without running it. The result runs on new `t_span`, `y0` and `theta` of the same shapes and dtypes, and reports `compile_seconds`, `cost_analysis()` and `memory_analysis()`. See [Running a simulation](https://stmorgenstern.github.io/diff-soup/overview/simulation/running-a-simulation/).
+
+  ```python
+  compiled = ds.compile(problem, solver, (0.0, 0.1), y0)
+  sol = compiled((0.0, 0.2), y0)
+  ```
+
+- `theta[handle]` reads a parameter, and `theta.replace(handle, value)` writes every copy of it. A theta that went through `jax.tree.map`, a device transfer or a tracer still works with `ds.default_theta`. See [Learnable parameters](https://stmorgenstern.github.io/diff-soup/overview/modeling/parameters/).
+- Added `ds.parameter_gradient(grads, handle)`, which reads `dloss/dparam` from `jax.grad(loss)(theta)` and sums the copies of a parameter that several equations read.
+- Added `est.values(x)[handle]`, which reads parameters from a vector in the fit coordinate. `ParameterSchema` is exported from `ds.inference`.
+- Added `recipe.spec(**inputs)`, which returns the `ProblemSpec` a recipe authors, and `grid.{coordinates,meshgrid()}` on both grid classes.
+- Grid transport: `q.ops.advect_upwind` takes velocity fields, `q.ops.div_advect` is the conservative form with central face fluxes by default (second order, no numerical dispersion) or `scheme="upwind"`, and `q.ops.div_flux` takes a per-axis `(Dx, Dy, Dz)`. `spec.bc.{dirichlet,flux,robin,neumann}` take `axis=` and `side=`, and the new `spec.bc.inflow` gives the Danckwerts condition with `div_advect`.
+- `spec.bc.periodic(var, axes=(0,))` makes a field periodic on some axes and allows other conditions on the rest.
+- Mesh regions: `TaggedMesh(cell_tags=, cell_tag_names=)`, `q.ops.cell_indicator(name)`, `polygons_to_tagged_mesh({name: polygon}, ...)` with conforming interfaces, and `read_mesh` physical groups as cell and boundary tags.
+- Mesh boundary conditions: flux, Robin and Neumann conditions, `surface_measure` and `q.ops.boundary_integral` on QUAD4, TRI6, QUAD8, HEX8, TET4, TET10, HEX20 and HEX27. A condition by `node_indices` selects the facets whose vertices all lie in the set.
+- On a mesh, `Field` composes with weak terms and nodal arrays and supports `**`, `abs` and comparisons. `c * q.dt(field)` takes one value of `c` per cell.
+- Added `ds.inference.approx.WIRE`, a coordinate network with the Gabor-wavelet activation of Saragadam et al. (2023) and the interface of `SIREN`. See [Function approximation](https://stmorgenstern.github.io/diff-soup/overview/inference/function-approximation/).
+- The Gauss-Newton Jacobian is now tiled: `NewtonTrustRegion(hessian_tile=)` applies to it, and `LevenbergMarquardt(jacobian_tile=)` is new. Previously an integer `hessian_tile` was ignored under Gauss-Newton. See [Solvers](https://stmorgenstern.github.io/diff-soup/overview/inference/solvers/).
+- NUTS options: `sample` takes `adapt=`, `mass=` (`"diag"` or `"dense"`), `step_size=` and `max_tree_depth=`, and `draws.info["adaptation"]` records what ran. See [MCMC](https://stmorgenstern.github.io/diff-soup/overview/inference/mcmc/).
+- Added `ds.inference.evidence(est, fit)` and `laplace(est, fit).log_evidence`, the Laplace evidence of a MAP fit. Its stationarity check scales with the solver tolerance and precision of the problem, it accepts float32 posteriors, and a refusal names the solver tolerance. `information`, `laplace`, `identifiability` and `predict` now take a multiple-shooting fit.
+- `Measurement(observe="name")` reads a `spec.observe` declaration.
+- A fit now seeds `with_start`, `posterior_target`, `information(at=)`, `identifiability`, `profile`, `predict` and `OptResult.load(problem=)` whenever its parameter layout matches. A rebuilt recipe or another solver tolerance no longer refuses it, and a start can be a mapping `{handle: value}`.
+- `verify_gradient` now returns a `verdict`: `"passed"`, `"failed"` or `"inconclusive"`.
+- `ds.default_theta` takes a whole module for a function parameter.
+
+### Bugfixes
+
+- `ds.default_theta` overrides no longer leak between two problems equal in content. Fixed parameters declared from one array, and functions declared from one module, are now copied.
+- `optsolve(checkpoint=)` now resumes `LevenbergMarquardt` and `NewtonTrustRegion` fits from their saved steps. It refuses a directory written by a fit of other parameters.
+- `sample(kernel="nuts")` now audits the gradient at a jittered chain start instead of the MAP, where the audit meant nothing. It refuses only a failed audit.
+- `posterior_target(gradient="reverse")`, `log_posterior` and `LogDensity.from_callable` now scale their reverse/forward check with the solver `rtol` and run it one percent away from the start, so a float32 fit passes at its mode. `jax.jit` and `eqx.filter_jit` now compile a `LogDensity`.
+- Fixed `ExperimentSet.log_posterior`, which raised on every call.
+- Meshes: a scalar source term in the residual form now builds, a first use under `jax.jit` no longer leaves a tracer in the cache, and `read_mesh` no longer reports TET10 meshes as tangled.
+- Fixed the operator-level `FluxBC`: the wrong sign on the low side of an FVM grid, and a crash with a per-cell `D` on a 2D grid. It now also works on 2D and 3D FDM grids.
+- Importing JAX before diff-soup no longer turns off constant hoisting, which made closures over large arrays compile to large programs.
+
+### Performance
+
+- Fitted window starts now solve each window once per evaluation instead of once per observed frame. With 110 frames in 5 windows the integrated time drops from 1265 to 110. Fitted values are unchanged up to the solver tolerance.
+- With fitted window starts, the Gauss-Newton Jacobian now pushes each direction through all windows at once. On an 803-variable FitzHugh-Nagumo fit one Jacobian takes 7.2 s instead of 31.0 s on CPU, 0.78 s instead of 3.30 s on an RTX 4070 Ti, and 0.33 GiB of compiled memory instead of 1.26 GiB.
+- `Precision.fp32_factor()` now solves its float32 factors unrefined, as documented. On Gray-Scott 256x256 at `rtol=1e-6` on an RTX 4070 Ti, a solve drops from 5.10 s to 3.06 s with the same steps and errors.
+- Fit diagnostics now differentiate only the non-network columns, which removes most of their cost on network fits.
+
+### Other
+
+- Better errors: `jax.grad` through a solve with the default forward-only adjoint raises a `ValueError` naming `CheckpointAdjoint`. `pdesolve(theta=)` refuses a theta that is not the problem's parameter pytree, and `ds.default_theta` checks keys, values and shapes.
+- An end-to-end `Precision.fp32()` solve that cannot initialize, as on some stiff DAEs where float32 rounding alone exceeds the tolerance, now says so and names `Precision.fp32_ir()` and `Precision.fp64()`.
+- Warnings now point at your own line. A float32 solve with `jax_enable_x64` off no longer prints JAX's truncation warnings from inside diff-soup.
+- Clearer output: results print as `diff_soup.RESULT<...>`, `ProblemSpec` and the recipe handles print short reprs, and the event-stop and window-rank messages use plain words.
+- diff-soup now requires `blackjax>=1.7`, and `meshio` joins the `[mesh]` extra.
+- Docs: [Precision](https://stmorgenstern.github.io/diff-soup/overview/simulation/precision/) explains the mixed modes, recommends `fp32_ir`, gives the float32 initialization floor and says that end-to-end float32 fits on a GPU are not bitwise reproducible from run to run. [Boundary conditions](https://stmorgenstern.github.io/diff-soup/overview/modeling/boundary-conditions/) states the order of a per-cell value on a grid face. The docs now state the float64 `step_tol` and `cost_tol` defaults (`1e-8`), what `converged` means, and when to run small problems on the CPU.
+
+**Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.0.0...v1.1.0
