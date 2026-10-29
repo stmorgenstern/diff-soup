@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use diff-soup in your work, please cite it as below."
 type: software
 title: "diff-soup: differentiable, GPU-native JAX library for stiff PDEs and DAEs"
-version: 1.0.0
-date-released: "2026-10-26"
+version: 1.1.0
+date-released: "2026-10-29"
 authors:
   - family-names: Degnan-Morgenstern
     given-names: Samuel
