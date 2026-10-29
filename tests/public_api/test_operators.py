@@ -11,6 +11,8 @@ constant curl ``k`` is ``k`` times the lumped mass.
 
 from __future__ import annotations
 
+import itertools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -27,8 +29,14 @@ from diff_soup.domains import (
     staggered_grid_2d,
 )
 
+# measured 0.0 on the coefficient-length and traced-first checks, workstation CPU 2026-10-28,
+# run one by one, and on the three composition rows, workstation CPU 2026-10-28, pytest
+# tests/public_api/test_operators.py -k composes;
 # measured at most 8.9e-16 on every stencil, rotation, divergence and residual-row check below
-# (0.0 on the control-unit rows), CPU VM 2026-10-22, pytest tests/public_api/test_operators.py
+# (0.0 on the control-unit rows), CPU VM 2026-10-22, pytest tests/public_api/test_operators.py;
+# measured at most 8.9e-16 on the transport checks (4.4e-16 central, 8.9e-16 upwind, 1.1e-16
+# inflow balance, 0.0 on the rest), workstation CPU 2026-10-28, pytest
+# tests/public_api/test_operators.py -k grid_transport
 _EXACT = 1e-12
 _ROTATION = np.array([1.0, 2.0, 3.0])
 
@@ -60,7 +68,8 @@ def test_grid_stencils_are_exact_on_low_order_polynomials(method):
 
 def test_the_operator_bank_composes_with_jit_ad_vmap_and_keeps_the_field_dtype():
     """The laplacian runs under jit and vmap, differentiates, and keeps a float32 field
-    float32 on a float64 grid; the grid and the mesh curl are linear under jit, vmap and jvp."""
+    float32 on a float64 grid; the grid and the mesh curl are linear under jit, vmap and jvp,
+    and a fresh mesh traced first still runs eagerly."""
     grid = cartesian_grid_1d(12, 0.0, 1.0, method="fvm")
     ops = Operators(grid)
 
@@ -82,6 +91,7 @@ def test_the_operator_bank_composes_with_jit_ad_vmap_and_keeps_the_field_dtype()
         curl = jax.jit(lambda u, bank=bank: bank.curl(u))
         field = _vortex(np.asarray(domain.node_coordinates()))
         batched = jax.vmap(curl)(jnp.stack((field, 2.0 * field)))
+        np.testing.assert_allclose(bank.curl(field), batched[0], rtol=_EXACT, atol=_EXACT)
         np.testing.assert_allclose(batched[1], 2.0 * curl(field), rtol=_EXACT, atol=_EXACT)
         np.testing.assert_allclose(jax.jvp(curl, (field,), (field,))[1], curl(field), atol=_EXACT)
 
@@ -209,3 +219,170 @@ def test_the_lowered_controls_surface_takes_internal_time():
     ``fn`` at SI ``t = 1``."""
     values = _control_recipe(time_scale=4.0).build().controls(jnp.asarray(0.25))
     np.testing.assert_allclose(values["protocol"], 2.0, rtol=0.0, atol=_EXACT)
+
+
+def _per_cell_coefficient():
+    mesh = rectangle_mesh(3, 2, 1.0, 1.0)
+    ops = Operators(mesh)
+    coords = np.asarray(mesh.node_coordinates())
+    u = jnp.asarray(coords[:, 0] ** 2 + coords[:, 1])
+    n_cells, n_q = ops.interp_to_quad(u).shape
+    return ops, u, jnp.linspace(1.0, 2.0, n_cells), n_q
+
+
+@pytest.mark.parametrize("operator", ["div_flux", "mass", "wrong length"])
+def test_a_one_dimensional_coefficient_is_read_by_its_length(operator):
+    """On a mesh a coefficient with one value per cell equals the same values repeated at each
+    cell's quadrature points, and one with neither a value per node nor a value per cell is
+    refused."""
+    ops, u, per_cell, n_q = _per_cell_coefficient()
+    if operator == "wrong length":
+        with pytest.raises(ValueError, match="num_dofs=12.*n_cells=6"):
+            ops.div_flux(per_cell[:-1], u)
+        return
+    apply = (lambda D: ops.div_flux(D, u)) if operator == "div_flux" else ops.mass
+    at_quad = jnp.repeat(per_cell[:, None], n_q, axis=1)
+    np.testing.assert_allclose(apply(per_cell), apply(at_quad), rtol=0.0, atol=_EXACT)
+
+
+_NODAL = 0.25 + np.arange(16) / 16.0
+
+
+def _explicit_composition(q):
+    """``jnp.where(abs(T) > 0.5, T**2, nodal - T) + T * lap`` with explicit arrays."""
+    at_quad = q.ops.interp_to_quad(q.ops.unwrap_field(q.T))
+    nodal = q.ops.interp_to_quad(jnp.asarray(_NODAL))
+    pointwise = jnp.where(jnp.abs(at_quad) > 0.5, at_quad * at_quad, nodal - at_quad)
+    return pointwise + q.ops.unwrap_field(q.T) * q.ops.laplacian(q.T)
+
+
+_COMPOSED = {
+    "1 + lap": (
+        lambda q: 1.0 + q.ops.laplacian(q.T),
+        lambda q: q.ops.laplacian(q.T) + 1.0,
+        lambda q: q.ops.laplacian(q.T) + jnp.ones(16),
+    ),
+    "constant": (lambda q: 1.0, lambda q: jnp.ones(16)),
+    "field algebra": (
+        lambda q: jnp.where(abs(q.T) > 0.5, q.T**2, _NODAL - q.T) + q.T * q.ops.laplacian(q.T),
+        _explicit_composition,
+    ),
+}
+
+
+@pytest.mark.parametrize("form", list(_COMPOSED), ids=list(_COMPOSED))
+def test_a_mesh_field_composes_like_its_explicit_form(form):
+    """On a mesh a constant joins a residual as the source ``1`` would, on either side of an
+    operator output, and a field read composes with ``abs``, comparisons, powers, nodal arrays
+    and operator outputs: each residual equals the one written with explicit nodal or
+    quadrature arrays."""
+    mesh = rectangle_mesh(3, 3, 1.0, 1.0, ele_type="TRI3")
+    coords = np.asarray(mesh.node_coordinates())
+    rows = []
+    for index, expr in enumerate(_COMPOSED[form]):
+        spec = ds.problem(f"composed_{index}").domain("plate", mesh)
+        spec.field("T", mass="differential", scale=1.0)
+        spec.equation(writes="T", reads=("T",))(expr)
+        state = spec.assemble_state({"T": jnp.asarray(0.2 + coords[:, 0] - coords[:, 1] ** 2)})
+        rows.append(spec.build().physics_residual(state, jnp.zeros(0), jnp.asarray(0.0))[0])
+    for row in rows[:-1]:
+        np.testing.assert_allclose(row, rows[-1], rtol=0.0, atol=_EXACT)
+
+
+def _bed_cells(method):
+    grid = cartesian_grid_2d(6, 3, 1.2, 0.6, method=method)
+    coords = np.asarray(grid.node_coordinates())
+    field = jnp.asarray(np.sin(3.0 * coords[:, 0]) + coords[:, 0] * coords[:, 1] ** 2)
+    return grid, coords, field
+
+
+_TRANSPORT = ["equal axes", "no y", "velocity field", "central", "upwind", "inflow balance"]
+_LIMITED = [{"scheme": "tvd", "limiter": name} for name in ("van_leer", "koren", "minmod")]
+
+
+@pytest.mark.parametrize(
+    "method, claim",
+    [(method, claim) for claim in _TRANSPORT for method in ("fvm", "fdm")]
+    + [("fvm", claim) for claim in ("limited orders", "no new extrema", "limited jacobian")],
+)
+def test_grid_transport_takes_per_axis_dispersion_velocity_fields_and_an_inflow(method, claim):
+    """``div_flux`` with the same cell diffusivity on both axes equals the shared one, and with
+    ``(1.5, 0)`` the 1-D operator along x; ``advect_upwind`` with velocity arrays equal to constants equals the
+    constant form; ``div_advect`` gives each interior face the mean of ``v c`` in its two cells under
+    ``"central"`` and the mean velocity of its two cells times the upstream value under
+    ``"upwind"``, and refuses another scheme; with ``-div_advect`` and an inflow ``0.5 * 2`` on the
+    low-x face, the rate of change of the integral is the inflow minus the outflow ``v c`` on the
+    high-x face. On ``exp(x)`` the interior error of ``"tvd"`` (each limiter) falls at second order
+    and of ``"weno3"`` at third, for either flow direction; under ``"tvd"`` no local maximum of a
+    rough profile rises and no minimum falls; and the sparse Jacobian of a ``"tvd"`` problem, whose
+    stencil reaches two cells upstream, equals ``jax.jacfwd`` of its residual."""
+    grid, coords, field = _bed_cells(method)
+    ops = Operators(grid)
+    if claim == "equal axes":
+        D = jnp.asarray(1.0 + 0.5 * coords[:, 0])
+        got, expected = ops.div_flux((D, D), field), ops.div_flux(D, field)
+    elif claim == "no y":
+        line = Operators(cartesian_grid_1d(6, 0.0, 1.2, method=method))
+        got = ops.div_flux((1.5, 0.0), field).reshape(6, 3)
+        expected = jax.vmap(lambda c: line.div_flux(1.5, c), in_axes=1, out_axes=1)(
+            field.reshape(6, 3)
+        )
+    elif claim == "velocity field":
+        uniform = (jnp.full(18, 0.3), jnp.full(18, -0.2))
+        got, expected = ops.advect_upwind(field, uniform), ops.advect_upwind(field, (0.3, -0.2))
+    elif claim in ("central", "upwind"):
+        box = cartesian_grid_3d(5, 3, 2, 1.0, 0.6, 0.4, method=method)
+        xyz = np.asarray(box.node_coordinates())
+        u = jnp.asarray(1.0 + xyz[:, 0] * xyz[:, 1])
+        c = jnp.asarray(np.sin(3.0 * xyz[:, 0]) + xyz[:, 2])
+        with pytest.raises(ValueError, match='"tvd", "weno3", "central" or "upwind"'):
+            Operators(box).div_advect(c, (u, 0.0, 0.0), scheme="quick")
+        got = Operators(box).div_advect(c, (u, 0.0, 0.0), scheme=claim).reshape(5, 3, 2)[1:-1]
+        u, c = u.reshape(5, 3, 2), c.reshape(5, 3, 2)
+        if claim == "central":
+            face = 0.5 * ((u * c)[:-1] + (u * c)[1:])
+        else:
+            face = 0.5 * (u[:-1] + u[1:]) * c[:-1]  # u > 0, so the low cell is upstream
+        expected = (face[1:] - face[:-1]) / np.diff(np.unique(xyz[:, 0]))[0]
+    elif claim == "limited orders":
+        error = []
+        for n in (40, 80):
+            line = cartesian_grid_1d(n, 0.0, 1.0, method=method)
+            c = jnp.exp(jnp.asarray(line.node_coordinates()).ravel())
+            for kw, v in itertools.product([*_LIMITED, {"scheme": "weno3"}], (1.0, -1.0)):
+                error.append(np.abs(Operators(line).div_advect(c, v, **kw) - v * c)[2:-2].max())
+        # measured ratios 3.83 to 3.93 for "tvd", 7.72 to 7.78 for "weno3", workstation CPU
+        # 2026-10-29, pytest tests/public_api/test_operators.py -k "limited orders"
+        got, expected = np.array(error[:8]) / np.array(error[8:]), [3.5] * 6 + [7.0] * 2
+        return np.testing.assert_array_less(expected, got)
+    elif claim == "no new extrema":
+        c = jnp.asarray(np.random.default_rng(0).uniform(0.0, 1.0, 40))
+        ops, outward = Operators(cartesian_grid_1d(40, 0.0, 1.0)), jnp.sign(c - jnp.roll(c, 1))
+        peak_or_dip = (outward * jnp.sign(c - jnp.roll(c, -1)) > 0)[1:-1]
+        rates = [-ops.div_advect(c, v, **kw) for kw in [{}, *_LIMITED] for v in (0.7, -0.7)]
+        assert np.max((np.asarray(rates) * np.asarray(outward))[:, 1:-1][:, peak_or_dip]) <= 0.0
+        return
+    elif claim == "limited jacobian":
+        c, line = jnp.asarray(np.linspace(1.0, 0.0, 42) ** 2), cartesian_grid_1d(42, 0.0, 1.0)
+        got, expected, lam, t = [], [], jnp.zeros(0), jnp.asarray(0.0)
+        for kw in _LIMITED:  # on this convex monotone c every limiter reads both upstream cells
+            spec = ds.problem(f"limited_{kw['limiter']}").domain("line", line)
+            spec.field("c", mass="differential", scale=1.0)
+            spec.equation(writes="c", reads=("c",))(lambda q: -q.ops.div_advect(q.c, -1.0, **kw))
+            problem = spec.build()
+            values, *_, pattern = problem.physics_jacobian_blocks(c, lam, t)
+            got.append(jnp.zeros((42, 42)).at[pattern.rows, pattern.cols].add(values))
+            expected.append(jax.jacfwd(lambda u: problem.physics_residual(u, lam, t)[0])(c))
+    else:
+        speed = jnp.asarray(0.5 + 0.1 * coords[:, 1])
+        spec = ds.problem(f"inflow_{method}").domain("bed", grid)
+        spec.field("c", mass="differential", scale=1.0)
+        spec.equation(writes="c", reads=("c",))(lambda q: -q.ops.div_advect(q.c, (speed, 0.0)))
+        spec.bc.inflow("c", axis=0, side="low", velocity=0.5, value=2.0)
+        rows = spec.build().physics_residual(
+            spec.assemble_state({"c": field}), jnp.zeros(0), jnp.asarray(0.0)
+        )[0]
+        got = jnp.sum(rows * jnp.asarray(grid.cell_volumes))
+        outlet = coords[:, 0] == coords[:, 0].max()
+        expected = 0.5 * 2.0 * 0.6 - jnp.sum((speed * field)[outlet]) * 0.2
+    np.testing.assert_allclose(got, expected, rtol=0.0, atol=_EXACT)

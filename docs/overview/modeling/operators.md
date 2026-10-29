@@ -38,15 +38,24 @@ and three dimensions and on the curvilinear one-dimensional grids
 with their metric terms included:
 
 - `laplacian(u)`: \(\nabla^2 u\).
-- `div_flux(D, u)`: \(\nabla \cdot (D \nabla u)\).
+- `div_flux(D, u)`: \(\nabla \cdot (D \nabla u)\). A tuple
+  `(Dx, Dy, Dz)` gives each axis its own diffusivity, a diagonal
+  dispersion tensor, each entry a scalar or one value per cell.
 - `divergence(v)`: \(\nabla \cdot v\) for a vector of per-node
   values.
 - `advect_upwind(u, velocity)`: the first-order upwind
-  \(\mathbf{v} \cdot \nabla u\) for a constant velocity, with the
-  sign of the velocity choosing the upwind side (a backward
-  difference for \(v \ge 0\), forward for \(v < 0\)). The return is
-  the operator itself, so a transport equation writes the minus sign:
-  `-q.ops.advect_upwind(q.u, v)`.
+  \(\mathbf{v} \cdot \nabla u\), with the sign of the velocity
+  choosing the upwind side (a backward difference for \(v \ge 0\),
+  forward for \(v < 0\)). The velocity is a constant, or a tuple
+  with one entry per axis, each a constant or one value per cell.
+  The return is the operator itself, so a transport equation writes
+  the minus sign: `-q.ops.advect_upwind(q.u, v)`.
+- `div_advect(u, velocity, scheme="tvd")`: the conservative form
+  \(\nabla \cdot (\mathbf{v} u)\), with the same velocity forms. Each
+  interior face carries the face velocity times a face value taken
+  from the side the flow comes from, chosen by `scheme` ([advection
+  schemes](#advection-schemes)). A boundary face carries only outflow,
+  so an inlet is fed by [`spec.bc.inflow`](boundary-conditions.md).
 - `curl(u)`: \(\nabla \times u\) of a vector field with one
   component per axis, in two and three dimensions. In two the curl
   is the scalar \(\partial u_y/\partial x - \partial u_x/\partial y\),
@@ -81,6 +90,36 @@ expression, and a nonlinearity applies to an operator's result:
 q.ops.laplacian(q.u ** 2)          # operator of a pointwise nonlinearity
 jnp.tanh(q.ops.gradient(q.u))      # pointwise nonlinearity of an operator
 ```
+
+### Advection schemes
+
+`div_advect` takes four face values. The cell Péclet number
+\(u h / D\) compares transport with dispersion across one cell.
+
+| `scheme` | Face value | Order | Use it for |
+|---|---|---|---|
+| `"tvd"` (default) | the upstream value plus a limited share of the change to the downstream one | 2 where smooth, 1 at extrema | any cell Péclet number: it creates no new extrema |
+| `"weno3"` | the WENO blend of two two-cell reconstructions | 3 where smooth | smooth fields on coarse grids, at a costlier Jacobian |
+| `"central"` | the mean of \(v u\) in the two cells | 2 | cell Péclet numbers below 2 everywhere; above 2 it oscillates |
+| `"upwind"` | the upstream value | 1 | the most robust form; it adds a numerical dispersion \(u h / 2\) |
+
+`"tvd"` is a MUSCL scheme with the flux limiter `limiter="van_leer"`
+(the default), `"koren"` or `"minmod"` (van Leer, 1974, 1979; Koren,
+1993). The van Leer limiter is smooth in the ratio of successive
+differences. Koren's and minmod switch between linear pieces, which
+slows Newton's method: on a 64 by 16 by 16 packed bed, Koren's took
+twice the steps of van Leer's and five times the factorizations. `"weno3"` is the third-order WENO reconstruction of Jiang and
+Shu (1996), with the smoothness guard \(10^{-10}\) where they used
+\(10^{-6}\), so the weights also see jumps in small fields.
+Both are upwind-biased by the sign of the face velocity and read two
+cells upstream. A face next to a boundary cell lacks the second cell,
+so both drop to the upstream value there, which is first order.
+
+The wider stencil reaches the Jacobian: the build widens the sparse
+pattern on its own, and a [family](equations.md#populations) member kernel
+declares `stencil_radius=2`, which the build checks. On a 64 by 16 by 16 grid one sparse
+factorization costs about four times central's on a CPU and a fifth
+more on a GPU.
 
 ## A primer on FEM and the weak form
 
@@ -273,14 +312,20 @@ over the grid spacings:
 class CurlOnGrid(Operators):
     def scalar_curl(self, u):
         nx, ny = self.domain.shape
-        dx = self.domain.axes[0].node_distances[0]
-        dy = self.domain.axes[1].node_distances[0]
+        dx = self.domain.axes[0].node_distances[0].astype(u.dtype)
+        dy = self.domain.axes[1].node_distances[0].astype(u.dtype)
         ux = u[:, 0].reshape(nx, ny)
         uy = u[:, 1].reshape(nx, ny)
         duy_dx = jnp.gradient(uy, dx, axis=0)
         dux_dy = jnp.gradient(ux, dy, axis=1)
         return (duy_dx - dux_dy).reshape(-1)
 ```
+
+An operator body is traced, so geometry such as `node_distances` arrives
+as a traced float64 array. Compute on it with `jnp` arithmetic, never
+with `float()`, `int()`, `.item()` or a Python `if`.
+`x.astype(u.dtype)` keeps the arithmetic in float32 under
+`Precision.fp32()`.
 
 On a mesh the convention is the integrated weak term
 \(\int (\nabla \times u)\, N_i \, d\Omega\), assembled from the
@@ -330,3 +375,21 @@ Sparsity needs no declaration when extending the built-in bank. On
 grids the lowering probes the assembled residual at build time and
 widens the stencil pattern to the coupling the operators exercise.
 On meshes the pattern is the element connectivity.
+
+## References
+
+- G.-S. Jiang and C.-W. Shu. Efficient implementation of weighted ENO
+  schemes. Journal of Computational Physics, 126(1):202–228, 1996.
+  [doi:10.1006/jcph.1996.0130](https://doi.org/10.1006/jcph.1996.0130).
+- B. Koren. A robust upwind discretization method for advection,
+  diffusion and source terms. In C. B. Vreugdenhil and B. Koren,
+  editors, Numerical Methods for Advection-Diffusion Problems,
+  pages 117–138. Vieweg, 1993.
+- B. van Leer. Towards the ultimate conservative difference scheme. II.
+  Monotonicity and conservation combined in a second-order scheme.
+  Journal of Computational Physics, 14(4):361–370, 1974.
+  [doi:10.1016/0021-9991(74)90019-9](https://doi.org/10.1016/0021-9991(74)90019-9).
+- B. van Leer. Towards the ultimate conservative difference scheme. V.
+  A second-order sequel to Godunov's method. Journal of Computational
+  Physics, 32(1):101–136, 1979.
+  [doi:10.1016/0021-9991(79)90145-1](https://doi.org/10.1016/0021-9991(79)90145-1).

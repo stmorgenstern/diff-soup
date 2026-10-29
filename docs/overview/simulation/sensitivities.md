@@ -43,9 +43,10 @@ def heat(q):
 ```
 
 `ds.default_theta(problem)` returns the problem's parameter pytree,
-whose leaves are the problem's array coefficients, the declared
-learnable parameters among them. `jax.jacfwd` pushes one tangent per
-parameter direction through the solve:
+which holds every floating-point array of the problem: the declared
+parameters and functions, the mass diagonal and the initial
+multipliers. `jax.jacfwd` pushes one tangent per parameter direction
+through the solve:
 
 ```python
 theta = ds.default_theta(problem)
@@ -103,14 +104,30 @@ def loss(theta):
 grads = jax.grad(loss)(theta)
 ```
 
-`grads` mirrors `theta` leaf for leaf. The handle returned by
-`spec.param` holds the declared value, which is itself a leaf of
-`theta`, so one parameter's entry is read by pairing the two pytrees:
+`grads` mirrors `theta` leaf for leaf. To differentiate with respect to
+one parameter, build `theta` inside the loss. `D` is the handle returned
+by `spec.param`, and `ds.default_theta(problem, {D: value})` sets it:
 
 ```python
-pairs = zip(jax.tree.leaves(theta), jax.tree.leaves(grads))
-(dloss_dD,) = [g for value, g in pairs if value is D.value]
+def loss_D(D_value):
+    theta = ds.default_theta(problem, {D: D_value})
+    sol = ds.pdesolve(problem, solver, (0.0, 0.1), y0, theta=theta,
+                      adjoint=ds.CheckpointAdjoint())
+    return sol.ys[-1].sum()
+
+dloss_dD = jax.grad(loss_D)(0.1)
 ```
+
+`theta[D]` reads the value `theta` holds for `D`, and
+`theta.replace(D, value)` returns a copy with `D` set, the same as
+`ds.default_theta(problem, {D: value})`. `ds.parameter_gradient(grads, D)`
+reads `dloss_dD` from `grads`.
+
+An array parameter is set the same way, with an array as the value.
+`default_theta` works under `jax.jacfwd`, `jax.grad` with
+`ds.CheckpointAdjoint()` and `jax.jit`. When `theta` holds a network, an
+`eqx.Module`, use `eqx.filter_jit` in place of `jax.jit`. `jax.grad` alone
+is fine.
 
 Named-parameter sensitivity runs, selected by handle, are provided by
 the [inference](../inference/identifiability.md) layer.

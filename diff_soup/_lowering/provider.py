@@ -38,6 +38,7 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision
 from diff_soup.domains.grid.core import _METRIC_DIMENSION
+from diff_soup.domains.mesh.fem._boundary import facet_average, facet_shares
 from diff_soup.domains.operators.dispatch import dispatch_lumped_mass, finalize_residual
 from diff_soup.linear import SparseTopology
 from diff_soup.problem._ad.sparse_jac import SparseJacobian
@@ -45,10 +46,15 @@ from diff_soup.problem._ir.constraint import (
     OperationalControlConstraint,
     ReduceResidualConstraint,
 )
+from diff_soup.problem._ir.derivative_ir import capture_forms
 from diff_soup.problem._ir.equation import MultiEquation
 from diff_soup.problem._ir.equation_set import EquationSet
 from diff_soup.problem._ir.lower import _apply_boundary_cast, _LoweringAnalysis
 from diff_soup.problem._ir.variable import GlobalVariable, Variable
+from diff_soup.problem._spec.derivative_expr import (
+    current_slopes,
+    slope_context_includes_residual,
+)
 
 from .constraints import _eval_constraint_residual
 from .couplings import _read_through_alias_owner, _resolve_family_couplings
@@ -209,7 +215,7 @@ def _mass_diagonal(eqset: EquationSet) -> jax.Array:
                 raise ValueError(
                     f"variable {var.name!r} in component {comp.name!r} is "
                     f"declared mass='differential' but its assembled mass "
-                    f"diagonal is all zero — this is degenerate (really "
+                    f"diagonal is all zero, which is degenerate (really "
                     f"algebraic). Declare it mass='algebraic' if you mean 0=f, "
                     f"or supply a domain with positive (lumped/consistent) mass."
                 )
@@ -964,7 +970,7 @@ def _build_full_residual_fn(
         if owner is None:
             raise ValueError(
                 f"_build_full_residual_fn: read-through coupling {cp.name!r} "
-                f"alias {cp.target.name!r} has no consuming component — it is read "
+                f"alias {cp.target.name!r} has no consuming component: it is read "
                 "by no equation and names no onto= target owner."
             )
         consuming_comp, alias_var = owner
@@ -1030,6 +1036,7 @@ def _build_full_residual_fn(
             bool(f.is_face_flux),
             jnp.asarray(f.face_centroids) if f.face_centroids is not None else None,
             bool(getattr(f, "cross_facet", False)),
+            jnp.asarray(f.face_weights) if f.face_weights is not None else None,
         )
         for f in bcs.flux
     )
@@ -1061,6 +1068,7 @@ def _build_full_residual_fn(
             jnp.asarray(r_.node_indices, dtype=jnp.int32) if r_.node_indices is not None else None,
             jnp.asarray(r_.face_factor) if r_.face_factor is not None else None,
             r_.comp_name,
+            jnp.asarray(r_.face_weights) if r_.face_weights is not None else None,
         )
         for r_ in bcs.robin
     )
@@ -1072,6 +1080,7 @@ def _build_full_residual_fn(
             jnp.asarray(t_.face_indices, dtype=jnp.int32),
             jnp.asarray(t_.face_lengths),
             jnp.asarray(t_.face_normals),
+            jnp.asarray(t_.face_weights) if t_.face_weights is not None else None,
         )
         for t_ in bcs.traction
     )
@@ -1385,7 +1394,17 @@ def _build_full_residual_fn(
             )
             return _eval_boundary_value(value_fn, q, t)
 
-        if flux_geom or robin_geom or traction_geom:
+        # Slope modes (the residual-form lowering, see ``slope_context``): the
+        # boundary kernels and the symmetry and Dirichlet overrides are free of
+        # time derivatives. The derivative-action mode excludes them, and the
+        # full-residual mode subtracts the kernels, so a residual-form row
+        # reads ``residual = derivative_part + free_terms - flux``, as the
+        # family member kernel does.
+        slopes_active = current_slopes() is not None
+        derivative_action_only = slopes_active and not slope_context_includes_residual()
+        bc_sign = -1.0 if slopes_active else 1.0
+
+        if (flux_geom or robin_geom or traction_geom) and not derivative_action_only:
             # Owner-aware string-keyed views built AFTER coupling transfer: each
             # component's post-transfer var_view (local fields + coupled-in
             # targets SET above + injected read-through aliases + globals) keyed by
@@ -1411,6 +1430,7 @@ def _build_full_residual_fn(
                     is_face_flux,
                     face_centroids,
                     cross_facet,
+                    fw,
                 ) = kern
                 if restricted and int(v_off) not in active_row_offsets:
                     continue  # scatters onto unassembled rows only.
@@ -1473,11 +1493,9 @@ def _build_full_residual_fn(
                 if is_fem:
                     fv = jnp.broadcast_to(jnp.asarray(flux_val), fl.shape)
                     face_contrib = fv * fl
-                    n_verts = fi.shape[1]
-                    per_vertex = face_contrib / n_verts
                     contribution = jnp.zeros((v_size,), dtype=u.dtype)
                     contribution = contribution.at[fi.reshape(-1)].add(
-                        jnp.broadcast_to(per_vertex[:, None], fi.shape).reshape(-1).astype(u.dtype)
+                        facet_shares(face_contrib, fi, fw).reshape(-1).astype(u.dtype)
                     )
                 else:
                     fv = jnp.broadcast_to(jnp.asarray(flux_val), ni.shape)
@@ -1485,12 +1503,12 @@ def _build_full_residual_fn(
                     contribution = contribution.at[ni].add((fv * factor).astype(u.dtype))
                 if row_scale is not None:
                     contribution = contribution / row_scale
-                f = f.at[v_off : v_off + v_size].add(contribution)
+                f = f.at[v_off : v_off + v_size].add(bc_sign * contribution)
 
             for kern, fns, callback_geom, row_scale in zip(
                 robin_geom, robin_callables, robin_callback_geometry, robin_row_scales
             ):
-                (v_off, v_size, is_fem, fi, fl, _fn_arr, ni, factor, robin_comp) = kern
+                (v_off, v_size, is_fem, fi, fl, _fn_arr, ni, factor, robin_comp, fw) = kern
                 if restricted and int(v_off) not in active_row_offsets:
                     continue  # scatters onto unassembled rows only.
                 if robin_comp in lengths:
@@ -1507,14 +1525,12 @@ def _build_full_residual_fn(
                 # branch above uses.  ``beta`` is nonzero: a zero beta states a
                 # Dirichlet condition and is rejected when the BC is resolved.
                 if is_fem:
-                    u_at_faces = jnp.mean(u_slice[fi], axis=1)
+                    u_at_faces = facet_average(u_slice, fi, fw)
                     inward = (value_val - alpha_val * u_at_faces) / beta_val
                     per_face = inward * fl
-                    n_verts = fi.shape[1]
-                    per_vertex = per_face / n_verts
                     contribution = jnp.zeros((v_size,), dtype=u.dtype)
                     contribution = contribution.at[fi.reshape(-1)].add(
-                        jnp.broadcast_to(per_vertex[:, None], fi.shape).reshape(-1).astype(u.dtype)
+                        facet_shares(per_face, fi, fw).reshape(-1).astype(u.dtype)
                     )
                 else:
                     u_at_nodes = u_slice[ni]
@@ -1524,43 +1540,41 @@ def _build_full_residual_fn(
                     contribution = contribution.at[ni].add(per_node.astype(u.dtype))
                 if row_scale is not None:
                     contribution = contribution / row_scale
-                f = f.at[v_off : v_off + v_size].add(contribution)
+                f = f.at[v_off : v_off + v_size].add(bc_sign * contribution)
 
             for kern, value_fn, callback_geom, row_scale in zip(
                 traction_geom, traction_callables, traction_callback_geometry, traction_row_scales
             ):
-                v_off, v_size, v_shape, fi, fl, _fn_arr = kern
+                v_off, v_size, v_shape, fi, fl, _fn_arr, fw = kern
                 if restricted and int(v_off) not in active_row_offsets:
                     continue  # scatters onto unassembled rows only.
                 n_components = int(v_shape[-1])
                 t_vec = jnp.asarray(boundary_value(value_fn, callback_geom))
                 t_vec = jnp.broadcast_to(t_vec, (fi.shape[0], n_components))
-                n_verts = fi.shape[1]
                 n_nodes = v_size // n_components
                 per_face = t_vec * fl[:, None]
-                per_vertex = per_face / n_verts
                 contribution = jnp.zeros((n_nodes, n_components), dtype=u.dtype)
                 contribution = contribution.at[fi.reshape(-1)].add(
-                    jnp.broadcast_to(per_vertex[:, None, :], (fi.shape[0], n_verts, n_components))
-                    .reshape(-1, n_components)
-                    .astype(u.dtype)
+                    facet_shares(per_face, fi, fw).reshape(-1, n_components).astype(u.dtype)
                 )
                 if row_scale is not None:
                     contribution = contribution / row_scale
-                f = f.at[v_off : v_off + v_size].add(contribution.reshape(-1))
+                f = f.at[v_off : v_off + v_size].add(bc_sign * contribution.reshape(-1))
 
         # Symmetry override: replace the row of each tagged node's dominant
         # normal component with the normal projection ``n·u``, leaving the
         # node's other rows on their assembled physics (free tangential
         # traction).  Applied BEFORE the Dirichlet override so an explicit pin
         # on the same DOF still wins.
-        for sym_rows, sym_cols, sym_coeffs, sym_consts in symmetry_geom:
+        for sym_rows, sym_cols, sym_coeffs, sym_consts in (
+            () if derivative_action_only else symmetry_geom
+        ):
             projection = jnp.sum(sym_coeffs.astype(u.dtype) * u[sym_cols], axis=1)
             f = f.at[sym_rows].set(projection + sym_consts.astype(u.dtype))
 
         # Dirichlet override: pin each tagged DOF to ``u[bc] - target(t)``.
         for dof_idx, value_fn, geometry, projection in zip(
-            bc_dof_indices,
+            () if derivative_action_only else bc_dof_indices,
             dirichlet_value_fns,
             dirichlet_callback_geometry,
             dirichlet_callback_projection,
@@ -2242,7 +2256,7 @@ def _build_full_jac_blocks_fn(
                         raise ConfigurationError(
                             f"this problem declares an operational control table "
                             f"({table_name!r}); evaluate it with an operating control "
-                            "state — ControlState.operating(mode=..., target=...)."
+                            "state: ControlState.operating(mode=..., target=...)."
                         )
                     C_sum, D_sum = residual_sum_rows(row_lo, row_hi, dim_c)
                     on = jnp.asarray(mode, dtype=jnp.int32) == current_index
@@ -2445,6 +2459,7 @@ def _initial_lambda(eqset: EquationSet, dtype) -> jax.Array:
     ``init`` seeds the slice; the slices line up with
     ``_build_global_layout_entries``'s global-row order.
     """
+    dtype = jax.dtypes.canonicalize_dtype(dtype)
     if not eqset.constraints:
         return jnp.zeros((0,), dtype=dtype)
     parts = []
@@ -2454,6 +2469,36 @@ def _initial_lambda(eqset: EquationSet, dtype) -> jax.Array:
             v = jnp.broadcast_to(v.reshape(()), (c.dim,))
         parts.append(v.astype(dtype))
     return jnp.concatenate(parts)
+
+
+def _component_form_cells(eqset: EquationSet):
+    """The derivative-form cell of every component equation that carries one."""
+    for comp in eqset.components:
+        for eq in comp.equations:
+            cell = getattr(eq.rhs_fn, "_derivative_form", None)
+            if cell is not None:
+                yield cell
+
+
+def _capture_component_forms(eqset: EquationSet, probe_f, state_size: int, n_lam: int, dtype):
+    """Run the build-time capture pass over the component equations.
+
+    A component equation authored with ``q.dt`` records its derivative
+    structure only inside this pass (see
+    [capture_forms][diff_soup.problem._ir.derivative_ir.capture_forms]), the
+    same pass family member equations go through. It evaluates the probe
+    residual once, eagerly, at a generic positive state (the family pass's
+    convention), on a grid and on a mesh alike.
+    """
+    dtype = jax.dtypes.canonicalize_dtype(dtype)
+
+    def evaluate():
+        n_u, n_l = max(int(state_size), 1), max(int(n_lam), 1)
+        u = jnp.linspace(0.75, 1.25, n_u).astype(dtype)[: int(state_size)]
+        lam = jnp.linspace(0.75, 1.25, n_l).astype(dtype)[: int(n_lam)]
+        probe_f(u, lam, jnp.asarray(0.0, dtype=dtype))
+
+    capture_forms(_component_form_cells(eqset), evaluate)
 
 
 def _analyze_family_layer(eqset: EquationSet, compute_dtype) -> _LoweringAnalysis:
@@ -2526,6 +2571,13 @@ def _analyze_family_layer(eqset: EquationSet, compute_dtype) -> _LoweringAnalysi
         total,
         int(sum(int(c.dim) for c in eqset.constraints)),
         _probe_f,
+        compute_dtype,
+    )
+    _capture_component_forms(
+        eqset,
+        _probe_f,
+        total,
+        int(sum(int(c.dim) for c in eqset.constraints)),
         compute_dtype,
     )
     rows, cols = _sparsity_full(
@@ -2683,6 +2735,7 @@ def analyze(eqset: EquationSet, *, precision: Optional[Precision] = None) -> _Lo
         _probe_f,
         compute_dtype,
     )
+    _capture_component_forms(eqset, _probe_f, total, 0, compute_dtype)
     rows, cols = _sparsity(eqset, offset_of, total, stencil_offsets=stencil_offsets)
     topo = SparseTopology(rows=rows, cols=cols, n_dofs=total, bc_indices=None)
     mass = _mass_diagonal(eqset)

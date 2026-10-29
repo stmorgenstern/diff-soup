@@ -26,7 +26,7 @@ from diff_soup.inference.solvers.tangent import (
     value_and_jacfwd,
     value_and_jacfwd_tiled,
 )
-from tests.support.inference import solver
+from tests.support.inference import NOISE, decay_experiment, decay_recipe, small_fit, solver
 from tests.support.programs import primitive_names
 
 _RNG = np.random.default_rng(0)
@@ -61,22 +61,78 @@ def test_optsolve_recovers_the_analytical_least_squares_solution(optimizer):
     np.testing.assert_allclose(fit.params, _EXACT, rtol=0.0, atol=_LSQ_ATOL)
 
 
-def test_optsolve_defaults_to_the_exact_newton_trust_region():
-    """optsolve without an optimizer runs the exact NewtonTrustRegion, which refuses a Hessian
-    scale on its matrix-free subproblem."""
+def test_optsolve_defaults_to_the_gauss_newton_trust_region():
+    """optsolve without an optimizer runs NewtonTrustRegion on the Gauss-Newton matrix of residual
+    rows and on the exact Hessian of a scalar objective; a Hessian scale is refused on the
+    matrix-free subproblem."""
     target = jnp.asarray([1.0, -2.0])
     fit = inf.optsolve(
         inf.LeastSquaresProblem.from_residual(jnp.zeros(2), lambda x: x - target), diagnostics=False
     )
-    assert fit.status is inf.TerminationStatus.GRAD_TOL and fit.info["hessian"] == "true"
-    # measured 0.0 (one Newton step on a quadratic), CPU VM 2026-10-22,
-    # pytest tests/contracts/test_structural_fitting.py
+    assert fit.status is inf.TerminationStatus.GRAD_TOL and fit.info["hessian"] == "gauss-newton"
+    scalar = inf.OptimizationProblem.from_value(
+        jnp.zeros(2), lambda x: 0.5 * jnp.sum((x - target) ** 2), hessian=True
+    )
+    exact = inf.optsolve(scalar, diagnostics=False)
+    assert exact.info["hessian"] == "true"
+    # measured 0.0 for both (one Newton step on a quadratic), CPU VM 2026-10-22 and workstation
+    # CPU 2026-10-28, pytest tests/contracts/test_structural_fitting.py
     np.testing.assert_allclose(fit.params, target, atol=1e-12)
+    np.testing.assert_allclose(exact.params, target, atol=1e-12)
     problem = inf.LeastSquaresProblem.from_residual(
         np.zeros(3), lambda x: jnp.asarray(_MATRIX) @ x - jnp.asarray(_TARGET)
     )
     with pytest.raises(ds.ConfigurationError, match="HessianScale.*matrix-free.*ConstantScale"):
         inf.NewtonTrustRegion(subproblem="cg").solve(problem)
+
+
+def test_the_newton_curvature_is_formed_in_tiles_above_the_dense_cutoff():
+    """Above dense_cutoff=64 parameters the default hessian_tile forms the exact Hessian 32
+    directions at a time and the Gauss-Newton Jacobian whole when it fits; a given tile forms
+    the Jacobian in tiles. Each tiled fit steps as the whole one does."""
+    rng = np.random.default_rng(1)
+    matrix, target = (
+        jnp.asarray(rng.standard_normal((80, 70))),
+        jnp.asarray(rng.standard_normal(80)),
+    )
+    problem = inf.LeastSquaresProblem.from_residual(np.zeros(70), lambda x: matrix @ x - target)
+    tiled, whole, gauss_newton, gauss_newton_tiled = (
+        inf.optsolve(problem, inf.NewtonTrustRegion(max_steps=3, **options), diagnostics=False)
+        for options in (
+            {"hessian": "true"},
+            {"hessian": "true", "hessian_tile": "full"},
+            {},
+            {"hessian_tile": 16},
+        )
+    )
+    assert (tiled.info["hessian_tile"], whole.info["hessian_tile"]) == (32, "full")
+    assert gauss_newton.info["hessian"] == gauss_newton_tiled.info["hessian"] == "gauss-newton"
+    assert (gauss_newton.info["hessian_tile"], gauss_newton_tiled.info["hessian_tile"]) == (
+        "full",
+        16,
+    )
+    # measured 5.0e-16 worst parameter difference (exact) and 0.0 (Gauss-Newton, tile 16),
+    # workstation CPU 2026-10-28, pytest tests/contracts/test_structural_fitting.py
+    np.testing.assert_allclose(tiled.params, whole.params, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(gauss_newton_tiled.params, gauss_newton.params, rtol=0.0, atol=1e-12)
+
+
+def test_fitted_window_starts_solve_each_window_once_and_reach_the_single_shoot_rate():
+    """Fitted starts of two windows with two observed frames each are solved once per window
+    per evaluation; optsolve without an optimizer fits them with
+    NewtonTrustRegion(hessian="gauss-newton") and ends at the rate of the single shoot."""
+    decay = decay_recipe("structural_window_solves")
+    experiment = decay_experiment(decay, noise=NOISE)
+    windows = inf.InferenceProblem(
+        experiment, parameters=decay.rate, trajectory=inf.Multishoot(inf.Windows.uniform(2))
+    )
+    assert windows.diagnostic_problem.trajectory_solves_per_eval == 2
+    single = small_fit(inf.InferenceProblem(experiment, parameters=decay.rate))
+    fit = small_fit(windows)
+    assert fit.info["hessian"] == "gauss-newton"
+    # the continuity rows hold the window fit 1.25e-4 from the single shoot (0.601196 against
+    # 0.601071); measured, workstation CPU 2026-10-28, pytest tests/contracts/test_structural_fitting.py
+    np.testing.assert_allclose(fit[decay.rate], single[decay.rate], rtol=0.0, atol=5e-4)
 
 
 def test_newton_gauss_newton_records_the_final_residual_and_jacobian():

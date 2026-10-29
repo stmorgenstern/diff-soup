@@ -1,26 +1,26 @@
 {
   "budgets": {
     "test_files": 43,
-    "test_functions": 365,
-    "collected_tests": 640,
-    "source_lines": 13021
+    "test_functions": 390,
+    "collected_tests": 565,
+    "source_lines": 14100
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
-      "functions": 148,
-      "collected": 272,
-      "lines": 4800
+      "functions": 175,
+      "collected": 277,
+      "lines": 5592
     },
     "contracts": {
       "files": 17,
-      "functions": 148,
-      "collected": 253,
-      "lines": 5112
+      "functions": 160,
+      "collected": 220,
+      "lines": 5400
     },
     "performance_contracts": {
       "files": 2,
-      "functions": 14,
+      "functions": 11,
       "collected": 28,
       "lines": 480
     },
@@ -32,13 +32,13 @@
     },
     "integration": {
       "files": 2,
-      "functions": 16,
+      "functions": 11,
       "collected": 32,
       "lines": 680
     },
     "validation": {
       "files": 1,
-      "functions": 10,
+      "functions": 4,
       "collected": 20,
       "lines": 420
     }
@@ -64,6 +64,7 @@
     "tests/contracts/test_implicit_layer.py": "diff_soup.problem.implicit",
     "tests/contracts/test_linear_primitive.py": "diff_soup.linear._primitive",
     "tests/contracts/test_second_order_ad.py": "diff_soup.timestepping.vsvo",
+    "tests/contracts/test_second_order_ad_precision.py": "diff_soup.timestepping.vsvo",
     "tests/contracts/test_structural_fitting.py": "diff_soup.inference.solvers",
     "tests/contracts/test_recipe_handles.py": "diff_soup.inference.fitting",
     "tests/contracts/test_linear_structured.py": "diff_soup.problem._ir._low_rank",

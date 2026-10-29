@@ -65,6 +65,35 @@ def _coerce_problem(problem: Any) -> Any:
     return get_or_build_solver_view(problem)
 
 
+def _check_theta_structure(problem: Any, theta: Any) -> None:
+    """Raise when ``theta`` is not shaped like the problem's own parameter pytree.
+
+    A mapping ``{handle: value}``, a theta built for another problem, or a bare
+    array would otherwise fail deep in the solver with JAX's pytree-structure
+    message. Problems that declare no parameters are not checked.
+    """
+    import jax
+
+    getter = getattr(problem, "default_theta", None)
+    default = getter() if callable(getter) else None
+    if default is None:
+        return
+    expected = jax.tree_util.tree_structure(default)
+    given = jax.tree_util.tree_structure(theta)
+    if given == expected:
+        return
+    hint = (
+        "build it with ds.default_theta(problem, {handle: value})"
+        if isinstance(theta, dict)
+        else "pass the pytree ds.default_theta(problem, ...) returns for this problem"
+    )
+    raise ValueError(
+        "pdesolve: theta does not have this problem's parameter structure; "
+        f"{hint}. Got {type(theta).__name__} with {given.num_leaves} leaves, "
+        f"expected {expected.num_leaves} leaves."
+    )
+
+
 def pdesolve(
     problem: Any,
     solver: Any,
@@ -125,6 +154,8 @@ def pdesolve(
 
     # Freeze the one runtime contract before choosing an engine.
     problem = _coerce_problem(problem)
+    if theta is not None:
+        _check_theta_structure(problem, theta)
 
     solve_kwargs: dict = dict(
         saveat=saveat,

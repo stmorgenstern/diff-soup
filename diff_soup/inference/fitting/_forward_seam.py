@@ -45,6 +45,7 @@ import numpy as np
 
 from diff_soup._logging import log as logger
 from diff_soup.inference.fitting._lane_map import folds_enclosing_batches, lane_map
+from diff_soup.problem._registry import theta_leaf_keys, theta_mask, theta_table
 
 # Residual value stamped on any failed or non-finite PDE solve. Large enough
 # that the optimizer steps away from the failing region without a NaN poisoning
@@ -334,6 +335,8 @@ class ForwardSeam:
         theta_frozen: The non-learnable theta leaves (recombined each call).
         x0: Initial flat learnable-theta vector (numpy, the θ-dtype stream).
         theta_names: Ordered names of the inexact-array θ leaves (for diagnostics).
+        theta_token_sets: Per-scalar path-token sets, in ravel order.
+        theta_leaf_ids: Per-scalar slot keys (paths in the problem's path table), in ravel order.
     """
 
     problem: Any
@@ -358,17 +361,17 @@ class GroupedThetaSelection:
     * ``name_sources`` — tuples of learnable names matched against each θ-leaf's key
       path (the same rule a bare ``theta=("k",)`` name spec uses).
     * ``mask_sources`` — boolean pytrees over the *problem* (from
-      ``learnables(problem, names)``).  These select by leaf identity, so a declared
-      learnable whose public name is not a θ-leaf path token (e.g. a Dirichlet value
-      whose leaf field is ``value``) is still resolved correctly.
-    * ``leaf_id_sources`` — leaf-identity sets obtained directly from stable Recipe
-      parameter/function handles. These do not inspect authored problem IR.
+      ``learnables(problem, names)``).  These select by the problem's path table,
+      so a declared learnable whose public name is not a θ-leaf path token (e.g. a
+      Dirichlet value whose leaf field is ``value``) is still resolved correctly.
+    * ``leaf_id_sources`` — slot-key sets obtained directly from stable Recipe
+      parameter/function handles through the problem's path table.
 
     [build_forward_seam][] unions every source into one θ-leaf filter.
 
     ``order`` lists the groups in the order their coordinates take in the flat
     decision vector, one ``(leaf_ids, tokens)`` pair per group. A selected leaf
-    goes with the first group that owns it, by identity or by a path token;
+    goes with the first group that owns it, by slot key or by a path token;
     leaves within one group, and leaves no group owns, keep their θ-leaf order.
     """
 
@@ -379,52 +382,52 @@ class GroupedThetaSelection:
 
 
 def selected_leaf_ids(pytree: Any, mask: Any) -> frozenset:
-    """Return the ``id()`` set of ``pytree`` leaves selected ``True`` by ``mask``.
+    """Return the slot keys of the ``pytree`` leaves selected ``True`` by ``mask``.
 
     ``mask`` is a boolean pytree of ``pytree``'s structure (e.g. from
-    [parameters_at][diff_soup.inference.fitting._path_filter.parameters_at]). The solver
-    view's ``default_theta()`` shares the array objects partitioned from the
-    source problem, so a problem-relative mask resolves to θ-leaf identities.
+    [parameters_at][diff_soup.inference.fitting._path_filter.parameters_at]). A
+    key is the first path of the places holding one array in the problem's path
+    table, so a problem-relative mask names the same leaves in every theta of
+    the problem's structure.
     """
-    leaves = jax.tree_util.tree_leaves(pytree)
+    table = theta_table(pytree)
+    _leaves, _treedef, paths = table.layout(pytree, strip=0)
     mask_leaves = jax.tree_util.tree_leaves(mask)
-    return frozenset(id(leaf) for leaf, keep in zip(leaves, mask_leaves) if bool(keep))
+    return frozenset(table.key_of(path) for path, keep in zip(paths, mask_leaves) if bool(keep))
 
 
 def parameter_handle_leaf_ids(handle: Any, *, problem: Any = None) -> frozenset:
-    """Return the current ``theta`` leaf identities owned by a Recipe handle.
+    """Return the slot keys of the learnable arrays a Recipe handle declares on ``problem``.
 
-    When ``problem`` is supplied, resolve through its Recipe-handle registry.
-    This keeps a handle usable when a structurally identical Recipe refreshes
-    the shared lowering cache with new array objects.
+    Resolves through ``problem``'s Recipe-handle registry and path table, so a
+    handle of a structurally identical Recipe still finds its declaration.
 
     Raises:
+        TypeError: When ``problem`` is not given.
         ValueError: When ``problem`` carries registered Recipe declarations but
-            none from the builder that declared ``handle``.
+            none from the builder that declared ``handle``, or ``handle`` is not
+            declared learnable on ``problem``.
     """
-    if problem is not None:
-        from diff_soup.inference.fitting.learnables import learnables
-        from diff_soup.problem._registry import handle_declarations
-
-        handle_declarations(problem, handle)
-        selector = learnables(problem, (getattr(handle, "name", ""),))
-        if selector is None:
-            return frozenset()
-        return selected_leaf_ids(problem, selector.mask)
+    if problem is None:
+        raise TypeError(
+            "parameter_handle_leaf_ids needs the problem that declares "
+            f"{getattr(handle, 'name', handle)!r}."
+        )
+    from diff_soup.inference.fitting.learnables import learnable_paths
+    from diff_soup.problem._registry import handle_declarations
 
     kind = getattr(handle, "kind", None)
-    if kind in ("scalar", "array"):
-        value = handle.value
-    elif kind == "function":
-        value = handle.fn
-    else:
+    if kind not in ("scalar", "array", "function"):
         raise TypeError(
             "parameter groups accept Recipe handles returned by spec.param(...) "
             f"or spec.function(...); got {type(handle).__name__}."
         )
-    return frozenset(
-        id(leaf) for leaf in jax.tree_util.tree_leaves(value) if eqx.is_inexact_array(leaf)
-    )
+    handle_declarations(problem, handle)
+    name = getattr(handle, "name", "")
+    learnable_paths(problem, (name,))
+    table = theta_table(problem)
+    row = table.row(name, "function" if kind == "function" else "parameter")
+    return frozenset() if row is None else table.slot_keys(row[3])
 
 
 def build_forward_seam(problem: Any, theta: Any) -> ForwardSeam:
@@ -446,13 +449,13 @@ def build_forward_seam(problem: Any, theta: Any) -> ForwardSeam:
         TypeError: If ``theta`` is none of the above.
     """
     solver_problem = coerce_forward_problem(problem)
-    theta0 = solver_problem.default_theta()
+    source, theta0 = _own_default_theta(problem, solver_problem)
     if isinstance(theta, GroupedThetaSelection):
         leaf_filter = _grouped_leaf_filter(problem, theta0, theta)
     elif _is_name_spec(theta):
         leaf_filter, _all_names = names_to_theta_mask(theta0, theta)
     elif theta is None:
-        leaf_filter = _declared_leaf_filter(problem, solver_problem, theta0)
+        leaf_filter = _declared_leaf_filter(source, theta0)
     else:
         raise TypeError(
             "optsolve: the theta selection must be None, a tuple of learnable "
@@ -490,8 +493,23 @@ def build_forward_seam(problem: Any, theta: Any) -> ForwardSeam:
     )
 
 
-def _declared_leaf_filter(problem: Any, solver_problem: Any, theta0: Any) -> Any:
-    """Return the θ mask selecting the model's declared learnables.
+def _own_default_theta(problem: Any, solver_problem: Any) -> tuple:
+    """Return ``(source, theta0)``: the problem whose values ``theta0`` holds, and ``theta0``.
+
+    A problem equal in content to one presented earlier is served that one's
+    solver view, whose ``default_theta()`` holds the other problem's values.
+    The fit starts from ``problem``'s own values, so ``theta0`` comes from
+    ``problem``'s own ``default_theta()`` when it has one.
+    """
+    own = getattr(problem, "default_theta", None)
+    if problem is not solver_problem and callable(own):
+        return problem, own()
+    source = getattr(solver_problem, "source", None)
+    return (source if source is not None else problem), solver_problem.default_theta()
+
+
+def _declared_leaf_filter(source: Any, theta0: Any) -> Any:
+    """Return the θ mask selecting the declared learnables of ``source``, the owner of ``theta0``'s leaves.
 
     Membership follows the declaration, not the leaf's type: a parameter is
     fitted because it was declared ``learnable=True`` (or because the model
@@ -501,9 +519,8 @@ def _declared_leaf_filter(problem: Any, solver_problem: Any, theta0: Any) -> Any
     """
     from diff_soup.inference.fitting.learnables import declared_learnable_leaf_ids
 
-    source = getattr(solver_problem, "source", None)
-    ids = declared_learnable_leaf_ids(source if source is not None else problem)
-    if not ids:
+    keys = declared_learnable_leaf_ids(source)
+    if not keys:
         raise ValueError(
             "optsolve: the problem declares no learnable parameters, so there is no "
             "default answer to what is being fitted. Declare the unknowns with "
@@ -511,45 +528,47 @@ def _declared_leaf_filter(problem: Any, solver_problem: Any, theta0: Any) -> Any
             "or state the selection explicitly with "
             "parameters=ParameterGroups(...)."
         )
-    return jax.tree_util.tree_map(
-        lambda leaf: eqx.is_inexact_array(leaf) and id(leaf) in ids, theta0
-    )
+    return theta_mask(theta0, keys)
 
 
 def _deduplicated_selection(learn: Any) -> tuple:
-    """Return one ``(label, path_tokens, leaf)`` entry per distinct selected array.
+    """Return one ``(label, path_tokens, leaf, key)`` entry per selected slot.
 
-    ``learn`` holds the selected θ leaves.  One array object can sit at several
-    places in the pytree — a declared parameter read by three equations rides on
-    all three closures — and a single object cannot hold two different values,
-    so those places share one entry.  The entry keeps the union of their path
-    tokens, so a name that appears on any occurrence still selects it, and takes
-    its label from the first occurrence's own path.
+    ``learn`` holds the selected θ leaves.  One declared array can sit at
+    several places in the pytree — a declared parameter read by three equations
+    rides on all three closures — and the problem's path table groups those
+    places into one slot, named by ``key``, so they share one entry.  The entry
+    keeps the union of their path tokens, so a name that appears on any
+    occurrence still selects it, and takes its label from the first
+    occurrence's own path.
     """
-    order: dict[int, int] = {}
+    order: dict[Any, int] = {}
     labels: list[str] = []
     tokens: list[set] = []
     leaves: list = []
-    for path, leaf in jax.tree_util.tree_leaves_with_path(learn):
+    keys: list = []
+    pairs = jax.tree_util.tree_leaves_with_path(learn)
+    for (path, leaf), key in zip(pairs, theta_leaf_keys(learn)):
         path_tokens = _path_key_tokens(path)
-        index = order.get(id(leaf))
+        index = order.get(key)
         if index is None:
-            order[id(leaf)] = len(leaves)
+            order[key] = len(leaves)
             labels.append(path_tokens[-1] if path_tokens else "")
             tokens.append(set(path_tokens))
             leaves.append(leaf)
+            keys.append(key)
         else:
             tokens[index].update(path_tokens)
-    return tuple(zip(labels, tokens, leaves))
+    return tuple(zip(labels, tokens, leaves, keys))
 
 
 def _in_declaration_order(selected: tuple, order: tuple) -> tuple:
     """Stably sort the selected leaves by the first declared group that owns each."""
 
     def rank(entry):
-        _label, tokens, leaf = entry
+        _label, tokens, _leaf, key = entry
         for index, (leaf_ids, group_tokens) in enumerate(order):
-            if id(leaf) in leaf_ids or (group_tokens and tokens & group_tokens):
+            if key in leaf_ids or (group_tokens and tokens & group_tokens):
                 return index
         return len(order)
 
@@ -559,14 +578,15 @@ def _in_declaration_order(selected: tuple, order: tuple) -> tuple:
 def _ravel_deduplicated(learn: Any, selected: tuple) -> tuple:
     """Ravel the deduplicated selection and return ``(flat, unflatten)``.
 
-    ``unflatten`` writes each flat block back to EVERY position that shares the
-    array object it came from, so the reconstructed θ keeps one value per
-    declared unknown.
+    ``unflatten`` writes each flat block back to EVERY place of the slot it came
+    from, so the reconstructed θ keeps one value per declared unknown.
     """
     leaves, treedef = jax.tree_util.tree_flatten(learn)
-    positions = {id(leaf): index for index, (_label, _tokens, leaf) in enumerate(selected)}
-    slots = [positions[id(leaf)] for leaf in leaves]
-    flat, unravel = jax.flatten_util.ravel_pytree([leaf for _label, _tokens, leaf in selected])
+    positions = {key: index for index, (_label, _tokens, _leaf, key) in enumerate(selected)}
+    slots = [positions[key] for key in theta_leaf_keys(learn)]
+    flat, unravel = jax.flatten_util.ravel_pytree(
+        [leaf for _label, _tokens, leaf, _key in selected]
+    )
 
     def unflatten(x_flat):
         values = unravel(x_flat)
@@ -579,29 +599,21 @@ def _grouped_leaf_filter(problem: Any, theta0: Any, selection: GroupedThetaSelec
     """Union a [GroupedThetaSelection][diff_soup.inference.fitting._forward_seam.GroupedThetaSelection]'s sources into one θ-leaf bool mask.
 
     Name sources resolve via [names_to_theta_mask][] (path-token match); mask
-    sources resolve via leaf identity ([selected_leaf_ids][]) so declared
-    learnables whose public name is not a θ-leaf token are selected correctly.
+    sources resolve via the problem's path table ([selected_leaf_ids][]) so
+    declared learnables whose public name is not a θ-leaf token are selected
+    correctly.
     """
     masks = [jax.tree_util.tree_map(lambda _leaf: False, theta0)]
     for names in selection.name_sources:
         mask, _ = names_to_theta_mask(theta0, names)
         masks.append(mask)
     if selection.mask_sources:
-        ids: frozenset = frozenset()
+        keys: frozenset = frozenset()
         for problem_mask in selection.mask_sources:
-            ids = ids | selected_leaf_ids(problem, problem_mask)
-        masks.append(
-            jax.tree_util.tree_map(
-                lambda leaf: eqx.is_inexact_array(leaf) and id(leaf) in ids, theta0
-            )
-        )
+            keys = keys | selected_leaf_ids(problem, problem_mask)
+        masks.append(theta_mask(theta0, keys))
     if selection.leaf_id_sources:
-        ids = frozenset().union(*selection.leaf_id_sources)
-        masks.append(
-            jax.tree_util.tree_map(
-                lambda leaf: eqx.is_inexact_array(leaf) and id(leaf) in ids, theta0
-            )
-        )
+        masks.append(theta_mask(theta0, frozenset().union(*selection.leaf_id_sources)))
     return jax.tree_util.tree_map(lambda *bs: any(bs), *masks)
 
 
@@ -614,7 +626,7 @@ def _selected_theta_names(selected: tuple) -> tuple:
     the leaf's path — for a declared parameter or function, its declared name.
     """
     names: list[str] = []
-    for label, _tokens, leaf in selected:
+    for label, _tokens, leaf, _key in selected:
         label = label or "theta"
         size = int(np.asarray(leaf).size)
         if size == 1:
@@ -635,7 +647,7 @@ def _selected_theta_token_sets(selected: tuple) -> tuple:
     ``functions.j0.weight``).
     """
     token_sets: list = []
-    for _label, tokens, leaf in selected:
+    for _label, tokens, leaf, _key in selected:
         toks = frozenset(tokens)
         size = int(np.asarray(leaf).size)
         token_sets.extend([toks] * size)
@@ -643,17 +655,18 @@ def _selected_theta_token_sets(selected: tuple) -> tuple:
 
 
 def _selected_theta_leaf_ids(selected: tuple) -> tuple:
-    """Per-scalar ``id()`` of the source θ leaf, in ravel order.
+    """Per-scalar slot key of the source θ leaf, in ravel order.
 
-    Each scalar carries the identity of the array leaf it was raveled from; a
-    parameter group built from a [LearnableSelector][diff_soup.inference.fitting.learnables.LearnableSelector]
-    owns a scalar when its leaf identity is in the selector's selected set — the
-    identity rule that resolves declared learnables whose name is not a path token.
+    Each scalar carries the key of the slot it was raveled from; a parameter
+    group built from a handle or a
+    [LearnableSelector][diff_soup.inference.fitting.learnables.LearnableSelector]
+    owns a scalar when that key is in the group's set, which resolves declared
+    learnables whose name is not a path token.
     """
     leaf_ids: list = []
-    for _label, _tokens, leaf in selected:
+    for _label, _tokens, leaf, key in selected:
         size = int(np.asarray(leaf).size)
-        leaf_ids.extend([id(leaf)] * size)
+        leaf_ids.extend([key] * size)
     return tuple(leaf_ids)
 
 

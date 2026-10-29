@@ -22,7 +22,7 @@ from typing import Any, Optional
 import equinox as eqx
 import jax
 
-from diff_soup.inference.fitting._path_filter import _walk_path, parameters_at
+from diff_soup.inference.fitting._path_filter import parameters_at
 from diff_soup.problem._ir.content_hash import declared_callable_layers, iter_declared_closures
 
 
@@ -163,20 +163,65 @@ def learnable_paths(problem: Any, names: Iterable[str] | None = None) -> list[st
     return paths
 
 
-def declared_learnable_leaf_ids(problem: Any) -> frozenset:
-    """Return the ``id()`` set of the array leaves ``problem`` declares learnable.
+def _model_declared_keys(problem: Any, table: Any) -> frozenset:
+    """The slot keys of the leaves at or under each path a model declares for itself."""
+    paths = _model_declared_paths(problem)
+    if not paths:
+        return frozenset()
+    from diff_soup.problem._registry import dotted_path
 
-    One declared value can be referenced by several lowered closures — one
-    parameter read by three equations is one array object sitting at three
-    places in the pytree — so identity, not position, is what selects it: every
-    occurrence of the declared value answers to the same declaration.
-    """
+    _leaves, _treedef, places = table.layout(problem, strip=0)
     return frozenset(
-        id(leaf)
-        for path in learnable_paths(problem, None)
-        for leaf in jax.tree_util.tree_leaves(_walk_path(problem, path))
-        if eqx.is_inexact_array(leaf)
+        table.key_of(place)
+        for place in places
+        for dotted in (dotted_path(place),)
+        if any(dotted == path or dotted.startswith(f"{path}.") for path in paths)
     )
+
+
+def _declared_keys(problem: Any, *, functions_only: bool) -> frozenset:
+    """The slot keys of ``problem``'s declared learnable arrays, read from its path table."""
+    from diff_soup.problem._registry import theta_table
+
+    table = theta_table(problem)
+    keys = set() if functions_only else set(_model_declared_keys(problem, table))
+    located = _traced_adapter_layer(problem)
+    if located is not None:
+        adapter = located[1]
+        rows = [(name, "function") for name in getattr(adapter, "learnable_functions", ())]
+        if not functions_only:
+            rows += [(name, "parameter") for name in getattr(adapter, "learnable_params", ())]
+        for name, kind in rows:
+            row = table.row(name, kind)
+            if row is not None:
+                keys |= table.slot_keys(row[3])
+    return frozenset(keys)
+
+
+def declared_learnable_leaf_ids(problem: Any) -> frozenset:
+    """Return the slot keys of the array leaves ``problem`` declares learnable.
+
+    One declared value can be read by several lowered closures, so one
+    parameter read by three equations sits at three places in the pytree. The
+    problem's path table groups those places into one slot, named by its first
+    path, so every occurrence of the declared value answers to the same key in
+    every theta of the problem's structure.
+    """
+    learnable_paths(problem, None)
+    return _declared_keys(problem, functions_only=False)
+
+
+def learnable_function_leaf_ids(problem: Any) -> frozenset:
+    """Return the slot keys of the array leaves of ``problem``'s learnable functions.
+
+    These are the weights of the networks and other callables declared with
+    ``spec.function(..., learnable=True)``, a subset of
+    [declared_learnable_leaf_ids][diff_soup.inference.fitting.learnables.declared_learnable_leaf_ids].
+    """
+    located = _traced_adapter_layer(problem)
+    if located is None or not getattr(located[1], "learnable_functions", ()):
+        return frozenset()
+    return _declared_keys(problem, functions_only=True)
 
 
 @dataclasses.dataclass(frozen=True)

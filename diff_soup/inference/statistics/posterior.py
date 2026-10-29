@@ -15,8 +15,8 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
+from diff_soup.inference.fitting._layout import resolve_point
 from diff_soup.inference.fitting.bounds import resolve_decision_bounds
-from diff_soup.inference.fitting.inference_problem import _is_structural_schema
 from diff_soup.inference.fitting.result import OptResult
 from diff_soup.inference.statistics.estimation import MAP, EstimationProblem
 from diff_soup.inference.statistics.measurement import require_likelihoods
@@ -117,26 +117,15 @@ def _schema_parameterization(
 
 
 def _validated_start(problem: EstimationProblem, start: Any) -> np.ndarray:
-    """Resolve an array/OptResult start and preserve Study provenance checks."""
+    """Resolve an array, mapping or OptResult start; a fit must share the problem's layout."""
     if start is None:
         value = np.asarray(problem.x0, dtype=float)
     elif isinstance(start, OptResult):
         if start.parameter_schema is None:
             raise ValueError(
                 "posterior start OptResult has no handle-based parameter schema; "
-                "fit this InferenceProblem through diff_soup.inference.optsolve first."
-            )
-        # A structural schema records one problem's own column layout rather than
-        # the content of a declaration, so it is never comparable with a Study
-        # fingerprint; the shape check below is what validates such a start.
-        if (
-            not _is_structural_schema(start.parameter_schema)
-            and start.parameter_schema.fingerprint != problem.parameter_schema.fingerprint
-        ):
-            raise ValueError(
-                "posterior start OptResult carries parameter schema fingerprint "
-                f"{start.parameter_schema.fingerprint!r}, but this problem's schema "
-                f"fingerprint is {problem.parameter_schema.fingerprint!r}."
+                "fit this InferenceProblem through diff_soup.inference.optsolve first, "
+                "or pass fit.params."
             )
         if type(start.objective).__name__ != "MAP":
             raise ValueError(
@@ -147,9 +136,9 @@ def _validated_start(problem: EstimationProblem, start: Any) -> np.ndarray:
                 "posterior refuses a start with failed forward segments; failed "
                 f"indices are {tuple(start.failed_segment_indices)}."
             )
-        value = np.asarray(start.params, dtype=float)
+        value = np.asarray(resolve_point(problem, start, where="posterior start"), dtype=float)
     else:
-        value = np.asarray(start, dtype=float)
+        value = np.asarray(resolve_point(problem, start, where="posterior start"), dtype=float)
     if value.shape != (problem.n_params,):
         raise ValueError(
             f"posterior start has shape {value.shape}; expected ({problem.n_params},)."
@@ -204,6 +193,11 @@ def posterior_target(
 
     Sampling maps every draw back to the physical Recipe coordinate. The
     change-of-variables term preserves the posterior probability measure.
+
+    With `gradient="reverse"` the reverse-mode gradient must agree with the forward-mode one
+    within 100 times the solvers' largest `rtol`, kept between 1e-3 and 1e-1. A float32 solve
+    counts as `rtol` 1e-3 or more. The check moves each coordinate of the start by 1% of
+    `max(|z|, 1)`, away from the mode, where the gradient is noise.
     """
     if not isinstance(problem, EstimationProblem):
         raise TypeError("posterior_target requires an InferenceProblem.")
@@ -245,6 +239,7 @@ def posterior_target(
         names=parameterization.names(),
         _coordinate="x" if identity_coordinate else "z",
         gradient=gradient,
+        _source=problem,
     )
     return dataclasses.replace(
         target,

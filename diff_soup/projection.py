@@ -660,7 +660,7 @@ def project_algebraic(
                 "structure lets algebraic residual rows read differential "
                 "derivatives (or the canonical residual is fully implicit, where "
                 "absence cannot be proven). Pass the full canonical state_dot "
-                "vector — for example the solver interpolant's derivative."
+                "vector, for example the solver interpolant's derivative."
             )
         state_dot = jnp.zeros((n,), dtype=dtype)
     else:

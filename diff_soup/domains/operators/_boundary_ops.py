@@ -11,10 +11,10 @@ import jax.numpy as jnp
 
 def boundary_integral(field, *, tag, mesh):
     """Surface integral of a scalar bulk field over a tagged boundary."""
-    from diff_soup.domains.mesh.fem._boundary import boundary_face_assembly
+    from diff_soup.domains.mesh.fem._boundary import boundary_face_assembly, facet_average
 
-    face_indices, face_areas, _normals = boundary_face_assembly(mesh, tag)
-    field_at_faces = jnp.mean(field[face_indices], axis=1)
+    face_indices, face_areas, _normals, weights = boundary_face_assembly(mesh, tag, weights=True)
+    field_at_faces = facet_average(field, face_indices, weights)
     return jnp.sum(field_at_faces * face_areas)
 
 

@@ -418,10 +418,11 @@ def get_face_shape_vals_and_grads(
 
     if ele_type == "TET10":
         # 4 faces, each TRI6 (6 nodes per face).
-        # Face 0: nodes [1,2,3, 7,8,9] (opposite vertex 0)
-        # Face 1: nodes [0,3,2, 6,8,5] (opposite vertex 1)
-        # Face 2: nodes [0,1,3, 4,9,6] (opposite vertex 2)
-        # Face 3: nodes [0,2,1, 5,7,4] (opposite vertex 3)
+        # Corners, then the mid-edge nodes of edges (a, b), (b, c), (c, a).
+        # Face 0: nodes [1,2,3, 5,8,9] (opposite vertex 0)
+        # Face 1: nodes [0,3,2, 7,8,6] (opposite vertex 1)
+        # Face 2: nodes [0,1,3, 4,9,7] (opposite vertex 2)
+        # Face 3: nodes [0,2,1, 6,5,4] (opposite vertex 3)
         o = 2 if gauss_order is None else gauss_order
         tri_pts, tri_w = _gauss_tri(o)
         n_q = len(tri_w)
@@ -439,10 +440,10 @@ def get_face_shape_vals_and_grads(
         ]
         face_inds = np.array(
             [
-                [1, 2, 3, 7, 8, 9],
-                [0, 3, 2, 6, 8, 5],
-                [0, 1, 3, 4, 9, 6],
-                [0, 2, 1, 5, 7, 4],
+                [1, 2, 3, 5, 8, 9],
+                [0, 3, 2, 7, 8, 6],
+                [0, 1, 3, 4, 9, 7],
+                [0, 2, 1, 6, 5, 4],
             ],
             dtype=np.int32,
         )

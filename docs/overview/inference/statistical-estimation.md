@@ -419,6 +419,34 @@ posterior.sample(jax.random.PRNGKey(0), 1000)    # draws from the Gaussian aroun
   `posterior.sample(key, n)` draws.
 - For a MAP fit `posterior.prior_spectrum` holds the eigenvalues of the
   prior curvature.
+- A [multiple-shooting](multiple-shooting.md) fit that fits its window
+  starts has them integrated out, so `information`, `laplace` and
+  `identifiability` report the parameters alone.
+
+For a MAP fit, `ds.inference.evidence(problem, fit, *,
+curvature="observed")` uses the same Gaussian to approximate the log
+evidence, the logarithm of the normalizer \(p(u_{\text{data}})\) of
+Bayes' rule:
+
+$$
+\log p(u_{\text{data}}) \approx \log p(u_{\text{data}} \mid \hat\theta) + \log p(\hat\theta) + \tfrac{d}{2}\log 2\pi - \tfrac{1}{2}\log\det H,
+$$
+
+with \(d\) the number of parameters and \(H\) the information matrix plus
+the curvature of the prior. Between priors or models fitted to the same
+data, the larger evidence is preferred.
+
+```python
+ds.inference.evidence(est_map, fit_map).log_evidence    # the log evidence of the MAP fit
+ds.inference.laplace(est_map, fit_map).log_evidence     # the same value
+```
+
+- The priors are the ones declared on the handles. A maximum-likelihood
+  fit has no normalized prior and is refused.
+- A fit that has not reached a stationary point is refused. The check
+  tolerates a Newton decrement of 400 times the solver `rtol`, between
+  0.1 and 0.5, and credits a float32 solve with an `rtol` of at least
+  1e-3.
 
 Uncertainty across the experiments of a population fit is estimated by
 `ds.inference.cluster_covariance` and `ds.inference.bootstrap`

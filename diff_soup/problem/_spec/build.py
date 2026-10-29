@@ -37,7 +37,6 @@ adapters, never stored directly on a frozen IR node.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
@@ -47,6 +46,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._warnings import warn_user
 from diff_soup.problem._ir import (
     BoundarySpec,
     Component,
@@ -63,7 +63,7 @@ from diff_soup.problem._ir import (
     Variable,
     _BoundaryFn,
 )
-from diff_soup.problem._ir.bc import _time_flux_fn
+from diff_soup.problem._ir.bc import _constant_fn, _time_flux_fn
 from diff_soup.problem._ir.constraint import (
     BoundaryIntegralConstraint,
     DifferentialGlobalEquation,
@@ -364,7 +364,18 @@ def _make_flux_fn(value: Any, value_fn: Optional[Callable]) -> Callable:
     return fn
 
 
-def _resolve_where(where: dict[str, Any]) -> BoundarySpec:
+def _resolve_where(where: dict[str, Any], domain=None) -> BoundarySpec:
+    if where.get("face") is not None:
+        from diff_soup._lowering.bcs import _grid_face_cells
+
+        axis, side = where["face"]
+        if getattr(domain, "discretization_type", None) not in ("fvm", "fdm"):
+            raise ValueError(
+                f"axis={axis}, side={side!r} names a face of a structured grid, and this "
+                f"field lives on a {type(domain).__name__}. Select the boundary with on=, "
+                "tag= or node_indices= instead."
+            )
+        return BoundarySpec(node_indices=_grid_face_cells(domain, axis, side), face=(axis, side))
     if "selector" in where and where["selector"] is not None:
         return BoundarySpec(selector=where["selector"])
     if "tag" in where and where["tag"] is not None:
@@ -380,9 +391,27 @@ def _resolve_where(where: dict[str, Any]) -> BoundarySpec:
     raise ValueError("BCSpec.where missing a selector, tag, and node_indices")
 
 
-def _emit_bc(bc: BCSpec, var_map: dict[str, Any]):
+def _inflow_flux_fn(velocity, value, value_fn):
+    """The flux density ``velocity * c_in`` an inflow face carries into the domain."""
+    speed = jnp.asarray(velocity, dtype=float)
+    inlet = _constant_fn(value) if value_fn is None else value_fn
+
+    def flux_fn(view, ctx, t, _speed=speed, _inlet=inlet):  # noqa: ARG001
+        return _speed * jnp.asarray(_inlet(t))
+
+    return flux_fn
+
+
+def _emit_bc(bc: BCSpec, var_map: dict[str, Any], domain=None):
     var = var_map[bc.var]
-    where = _resolve_where(bc.where)
+    where = _resolve_where(bc.where, domain)
+    if bc.kind == "inflow":
+        # Danckwerts ``v c - D dc/dn = v c_in``: the face carries the total flux
+        # ``v c_in`` into the domain, while div_advect carries no flux in through
+        # it and div_flux keeps its natural zero flux there.
+        return FluxBC(
+            var=var, where=where, flux_fn=_inflow_flux_fn(bc.velocity, bc.value, bc.value_fn)
+        )
     if bc.kind == "dirichlet":
         return DirichletBC(
             var=var,
@@ -491,7 +520,7 @@ def _check_closes_pairing(spec) -> None:
             raise ValueError(
                 f"constraints {first!r} and {c.name!r} both close global "
                 f"{target!r}; a global carries one multiplier and is determined "
-                "by exactly one constraint row — give one of the two its own "
+                "by exactly one constraint row; give one of the two its own "
                 "spec.global_var to close, or drop it."
             )
         closed_by[target] = c.name
@@ -503,7 +532,7 @@ def _check_closes_pairing(spec) -> None:
             continue
         raise ValueError(
             f"global {name!r} is closed by no constraint; an algebraic global "
-            "is determined by the one constraint row that closes it — declare "
+            "is determined by the one constraint row that closes it; declare "
             f"a constraint with closes={name!r} (spec.constraint.galvanostatic, "
             ".integral, .boundary_integral, .reduce_residual, .flux_total), name "
             f"it as the current unknown of spec.control.operational(...), "
@@ -916,6 +945,74 @@ class _ObservationTracer:
         return owner or "", inputs, tuple(int(n) for n in out.shape), str(out.dtype)
 
 
+class _MeanObservationFn(eqx.Module):
+    """Average an observation's nodal values with the weights of its domain.
+
+    Without ``nodes`` the weights are the lumped mass of the evaluating bank
+    (cell volumes on a grid, ``int N_i`` on a mesh); with ``nodes`` they are
+    the boundary measure resolved at build, one weight per selected node. The
+    weights are normalized, so a uniform geometry scale cancels.
+    """
+
+    inner: object
+    nodes: Optional[tuple[int, ...]] = eqx.field(static=True, default=None)
+    weights: Optional[tuple[float, ...]] = eqx.field(static=True, default=None)
+
+    def __call__(self, view, ctx, t):
+        from diff_soup.domains.operators.dispatch import _WeakTerm
+
+        values = jnp.asarray(self.inner(view, ctx, t))
+        if self.nodes is None:
+            weights = ctx.ops.lumped_mass()
+            if isinstance(weights, _WeakTerm):
+                weights = weights.value
+        else:
+            values = values[np.asarray(self.nodes)]
+            weights = np.asarray(self.weights)
+        weights = jnp.asarray(weights).astype(values.dtype)
+        return jnp.sum(weights * values) / jnp.sum(weights)
+
+
+def _mean_observation(o: ObservationSpec, fn, tracer: _ObservationTracer, owner: str, out_shape):
+    """Wrap a ``spatial_mean`` or ``boundary_mean`` closure in its weighted mean."""
+    domain = tracer.spec._domains.get(owner) if owner else None
+    if domain is None:
+        raise ConfigurationError(
+            f"observation {o.name!r}: spec.observe.{o.kind} averages over the nodes of "
+            "a domain that carries fields, and the recipe declares none"
+        )
+    n_nodes = int(domain.num_nodes)
+    if tuple(out_shape) != (n_nodes,):
+        raise ConfigurationError(
+            f"observation {o.name!r}: spec.observe.{o.kind} averages one value per node, "
+            f"so fn must return an array of length {n_nodes} on domain {owner!r}; it "
+            f"returns shape {tuple(out_shape)}. Return the nodal values, or declare a "
+            "precomputed value with spec.observe.scalar"
+        )
+    if o.kind == "spatial_mean":
+        return _MeanObservationFn(inner=fn)
+    from diff_soup._lowering.bcs import _boundary_integral_measure
+    from diff_soup.domains.boundary_set import tags
+
+    tag = (o.where or {}).get("tag", "")
+    try:
+        measure = _boundary_integral_measure(
+            domain, tags(tag), constraint_desc=f"observation {o.name!r}"
+        )
+    except (ValueError, TypeError, KeyError) as error:
+        raise ConfigurationError(
+            f"observation {o.name!r}: the boundary tag {tag!r} does not resolve on "
+            f"domain {owner!r}: {error}"
+        ) from error
+    nodes = tuple(int(i) for i in np.asarray(measure.tag_nodes))
+    if not nodes:
+        raise ConfigurationError(
+            f"observation {o.name!r}: the boundary tag {tag!r} selects no node on domain {owner!r}"
+        )
+    weights = tuple(float(w) for w in np.asarray(measure.nodal_measure, dtype=np.float64))
+    return _MeanObservationFn(inner=fn, nodes=nodes, weights=weights)
+
+
 def _emit_observation(
     o: ObservationSpec,
     tracer: _ObservationTracer,
@@ -932,13 +1029,16 @@ def _emit_observation(
     var map.  A read-through alias is refused at build (the observe view holds
     the state and the bordered globals, not the coupled values), and members
     of a family population are not part of the var map an observation reads,
-    so neither appears in the read set.
+    so neither appears in the read set. A ``spatial_mean`` or
+    ``boundary_mean`` closure is wrapped in its weighted mean and records a
+    scalar output.
 
     Raises:
         ConfigurationError: If ``domain=`` names no declared domain with
             fields, the observation reads the fields of two or more components
-            without ``domain=``, or the trace fails or returns something other
-            than a single array.
+            without ``domain=``, the trace fails or returns something other
+            than a single array, a mean's closure returns other than one value
+            per node, or a ``boundary_mean`` tag does not resolve.
     """
     owner, inputs, out_shape, out_dtype = tracer.resolve(o)
     comp_var_map = tracer.comp_var_map(owner) if owner else tracer.var_map
@@ -950,6 +1050,9 @@ def _emit_observation(
         learnable_params=learnable_params,
         learnable_functions=learnable_functions,
     )
+    if o.kind in ("spatial_mean", "boundary_mean"):
+        fn = _mean_observation(o, fn, tracer, owner, out_shape)
+        out_shape = ()
     record = {"owner": owner, "inputs": inputs, "out_shape": out_shape, "out_dtype": out_dtype}
     if o.kind == "scalar":
         return ScalarObservation(name=o.name, fn=fn, **record)
@@ -1146,13 +1249,173 @@ class _FormCell:
 
     Lives on the static side of the adapter module, so it must be hashable;
     the default object identity hash is correct here — the cell is created
-    per adapter and mutated in place at the first evaluation.
+    per adapter and filled in place by the build-time capture pass.
     """
 
     __slots__ = ("data",)
 
     def __init__(self):
         self.data: dict = {}
+
+
+def _weight_by(action, weight):
+    """Multiply a derivative action by one weight per node, shared by a vector field's components."""
+    action = jnp.asarray(action)
+    weight = jnp.asarray(weight)
+    if action.size != weight.size:
+        return (action.reshape(weight.size, -1) * weight[:, None]).reshape(action.shape)
+    return action * weight.reshape(action.shape)
+
+
+def _lumped_weight(ops):
+    """The lumped mass of a mesh bank, one weight per node."""
+    from diff_soup.domains.operators.dispatch import _WeakTerm
+
+    domain = getattr(ops, "domain", None)
+    if domain is not None and hasattr(domain, "lumped_mass"):
+        weight = domain.lumped_mass()
+    else:
+        weight = ops.lumped_mass()
+    if isinstance(weight, _WeakTerm):
+        weight = weight.value
+    return jnp.asarray(weight)
+
+
+def _lumped_derivative_action(ctx, action):
+    """Weight a derivative action by the lumped mass on a mesh.
+
+    On a mesh the rows of a residual are integrated against the test
+    functions, and the explicit form weights ``d(field)/dt`` by the lumped
+    mass (the problem's mass diagonal). The derivative action gets the same
+    weight and is marked as already integrated. On a grid it is unchanged.
+    """
+    ops = getattr(ctx, "ops", None)
+    if ops is None or getattr(ops, "discretization_type", None) != "fem":
+        return action
+    return ops.as_weak(_weight_by(action, _lumped_weight(ops)))
+
+
+def _has_cell_scale(expr) -> bool:
+    """Whether a per-cell coefficient scales any derivative in ``expr``."""
+    from diff_soup.problem._spec.derivative_expr import (
+        DerivativeScale,
+        DerivativeSum,
+        NonlinearDerivativeExpr,
+    )
+
+    if isinstance(expr, DerivativeScale) and expr.per_cell:
+        return True
+    if isinstance(expr, DerivativeSum):
+        return any(_has_cell_scale(term) for term in expr.terms)
+    if isinstance(expr, NonlinearDerivativeExpr):
+        return any(_has_cell_scale(operand) for operand in expr.operands)
+    inner = getattr(expr, "expr", None)
+    return inner is not None and _has_cell_scale(inner)
+
+
+def _split_cell_scale(term):
+    """Split ``term`` into the expression without its per-cell scales and their product.
+
+    A per-cell coefficient must scale a field's derivative directly, possibly
+    through other scales; anywhere else it is refused.
+    """
+    from diff_soup.problem._spec.derivative_expr import DerivativeScale
+
+    if isinstance(term, DerivativeScale):
+        inner, cell = _split_cell_scale(term.expr)
+        if term.per_cell:
+            return inner, term.coeff if cell is None else cell * jnp.asarray(term.coeff)
+        return (term if inner is term.expr else DerivativeScale(inner, term.coeff)), cell
+    if _has_cell_scale(term):
+        raise ValueError(
+            "a per-cell coefficient must scale q.dt(field) directly, as in "
+            "rho_c * q.dt(field), not a gathered, reduced, scattered, applied or "
+            "nonlinear derivative expression"
+        )
+    return term, None
+
+
+def _cell_terms(expr, ctx):
+    """The terms of ``expr`` as ``(term without per-cell scales, coefficient per cell)``.
+
+    Each per-cell coefficient is read against the mesh of the evaluating bank,
+    which refuses another length than the number of cells; on a grid any
+    length other than the field's is refused.
+    """
+    from diff_soup.domains.operators.dispatch import _read_fem_operand
+    from diff_soup.problem._spec.derivative_expr import DerivativeSum, scale_size_error
+
+    terms = expr.terms if isinstance(expr, DerivativeSum) else (expr,)
+    ops = getattr(ctx, "ops", None)
+    on_mesh = ops is not None and getattr(ops, "discretization_type", None) == "fem"
+    out = []
+    for term in terms:
+        inner, cell = _split_cell_scale(term)
+        if cell is not None:
+            if not on_mesh:
+                raise scale_size_error(int(np.shape(cell)[0]), int(inner.size))
+            length = int(np.shape(cell)[0])
+            cell, layout = _read_fem_operand(ops.domain, cell, "a per-cell coefficient of q.dt")
+            if layout != "quad":
+                raise scale_size_error(length, int(inner.size))
+        out.append((inner, cell))
+    return out
+
+
+def _check_cell_scales(expr, ctx) -> None:
+    """Refuse a per-cell coefficient of ``expr`` that its domain cannot read."""
+    if _has_cell_scale(expr):
+        _cell_terms(expr, ctx)
+
+
+def _cell_weighted_parts(expr, slopes: dict, ctx, include: bool):
+    """``(derivative action, residual part)`` of an expression with per-cell coefficients.
+
+    A term scaled per cell by ``c`` is weighted by ``int c N_i``, the lumped
+    mass with the coefficient inside the integral; the other terms take the
+    lumped mass.
+    """
+    from diff_soup.domains.operators.dispatch import dispatch_integrate_scalar_at_quad
+    from diff_soup.problem._ir.derivative_ir import evaluate_parts, sum_residual_terms
+    from diff_soup.problem._spec.derivative_expr import DerivativeSum
+
+    ops = ctx.ops
+    size = int(expr.size)
+    action = None
+    for inner, cell in _cell_terms(expr, ctx):
+        value, _ = evaluate_parts(inner, slopes, size, include_residual=False)
+        if cell is None:
+            weight = _lumped_weight(ops)
+        else:
+            weight = dispatch_integrate_scalar_at_quad(ops.domain, cell)
+        weighted = _weight_by(value, weight)
+        action = weighted if action is None else action + weighted
+    residual = None
+    if include and isinstance(expr, DerivativeSum):
+        residual = sum_residual_terms(expr.residual_terms, size)
+    return ops.as_weak(action), residual
+
+
+def _slope_evaluation(expr, slopes: dict, ctx):
+    """Evaluate a derivative expression inside a slope context.
+
+    Returns the derivative action alone, or the full residual rows when the
+    context includes the residual part. On a mesh the derivative action is
+    weighted by the lumped mass (see ``_lumped_derivative_action``), and a term
+    with a per-cell coefficient by the mass integral of that coefficient.
+    """
+    from diff_soup.problem._ir.derivative_ir import evaluate_parts
+    from diff_soup.problem._spec.derivative_expr import slope_context_includes_residual
+
+    include = slope_context_includes_residual()
+    if _has_cell_scale(expr):
+        action, residual = _cell_weighted_parts(expr, slopes, ctx, include)
+    else:
+        action, residual = evaluate_parts(expr, slopes, int(expr.size), include_residual=include)
+        action = _lumped_derivative_action(ctx, action)
+    if residual is None:
+        return action
+    return action + residual
 
 
 class _ResidualFormAdapter(eqx.Module):
@@ -1167,12 +1430,14 @@ class _ResidualFormAdapter(eqx.Module):
     default, or the derivative action alone when the context excludes the
     residual part.
 
-    The adapter records the expression's static structure
+    During the build-time capture pass (and only then, see
+    [capture_forms][diff_soup.problem._ir.derivative_ir.capture_forms]) the
+    adapter records the expression's static structure
     (``_derivative_form``): the written field, each contributing field's
     exact coefficient pattern, and which fields the coefficients read
-    (``state_deps`` — probed by value at the first evaluation; ``None`` when
-    undecidable). Expressions that are nonlinear in the state derivative are
-    recorded as such; they lower through the general implicit form instead.
+    (``state_deps``, probed by value; ``None`` when undecidable).
+    Expressions that are nonlinear in the state derivative are recorded as
+    such; they lower through the general implicit form instead.
 
     An ``eqx.Module`` (not a plain closure) for the same reason as
     [_TracedQAdapter][diff_soup.problem._spec.build._TracedQAdapter]: the
@@ -1193,7 +1458,7 @@ class _ResidualFormAdapter(eqx.Module):
 
     @property
     def _derivative_form(self) -> dict:
-        """The captured structure cell (empty until the first evaluation)."""
+        """The captured structure cell (empty until the build-time capture pass)."""
         return self.cell.data
 
     def __call__(self, view, ctx, t):
@@ -1201,45 +1466,32 @@ class _ResidualFormAdapter(eqx.Module):
             ImplicitResidualIR,
             evaluate_expression,
             normalize_expression,
+            record_form,
+            record_plain,
             zero_slopes_for,
         )
-        from diff_soup.problem._spec.derivative_expr import (
-            DerivativeExpr,
-            current_slopes,
-            slope_context_includes_residual,
-        )
+        from diff_soup.problem._spec.derivative_expr import DerivativeExpr, current_slopes
 
         result = self.inner(view, ctx, t)
+        form_cell = self.cell.data
         if not isinstance(result, DerivativeExpr):
+            record_plain(form_cell)
             return result
         slopes = current_slopes()
         if slopes is not None:
-            return evaluate_expression(
-                result,
-                slopes,
-                int(result.size),
-                include_residual=slope_context_includes_residual(),
-            )
-        form_cell = self.cell.data
+            return _slope_evaluation(result, slopes, ctx)
+        _check_cell_scales(result, ctx)
         ir = normalize_expression(result, out_size=int(result.size))
+        record_form(
+            form_cell,
+            self.field_name,
+            ir,
+            state_deps=lambda: _probe_coefficient_state_dependence(self.inner, view, ctx, ir),
+        )
         if isinstance(ir, ImplicitResidualIR):
-            if not form_cell.get("captured"):
-                form_cell["out_field"] = self.field_name
-                form_cell["terms"] = ()
-                form_cell["nonlinear"] = True
-                form_cell["ydot_fields"] = ir.ydot_fields
-                form_cell["captured"] = True
             # No slope context: contribute the residual at zero slopes (the
             # derivative-free evaluation the rhs channel expects).
             return evaluate_expression(result, zero_slopes_for(result), int(result.size))
-        if not form_cell.get("captured"):
-            form_cell["out_field"] = self.field_name
-            form_cell["terms"] = tuple(
-                (term.in_field, term.pattern[0], term.pattern[1]) for term in ir.terms
-            )
-            form_cell["nonlinear"] = False
-            form_cell["state_deps"] = _probe_coefficient_state_dependence(self.inner, view, ctx, ir)
-            form_cell["captured"] = True
         return -ir.residual_part()
 
 
@@ -1287,6 +1539,166 @@ def _reject_derivative_returns_in_bundle(rhs: Callable, equation_name: str) -> C
     return _BundledReturnGuard(inner=rhs, equation_name=equation_name)
 
 
+class _NeumannCondition(eqx.Module):
+    """One ``spec.bc.neumann`` declaration, resolved to a grid face.
+
+    ``positions`` are the selected cells' positions in the face (the grid shape
+    with ``axis`` removed, row-major), or ``None`` for the whole face.
+    ``value_fn`` takes dimensional time and returns a scalar or one value per
+    selected cell.
+    """
+
+    field: str = eqx.field(static=True)
+    axis: int = eqx.field(static=True)
+    side: str = eqx.field(static=True)
+    face_shape: tuple[int, ...] = eqx.field(static=True)
+    positions: Optional[tuple[int, ...]] = eqx.field(static=True)
+    time_ref: float = eqx.field(static=True)
+    value_fn: Callable
+
+    def evaluate(self, t):
+        """The operator-level condition at internal time ``t``."""
+        from diff_soup.domains.operators.flux_bc import _NormalDerivativeBC
+
+        value = jnp.asarray(self.value_fn(t * self.time_ref))
+        size = int(np.prod(self.face_shape))
+        if self.positions is None:
+            value = value if value.ndim == 0 else value.reshape(self.face_shape)
+            return _NormalDerivativeBC(axis=self.axis, side=self.side, value=value)
+        where = jnp.asarray(self.positions)
+        face = jnp.zeros((size,), dtype=value.dtype).at[where].set(value)
+        mask = jnp.zeros((size,), dtype=value.dtype).at[where].set(1.0)
+        return _NormalDerivativeBC(
+            axis=self.axis,
+            side=self.side,
+            value=face.reshape(self.face_shape),
+            mask=mask.reshape(self.face_shape),
+        )
+
+
+class _MeshNeumannCondition(eqx.Module):
+    """One ``spec.bc.neumann`` declaration on a tagged mesh, resolved to its facets.
+
+    ``facets`` are the selected rows of ``mesh.boundary_facets()``; ``value_fn``
+    takes dimensional time and returns a scalar or one value per selected facet.
+    """
+
+    field: str = eqx.field(static=True)
+    facets: tuple[int, ...] = eqx.field(static=True)
+    time_ref: float = eqx.field(static=True)
+    value_fn: Callable
+
+    def evaluate(self, t):
+        """The operator-level condition at internal time ``t``."""
+        from diff_soup.domains.operators.flux_bc import _MeshNormalDerivative
+
+        value = jnp.asarray(self.value_fn(t * self.time_ref))
+        return _MeshNormalDerivative(facets=self.facets, value=value)
+
+
+class _OpsContext:
+    """The residual context with ``ops`` replaced; every other attribute forwards."""
+
+    __slots__ = ("_ctx", "ops")
+
+    def __init__(self, ctx, ops) -> None:
+        self._ctx = ctx
+        self.ops = ops
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_ctx"), name)
+
+
+class _NeumannRhs(eqx.Module):
+    """Carry a component's ``spec.bc.neumann`` conditions into its equations' operators.
+
+    Each evaluation hands the wrapped rhs a ``q.ops`` whose ``laplacian`` and
+    ``div_flux``, applied to a conditioned field's own values, impose its outward
+    normal derivative: through a ghost value on a grid, as the natural boundary
+    term ``int D s N_i dS`` on a mesh. The operator supplies its own
+    diffusivity, so the condition holds for any ``D``, ``D(u)`` included.
+    """
+
+    inner: object
+    fields: dict
+    conditions: tuple
+
+    def __call__(self, view, ctx, t):
+        from diff_soup.domains.operators.base import _FieldConditionView
+
+        targets = []
+        for name, variable in self.fields.items():
+            conditions = tuple(c.evaluate(t) for c in self.conditions if c.field == name)
+            targets.append((view[variable], conditions))
+        return self.inner(view, _OpsContext(ctx, _FieldConditionView(ctx.ops, targets)), t)
+
+
+def _neumann_conditions(spec, var_map) -> dict[str, tuple]:
+    """Resolve every ``spec.bc.neumann`` to its grid face or mesh facets, grouped by domain name."""
+    from diff_soup._lowering.bcs import (
+        _grid_face_cells,
+        _grid_face_of,
+        _grid_shape,
+        _resolve_facet_mask,
+        _resolve_selector,
+    )
+
+    time_ref = 1.0 if spec._time_scale is None else float(spec._time_scale)
+    out: dict[str, list] = {}
+    for bc in spec._bcs:
+        if bc.kind != "neumann" or bc.var not in spec._fields:
+            continue
+        dname = spec._field_domains[bc.var]
+        domain = spec._domains[dname]
+        desc = f"spec.bc.neumann({bc.var!r})"
+        value_fn = bc.value_fn if bc.value_fn is not None else _constant_fn(bc.value)
+        if hasattr(domain, "boundary_facets") and bc.where.get("selector") is not None:
+            mask = _resolve_facet_mask(domain, bc.where["selector"], bc_desc=desc)
+            out.setdefault(dname, []).append(
+                _MeshNeumannCondition(
+                    field=bc.var,
+                    facets=tuple(int(i) for i in np.flatnonzero(mask)),
+                    time_ref=time_ref,
+                    value_fn=value_fn,
+                )
+            )
+            continue
+        if getattr(domain, "discretization_type", None) not in ("fvm", "fdm") or not hasattr(
+            domain, "cell_volumes"
+        ):
+            raise ValueError(
+                f"{desc}: the normal derivative is imposed on structured grids and tagged "
+                f"meshes, and {bc.var!r} lives on a {type(domain).__name__}. State the flux "
+                "density D du/dn with spec.bc.flux."
+            )
+        if bc.where.get("face") is not None:
+            face = tuple(bc.where["face"])
+            cells = _grid_face_cells(domain, *face)
+        else:
+            cells = _resolve_selector(domain, bc.where["selector"], want="nodes")
+            face = _grid_face_of(domain, cells, bc_desc=desc)
+        axis, side = face
+        face = _grid_face_of(domain, cells, face=face, bc_desc=desc)
+        shape = _grid_shape(domain)
+        face_shape = tuple(n for k, n in enumerate(shape) if k != axis)
+        multi = np.unravel_index(np.asarray(cells, dtype=np.int64), shape)
+        others = tuple(m for k, m in enumerate(multi) if k != axis)
+        positions = np.ravel_multi_index(others, face_shape) if face_shape else np.zeros(1, int)
+        whole = len(cells) == int(np.prod(face_shape))
+        out.setdefault(dname, []).append(
+            _NeumannCondition(
+                field=bc.var,
+                axis=int(axis),
+                side=side,
+                face_shape=face_shape,
+                positions=None if whole else tuple(int(p) for p in positions),
+                time_ref=time_ref,
+                value_fn=value_fn,
+            )
+        )
+    return {dname: tuple(conditions) for dname, conditions in out.items()}
+
+
 def _build_components(
     spec,
     var_map: dict[str, Any],
@@ -1329,6 +1741,15 @@ def _build_components(
     def _comp_var_map(dname: str) -> dict[str, Any]:
         return _component_var_map(var_map, aliases_by_comp, dname)
 
+    neumann = _neumann_conditions(spec, var_map)
+
+    def _with_neumann(rhs, dname: str):
+        conditions = neumann.get(dname)
+        if not conditions:
+            return rhs
+        fields = {c.field: var_map[c.field] for c in conditions}
+        return _NeumannRhs(inner=rhs, fields=fields, conditions=conditions)
+
     for eqspec in spec._equations:
         if eqspec.writes in spec._globals:
             # Differential-global equations lower to a bordered closing row,
@@ -1362,6 +1783,7 @@ def _build_components(
             learnable_functions=learnable_functions,
             quad_fields=quad_fields,
         )
+        rhs = _with_neumann(rhs, dname)
         rhs = _wrap_derivative_return(rhs, equation_name=eqspec.name, field_name=eqspec.writes)
         eq = Equation(var=var, rhs_fn=rhs, inputs=tuple(inputs), name=eqspec.name)
         by_domain[dname]["eqs"].append(eq)
@@ -1412,6 +1834,7 @@ def _build_components(
             learnable_functions=learnable_functions,
             quad_fields=quad_fields,
         )
+        rhs = _with_neumann(rhs, dname)
         rhs = _reject_derivative_returns_in_bundle(rhs, meqspec.name)
         eq = MultiEquation(vars=out_vars, rhs_fn=rhs, inputs=tuple(inputs), name=meqspec.name)
         by_domain[dname]["eqs"].append(eq)
@@ -1455,12 +1878,14 @@ def _build_components(
         if bcspec.var not in spec._fields:
             raise ValueError(f"BC kind={bcspec.kind!r} references unknown field {bcspec.var!r}")
         dname = spec._field_domains[bcspec.var]
+        domain = spec._domains[dname]
         if bcspec.kind == "periodic":
-            domain = spec._domains[dname]
-            axes = tuple(range(_grid_dim(domain)))
+            axes = bcspec.axes if bcspec.axes is not None else tuple(range(_grid_dim(domain)))
             by_domain[dname]["bcs"].append(PeriodicBC(var=var_map[bcspec.var], axes=axes))
+        elif bcspec.kind == "neumann":
+            continue  # carried by the equations' operators (see _neumann_conditions)
         else:
-            by_domain[dname]["bcs"].append(_emit_bc(bcspec, var_map))
+            by_domain[dname]["bcs"].append(_emit_bc(bcspec, var_map, domain))
 
     components: list[Component] = []
     for dname, payload in by_domain.items():
@@ -1506,8 +1931,7 @@ def _resolve_scales(
       constraint nodes are born with the resolved ``integrand_scale``
       (same value populates both this and ``integrand_ref``).
 
-    Emits conflict + un-scaled UserWarnings at ``stacklevel=2`` so they
-    surface at the ``to_equation_set`` callsite.
+    Emits the conflict and un-scaled UserWarnings at the user's own call.
 
     ``families`` is the registration-order tuple of
     [Family][diff_soup.problem._ir.family.Family] IR nodes;
@@ -1632,10 +2056,9 @@ def _resolve_scales(
         for key, cval in central.items():
             if key in inline and inline[key] != cval:
                 ival = inline[key]
-                warnings.warn(
+                warn_user(
                     label_fn(key, cval, ival),
                     UserWarning,
-                    stacklevel=2,
                 )
             inline[key] = cval
 
@@ -1650,12 +2073,11 @@ def _resolve_scales(
     # central time
     if spec._central_time is not None:
         if spec._time_scale is not None and float(spec._time_scale) != float(spec._central_time):
-            warnings.warn(
+            warn_user(
                 f"spec.scales: central override of 'time' = "
                 f"{float(spec._central_time)!r} differs from inline scale "
                 f"{float(spec._time_scale)!r}; central value wins",
                 UserWarning,
-                stacklevel=2,
             )
         time_ref = float(spec._central_time)
     # central integrand: sets BOTH integrand_ref and the constraint node.
@@ -1674,12 +2096,11 @@ def _resolve_scales(
     ]
     if unscaled:
         names = ", ".join(repr(n) for n in unscaled)
-        warnings.warn(
+        warn_user(
             f"spec.scales: fields {names} have no scale= and none was set "
             "centrally; defaulting to 1.0 (dimensional). Set scale= per field "
             "or via spec.scales(state=...) to non-dimensionalize.",
             UserWarning,
-            stacklevel=2,
         )
 
     scales = Scales(

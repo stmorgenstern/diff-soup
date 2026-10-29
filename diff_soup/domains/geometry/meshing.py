@@ -5,18 +5,35 @@ Converts boundary polygons (from [mask_to_polygon][diff_soup.domains.geometry.ma
 to triangulated [Mesh][diff_soup.domains.mesh.Mesh] objects ready for FEM
 assembly.
 
-Meshing runs on ``gmsh``, which installs with diff_soup.
+Meshing needs ``gmsh`` from the ``mesh`` extra, ``pip install "diff-soup[mesh]"``.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from diff_soup._optional import import_optional
 from diff_soup.domains.geometry.mask import mask_to_polygon
 from diff_soup.domains.mesh import Mesh, TaggedMesh
+
+
+def _ccw_loop(polygon: List[Tuple[float, float]], line_tags: List[int]) -> List[int]:
+    """Return the gmsh curve-loop tags that traverse *polygon* counter-clockwise.
+
+    gmsh orients each triangle like the loop it meshes, so a clockwise polygon
+    (an OpenCV contour, for one) would give clockwise triangles. The measure is
+    orientation-free, but a counter-clockwise mesh is the convention every
+    other factory follows. Reversing the loop reverses each line by sign, so
+    the line tags, and the physical groups that hold them, are unchanged.
+    """
+    xy = np.asarray(polygon, dtype=np.float64)
+    x, y = xy[:, 0], xy[:, 1]
+    signed_area = 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+    if signed_area < 0.0:
+        return [-lt for lt in reversed(line_tags)]
+    return list(line_tags)
 
 
 def polygon_to_mesh(
@@ -31,6 +48,7 @@ def polygon_to_mesh(
     Args:
         polygon: Ordered list of ``(x, y)`` vertices defining the domain boundary.
             The polygon is automatically closed (last vertex connected to first).
+            Either orientation works; the triangles always come out counter-clockwise.
             Must have at least 3 vertices.
         mesh_size: Target element size in physical units.  Smaller values produce finer
             meshes with more elements.
@@ -84,8 +102,8 @@ def polygon_to_mesh(
             tag = gmsh.model.geo.addLine(point_tags[i], point_tags[(i + 1) % n])
             line_tags.append(tag)
 
-        # Curve loop + plane surface
-        loop_tag = gmsh.model.geo.addCurveLoop(line_tags)
+        # Curve loop + plane surface, counter-clockwise (see _ccw_loop)
+        loop_tag = gmsh.model.geo.addCurveLoop(_ccw_loop(polygon, line_tags))
         gmsh.model.geo.addPlaneSurface([loop_tag])
 
         gmsh.model.geo.synchronize()
@@ -373,6 +391,7 @@ def polygon_to_tagged_mesh(
 
     Args:
         polygon: Ordered ``(x, y)`` vertices defining the domain boundary (auto-closed).
+            Either orientation works; the triangles always come out counter-clockwise.
         mesh_size: Target element size.
         segment_tags: Optional list of integer tags, one per polygon edge.  Ids may
             repeat to group edges into one region.  If ``None``, edges are tagged
@@ -381,7 +400,8 @@ def polygon_to_tagged_mesh(
             also ``None``, names default to ``"seg_0"``, ``"seg_1"``, etc.
             A ``"boundary"`` name covering every tagged edge is always available
             as well, unless a segment already carries that name.
-        order: Mesh polynomial order (1 = TRI3).
+        order: Mesh polynomial order (1 = TRI3, 2 = TRI6, whose boundary edges
+            list the midside node after the two end nodes).
         verbose: Forward gmsh terminal output.
 
     Returns:
@@ -447,8 +467,8 @@ def polygon_to_tagged_mesh(
             lt = gmsh.model.geo.addLine(point_tags[i], point_tags[(i + 1) % n_verts])
             line_tags.append(lt)
 
-        # Curve loop + surface
-        loop_tag = gmsh.model.geo.addCurveLoop(line_tags)
+        # Curve loop + surface, counter-clockwise (see _ccw_loop)
+        loop_tag = gmsh.model.geo.addCurveLoop(_ccw_loop(polygon, line_tags))
         gmsh.model.geo.addPlaneSurface([loop_tag])
         gmsh.model.geo.synchronize()
 
@@ -483,6 +503,7 @@ def polygon_to_tagged_mesh(
             elem_type = 9
             ele_type_str = "TRI6"
             nodes_per_elem = 6
+        nodes_per_edge = order + 1
 
         elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=2)
         tri_mask = np.array(elem_types) == elem_type
@@ -515,21 +536,22 @@ def polygon_to_tagged_mesh(
                 et, _, ent_node_tags = gmsh.model.mesh.getElements(1, ent)
                 if len(et) == 0:
                     continue
-                # Line elements (type 1) have 2 nodes each
+                # A 2-node line (type 1) on a TRI3 mesh, a 3-node line (type 8,
+                # end nodes then the midside node) on a TRI6 mesh.
                 for ti in range(len(et)):
-                    if et[ti] == 1:  # 2-node line
-                        line_nodes = np.array(ent_node_tags[ti], dtype=np.int64).reshape(-1, 2)
-                        for row in line_nodes:
-                            a = tag_to_idx[int(row[0])]
-                            b = tag_to_idx[int(row[1])]
-                            bnd_edges_list.append((a, b))
-                            bnd_tags_list.append(pg_tag)
+                    width = {1: 2, 8: 3}.get(int(et[ti]))
+                    if width != nodes_per_edge:
+                        continue
+                    line_nodes = np.array(ent_node_tags[ti], dtype=np.int64).reshape(-1, width)
+                    for row in line_nodes:
+                        bnd_edges_list.append(tuple(tag_to_idx[int(n)] for n in row))
+                        bnd_tags_list.append(pg_tag)
 
         if len(bnd_edges_list) > 0:
             boundary_edges = np.array(bnd_edges_list, dtype=np.int32)
             boundary_tags = np.array(bnd_tags_list, dtype=np.int32)
         else:
-            boundary_edges = np.empty((0, 2), dtype=np.int32)
+            boundary_edges = np.empty((0, nodes_per_edge), dtype=np.int32)
             boundary_tags = np.empty((0,), dtype=np.int32)
 
     finally:
@@ -544,6 +566,306 @@ def polygon_to_tagged_mesh(
         tag_names=tag_names,
         tag_groups=tag_groups,
     )
+
+
+def polygons_to_tagged_mesh(
+    regions: Dict[str, List[Tuple[float, float]]],
+    *,
+    mesh_size: float = 1.0,
+    segment_tags: Optional[Dict[str, List[int]]] = None,
+    segment_names: Optional[dict] = None,
+    order: int = 1,
+    verbose: bool = False,
+) -> TaggedMesh:
+    """Triangulate several named polygons into one mesh whose regions share their interfaces.
+
+    Each cell is tagged with its region, and each region's outer edges with its name.
+    The edges two regions share are tagged with both names, sorted and joined by `|`,
+    such as `"bowl|soup"`. The tag group `"boundary"` holds the whole outer boundary.
+
+    `segment_tags` splits a region's outer edges as `polygon_to_tagged_mesh` does:
+    one integer per polygon edge, with ids repeated to group edges, and
+    `segment_names` naming each id (`segment_tags={"bowl": [1, 1, 2, 1]}` with
+    `segment_names={1: "bowl", 2: "table"}`). Interface edges keep their `"a|b"` tag.
+
+    Args:
+        regions: The polygon of each region by name, where a later region takes any overlap with an earlier one.
+        mesh_size: The target element size.
+        segment_tags: The tag of each polygon edge, by region name. A region left out keeps one tag, its name.
+        segment_names: The name of each id in `segment_tags`, such as `{2: "table"}`. Defaults to `"<region>_seg_<i>"`, after the first polygon edge `i` carrying the id.
+        order: `1` for TRI3 elements, `2` for TRI6.
+        verbose: If `True`, show gmsh's output.
+
+    Returns:
+        A [TaggedMesh][diff_soup.domains.TaggedMesh] with boundary and cell tags.
+
+    Raises:
+        ValueError: If there are no regions, a polygon has fewer than three
+            vertices, a name contains `|`, a region ends up with no cells, or
+            `segment_tags` and `segment_names` do not match the regions, their
+            edges and each other.
+    """
+    gmsh = import_optional("gmsh")
+
+    names = [str(name) for name in regions]
+    if not names:
+        raise ValueError("polygons_to_tagged_mesh: pass at least one region")
+    if order not in (1, 2):
+        raise ValueError("order must be 1 or 2")
+    for name, polygon in regions.items():
+        if "|" in str(name):
+            raise ValueError(
+                f"polygons_to_tagged_mesh: region name {name!r} contains '|', which "
+                "joins the two names of an interface tag"
+            )
+        if len(polygon) < 3:
+            raise ValueError(
+                f"polygons_to_tagged_mesh: region {name!r} needs at least 3 vertices, "
+                f"got {len(polygon)}"
+            )
+    segments = _checked_segments(regions, names, segment_tags, segment_names)
+
+    gmsh.initialize()
+    try:
+        if not verbose:
+            gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("diff_soup_regions")
+        occ = gmsh.model.occ
+        surfaces = []
+        for polygon in regions.values():
+            points = [occ.addPoint(float(x), float(y), 0.0, mesh_size) for x, y in polygon]
+            n = len(points)
+            lines = [occ.addLine(points[i], points[(i + 1) % n]) for i in range(n)]
+            surfaces.append(occ.addPlaneSurface([occ.addCurveLoop(lines)]))
+        dim_tags = [(2, s_tag) for s_tag in surfaces]
+        if len(dim_tags) > 1:
+            _, pieces_of = occ.fragment(dim_tags[:1], dim_tags[1:])
+        else:
+            pieces_of = [dim_tags]
+        occ.synchronize()
+        # Each piece of the plane belongs to the last region that covers it.
+        region_of_surface: dict = {}
+        for k, pieces in enumerate(pieces_of):
+            for dim, tag in pieces:
+                if dim == 2:
+                    region_of_surface[int(tag)] = k
+        gmsh.model.mesh.setSize(gmsh.model.getEntities(0), mesh_size)
+        gmsh.option.setNumber("Mesh.MeshSizeMax", mesh_size)
+        gmsh.model.mesh.generate(2)
+        if order == 2:
+            gmsh.model.mesh.setOrder(2)
+
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        coords = np.array(node_coords).reshape(-1, 3)[:, :2]
+        tag_to_idx = {int(t): i for i, t in enumerate(node_tags)}
+        elem_type, nodes_per_elem = (2, 3) if order == 1 else (9, 6)
+        cell_blocks, region_blocks = [], []
+        for surface, k in sorted(region_of_surface.items()):
+            types, _, elem_nodes = gmsh.model.mesh.getElements(2, surface)
+            for et, block in zip(types, elem_nodes):
+                if int(et) != elem_type:
+                    continue
+                conn = np.array(block, dtype=np.int64).reshape(-1, nodes_per_elem)
+                cell_blocks.append(np.vectorize(tag_to_idx.__getitem__)(conn))
+                region_blocks.append(np.full(conn.shape[0], k, dtype=np.int64))
+    finally:
+        gmsh.finalize()
+
+    cells = np.concatenate(cell_blocks).astype(np.int64)
+    region = np.concatenate(region_blocks)
+    cells = _counter_clockwise(coords, cells)
+    for k, name in enumerate(names):
+        if not np.any(region == k):
+            raise ValueError(
+                f"polygons_to_tagged_mesh: region {name!r} has no cells; a region listed "
+                "later covers all of it"
+            )
+    edges, tags, tag_names, outer_ids = _region_boundary_edges(cells, region, names)
+    if segments is not None:
+        tags, tag_names, outer_ids = _split_outer_edges(
+            coords, edges, tags, tag_names, regions, names, *segments
+        )
+    tag_groups = None if "boundary" in tag_names.values() else {"boundary": tuple(outer_ids)}
+    return TaggedMesh(
+        points=coords,
+        cells=cells.astype(np.int32),
+        ele_type="TRI3" if order == 1 else "TRI6",
+        boundary_edges=edges,
+        boundary_tags=tags,
+        tag_names=tag_names,
+        tag_groups=tag_groups,
+        cell_tags=(region + 1).astype(np.int32),
+        cell_tag_names={name: k + 1 for k, name in enumerate(names)},
+    )
+
+
+def _checked_segments(regions, names, segment_tags, segment_names):
+    """``(segment_tags, segment_names)`` checked against the regions, or ``None``.
+
+    Raises:
+        ValueError: If `segment_names` comes without `segment_tags`, `segment_tags`
+            names an unknown region or gives one region the wrong number of tags,
+            or a name is missing, unused, repeated, contains `|`, or is the name of
+            a region whose edges keep their default tag.
+    """
+    if segment_tags is None:
+        if segment_names is not None:
+            raise ValueError(
+                "polygons_to_tagged_mesh: segment_names names the ids of segment_tags; "
+                "pass segment_tags as well"
+            )
+        return None
+    tags_of = {str(name): [int(t) for t in seg] for name, seg in segment_tags.items()}
+    unknown = sorted(set(tags_of) - set(names))
+    if unknown:
+        raise ValueError(
+            f"polygons_to_tagged_mesh: segment_tags names {unknown}, which are not "
+            f"regions; the regions are {names}"
+        )
+    for name, seg in tags_of.items():
+        if len(seg) != len(regions[name]):
+            raise ValueError(
+                f"polygons_to_tagged_mesh: segment_tags[{name!r}] has {len(seg)} tags, "
+                f"but region {name!r} has {len(regions[name])} polygon edges"
+            )
+    used = []  # every id, in the order the regions first use it
+    for name in names:
+        for t in tags_of.get(name, ()):
+            if t not in used:
+                used.append(t)
+    if segment_names is None:
+        name_of: dict = {}
+        for name in names:
+            for i, t in enumerate(tags_of.get(name, ())):
+                name_of.setdefault(t, f"{name}_seg_{i}")
+    else:
+        name_of = {int(t): str(n) for t, n in segment_names.items()}
+        missing = [t for t in used if t not in name_of]
+        unused = sorted(set(name_of) - set(used))
+        if missing or unused:
+            raise ValueError(
+                "polygons_to_tagged_mesh: segment_names must name exactly the ids in "
+                f"segment_tags; missing {missing}, unused {unused}"
+            )
+    taken = [name_of[t] for t in used] + [n for n in names if n not in tags_of]
+    for n in taken:
+        if "|" in n:
+            raise ValueError(
+                f"polygons_to_tagged_mesh: segment name {n!r} contains '|', which joins "
+                "the two names of an interface tag"
+            )
+        if taken.count(n) > 1:
+            hint = (
+                f"region {n!r} has no segment_tags, so its outer edges carry its name"
+                if n in names and n not in tags_of
+                else "give the edges one id instead"
+            )
+            raise ValueError(f"polygons_to_tagged_mesh: two edge tags are named {n!r}; {hint}")
+    return tags_of, name_of
+
+
+def _split_outer_edges(coords, edges, tags, tag_names, regions, names, tags_of, name_of):
+    """Retag the outer edges of the regions in ``tags_of`` by the polygon edge they lie on.
+
+    The ids of ``tags_of`` are kept; the default region tags and the interface tags
+    that remain are renumbered after the largest of them, in their original order.
+
+    Returns:
+        ``(tags, tag_names, outer_ids)``, as from ``_region_boundary_edges``.
+    """
+    n_regions = len(names)
+    used = sorted({t for seg in tags_of.values() for t in seg})
+    new_tags = tags.copy()
+    span = float(np.ptp(coords, axis=0).max())
+    for k, name in enumerate(names):
+        if name not in tags_of:
+            continue
+        rows = np.flatnonzero(tags == k + 1)
+        if rows.size == 0:
+            continue
+        mid = 0.5 * (coords[edges[rows, 0]] + coords[edges[rows, 1]])
+        polygon = np.asarray(regions[name], dtype=float)
+        a, b = polygon, np.roll(polygon, -1, axis=0)
+        ab = b - a
+        # Distance from each edge midpoint to each polygon edge (as a segment).
+        s = np.einsum("pmd,md->pm", mid[:, None, :] - a[None], ab) / np.einsum("md,md->m", ab, ab)
+        foot = a[None] + np.clip(s, 0.0, 1.0)[..., None] * ab[None]
+        dist = np.linalg.norm(mid[:, None, :] - foot, axis=2)
+        nearest = dist.argmin(axis=1)
+        if dist[np.arange(rows.size), nearest].max() > 1e-8 * span:
+            raise RuntimeError(
+                f"polygons_to_tagged_mesh: an outer edge of region {name!r} lies on none "
+                "of its polygon edges"
+            )
+        new_tags[rows] = np.asarray(tags_of[name], dtype=np.int32)[nearest]
+    # Renumber the tags that stay (untouched regions, interfaces) after the user's ids.
+    kept = [t for t in sorted(tag_names) if not (t <= n_regions and names[t - 1] in tags_of)]
+    renumber = {t: max(used) + 1 + i for i, t in enumerate(kept)}
+    lookup = np.zeros(max(tag_names) + 1, dtype=np.int64)
+    lookup[list(renumber)] = list(renumber.values())
+    stays = np.isin(tags, kept)
+    new_tags[stays] = lookup[tags[stays]]
+    present = set(np.unique(new_tags).tolist())
+    out_names = {t: name_of[t] for t in used if t in present}
+    out_names.update({renumber[t]: tag_names[t] for t in kept})
+    outer_ids = [t for t in used if t in present] + [renumber[t] for t in kept if t <= n_regions]
+    return new_tags.astype(np.int32), out_names, outer_ids
+
+
+def _counter_clockwise(points: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Reverse every clockwise triangle (TRI3 or TRI6) so all run counter-clockwise."""
+    p0, p1, p2 = (points[cells[:, i]] for i in range(3))
+    e1, e2 = p1 - p0, p2 - p0
+    clockwise = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0] < 0.0
+    flip = [0, 2, 1] if cells.shape[1] == 3 else [0, 2, 1, 5, 4, 3]
+    cells = cells.copy()
+    cells[clockwise] = cells[clockwise][:, flip]
+    return cells
+
+
+def _region_boundary_edges(cells: np.ndarray, region: np.ndarray, names: List[str]):
+    """Tag the outer edges of each region and the edges two regions share.
+
+    Returns ``(edges, tags, tag_names, outer_ids)``. An outer edge of region
+    ``k`` takes tag ``k + 1`` and the region's name; each interface takes a tag
+    after those, named by the two region names sorted and joined by ``|``. A
+    TRI6 edge lists its end nodes, then its midside node.
+    """
+    local = np.array([[0, 1], [1, 2], [2, 0]])
+    n_cells = cells.shape[0]
+    ends = cells[:, local].reshape(-1, 2)
+    owner = np.repeat(np.arange(n_cells), 3)
+    keys = np.sort(ends, axis=1)
+    _, inverse, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+    inverse = inverse.reshape(-1)
+    order = np.argsort(inverse, kind="stable")
+    first = np.ones(order.shape[0], dtype=bool)
+    first[1:] = inverse[order][1:] != inverse[order][:-1]
+    rows = []  # (edge slot, tag key)
+    for pos in np.flatnonzero(first):
+        slot = order[pos]
+        n_owners = counts[inverse[slot]]
+        k = int(region[owner[slot]])
+        if n_owners == 1:
+            rows.append((slot, (k,)))
+        else:
+            k2 = int(region[owner[order[pos + 1]]])
+            if k2 != k:
+                rows.append((slot, tuple(sorted((names[k], names[k2])))))
+    outer = sorted({key[0] for _, key in rows if len(key) == 1})
+    pairs = sorted({key for _, key in rows if len(key) == 2})
+    tag_names = {k + 1: names[k] for k in outer}
+    pair_id = {pair: len(names) + 1 + i for i, pair in enumerate(pairs)}
+    tag_names.update({pair_id[pair]: "|".join(pair) for pair in pairs})
+    slots = np.array([slot for slot, _ in rows], dtype=np.int64)
+    tags = np.array(
+        [key[0] + 1 if len(key) == 1 else pair_id[key] for _, key in rows], dtype=np.int32
+    )
+    edges = ends[slots]
+    if cells.shape[1] == 6:
+        mids = cells[owner[slots], 3 + slots % 3]
+        edges = np.concatenate([edges, mids[:, None]], axis=1)
+    return edges.astype(np.int32), tags, tag_names, [k + 1 for k in outer]
 
 
 # ======================================================================

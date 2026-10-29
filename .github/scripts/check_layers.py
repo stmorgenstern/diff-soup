@@ -45,6 +45,7 @@ LAYERS: tuple[str, ...] = (
     "_errors",  # the exception hierarchy every package raises
     "_optional",  # optional-dependency loader; raises an _errors type
     "_logging",  # the package logger; imports nothing from diff_soup
+    "_warnings",  # warnings attributed to the user's line; imports nothing from diff_soup
     "_precision",  # dtype policy; raises _errors types
     "_layout",  # state-vector layout helpers; raises _errors types
     "_solution",  # solution container shared by solvers and the schedule
@@ -62,6 +63,7 @@ LAYERS: tuple[str, ...] = (
     "_lowering",  # turns a problem and its domains into solver-ready arrays
     "timestepping",  # time integrators over nonlinear and linear
     "pdesolve",  # the solve entry point; wires timestepping together
+    "_compile",  # ds.compile: compiles one pdesolve call ahead of time
     "_schedule",  # multi-phase schedules over pdesolve; used by inference
     "inference",  # fitting and sensitivities over the whole solve stack
     # Top level: wires the packages together for the public namespace.

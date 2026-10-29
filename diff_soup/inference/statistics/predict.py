@@ -836,6 +836,7 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
     """
     from statistics import NormalDist
 
+    from diff_soup.inference.fitting._layout import require_layout
     from diff_soup.inference.statistics._analysis import experiment_view
     from diff_soup.inference.statistics.laplace import laplace
     from diff_soup.inference.statistics.sample import Draws
@@ -849,8 +850,11 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
     z = NormalDist().inv_cdf((1 + level) / 2)
     if isinstance(fit_or_draws, Draws):
         schema = fit_or_draws._parameter_schema
-        if schema is None or schema.fingerprint != problem.parameter_schema.fingerprint:
-            raise ValueError("predict draws must belong to this InferenceProblem.")
+        if schema is None:
+            raise ValueError(
+                "predict draws carry no parameter schema; draw them with sample(problem, fit)."
+            )
+        require_layout(problem, schema, where="predict draws")
         values = fit_or_draws.values.reshape(-1, problem.n_params)
         predictions, failed = jax.jit(jax.vmap(lambda x: predictor(x[columns])))(values)
         if bool(jnp.any(failed)):
@@ -876,7 +880,8 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
             variance = jnp.var(values, axis=0) + noise
         else:
             mean = values
-            J = jacobians[measurement.name].reshape(-1, problem.n_params)
+            # The posterior of a multiple-shooting fit covers the parameters alone.
+            J = jacobians[measurement.name].reshape(-1, post.dim)
             variance = jnp.sum(J * covariance(J.T).T, axis=1).reshape(mean.shape)
             if kind == "predictive":
                 mean, noise = _conditional_moments(likelihood, mean)

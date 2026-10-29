@@ -126,8 +126,8 @@ def test_a_surface_projection_reads_the_projected_fields_own_surface_node(projec
     assert not np.any((np.abs(dense) > 0) & ~declared)
 
 
-def _composed_laplacian(domain, *, composed=True, **family):
-    spec = _cell(f"wide_stencil_{composed}_{family.get('stencil_radius')}")
+def _composed_laplacian(domain, *, composed=True, advect=False, **family):
+    spec = _cell(f"wide_stencil_{composed}_{advect}_{family.get('stencil_radius')}")
     spec.equation(writes="m", reads=("m",))(lambda q: -q.m)
     members = spec.family(
         "particles",
@@ -142,7 +142,7 @@ def _composed_laplacian(domain, *, composed=True, **family):
 
     def member(q, member):
         if not composed:
-            return -member.rate * q.c
+            return -q.ops.div_advect(q.c, member.rate) if advect else -member.rate * q.c
         return -member.rate * q.ops.laplacian(q.ops.laplacian(q.c)) - q.c
 
     members.equation(writes="c", reads=("c",))(member)
@@ -152,7 +152,8 @@ def _composed_laplacian(domain, *, composed=True, **family):
 def test_a_declared_stencil_radius_widens_the_member_tile_to_the_composed_stencil():
     """With ``stencil_radius=2`` the declared pattern of a composed laplacian covers the dense
     Jacobian and adds the distance-two pairs (2 members x 2 x 5); the radius is validated
-    where it is authored and needs a structured member grid."""
+    where it is authored and needs a structured member grid; a member ``div_advect`` under the
+    default ``"tvd"``, which reads two cells, is refused at the default radius and exact at 2."""
     grid = _GRID(7, 0.0, 1.0, method="fvm")
     default = _composed_laplacian(grid).build()
     wide = _composed_laplacian(grid, stencil_radius=2).build()
@@ -161,6 +162,10 @@ def test_a_declared_stencil_radius_widens_the_member_tile_to_the_composed_stenci
     assert not np.any((np.abs(dense) > 0) & ~declared)
     np.testing.assert_allclose(sparse, dense, rtol=0.0, atol=_EXACT)
     assert int(declared.sum()) == int(_declared(default, state)[2].sum()) + 20
+    with pytest.raises(ds.LoweringError, match=r'div_advect\(scheme="tvd"\).*stencil_radius=2'):
+        _composed_laplacian(grid, composed=False, advect=True).build()
+    advected = _composed_laplacian(grid, composed=False, advect=True, stencil_radius=2).build()
+    np.testing.assert_allclose(*_declared(advected, state)[:2], rtol=0.0, atol=_EXACT)
     with pytest.raises(ValueError, match="stencil_radius must be at least 1"):
         _composed_laplacian(grid, stencil_radius=0)
     with pytest.raises(TypeError, match="stencil_radius must be None or a positive int"):

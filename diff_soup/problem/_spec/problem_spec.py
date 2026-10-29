@@ -27,6 +27,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -119,6 +120,15 @@ class _FieldProjection:
         return f"_FieldProjection({self.family_name!r}.{self.field_name!r}, projection={kind})"
 
 
+def _copy_array(value: Any) -> Any:
+    """Return a copy of a NumPy or JAX array, and any other value unchanged."""
+    if isinstance(value, np.ndarray):
+        return np.array(value)
+    if isinstance(value, jax.Array):
+        return jnp.array(value)
+    return value
+
+
 # A smart-couple arg-0 (``_CoupleSource``) is either a macro ``FieldSpec`` or a
 # family-field ``_FieldProjection`` handle.
 _COUPLE_SOURCE_TYPES = (FieldSpec, _FieldProjection)
@@ -132,6 +142,9 @@ class ProblemSpec:
     `spec.constraint`, `spec.observe` and `spec.control` hold the remaining
     declaration methods.
     """
+
+    def __repr__(self) -> str:
+        return f"ProblemSpec({self.name!r})"
 
     def __init__(self, name: str) -> None:
         self.name = str(name)
@@ -480,16 +493,18 @@ class ProblemSpec:
                     "must be strictly below the upper bound."
                 )
             bounds = (lo, hi)
+        # A fresh array per declaration: two parameters written from one array
+        # are still two parameters, and every selector that keys on leaf
+        # identity must be able to tell them apart.
         if learnable:
-            # A fresh array per declaration: two learnable parameters written
-            # from one array are still two unknowns, and every selector that
-            # keys on leaf identity must be able to tell them apart.
             value = jnp.array(value)
             if not jnp.issubdtype(value.dtype, jnp.inexact):
                 raise TypeError(
                     f"learnable param {name!r} must be an inexact scalar/array, "
                     f"got dtype {value.dtype}"
                 )
+        else:
+            value = _copy_array(value)
         spec = ParamSpec(
             name=name,
             value=value,
@@ -634,6 +649,31 @@ class ProblemSpec:
         if callable(validate_domain):
             for domain_name, domain in self._domains.items():
                 validate_domain(domain, name=domain_name)
+        if learnable:
+            from diff_soup.problem.parameters import _function_parameter_partition
+
+            if not any(
+                eqx.is_inexact_array(leaf)
+                for leaf in jax.tree_util.tree_leaves(_function_parameter_partition(fn)[0])
+            ):
+                raise ValueError(
+                    f"function({name!r}, learnable=True): {type(fn).__name__} holds no "
+                    "floating-point array leaf to fit; an array a closure captures is "
+                    "not a leaf. Pass an eqx.Module that holds the arrays, or declare "
+                    "the function with learnable=False."
+                )
+        # Two functions declared from one module are two functions: one that
+        # shares an array with a function declared earlier gets fresh arrays. A
+        # function's arrays are otherwise kept, so a boundary condition given
+        # the same object still reads the declared function's values.
+        declared = {
+            id(leaf)
+            for other in self._functions.values()
+            for leaf in jax.tree_util.tree_leaves(other.fn)
+            if eqx.is_array(leaf)
+        }
+        if any(id(leaf) in declared for leaf in jax.tree_util.tree_leaves(fn)):
+            fn = jax.tree_util.tree_map(_copy_array, fn)
         spec = FunctionSpec(
             name=name,
             fn=fn,
@@ -1093,7 +1133,7 @@ class ProblemSpec:
         # DOF.
         raise ValueError(
             f"spec.couple({source.name!r}, onto={onto!r}): gathering a component "
-            "field onto another DOMAIN uses the NO-DOF read-through form — "
+            "field onto another DOMAIN uses the NO-DOF read-through form: "
             f"add as_=<alias> (e.g. spec.couple({source.name!r}, onto={onto!r}, "
             f"at=..., as_={source.name!r})) and read it as q.<alias> in the "
             f"{onto!r} closures."
@@ -1189,7 +1229,7 @@ class ProblemSpec:
         if handle is not None and getattr(handle, "is_ragged", False):
             raise NotImplementedError(
                 f"spec.couple: family {name!r} is ragged (static size "
-                "buckets); coupling a ragged family is not supported — author "
+                "buckets); coupling a ragged family is not supported; author "
                 "one uniform family per size and couple each."
             )
 
@@ -1264,7 +1304,7 @@ class ProblemSpec:
         if not members:
             raise ValueError(
                 f"spec.couple(onto={onto!r}): family {onto!r} has no member "
-                "fields yet — declare at least one with parts.field_decl(...) "
+                "fields yet; declare at least one with parts.field_decl(...) "
                 "before gathering onto it."
             )
         return members[0]

@@ -13,6 +13,7 @@ from diff_soup.domains import cartesian_grid_1d
 from diff_soup.inference.approx import legendre_weights
 from diff_soup.inference.statistics import IdentifiedSubspace, ImproperPosteriorError
 from tests.support.inference import (
+    TIMES,
     decay_recipe,
     decay_study,
     decay_values,
@@ -86,6 +87,83 @@ def test_laplace_defaults_to_observed_curvature_and_labels_it(single):
     assert lower < float(fit[rate]) < upper
     observed = np.asarray(inf.information(problem, at=fit, kind="observed").observed)
     np.testing.assert_array_equal(observed, observed.T)
+
+
+# measured 0.0 relative difference, workstation CPU 2026-10-28,
+# pytest tests/public_api/test_statistics.py::test_the_laplace_evidence_of_a_map_fit_is_its_closed_form
+_EVIDENCE = 1e-12
+# measured 1.5e-8 relative difference between the float32 and float64 posteriors of the
+# float32 study, workstation CPU 2026-10-28, bugfix/fpass/t_probe.py
+_FLOAT32_EVIDENCE = 1e-6
+
+
+def test_the_laplace_evidence_of_a_map_fit_is_its_closed_form(single):
+    """evidence(problem, fit) and laplace(problem, fit).log_evidence equal
+    log p(y | mode) + log p(mode) + d/2 log 2 pi - 1/2 log det H, with H the observed
+    information plus the prior precision, so the user restates no prior. The log posterior
+    of an ExperimentSet of the experiment is log p(y | mode) + log p(mode) at the mode."""
+    problem, _, fit, _ = single
+    experiments = inf.statistics.ExperimentSet(problem.study.experiments, independent=True)
+    prior = inf.statistics.GaussianPrior(mean=jnp.array([0.5]), scale=jnp.array([0.3]))
+    # 1.0.0 raised AttributeError ('observed'), then TypeError ('coordinate'); measured 0.0
+    # relative difference after the fix, CPU workstation 2026-10-28, bugfix/we1b/r37.py
+    value = float(experiments.log_posterior(prior=prior)(jnp.asarray(fit.params)))
+    np.testing.assert_allclose(value, fit.log_likelihood + fit.log_prior, rtol=_EVIDENCE)
+    curvature = inf.information(problem, at=fit)
+    precision = np.asarray(curvature.observed) + np.asarray(curvature.prior_precision)
+    closed = (
+        fit.log_likelihood
+        + fit.log_prior
+        + 0.5 * precision.shape[0] * np.log(2.0 * np.pi)
+        - 0.5 * np.linalg.slogdet(precision)[1]
+    )
+    values = [inf.evidence(problem, fit).log_evidence, inf.laplace(problem, fit).log_evidence]
+    np.testing.assert_allclose(values, closed, rtol=_EVIDENCE)
+
+
+def test_a_float32_fit_has_an_evidence_and_its_solve_sets_the_stationarity_bound():
+    """A float32 study has an evidence at a float32 point equal to the one at its fit; a point
+    off the mode by a decrement its float32 solve tolerates has an evidence, and a point
+    farther off is refused, naming the solver tolerance and dtype."""
+    # Measured decrements, workstation CPU 2026-10-28, bugfix/fpass/t_probe.py: 0.221 at the
+    # rate + 0.003 against the bound 0.4 of the float32 solve, 3.70 at + 0.05.
+    decay = decay_recipe(
+        "statistics_float32",
+        source=True,
+        rate_prior=inf.NormalPrior(mean=0.5, scale=0.3),
+        source_prior=inf.NormalPrior(mean=0.0, scale=0.1),
+        precision=ds.Precision.fp32(),
+    )
+    study = inf.InferenceProblem(decay_study(decay), objective=inf.MAP())
+    fit32 = small_fit(study, inf.LevenbergMarquardt(max_steps=30))
+    narrow = inf.evidence(study, np.asarray(fit32.params, np.float32)).log_evidence
+    at_fit = inf.evidence(study, fit32).log_evidence
+    np.testing.assert_allclose(narrow, at_fit, rtol=_FLOAT32_EVIDENCE)
+    rate = np.eye(4)[0]  # the shared rate leads the flat parameter order
+    assert np.isfinite(inf.evidence(study, fit32.params + 0.003 * rate).log_evidence)
+    with pytest.raises(ValueError, match="rtol 1e-06 in float32.*tighter solver tolerance"):
+        inf.evidence(study, fit32.params + 0.05 * rate)
+
+
+# measured 3.3e-3 relative difference (Continuity weight 1e6), workstation CPU 2026-10-28,
+# pytest tests/public_api/test_statistics.py::test_laplace_on_a_multishoot_fit_integrates_out_the_window_starts
+_MARGINAL_SD = 1e-2
+
+
+def test_laplace_on_a_multishoot_fit_integrates_out_the_window_starts(single):
+    """On a multiple-shooting fit, laplace covers the rate alone, the window starts integrated
+    out, and its standard deviation is the single-shooting fit's."""
+    problem, rate, fit, _ = single
+    windowed = inf.InferenceProblem(
+        problem.study.experiments[0],
+        parameters=rate,
+        objective=inf.MAP(),
+        trajectory=inf.Multishoot(inf.Windows.at(TIMES), inf.Continuity(weight=1.0e6)),
+    )
+    posterior = inf.laplace(windowed, small_fit(windowed, inf.LevenbergMarquardt(max_steps=30)))
+    assert posterior.names == ("rate",)
+    single_sd = float(inf.laplace(problem, fit)[rate].sd)
+    np.testing.assert_allclose(float(posterior[rate].sd), single_sd, rtol=_MARGINAL_SD)
 
 
 def test_identifiability_and_profile_name_the_fitted_handle(single):

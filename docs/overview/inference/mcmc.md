@@ -123,8 +123,9 @@ fit with `ds.inference.sample`, and check the draws with
 ### Run the sampler
 
 `ds.inference.sample(problem, fit, *, kernel="nuts", chains=4,
-draws=1000, warmup=500, key, preconditioner="laplace",
-curvature="observed", nuts_target_acceptance=0.8, chain_map=None)` runs one chain
+draws=1000, warmup=200, adapt="pooled", mass="diag", step_size=None,
+max_tree_depth=10, key, preconditioner="laplace", curvature="observed",
+nuts_target_acceptance=0.8, chain_map=None)` runs one chain
 per `chains` on the posterior of the MAP problem and returns the draws.
 An MLE problem is refused, since it has no prior.
 
@@ -139,10 +140,27 @@ draws = ds.inference.sample(est, fit, key=jax.random.PRNGKey(0), chains=2, draws
   during the warmup. `kernel="rmh"` is the random-walk Metropolis
   kernel, which proposes Gaussian steps of a fixed size and needs no
   gradient. Any other name is refused.
-- `chains=` is the number of chains, each started from a perturbed
-  copy of the fit.
+- `chains=` is the number of chains. Each starts from the fit plus
+  random noise of half a standard deviation of the Laplace
+  approximation per coordinate (half a unit without the preconditioner
+  below), so the starts lie inside the posterior.
 - `draws=` is the number of draws kept per chain, and `warmup=` the
-  number discarded first, during which NUTS adapts.
+  number of steps before them. The random-walk chains discard their
+  warmup steps. NUTS chains adapt during them and keep their last state,
+  so the kept draws start adapted.
+- `adapt=` is how NUTS adapts. `"pooled"` adapts one step size and one
+  mass matrix from all chains at once, with the ChEES method of Hoffman
+  et al. (2021) ([references](#references)), so no single chain's noise
+  sets them. `"window"` adapts each chain on its own with Stan's window
+  schedule. `"step_size"` adapts only the step size and keeps the unit
+  scale of the Laplace preconditioner, and `None` runs at `step_size`.
+  One chain, or chains that do not run as one batched call, adapt as
+  `"window"`.
+- `mass="diag"` adapts a diagonal mass matrix. `"dense"` adapts a full
+  one, with `adapt="window"` and at most 50 parameters.
+- `step_size=` is the step size adaptation starts from, 1.0 when
+  `None`, and the fixed one with `adapt=None`. `max_tree_depth=10` is the
+  most times a NUTS trajectory doubles in one draw.
 - `preconditioner="laplace"` scales the proposals of either kernel by
   the Laplace approximation of
   [standard errors and covariance](statistical-estimation.md#standard-errors-and-covariance),
@@ -178,7 +196,10 @@ predictive = ds.inference.predict(est, draws, kind="predictive")["u"]   # the so
   cluster for a parameter that varies by cluster
   ([hierarchical fits](hierarchical.md)).
 - `draws.info` holds one value per draw of `acceptance_rate`, and for
-  NUTS `is_divergent` and `num_integration_steps`.
+  NUTS `is_divergent` and `num_integration_steps`. For NUTS,
+  `draws.info["adaptation"]` records the `method` that ran, the adapted
+  `step_size` of each chain, the `mass`, the `max_tree_depth`, the
+  `warmup` and the mean `acceptance_rate` of the kept draws.
 - `ds.inference.predict(problem, draws, kind=)` solves the model at
   every draw and summarizes the predicted values, the sampled
   counterpart of the
@@ -303,3 +324,7 @@ lower, upper = jnp.percentile(curves, jnp.array([2.5, 97.5]), axis=0)           
   \(\hat R\) for assessing convergence of MCMC (with discussion).
   Bayesian Analysis, 16(2):667–718, 2021.
   [doi:10.1214/20-BA1221](https://doi.org/10.1214/20-BA1221).
+- M. D. Hoffman, A. Radul, and P. Sountsov. An adaptive-MCMC scheme
+  for setting trajectory lengths in Hamiltonian Monte Carlo. Proceedings
+  of AISTATS, PMLR 130:3907–3915, 2021.
+  [proceedings.mlr.press/v130/hoffman21a](https://proceedings.mlr.press/v130/hoffman21a.html).

@@ -20,18 +20,24 @@ is below what the dtype can resolve.
 
 The absolute cost-change tolerance ``cost_atol`` has no dtype floor: ``None``
 is 0, and a finite value of at least 0 is used as given.
+
+A step or cost test passed on a step that the trust radius
+(``NewtonTrustRegion``) or the damping (``LevenbergMarquardt``) held short is
+not convergence: the model still predicts a decrease the fit did not take. Such
+a fit ends ``STALLED``, with the reason ``TrustRegion`` gives for the same end
+(``radius_collapsed``, ``evaluation_noise`` or ``invalid_trials``).
 """
 
 from __future__ import annotations
 
 import dataclasses
 import math
-import warnings
 
 import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._warnings import warn_user
 
 __all__ = [
     "DEFAULT_COST_ATOL",
@@ -41,7 +47,9 @@ __all__ = [
     "GradientTolerance",
     "absolute_tolerance",
     "gradient_tolerance",
+    "model_held_the_step",
     "relative_tolerance",
+    "stall_reason_of",
     "step_budget",
 ]
 
@@ -78,13 +86,12 @@ def relative_tolerance(value, default: float, dtype, *, name: str, label: str) -
         return max(default, floor)
     value = float(value)
     if 0.0 < value < floor:
-        warnings.warn(
+        warn_user(
             f"{label} {name}={value:g} is below what {np.dtype(dtype).name} resolves "
             f"(10 * eps = {floor:.2g}); it is used as given, so this test can only "
             f"pass on an exactly zero change. Leave {name} unset for a "
             "dtype-aware default, or pass 0 to disable the test.",
             UserWarning,
-            stacklevel=3,
         )
     return value
 
@@ -173,14 +180,13 @@ class GradientTolerance:
         if self.relative:
             return self.value * max(float(initial_norm), float(np.finfo(np.float64).tiny))
         if self.given and self.narrow and 0.0 < self.value < self.floor * float(initial_norm):
-            warnings.warn(
+            warn_user(
                 f"{self.label} grad_tol={self.value:g} is below what {self.dtype_name} "
                 f"resolves for a gradient of norm {float(initial_norm):.3g} "
                 f"(10 * eps relative, {self.floor * float(initial_norm):.2g}); it is used "
                 "as given. Leave grad_tol unset for a tolerance relative to the "
                 "starting gradient.",
                 UserWarning,
-                stacklevel=3,
             )
         return self.value
 
@@ -208,3 +214,41 @@ def gradient_tolerance(value, dtype, *, label: str) -> GradientTolerance:
             max(DEFAULT_GRAD_TOL, floor), True, False, name, floor, True, label
         )
     return GradientTolerance(DEFAULT_GRAD_TOL, False, False, name, floor, False, label)
+
+
+def model_held_the_step(full_decrease: float, step_decrease: float, threshold: float) -> bool:
+    """Whether a step that passed a step or cost test was held short of the model's own.
+
+    The model's full step is its step without the trust radius or the damping.
+    The step was held short when the full step predicts a decrease above the
+    cost tolerance. That decrease must also be more than four times the one
+    predicted for the step taken.
+
+    Args:
+        full_decrease: The decrease the model predicts for its full step.
+        step_decrease: The decrease it predicted for the step taken.
+        threshold: The cost-change tolerance at the step's start, an absolute cost.
+
+    Returns:
+        ``True`` when the fit stalled rather than converged.
+    """
+    full = float(full_decrease)
+    return bool(np.isfinite(full) and full > threshold and full > 4.0 * max(step_decrease, 0.0))
+
+
+def stall_reason_of(*, invalid: bool, noise: bool) -> str:
+    """The reason a stalled fit records, in ``TrustRegion``'s words.
+
+    Args:
+        invalid: An invalid trial shrank the radius or raised the damping.
+        noise: The step that ended the fit was rejected with a cost change
+            within the cost tolerance.
+
+    Returns:
+        ``"invalid_trials"``, ``"evaluation_noise"`` or ``"radius_collapsed"``.
+    """
+    if invalid:
+        return "invalid_trials"
+    if noise:
+        return "evaluation_noise"
+    return "radius_collapsed"

@@ -47,6 +47,13 @@ The grid factories describe regular geometries:
   `spherical_grid_1d(n, r_max, r_min=0.0)`. Curvilinear grids carry
   their metric, so axis regularity (the \(r = 0\) cell of a spherical
   grid) needs nothing from you.
+- `grid.node_coordinates()` returns the node coordinates as an array of
+  shape `(num_nodes, dim)`, in row-major order over `shape` (x-major).
+  A field on a grid is a flat array in the same order. `Grid1D.nodes`
+  is the same array without the `dim` axis, and `GridND` has no `nodes`.
+- `grid.coordinates` is the tuple of per-axis cell-centre arrays, and
+  `grid.meshgrid()` the tuple of coordinate arrays of shape `shape`, so
+  `f(*grid.meshgrid()).ravel()` is a field.
 
 `method` selects the discretization: `"fvm"` (the default) or `"fdm"`.
 Flow and advection problems specialize grids further, described
@@ -95,6 +102,9 @@ Every route returns a mesh you register with `spec.domain`:
   boundary polygon from a mask (`pixel_size` sets the physical scale,
   `epsilon_factor` how aggressively the contour is simplified), and
   `polygon_to_mesh` or `polygon_to_tagged_mesh` triangulates it.
+- From several polygons: `polygons_to_tagged_mesh({"soup": soup, "bowl": bowl},
+  mesh_size=...)` meshes named regions into one mesh whose regions share
+  their interface edges ([regions](#regions)).
 - Named solids: `cylinder_mesh`, `sphere_mesh`, and `box_mesh_tet`
   generate tetrahedral meshes directly.
 - Structured meshes: `rectangle_mesh` and `box_mesh`, from the
@@ -119,9 +129,50 @@ quadratic `TRI6` elements.
 - The structured factories name their tags `"left"`, `"right"`,
   `"bottom"`, `"top"` (rectangles) and `"x_min"` through `"z_max"`
   (boxes).
+- `polygons_to_tagged_mesh` names each region's outer edges after the
+  region, and the edges two regions share after both, sorted and joined
+  by `|` (`"bowl|soup"`). `segment_tags={region: [...]}` with
+  `segment_names=` splits a region's outer edges as on one polygon
+  ([regions](#regions)).
 - Declarations select tags by name (`tag="rim"`) or by a composable
   expression: `on=ds.tags("boundary") - ds.tags("rim")` is every
   boundary edge except the rim group.
+
+### Regions
+
+A mesh can also tag its cells, which splits it into named regions.
+`TaggedMesh(..., cell_tags=..., cell_tag_names={"soup": 1, "bowl": 2})`
+takes one integer per cell, `polygons_to_tagged_mesh` tags each cell
+with its polygon, and `read_mesh` reads the physical surfaces of a gmsh
+file. `mesh.cell_indicator("soup")` is one on the soup's cells and zero
+elsewhere, so a piecewise coefficient is a weighted sum of indicators:
+
+```python
+from diff_soup.domains.geometry import polygons_to_tagged_mesh
+
+mesh = polygons_to_tagged_mesh({"soup": soup, "bowl": bowl}, mesh_size=2.0)
+k = 0.1 * mesh.cell_indicator("soup") + 1.0 * mesh.cell_indicator("bowl")
+
+@spec.equation(writes="u", reads=("u",))
+def cool(q):
+    return q.ops.div_flux(k, q.u)           # one conductivity per cell
+```
+
+One region's outer edges can meet different conditions, such as the
+bowl's wall in air and its foot on a table. `segment_tags` gives each
+polygon edge of a region a tag, with ids repeated to group edges, and
+`segment_names` names the tags. A region left out keeps its own name,
+and the interface keeps `"bowl|soup"`:
+
+```python
+on_table = [p[1] == q[1] == 0.0 for p, q in zip(bowl, bowl[1:] + bowl[:1])]
+mesh = polygons_to_tagged_mesh(
+    {"soup": soup, "bowl": bowl},
+    mesh_size=2.0,
+    segment_tags={"bowl": [3 if edge else 2 for edge in on_table]},
+    segment_names={2: "wall", 3: "table"},
+)
+```
 
 ### Example: a bowl of soup
 
@@ -251,14 +302,17 @@ $$
 which updates the cell average \(u_i\) through the fluxes at its two
 faces (\(A\) the face areas, \(V_i\) the cell volume). The face
 fluxes \(F_{i \pm 1/2}\) require special consideration: centered
-approximations oscillate when transport dominates, so we construct them
-with the upwind methods below.
+face fluxes are second order but oscillate when transport dominates a
+cell, so limited and upwind forms are offered beside them.
 
 ### Upwind advection on ordinary grids
 
 First-order upwind advection is handled at the operator layer, as
 `q.ops.advect_upwind(field, velocity)` on any grid, covered with
-[operators](operators.md).
+[operators](operators.md). The conservative `q.ops.div_advect` uses
+flux-limited (TVD) face values by default and takes `scheme="weno3"`,
+`"central"` or `"upwind"`. The operators page says when to choose
+which ([advection schemes](operators.md#advection-schemes)).
 
 A periodic direction is declared with `spec.bc.periodic` ([boundary
 conditions](boundary-conditions.md)).

@@ -79,6 +79,9 @@ y0 = spec.assemble_state({"u": lambda x: x * (1.0 - x)})  # a callable of the no
 
 - An explicit entry overrides the declared `init`, and `default=`
   fills any field left out.
+- The `assemble_state` of a built problem takes values and ignores
+  `init=`. Fields left out take `default=`, so pass every initial value
+  explicitly.
 - A `field(init=...)` callable takes one coordinate array per spatial
   dimension (`init=lambda x, y: ...` in two dimensions). A callable
   passed to `assemble_state` instead takes the full node-coordinate

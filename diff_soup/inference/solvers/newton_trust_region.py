@@ -33,7 +33,9 @@ from diff_soup.inference.solvers._termination import (
     DEFAULT_STEP_TOL,
     absolute_tolerance,
     gradient_tolerance,
+    model_held_the_step,
     relative_tolerance,
+    stall_reason_of,
     step_budget,
 )
 from diff_soup.inference.solvers.factorization import (
@@ -44,8 +46,6 @@ from diff_soup.inference.solvers.factorization import (
 )
 from diff_soup.inference.solvers.tangent import (
     deferred_value_and_grad,
-    jacfwd_from_pushforward,
-    linearize_value,
     normalize_tangent_tile,
     value_and_jacfwd_tiled,
 )
@@ -382,19 +382,38 @@ def _sr1_update(
     return 0.5 * (updated + updated.T), True
 
 
-class NewtonTrustRegion(OptSolver):
-    """The Newton trust-region method, steps on the exact Hessian or its Gauss-Newton approximation.
+#: The tiles ``hessian_tile="auto"`` tries above ``dense_cutoff`` parameters, widest first.
+_AUTO_HESSIAN_TILES = (32, 16, 8)
 
-    It needs the gradient and the exact Hessian of the objective, or the Gauss-Newton matrix
-    under `hessian="gauss-newton"`. Box bounds are kept. It is the default optimizer of
-    `ds.inference.optsolve`.
+
+def _tiled_hessian(value_and_gradient: Callable, tile: int) -> Callable:
+    """``x -> (loss, gradient, Hessian)``, the gradient pushed forward ``tile`` directions at a time."""
+
+    def loss_and_gradient(point):
+        loss_value, gradient_value = value_and_gradient(point)
+        return jnp.concatenate((jnp.reshape(loss_value, (1,)), gradient_value))
+
+    @jax.jit
+    def evaluate(point):
+        value, derivative = value_and_jacfwd_tiled(loss_and_gradient, point, tile=tile)
+        return value[0], value[1:], derivative[1:, :]
+
+    return evaluate
+
+
+class NewtonTrustRegion(OptSolver):
+    """The Newton trust-region method, steps on the Gauss-Newton matrix or the exact Hessian.
+
+    It steps on the Gauss-Newton matrix of a least-squares objective and keeps box bounds.
+    `hessian="true"` restores the exact Hessian of previous releases. It is the default
+    optimizer of `ds.inference.optsolve`.
 
     Args:
         max_steps: The step budget.
-        hessian: `"true"` steps on the exact Hessian, `"gauss-newton"` on `J^T J` from the residual Jacobian.
+        hessian: `"auto"` steps on `J^T J` when the problem has residual rows and on the exact Hessian otherwise, `"gauss-newton"` or `"true"` forces one.
         subproblem: `"exact"`, `"cg"`, or `"auto"`, which picks CG only for an exact Hessian above `dense_cutoff` parameters without `HessianScale`.
         linear_solver: `"eigh"`, `"cholesky"` or `"qr"` for the exact subproblem, or `"auto"` for `"eigh"` on the exact Hessian and Cholesky or QR otherwise.
-        dense_cutoff: The parameter count above which `subproblem="auto"` may pick CG.
+        dense_cutoff: The parameter count above which `subproblem="auto"` may pick CG and `hessian_tile="auto"` tiles the exact Hessian.
         radius_init: The initial trust radius, in scaled parameter units.
         radius_max: The largest trust radius.
         eta: The ratio of achieved to predicted decrease a step must reach to be accepted.
@@ -405,13 +424,13 @@ class NewtonTrustRegion(OptSolver):
         x_scale: The parameter scaling, `HessianScale()` by default, with `JacScale` refused under `hessian="true"` and `HessianScale` under CG.
         composition: `"forward-over-reverse"` or `"forward-over-forward"` for the exact Hessian, or `"auto"` to pick one the time-stepping adjoint supports.
         hessian_refresh: How often the exact Hessian is recomputed, with SR1 updates between: `"adaptive"`, `"every"`, or every `k` steps for an integer `k`.
-        hessian_tile: The number of tangent directions evaluated together, one of 8, 16, 32, 64 and 128, or `"full"` for all.
+        hessian_tile: How many directions of the exact Hessian or Gauss-Newton Jacobian are formed at once: 8 to 128, `"full"`, or `"auto"` to fit the free memory.
         cg_max_iter: The conjugate-gradient iteration budget, the parameter count when `None`.
         callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
     """
 
     max_steps: int = eqx.field(static=True, default=50)
-    hessian: str = eqx.field(static=True, default="true")
+    hessian: str = eqx.field(static=True, default="auto")
     subproblem: str = eqx.field(static=True, default="auto")
     linear_solver: str = eqx.field(static=True, default="auto")
     dense_cutoff: int = eqx.field(static=True, default=64)
@@ -425,22 +444,45 @@ class NewtonTrustRegion(OptSolver):
     x_scale: XScale = eqx.field(default_factory=HessianScale)
     composition: str = eqx.field(static=True, default="auto")
     hessian_refresh: Any = eqx.field(static=True, default="adaptive")
-    hessian_tile: Any = eqx.field(static=True, default="full")
+    hessian_tile: Any = eqx.field(static=True, default="auto")
     cg_max_iter: int | None = eqx.field(static=True, default=None)
     callbacks: tuple = eqx.field(static=True, default=())
 
+    def _resolved_hessian_tile(self, n_params: int, lanes: bool) -> Any:
+        """The tangent tile the solve starts with: an int, or ``"full"``."""
+        if self.hessian_tile != "auto":
+            return self.hessian_tile
+        if lanes or n_params <= self.dense_cutoff:
+            return "full"
+        return _AUTO_HESSIAN_TILES[0]
+
     @property
     def requires(self) -> frozenset:
-        """The structure the solve needs: the exact Hessian, or the Gauss-Newton statistics."""
+        """The structure the solve needs: the Gauss-Newton statistics, or the exact Hessian.
+
+        Under `hessian="auto"` only the gradient, and the solve reads which of the
+        two the problem has.
+        """
         if self.hessian == "gauss-newton":
             return frozenset({"value_gradient", "gauss_newton"})
+        if self.hessian == "auto":
+            return frozenset({"value_gradient"})
         return frozenset({"value_gradient", "hessian"})
+
+    def _for_problem(self, gauss_newton: bool) -> NewtonTrustRegion:
+        """This solver with `hessian="auto"` resolved: Gauss-Newton when the problem has it."""
+        if self.hessian != "auto":
+            return self
+        import dataclasses
+
+        return dataclasses.replace(self, hessian="gauss-newton" if gauss_newton else "true")
 
     def _resolve_options(self, problem: Any) -> tuple[str, str | None, str]:
         """Return the concrete subproblem, composition, and linear solver."""
         if self.hessian not in ("true", "gauss-newton"):
             raise ConfigurationError(
-                f"NewtonTrustRegion hessian must be 'true' or 'gauss-newton'; got {self.hessian!r}."
+                "NewtonTrustRegion hessian must be 'auto', 'gauss-newton' or 'true'; "
+                f"got {self.hessian!r}."
             )
         if self.subproblem not in ("auto", "exact", "cg"):
             raise ConfigurationError(
@@ -537,11 +579,84 @@ class NewtonTrustRegion(OptSolver):
                     "NewtonTrustRegion hessian_refresh must be 'adaptive', 'every', "
                     "or a positive integer."
                 )
-        normalize_tangent_tile(self.hessian_tile, max(n_params, 1))
+        if self.hessian_tile != "auto":
+            normalize_tangent_tile(self.hessian_tile, max(n_params, 1))
         return resolved_subproblem, composition, resolved_linear_solver
+
+    def _checked_hessian(self, problem: Any, x: jax.Array, tile: Any, lanes: bool) -> Callable:
+        """The exact-Hessian evaluation, memory-checked against the device before any step.
+
+        ``"full"`` uses the problem's own Hessian. A tile pushes the gradient
+        forward that many directions at a time. Either is compiled and checked
+        here, so the problem's own check inside it is skipped and the solve
+        reuses the compilation; under ``hessian_tile="auto"`` a tile that does
+        not fit is narrowed down to 8 directions before the error is raised.
+        """
+        from diff_soup.inference.fitting.inference_problem import (
+            _HESSIAN_GUARD_MIN_WIDTH,
+            _HessianMemoryError,
+            _MemoryCheckedHessian,
+        )
+
+        if lanes or (tile in (None, "full") and x.shape[0] <= _HESSIAN_GUARD_MIN_WIDTH):
+            return problem.value_gradient_hessian
+        if tile in (None, "full"):
+            checked = _MemoryCheckedHessian(problem.value_gradient_hessian, tile="full")
+            checked.check(x)
+            return checked
+        candidates = [tile]
+        if self.hessian_tile == "auto":
+            candidates += [t for t in _AUTO_HESSIAN_TILES if t < tile and t < x.shape[0]]
+        error = None
+        for candidate in candidates:
+            checked = _MemoryCheckedHessian(
+                _tiled_hessian(problem.value_and_gradient, candidate), tile=candidate
+            )
+            try:
+                checked.check(x)
+            except _HessianMemoryError as exc:
+                error = exc
+                continue
+            return checked
+        raise error
+
+    def _checked_jacobian(self, problem: Any, x: jax.Array) -> Callable:
+        """``x -> (residual, jacobian)`` of the Gauss-Newton path, memory-checked at ``x``.
+
+        The problem's structured Jacobian is used when it has one, such as fitted
+        window starts give. Under ``hessian_tile="auto"`` it is formed whole
+        when that fits in the free memory, else in tiles of 32, 16 or 8.
+        """
+        from diff_soup.inference.fitting.inference_problem import checked_residual_jacobian
+
+        return checked_residual_jacobian(problem, x, self.hessian_tile, knob="hessian_tile")
+
+    def _radius_held_the_step(
+        self, attempt: tuple, threshold: float, bounds: Any, lb: Any, ub: Any, cg_iters: int
+    ) -> bool:
+        """Whether the radius held the stopping step short of the model's own step.
+
+        ``attempt`` is the model at the step's start: the point, its gradient, the
+        model matrix (``None`` for the matrix-free Hessian), the scale, the
+        Hessian-vector product, and the decrease predicted for the step taken.
+        The model's own step is its step within ``radius_max``.
+        """
+        point, gradient, matrix, scale, model_hvp, predicted = attempt
+        if matrix is not None:
+            step, decrease, _multiplier = _more_sorensen(matrix, gradient, scale, self.radius_max)
+        else:
+            step, decrease, *_ = _steihaug_cg(model_hvp, gradient, scale, self.radius_max, cg_iters)
+        if bounds is not None:
+            step = jnp.clip(point + step, lb, ub) - point
+            product = matrix @ step if matrix is not None else model_hvp(step)
+            decrease = -(gradient @ step + 0.5 * step @ product)
+        return model_held_the_step(float(local_value(decrease)), predicted, threshold)
 
     def solve(self, problem: Any, *, callbacks: tuple = ()) -> OptResult:
         """Optimize an inference problem with a scaled Newton trust region."""
+        if self.hessian == "auto":
+            solver = self._for_problem("gauss_newton" in problem.structure)
+            return solver.solve(problem, callbacks=callbacks)
         resolved_subproblem, resolved_composition, resolved_linear_solver = self._resolve_options(
             problem
         )
@@ -589,7 +704,7 @@ class NewtonTrustRegion(OptSolver):
                 "Hessian of its lanes, which needs subproblem='exact'; a CG subproblem "
                 "differentiates the gradient matrix-free, which the lanes do not offer."
             )
-        if lanes and self.hessian == "true" and self.hessian_tile not in (None, "full"):
+        if lanes and self.hessian == "true" and self.hessian_tile not in (None, "full", "auto"):
             raise ConfigurationError(
                 "NewtonTrustRegion with hessian='true' on a lowered study takes the exact "
                 "Hessian of its lanes whole; leave hessian_tile='full'."
@@ -615,8 +730,16 @@ class NewtonTrustRegion(OptSolver):
                     residual = forward_residual(point)
                     return 0.5 * jnp.sum(residual * residual)
 
-            if resolved_subproblem == "exact" and self.hessian_tile in (None, "full"):
-                data_hessian = problem.value_gradient_hessian
+        # The Gauss-Newton Jacobian is whole under "auto" when it fits in the free
+        # memory, else tiled; the exact Hessian is tiled by size.
+        hessian_tile = self._resolved_hessian_tile(n_params, lanes)
+        if self.hessian == "true" and resolved_subproblem == "exact":
+            data_hessian = self._checked_hessian(problem, x, hessian_tile, lanes)
+            hessian_tile = data_hessian.tile if hasattr(data_hessian, "tile") else hessian_tile
+        data_jacobian = None
+        if self.hessian == "gauss-newton" and not gauss_newton_lanes:
+            data_jacobian = self._checked_jacobian(problem, x)
+            hessian_tile = data_jacobian.tile
 
         counts = {
             "residual": 0,
@@ -637,20 +760,7 @@ class NewtonTrustRegion(OptSolver):
             return loss + reg_loss, gradient + reg_gradient
 
         def eval_dense(point):
-            if data_hessian is not None:
-                loss, gradient, hessian = data_hessian(point)
-            else:
-
-                def loss_and_gradient(candidate):
-                    loss_value, gradient_value = data_gradient(candidate)
-                    return jnp.concatenate((jnp.reshape(loss_value, (1,)), gradient_value))
-
-                value, derivative = value_and_jacfwd_tiled(
-                    loss_and_gradient,
-                    point,
-                    tile=self.hessian_tile,
-                )
-                loss, gradient, hessian = value[0], value[1:], derivative[1:, :]
+            loss, gradient, hessian = data_hessian(point)
             reg_loss, reg_gradient = jax.value_and_grad(reg.penalty)(point)
             reg_hessian = jax.hessian(reg.penalty)(point)
             counts["hessian"] += 1
@@ -661,7 +771,7 @@ class NewtonTrustRegion(OptSolver):
             )
 
         def linearize_gauss_newton(point):
-            data_residual, pushforward = linearize_value(forward_residual, point)
+            data_residual, data_jacobian_value = data_jacobian(point)
             reg_residual = reg.residual(point)
             residual = (
                 jnp.concatenate((data_residual, reg_residual))
@@ -675,17 +785,11 @@ class NewtonTrustRegion(OptSolver):
                 loss,
                 data_residual,
                 reg_residual,
-                pushforward,
+                data_jacobian_value,
                 failed | ~jnp.isfinite(loss),
             )
 
-        def finish_gauss_newton(point, data_residual, reg_residual, pushforward):
-            jacobian = jacfwd_from_pushforward(
-                pushforward,
-                point,
-                data_residual,
-                tile=self.hessian_tile,
-            )
+        def finish_gauss_newton(point, data_residual, reg_residual, jacobian):
             residual = data_residual
             if reg_residual.shape[0]:
                 residual = jnp.concatenate((data_residual, reg_residual))
@@ -700,9 +804,9 @@ class NewtonTrustRegion(OptSolver):
 
         def eval_gauss_newton(point):
             linearized = linearize_gauss_newton(point)
-            loss, data_residual, reg_residual, pushforward, failed = linearized
+            loss, data_residual, reg_residual, point_jacobian, failed = linearized
             gradient, hessian, jacobian, residual = finish_gauss_newton(
-                point, data_residual, reg_residual, pushforward
+                point, data_residual, reg_residual, point_jacobian
             )
             return loss, gradient, hessian, jacobian, residual, failed
 
@@ -746,11 +850,7 @@ class NewtonTrustRegion(OptSolver):
             return value, data_grad() + reg_gradient
 
         def jacobian_for_scale(point):
-            _residual, jacobian = value_and_jacfwd_tiled(
-                forward_residual,
-                point,
-                tile=self.hessian_tile,
-            )
+            _residual, jacobian = data_jacobian(point)
             reg_rows = reg.residual(point)
             if reg_rows.shape[0]:
                 reg_jacobian = jax.jacfwd(reg.residual)(point)
@@ -798,6 +898,8 @@ class NewtonTrustRegion(OptSolver):
         refresh_at_start = False
         hessian_exact_at_x = self.hessian == "true" and resolved_subproblem == "exact"
         status = TerminationStatus.MAX_STEPS
+        stall_reason = None
+        cg_iters = n_params if self.cg_max_iter is None else self.cg_max_iter
 
         for step_index in range(self.max_steps):
             if refresh_at_start:
@@ -868,7 +970,7 @@ class NewtonTrustRegion(OptSolver):
                 else:
                     data_hessian_vector = problem.hessian_vector
 
-                    def model_hvp(vector):
+                    def model_hvp(vector, x=x):
                         data_product = data_hessian_vector(x, vector)
                         reg_product = jax.jvp(jax.grad(reg.penalty), (x,), (vector,))[1]
                         return data_product + reg_product
@@ -878,7 +980,7 @@ class NewtonTrustRegion(OptSolver):
                     g,
                     scale,
                     radius,
-                    n_params if self.cg_max_iter is None else self.cg_max_iter,
+                    cg_iters,
                 )
                 counts["hvp"] += products
                 multiplier = None
@@ -934,6 +1036,8 @@ class NewtonTrustRegion(OptSolver):
             accepted = assert_decision_value(
                 trial_ok and not invalid_pde and rho >= self.eta, label="Newton trust region accept"
             )
+            # The model at the point this step was taken from, for the stall test.
+            attempt = (x, g, B, scale, model_hvp, predicted_value)
 
             if rho < 0.25:
                 radius = max(radius / 4.0, np.finfo(float).tiny)
@@ -951,9 +1055,9 @@ class NewtonTrustRegion(OptSolver):
                     f, g, B, _failed = trial_linearized
                     counts["jacobian"] += 1
                 elif self.hessian == "gauss-newton":
-                    f, data_residual, reg_residual, pushforward, _failed = trial_linearized
+                    f, data_residual, reg_residual, trial_jacobian, _failed = trial_linearized
                     g, B, current_jacobian, current_residual = finish_gauss_newton(
-                        x, data_residual, reg_residual, pushforward
+                        x, data_residual, reg_residual, trial_jacobian
                     )
                 else:
                     f, g = finish_true_trial(x, trial_cost, trial_data_grad)
@@ -1017,24 +1121,35 @@ class NewtonTrustRegion(OptSolver):
                 status = TerminationStatus.STOPPED
                 break
 
+            actual_reduction = float(local_value(previous_f)) - float(local_value(trial_cost))
+            # Relative to the cost itself, so where a fit stops does not depend
+            # on the units of its objective; ``cost_atol`` is the absolute floor.
+            threshold = cost_threshold(float(local_value(previous_f)), cost_tol, cost_atol)
+            stop = None
             if assert_decision_value(
                 trial_ok
                 and not invalid_pde
                 and step_norm <= step_tol * (1.0 + float(local_value(jnp.linalg.norm(x)))),
                 label="Newton trust region",
             ):
-                status = TerminationStatus.STEP_TOL
-                break
-            actual_reduction = float(local_value(previous_f)) - float(local_value(trial_cost))
-            # Relative to the cost itself, so where a fit stops does not depend
-            # on the units of its objective; ``cost_atol`` is the absolute floor.
-            if assert_decision_value(
-                accepted
-                and abs(actual_reduction)
-                <= cost_threshold(float(local_value(previous_f)), cost_tol, cost_atol),
+                stop = TerminationStatus.STEP_TOL
+            # A cost stop needs the model to agree with the decrease (SciPy's ratio).
+            elif assert_decision_value(
+                accepted and rho > 0.25 and abs(actual_reduction) <= threshold,
                 label="Newton trust region",
             ):
-                status = TerminationStatus.COST_TOL
+                stop = TerminationStatus.COST_TOL
+            if stop is not None:
+                status = stop
+                if assert_decision_value(
+                    self._radius_held_the_step(attempt, threshold, bounds, lb, ub, cg_iters),
+                    label="Newton trust region stall",
+                ):
+                    status = TerminationStatus.STALLED
+                    stall_reason = stall_reason_of(
+                        invalid=failure_growth_lock > 0,
+                        noise=not accepted and abs(actual_reduction) <= threshold,
+                    )
                 break
         else:
             step_index = self.max_steps - 1
@@ -1098,9 +1213,16 @@ class NewtonTrustRegion(OptSolver):
                 "hessian": self.hessian,
                 "hessian_composition": resolved_composition,
                 "subproblem": resolved_subproblem,
+                "hessian_tile": (
+                    hessian_tile
+                    if (self.hessian == "true" and resolved_subproblem == "exact")
+                    or (self.hessian == "gauss-newton" and data_jacobian is not None)
+                    else None
+                ),
                 "linear_solver": resolved_linear_solver,
                 "linear_solver_fallbacks": counts["factorization_fallback"],
                 "linear_factorizations": counts["factorizations"],
+                **({} if stall_reason is None else {"stall_reason": stall_reason}),
                 **final_arrays,
             },
             trust_region=TrustRegionReport(radius_history=radius_history),

@@ -80,7 +80,7 @@ def _check_coordinate(coordinate: Any, *, what: str) -> None:
     """Reject a coordinate label outside the ``z``/``x`` vocabulary."""
     if coordinate not in COORDINATES:
         raise ValueError(
-            f"{what} must be one of {COORDINATES} — 'z' is the flat inference "
+            f"{what} must be one of {COORDINATES}: 'z' is the flat inference "
             f"coordinate, 'x' the physical parameter coordinate; got {coordinate!r}."
         )
 
@@ -1208,7 +1208,7 @@ def _null_space_elimination(A: np.ndarray, b: np.ndarray, scalar_names: tuple) -
             raise ValueError(
                 f"The linear constraint rows coupling {involved} are inconsistent: "
                 f"no x satisfies all of them (least-squares residual "
-                f"{res_max:.3e}). Remove or reconcile the conflicting rows — for "
+                f"{res_max:.3e}). Remove or reconcile the conflicting rows, for "
                 f"example the same scalar pinned to two different values."
             )
         x_particular[cols] = xp_sub
@@ -1513,7 +1513,7 @@ def constrained(
             raise ValueError(
                 f"Linear constraints and gauges are eliminated exactly in the "
                 f"physical coordinate x, so every addressed block must use the "
-                f"Identity transform — a linear relation in x is nonlinear in the "
+                f"Identity transform, because a linear relation in x is nonlinear in the "
                 f"inference coordinate of a transformed block. {addressed_by} "
                 f"addresses block {block.name!r}, which uses "
                 f"{_transform_label(block.transform)}; give that block the "

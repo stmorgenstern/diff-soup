@@ -57,7 +57,11 @@ class FieldObservation(Observation):
 
 
 class BoundaryMeanObservation(Observation):
-    """Boundary-restricted mean; carries the boundary ``tag``."""
+    """The mean of a nodal quantity over a tagged boundary.
+
+    `fn` returns the declared closure's nodal values averaged with the boundary
+    measure of `tag`.
+    """
 
     name: str = eqx.field(static=True)
     fn: Callable
@@ -69,7 +73,11 @@ class BoundaryMeanObservation(Observation):
 
 
 class SpatialMeanObservation(Observation):
-    """Volume-integrated mean over the entire domain."""
+    """The mean of a nodal quantity over a domain.
+
+    `fn` returns the declared closure's nodal values averaged with the lumped
+    mass, the cell volumes on a grid.
+    """
 
     name: str = eqx.field(static=True)
     fn: Callable

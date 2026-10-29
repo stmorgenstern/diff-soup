@@ -37,18 +37,26 @@ class RESULT(eqxi.Enumeration):  # pyright: ignore[reportGeneralTypeIssues]
     """
 
     SUCCESS = "Solve reached t_end / converged."
-    EVENT_STOP = "Stopped on an event (e.g. all DOFs at a bound)."
+    EVENT_STOP = "Stopped by a terminating event."
     MAX_STEPS = "Maximum step count reached before t_end."
     STEP_COLLAPSE = "Step size collapsed below h_min before t_end."
     NONLINEAR_DIVERGED = "Nonlinear corrector diverged."
     LINEAR_FAIL = "Linear solve failed."
     SINGULAR = "Operator / factor detected singular."
-    INCONSISTENT_IC = "Initial state violates algebraic/Schur constraints."
+    INCONSISTENT_IC = (
+        "Initial state violates algebraic/Schur constraints. Under float32 compute, the "
+        "residual's own rounding can exceed the initialization tolerance; "
+        "Precision.fp32_ir() or Precision.fp64() initializes in float64."
+    )
     ACCURACY_LIMIT = (
-        "Requested tolerances are tighter than double precision can resolve at "
+        "Requested tolerances are tighter than the working precision can resolve at "
         "the current solution's magnitude; loosen atol/rtol."
     )
     UNKNOWN = "Incomplete / unknown."
+
+
+# equinox prints an item as ``<enumeration.__module__>.RESULT<...>``; show the public path.
+RESULT.__module__ = "diff_soup"
 
 
 #: ``RESULT`` member of each integer termination code, indexed by the code.

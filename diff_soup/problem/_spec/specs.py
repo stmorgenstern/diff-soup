@@ -60,6 +60,9 @@ class FieldSpec:
     # (``q.<name>`` returns a plain array — the default behaviour).
     quad: bool = False
 
+    def __repr__(self) -> str:
+        return f"FieldSpec({self.name!r}, mass={self.mass!r})"
+
 
 @dataclass(frozen=True)
 class GlobalVarSpec:
@@ -83,6 +86,9 @@ class GlobalVarSpec:
     initial: Any = 0.0
     mass: Literal["algebraic", "differential"] = "algebraic"
     scale: Optional[float] = None
+
+    def __repr__(self) -> str:
+        return f"GlobalVarSpec({self.name!r}, mass={self.mass!r})"
 
 
 @dataclass(frozen=True, eq=False)
@@ -124,6 +130,9 @@ class ParamSpec:
         """Compare declaration identity without invoking array equality."""
         return isinstance(other, ParamSpec) and self.identity == other.identity
 
+    def __repr__(self) -> str:
+        return f"ParamSpec({self.name!r}, learnable={self.learnable!r})"
+
 
 @dataclass(frozen=True, eq=False)
 class FunctionSpec:
@@ -163,6 +172,9 @@ class FunctionSpec:
         """Compare declaration identity without comparing callable leaves."""
         return isinstance(other, FunctionSpec) and self.identity == other.identity
 
+    def __repr__(self) -> str:
+        return f"FunctionSpec({self.name!r}, learnable={self.learnable!r})"
+
 
 @dataclass(frozen=True)
 class EquationSpec:
@@ -193,11 +205,17 @@ class MultiEquationSpec:
 
 @dataclass(frozen=True)
 class BCSpec:
-    """A user-declared boundary condition (lowers to a discriminated IR BC node)."""
+    """A user-declared boundary condition (lowers to a discriminated IR BC node).
+
+    ``where`` holds ``{"selector": BoundarySet}``, or ``{"face": (axis, side)}``
+    for a condition stated on one face of a structured grid.
+    """
 
     kind: Literal[
         "dirichlet",
         "flux",
+        "neumann",
+        "inflow",
         "robin",
         "traction",
         "symmetry",
@@ -223,6 +241,10 @@ class BCSpec:
     # Robin fields
     alpha: Optional[Any] = None
     beta: Optional[Any] = None
+    # Periodic only: the grid axes that wrap; ``None`` wraps every axis.
+    axes: Optional[tuple[int, ...]] = None
+    # Inflow only: the speed of the flow entering through the face.
+    velocity: Optional[Any] = None
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,7 @@
 """Reference-element shape functions and quadrature dispatch.
 
 Each supported element type lives in its own module
-(`line2`, `tri3`, `tri6`, `quad4`, `quad8`, `tet4`,
+(`line2`, `tri3`, `tri6`, `quad4`, `quad8`, `quad9`, `tet4`,
 `tet10`, `hex8`, `hex20`, `hex27`); shared
 quadrature rules live in `_common`.
 
@@ -27,6 +27,7 @@ from diff_soup.domains.mesh.fem.basis.hex27 import _hex27_shape
 from diff_soup.domains.mesh.fem.basis.line2 import _line2_shape
 from diff_soup.domains.mesh.fem.basis.quad4 import _quad4_shape
 from diff_soup.domains.mesh.fem.basis.quad8 import _quad8_shape
+from diff_soup.domains.mesh.fem.basis.quad9 import _quad9_shape
 from diff_soup.domains.mesh.fem.basis.tet4 import _tet4_shape
 from diff_soup.domains.mesh.fem.basis.tet10 import _tet10_shape
 from diff_soup.domains.mesh.fem.basis.tri3 import _tri3_shape
@@ -42,6 +43,7 @@ __all__ = [
     "_line2_shape",
     "_quad4_shape",
     "_quad8_shape",
+    "_quad9_shape",
     "_tet4_shape",
     "_tet10_shape",
     "_tri3_shape",

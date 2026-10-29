@@ -45,6 +45,7 @@ from diff_soup.inference.statistics.bootstrap import (
 from diff_soup.inference.statistics.cluster import cluster_covariance
 from diff_soup.inference.statistics.diagnostics import mcmc_report, residual_report
 from diff_soup.inference.statistics.estimation import MAP, MLE
+from diff_soup.inference.statistics.evidence import evidence
 from diff_soup.inference.statistics.hierarchy import Hierarchy
 from diff_soup.inference.statistics.identifiability import identifiability
 from diff_soup.inference.statistics.information import information
@@ -70,6 +71,7 @@ from diff_soup.inference.statistics.profile import profile
 from diff_soup.inference.statistics.report import function_report
 from diff_soup.inference.statistics.sample import Draws, sample
 from diff_soup.inference.statistics.study import Study, balance_owners
+from diff_soup.problem.parameters import ParameterSchema
 
 # The integrator's first-step policy at a window restart, declared on
 # ``Multishoot(first_step=...)``: ``FirstStep.auto()``, ``.fixed(dt)``,
@@ -113,6 +115,7 @@ __all__ = [
     "JacScale",
     "ConstantScale",
     "OptResult",
+    "ParameterSchema",
     "TerminationStatus",
     "OptDiagnostics",
     "LogCallback",
@@ -148,6 +151,7 @@ __all__ = [
     # Statistics: analysis verbs
     "information",
     "laplace",
+    "evidence",
     "profile",
     "identifiability",
     "cluster_covariance",

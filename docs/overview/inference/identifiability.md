@@ -211,6 +211,8 @@ prof.open_directions     # the sides that never reached the threshold, empty her
 - A fit that did not converge is refused. A MAP fit profiles the
   posterior objective instead, and its intervals carry no coverage
   guarantee.
+- A multiple-shooting fit that fits its window starts is refused. Refit
+  with single shooting from its parameters and profile that fit.
 
 ## Sensitivity runs
 

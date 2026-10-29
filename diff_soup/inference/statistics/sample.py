@@ -16,14 +16,14 @@ normalized log posterior of a data-bearing
 * gradients are **forward-assembled** by default (``jax.jacfwd`` — the mode
   the solver suite's composable forward-sensitivity runs support).
   ``gradient="reverse"`` is admitted only after a build-time check that
-  reverse mode reproduces the forward gradient at the initial point, and
+  reverse mode reproduces the forward gradient near the initial point, and
   ``gradient=None`` declares a gradient-free target.
 
 Every [LogDensity][] can audit its own gradient:
 [LogDensity.verify_gradient][] compares the stored gradient against
 Richardson-extrapolated central differences and records a
-[GradientCheck][]; gradient-based samplers gate on
-[LogDensity.gradient_verified][].
+[GradientCheck][] whose verdict is passed, failed or inconclusive; NUTS
+refuses a failed one.
 
 [whitening][] builds the affine [WhiteningTransform][] that maps a
 unit-Gaussian coordinate ``w`` to the parameter coordinate of a proper
@@ -53,6 +53,7 @@ with per-parameter chi-square evidence in an [SbcReport][].
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from typing import Any, Callable, Optional
 
 import equinox as eqx
@@ -63,10 +64,11 @@ from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._warnings import warn_user
 from diff_soup.inference.data.deferred import DeferredValues
 from diff_soup.inference.solvers.tangent import deferred_value_and_grad
 from diff_soup.inference.statistics.experiment import _channel_likelihood_view
-from diff_soup.inference.statistics.laplace import LaplacePosterior
+from diff_soup.inference.statistics.laplace import LaplacePosterior, _credited_rtol, _solver_rtol
 from diff_soup.inference.statistics.parameters import Transform
 from diff_soup.inference.statistics.priors import GaussianPrior, Prior
 from diff_soup.inference.statistics.report import IdentifiedSubspace
@@ -85,38 +87,61 @@ __all__ = [
 
 GRADIENT_MODES = ("forward", "reverse", None)
 
-# Relative agreement demanded between reverse- and forward-mode gradients at
-# the initial point before a reverse-mode target is admitted.
-_REVERSE_GATE_RTOL = 1e-6
+#: A solver-backed target's gradient is held to this many times its solvers' largest
+#: ``rtol``, within the bounds below: by the audit [sample][] runs before NUTS, and by the
+#: reverse-mode gate. A forward-sensitivity gradient and finite differences of an adaptive
+#: solve differ by about ten times the solver tolerance.
+_GRADIENT_RTOL_PER_SOLVER_RTOL = 100.0
+_GRADIENT_RTOL_BOUNDS = (1e-3, 1e-1)
+
+#: The agreement demanded of reverse- and forward-mode gradients of a target with no solver,
+#: by the floating width of the target: both are exact up to rounding.
+_REVERSE_GATE_RTOL = {64: 1e-6, 32: 1e-3}
+
+
+def _gradient_rtol(source: Any) -> Optional[float]:
+    """The tolerance a gradient of a target of ``source`` is held to, or ``None`` without a solver."""
+    rtol = _credited_rtol(source)
+    if rtol is None:
+        return None
+    low, high = _GRADIENT_RTOL_BOUNDS
+    return float(min(high, max(low, _GRADIENT_RTOL_PER_SOLVER_RTOL * rtol)))
+
+
+#: A point is too close to a stationary point to audit when the gradient norm is below this
+#: fraction of the gradient norm one standard deviation away (``curvature_scale``).
+_STATIONARY_FRACTION = 0.1
+
+#: An audit is inconclusive when the probe's own noise is at least this fraction of the
+#: gradient norm.
+_NOISE_FRACTION = 0.5
+
+_GRADIENT_VERDICTS = ("passed", "failed", "inconclusive")
 
 
 @dataclasses.dataclass(frozen=True)
 class GradientCheck:
-    """The recorded outcome of one finite-difference gradient audit.
+    """The outcome of one finite-difference audit of a target's gradient.
 
-    The pass criterion is the whole-vector relative disagreement
-    ``norm_rel_error`` — the measure a gradient consumer actually feels
-    (proposals and optimizer steps take the gradient as a vector, so a small
-    deviation on a component that is tiny next to the dominant ones cannot
-    change behavior). The per-component ``max_rel_error`` is kept as a
-    diagnostic: it exposes which directions the finite-difference probe and
-    the stored gradient disagree on, even when that disagreement is too
-    small in vector terms to matter.
+    `verdict` is `"passed"` when the vector relative error, less the probe's own noise, is
+    within `rtol`, and `"failed"` when it is not. It is `"inconclusive"` when that error
+    means nothing: the probe's noise is half the gradient norm or more, or the point is so
+    close to a stationary point that the gradient is below a tenth of `curvature_scale`.
 
     Attributes:
         at: The point the gradient was checked at.
-        gradient: The stored (AD) gradient at ``at``.
+        gradient: The target's gradient at `at`.
         fd_gradient: The Richardson-extrapolated central-difference gradient.
-        fd_spread: Per-component disagreement between the two central-
-            difference step levels — the probe's own resolving power; gaps
-            inside it cannot be attributed to the gradient.
-        norm_rel_error: ``‖gradient − fd‖ / max(‖gradient‖, ‖fd‖)`` — the
-            quantity ``passed`` is judged on.
-        max_rel_error: Largest per-component relative disagreement
-            (diagnostic only).
+        fd_spread: The per-component difference between the two step sizes, the probe's
+            resolution.
+        norm_rel_error: `|gradient - fd_gradient| / max(|gradient|, |fd_gradient|)`.
+        max_rel_error: The largest per-component relative difference.
         rtol: The tolerance the check was run against.
-        passed: Whether the vector-level disagreement, less the probe's
-            noise allowance, is within ``rtol``.
+        passed: Whether `verdict` is `"passed"`.
+        cosine: The cosine of the angle between `gradient` and `fd_gradient`.
+        curvature_scale: The typical gradient norm one standard deviation from a
+            stationary point, from the diagonal curvature at `at`.
+        verdict: `"passed"`, `"failed"` or `"inconclusive"`.
     """
 
     at: Array
@@ -127,15 +152,38 @@ class GradientCheck:
     max_rel_error: float
     rtol: float
     passed: bool
+    cosine: float = float("nan")
+    curvature_scale: float = float("nan")
+    verdict: str = ""
+
+    def __post_init__(self):
+        """Fill `verdict` from `passed` for a check built without one."""
+        if not self.verdict:
+            object.__setattr__(self, "verdict", "passed" if self.passed else "failed")
+        if self.verdict not in _GRADIENT_VERDICTS:
+            raise ValueError(f"GradientCheck verdict must be one of {_GRADIENT_VERDICTS}.")
+
+    def describe(self, coordinate: str = "z") -> str:
+        """The audit point and its numbers, as one line of text."""
+        point = np.array2string(np.asarray(self.at), precision=4, threshold=8, separator=", ")
+        return (
+            f"at {coordinate}={point}: vector relative error {self.norm_rel_error:.3e} "
+            f"against tolerance {self.rtol:.1e}, gradient norm "
+            f"{float(np.linalg.norm(np.asarray(self.gradient))):.3e}, finite-difference norm "
+            f"{float(np.linalg.norm(np.asarray(self.fd_gradient))):.3e}, cosine "
+            f"{self.cosine:+.3f}, curvature scale {self.curvature_scale:.3e}"
+        )
 
 
-@dataclasses.dataclass(frozen=True)
+# eq=False: a target compares and hashes by identity, so `jax.jit(target)` and
+# `eqx.filter_jit(target)` take it as a static callable instead of hashing its arrays.
+@dataclasses.dataclass(frozen=True, eq=False)
 class LogDensity:
     """A normalized log-density target with its coordinates and gradient.
 
-    Calling the object evaluates the scalar log density;
-    [value_and_grad][] additionally returns the gradient when one was
-    built. The target is frozen — [verify_gradient][] records its audit
+    Calling the object evaluates the scalar log density, and `jax.jit(target)`
+    compiles that call. [value_and_grad][] also returns the gradient when one
+    was built. The target is frozen — [verify_gradient][] records its audit
     result in place, and everything else is read-only.
 
     Attributes:
@@ -223,31 +271,22 @@ class LogDensity:
         return self.gradient_check is not None and self.gradient_check.passed
 
     def verify_gradient(self, at: Any = None, rtol: float = 1e-3) -> GradientCheck:
-        """Audit the stored gradient against central finite differences.
+        """Audit the gradient against central finite differences, and record the check.
 
-        Each component is probed with Richardson-extrapolated central
-        differences (two shrinking steps, so smooth truncation error cancels
-        to fourth order). The pass criterion is vector-level: the norm of
-        the disagreement, less the probe's own noise allowance (the
-        disagreement between the two step levels), must be within ``rtol``
-        of the gradient norm. That is the measure a gradient consumer
-        feels — a percent-level deviation on a component that is tiny next
-        to the dominant ones cannot change a proposal or a step, and
-        finite differences of a numerically solved density carry solver
-        truncation noise that is not gradient error. The per-component
-        relative disagreement is kept on the check as a diagnostic. The
-        resulting [GradientCheck][] is recorded on the target and
-        returned.
+        Each component is probed at two step sizes and Richardson-extrapolated. The check
+        judges the vector relative error, less the probe's noise, against `rtol`. At or
+        near a stationary point, such as a MAP fit, a relative error means nothing and the
+        verdict is `"inconclusive"`; audit away from the mode instead.
 
         Args:
-            at: The point to audit at; defaults to [init][].
-            rtol: Largest acceptable vector-relative disagreement.
+            at: The point to audit at, in the target's coordinate; `init` by default.
+            rtol: The largest acceptable vector relative error.
 
         Returns:
-            The recorded [GradientCheck][].
+            The recorded [`GradientCheck`][diff_soup.inference.statistics.GradientCheck].
 
         Raises:
-            ValueError: If the target has no gradient (``gradient=None``).
+            ValueError: If the target was built with `gradient=None`.
         """
         if self._grad is None:
             raise ValueError(
@@ -261,22 +300,28 @@ class LogDensity:
         def scalar(z: np.ndarray) -> float:
             return float(self._fn(jnp.asarray(z)))
 
+        # The value from the same function the differences evaluate, for the curvature.
+        f0 = scalar(z0)
+
+        def pair(j: int, step: float) -> tuple:
+            zp = z0.copy()
+            zp[j] += step
+            zm = z0.copy()
+            zm[j] -= step
+            return scalar(zp), scalar(zm)
+
         fd = np.zeros_like(z0)
         spread = np.zeros_like(z0)
+        curvature = np.zeros_like(z0)
         for j in range(z0.size):
             h = 1e-4 * max(1.0, abs(float(z0[j])))
-
-            def central(step: float, j: int = j) -> float:
-                zp = z0.copy()
-                zp[j] += step
-                zm = z0.copy()
-                zm[j] -= step
-                return (scalar(zp) - scalar(zm)) / (2.0 * step)
-
-            coarse = central(h)
-            fine = central(0.5 * h)
+            plus, minus = pair(j, h)
+            coarse = (plus - minus) / (2.0 * h)
+            fine_plus, fine_minus = pair(j, 0.5 * h)
+            fine = (fine_plus - fine_minus) / h
             fd[j] = (4.0 * fine - coarse) / 3.0
             spread[j] = abs(fine - coarse)
+            curvature[j] = abs(plus + minus - 2.0 * f0) / (h * h)
 
         scale = max(
             float(np.max(np.abs(grad), initial=0.0)), float(np.max(np.abs(fd), initial=0.0))
@@ -284,13 +329,26 @@ class LogDensity:
         denom = np.maximum(np.maximum(np.abs(grad), np.abs(fd)), max(1e-8 * scale, 1e-300))
         max_rel_error = float(np.max(np.abs(grad - fd) / denom, initial=0.0))
 
-        norm_scale = max(float(np.linalg.norm(grad)), float(np.linalg.norm(fd)), 1e-300)
+        grad_norm = float(np.linalg.norm(grad))
+        fd_norm = float(np.linalg.norm(fd))
+        norm_scale = max(grad_norm, fd_norm, 1e-300)
         norm_rel_error = float(np.linalg.norm(grad - fd)) / norm_scale
-        # Gap the probe itself cannot resolve: the Richardson-level spread,
-        # judged at the same 50x factor the library's finite-difference
-        # contracts use.
+        cosine = float(grad @ fd) / max(grad_norm * fd_norm, 1e-300)
+        # The gap the probe cannot resolve: the spread of its two step sizes, at the 50x
+        # factor of the library's finite-difference contracts.
         noise_allowance = 50.0 * float(np.linalg.norm(spread)) / norm_scale
-        passed = norm_rel_error <= float(rtol) + noise_allowance
+        # For a Gaussian, the expected squared gradient one standard deviation from the
+        # mode along a random direction is the mean diagonal curvature.
+        curvature_scale = float(np.sqrt(np.mean(curvature))) if z0.size else 0.0
+        if (
+            noise_allowance >= _NOISE_FRACTION
+            or max(grad_norm, fd_norm) < _STATIONARY_FRACTION * curvature_scale
+        ):
+            verdict = "inconclusive"
+        elif norm_rel_error <= float(rtol) + noise_allowance:
+            verdict = "passed"
+        else:
+            verdict = "failed"
 
         check = GradientCheck(
             at=jnp.asarray(z0),
@@ -300,7 +358,10 @@ class LogDensity:
             norm_rel_error=norm_rel_error,
             max_rel_error=max_rel_error,
             rtol=float(rtol),
-            passed=bool(passed),
+            passed=verdict == "passed",
+            cosine=cosine,
+            curvature_scale=curvature_scale,
+            verdict=verdict,
         )
         object.__setattr__(self, "gradient_check", check)
         return check
@@ -314,6 +375,7 @@ class LogDensity:
         names: Any = None,
         _coordinate: str = "x",
         gradient: Optional[str] = "forward",
+        _source: Any = None,
     ) -> "LogDensity":
         """Wrap a user-supplied log-density callable as a sampling target.
 
@@ -328,11 +390,11 @@ class LogDensity:
             init: The starting point, shape ``(n,)``.
             names: Optional per-scalar parameter names (defaults to
                 positional labels).
-            coordinate: The coordinate the density lives in — ``"x"``
+            _coordinate: The coordinate the density lives in, ``"x"``
                 (physical, default) or ``"z"`` (inference).
             gradient: ``"forward"`` (default, ``jax.jacfwd``), ``"reverse"``
                 (``jax.grad``, admitted only after it reproduces the forward
-                gradient at ``init``), or ``None`` (gradient-free).
+                gradient near ``init``), or ``None`` (gradient-free).
 
         Returns:
             The [LogDensity][] target.
@@ -340,7 +402,7 @@ class LogDensity:
         Raises:
             ValueError: For an unknown ``gradient`` or ``coordinate``, a
                 ``names`` length that does not match ``init``, or a
-                reverse-mode gradient that fails or disagrees at ``init``.
+                reverse-mode gradient that fails or disagrees near ``init``.
         """
         if gradient not in GRADIENT_MODES:
             raise ValueError(
@@ -357,7 +419,9 @@ class LogDensity:
         names = tuple(names) if names is not None else tuple(f"theta[{i}]" for i in range(n))
         if len(names) != n:
             raise ValueError(f"LogDensity.from_callable: {len(names)} names for {n} parameters.")
-        grad_fn = _build_gradient(fn, init, gradient, caller="LogDensity.from_callable")
+        grad_fn = _build_gradient(
+            fn, init, gradient, caller="LogDensity.from_callable", source=_source
+        )
         return cls(
             _coordinate=_coordinate,
             names=names,
@@ -384,38 +448,80 @@ def _kept_data(experiment: Any, scored: tuple) -> dict:
 
 
 def _build_gradient(
-    fn: Callable, init: Array, gradient: Optional[str], *, caller: str
+    fn: Callable, init: Array, gradient: Optional[str], *, caller: str, source: Any = None
 ) -> Optional[Callable]:
     """Build the gradient of a scalar target under the declared mode.
 
     ``"forward"`` returns ``jax.jacfwd(fn)``. ``"reverse"`` returns
-    ``jax.grad(fn)`` only after it reproduces the forward gradient at
+    ``jax.grad(fn)`` only after it reproduces the forward gradient near
     ``init`` — a failing or disagreeing reverse pass raises with the reason
     (composable forward-sensitivity solver runs support ``jax.jacfwd``
     only). ``None`` returns ``None`` (a gradient-free target).
+
+    The check runs at ``_gate_point(init)``, a fixed step of ``_GATE_JITTER`` of
+    ``max(|init|, 1)`` per coordinate, since ``init`` is often a mode, where the gradient is
+    small and the two modes' difference is noise. It falls back to ``init`` when the
+    forward gradient there is not finite. The two agree when the norm of their difference is within a tolerance times the larger
+    norm, or times one when both norms are below one. The tolerance of a target of a
+    solver-backed ``source`` (a problem or an experiment) is the one ``_gradient_rtol``
+    gives it; a target with no solver is held to rounding of its own dtype.
     """
     if gradient == "forward":
         return jax.jacfwd(fn)
     if gradient == "reverse":
-        forward_grad = np.asarray(jax.jacfwd(fn)(init), dtype=float)
+        at = _gate_point(init)
+        forward = jax.jacfwd(fn)(at)
+        if not bool(jnp.all(jnp.isfinite(forward))):
+            at = init
+            forward = jax.jacfwd(fn)(at)
         try:
-            reverse_grad = np.asarray(jax.grad(fn)(init), dtype=float)
+            reverse = jax.grad(fn)(at)
         except Exception as exc:
             raise ValueError(
-                f"{caller}: the reverse-mode gradient failed at the initial "
+                f"{caller}: the reverse-mode gradient failed near the initial "
                 f"point ({exc}). Composable forward-sensitivity solver runs "
-                "support jax.jacfwd only — build with gradient='forward'."
+                "support jax.jacfwd only; build with gradient='forward'."
             ) from exc
-        atol = _REVERSE_GATE_RTOL * max(1.0, float(np.max(np.abs(forward_grad), initial=0.0)))
-        if not np.allclose(reverse_grad, forward_grad, rtol=_REVERSE_GATE_RTOL, atol=atol):
+        rtol = _gradient_rtol(source)
+        if rtol is None:
+            dtypes = (jnp.result_type(x) for x in (init, forward, reverse))
+            narrowest = min(
+                (jnp.finfo(d).bits for d in dtypes if jnp.issubdtype(d, jnp.floating)), default=64
+            )
+            rtol = _REVERSE_GATE_RTOL[64 if narrowest >= 64 else 32]
+            basis = f"no solver, {narrowest}-bit target"
+        else:
+            solver_rtol, single = _solver_rtol(source)
+            basis = f"solver rtol {solver_rtol:.1e}" + (", float32 solve" if single else "")
+        forward_grad = np.asarray(forward, dtype=float)
+        reverse_grad = np.asarray(reverse, dtype=float)
+        scale = max(float(np.linalg.norm(forward_grad)), float(np.linalg.norm(reverse_grad)), 1.0)
+        difference = float(np.linalg.norm(reverse_grad - forward_grad)) / scale
+        if not difference <= rtol:
             raise ValueError(
-                f"{caller}: the reverse-mode gradient disagrees with the "
-                f"forward-assembled gradient at the initial point (reverse "
-                f"{reverse_grad}, forward {forward_grad}). Reverse mode is not "
-                "trustworthy for this target — build with gradient='forward'."
+                f"{caller}: the reverse-mode gradient disagrees with the forward-assembled "
+                f"gradient near the initial point by {difference:.3e} of its norm, against the "
+                f"tolerance {rtol:.1e} ({basis}). Reverse mode is not trustworthy for this "
+                f"target; build with gradient='forward'. Reverse {reverse_grad}, forward "
+                f"{forward_grad}."
             )
         return jax.grad(fn)
     return None
+
+
+#: The reverse-mode gate checks this far from the initial point, relative to
+#: ``max(|init|, 1)`` per coordinate, with signs from a fixed key.
+_GATE_JITTER = 1e-2
+_GATE_KEY = 104729
+
+
+def _gate_point(init: Array) -> Array:
+    """The point the reverse-mode gate compares the two gradients at, the same on every call."""
+    init = jnp.asarray(init)
+    if not jnp.issubdtype(init.dtype, jnp.floating):
+        return init
+    signs = jax.random.rademacher(jax.random.key(_GATE_KEY), init.shape, dtype=init.dtype)
+    return init + _GATE_JITTER * jnp.maximum(jnp.abs(init), 1.0) * signs
 
 
 def _build_value_and_gradient(fn: Callable, gradient: Optional[str]) -> Optional[Callable]:
@@ -473,7 +579,7 @@ def log_posterior(
         gradient: ``"forward"`` (default) assembles the gradient with
             ``jax.jacfwd`` — the mode composable forward-sensitivity solver
             runs support; ``"reverse"`` uses ``jax.grad`` and is admitted
-            only after it reproduces the forward gradient at ``init``;
+            only after it reproduces the forward gradient near ``init``;
             ``None`` builds a gradient-free target.
         parameters: Optional parameter groups selecting the learnable theta
             (as accepted by ``Experiment.predictor``).
@@ -485,7 +591,7 @@ def log_posterior(
         ValueError: If the prior is missing, improper for this use, or sized
             wrong; if no response channel has attached data; if ``gradient``
             is unknown; or if a reverse-mode gradient fails or disagrees
-            with the forward gradient at the initial point.
+            with the forward gradient near the initial point.
     """
     from diff_soup.inference.statistics.measurement import require_likelihoods
 
@@ -567,7 +673,7 @@ def log_posterior(
             x = p12n.transform(z)
             return log_likelihood(x) + prior.log_prob(x) + jnp.sum(p12n.log_abs_det_jacobian(z))
 
-    grad_fn = _build_gradient(fn, init, gradient, caller="log_posterior")
+    grad_fn = _build_gradient(fn, init, gradient, caller="log_posterior", source=experiment)
 
     return LogDensity(
         _coordinate=coordinate,
@@ -669,7 +775,7 @@ def whitening(source: Any) -> WhiteningTransform:
         )
     if isinstance(source, IdentifiedSubspace):
         raise ValueError(
-            "whitening: an IdentifiedSubspace is an improper source — it "
+            "whitening: an IdentifiedSubspace is an improper source: it "
             "records the parameter directions an analysis left undetermined, "
             "so no finite (SPD) covariance exists to whiten. Close the "
             "undetermined directions with a proper prior or re-parameterize, "
@@ -707,10 +813,20 @@ def whitening(source: Any) -> WhiteningTransform:
 #: unit-scale target (pass a whitening transform for anything anisotropic).
 _RW_OPTIMAL_SCALE = 2.38
 
-#: Standard deviation of the per-chain overdispersed start jitter, applied in
-#: the sampling coordinate (the whitened ``w`` when a whitening transform is
-#: given, the target's own coordinate otherwise).
+#: Standard deviation of the per-chain start jitter, applied in the sampling
+#: coordinate (the whitened ``w`` when a whitening transform is given, the
+#: target's own coordinate otherwise): half a Laplace standard deviation per
+#: coordinate, so the starts lie inside the posterior, not around it.
 _CHAIN_JITTER = 0.5
+
+#: Adam's learning rate for the ChEES trajectory-length criterion of the pooled
+#: NUTS warmup, the value of Hoffman, Radul and Sountsov (2021).
+_CHEES_LEARNING_RATE = 0.025
+
+#: The most parameters ``mass="dense"`` adapts a dense mass matrix for.
+_DENSE_MASS_MAX = 50
+
+_NUTS_ADAPTATIONS = ("pooled", "window", "step_size", None)
 
 #: How [sample][] spreads its chains over the target: ``"vmap"`` evaluates
 #: every chain in one batched call, ``"sequential"`` runs them one after
@@ -757,8 +873,8 @@ class Draws:
     Attributes:
         values: The draws, shaped `(chains, draws, parameters)`.
         names: The label of each parameter column of `values`.
-        info: Sampler statistics per draw, `acceptance_rate`, and for NUTS `is_divergent` and
-            `num_integration_steps`.
+        info: Sampler statistics per draw, `acceptance_rate`, and for NUTS `is_divergent`,
+            `num_integration_steps` and the `adaptation` record.
         chain_map: How the chains ran, `"vmap"`, `"sequential"` or `"devices"`.
     """
 
@@ -918,7 +1034,11 @@ def sample(
     kernel: str = "nuts",
     chains: int = 4,
     draws: int = 1000,
-    warmup: int = 500,
+    warmup: int = 200,
+    adapt: Optional[str] = "pooled",
+    mass: str = "diag",
+    step_size: Optional[float] = None,
+    max_tree_depth: int = 10,
     key: Array,
     preconditioner: Any = "laplace",
     curvature: str = "observed",
@@ -927,19 +1047,27 @@ def sample(
 ) -> Draws:
     """Draw from the posterior of a `MAP` problem with MCMC, with the chains started near the fit.
 
-    Each chain starts from a perturbed copy of the fit, and every draw is in the parameters' own
-    coordinates. It is refused in a run of several processes.
+    Each chain starts from the fit plus random noise of half a standard deviation per coordinate,
+    and every draw is in the parameters' own coordinates. It is refused in a run of several
+    processes.
 
     Args:
         problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] with a `MAP`
             objective, or a target from `posterior_target`, which takes no `fit`.
         fit: The `MAP` fit the chains start from.
-        kernel: `"nuts"` for the No-U-Turn sampler, or `"rmh"` for random-walk Metropolis, which
-            needs no gradient.
+        kernel: `"nuts"` for the No-U-Turn sampler, which first audits the gradient at a perturbed
+            chain start, or `"rmh"` for random-walk Metropolis, which needs no gradient.
         chains: The number of chains.
         draws: The number of draws kept per chain.
-        warmup: The number of steps before the kept draws, at least 1 for NUTS, which adapts
-            during them.
+        warmup: The number of steps before the kept draws, which random-walk chains discard and
+            NUTS chains spend adapting, keeping their last state.
+        adapt: How NUTS adapts, `"pooled"` from all chains at once, `"window"` each chain alone,
+            `"step_size"` the step size alone, or `None` not at all.
+        mass: The mass matrix NUTS adapts, `"diag"` or `"dense"`, which needs `adapt="window"`
+            and at most 50 parameters.
+        step_size: The NUTS step size adaptation starts from, 1.0 when `None`, and the fixed one
+            with `adapt=None`.
+        max_tree_depth: The most times a NUTS trajectory doubles in one draw.
         key: The JAX random key that fixes the draws.
         preconditioner: `"laplace"` to scale the proposals by the Laplace approximation at the
             fit, or `None` to run without it.
@@ -1010,10 +1138,54 @@ def sample(
         chains=chains,
         num_steps=draws,
         num_warmup=warmup,
+        adapt=adapt,
+        mass=mass,
+        step_size=step_size,
+        max_tree_depth=max_tree_depth,
         whitening=white,
         chain_map=chain_map,
         **kernel_options,
     )
+
+
+def _audit_rtol(problem: Any) -> float:
+    """The audit tolerance for a target of ``problem``, scaled with its solvers' ``rtol``."""
+    rtol = _gradient_rtol(problem)
+    return _GRADIENT_RTOL_BOUNDS[0] if rtol is None else rtol
+
+
+def _audit_chain_start(
+    logdensity: LogDensity,
+    key: Array,
+    whitening: Optional["WhiteningTransform"],
+    init: Any,
+) -> GradientCheck:
+    """Audit the gradient at a perturbed chain start, and once more if inconclusive.
+
+    The start moves one standard deviation along a random direction of the whitened
+    coordinate, or ``_CHAIN_JITTER`` of the target's coordinate without whitening. The
+    directions come from ``key`` folded apart from the chains' own keys.
+    """
+    center = jnp.asarray(logdensity.init if init is None else init)
+    rtol = _audit_rtol(logdensity._problem)
+    check = None
+    for attempt in range(2):
+        direction = jax.random.normal(
+            jax.random.fold_in(key, _AUDIT_STREAM + attempt), center.shape, dtype=center.dtype
+        )
+        direction = direction / jnp.linalg.norm(direction)
+        if whitening is None:
+            point = center + _CHAIN_JITTER * direction
+        else:
+            point = whitening.forward(whitening.inverse(center) + direction)
+        check = logdensity.verify_gradient(at=point, rtol=rtol)
+        if check.verdict != "inconclusive":
+            break
+    return check
+
+
+#: The stream ``key`` is folded into for the audit directions, apart from the chains'.
+_AUDIT_STREAM = 7919
 
 
 def _sample_target(
@@ -1025,7 +1197,11 @@ def _sample_target(
     num_steps: int,
     whitening: Optional[WhiteningTransform] = None,
     init: Any = None,
-    num_warmup: int = 500,
+    num_warmup: int = 200,
+    adapt: Optional[str] = "pooled",
+    mass: str = "diag",
+    step_size: Optional[float] = None,
+    max_tree_depth: int = 10,
     nuts_target_acceptance: float = 0.8,
     chain_map: Optional[str] = None,
 ) -> Draws:
@@ -1038,28 +1214,28 @@ def _sample_target(
     ``2.38 / sqrt(dim)``, the optimal scaling for a unit-covariance Gaussian:
     pass ``whitening=`` so the chains run where the target really has unit
     scale, or leave it out only for targets that are already roughly unit
-    scale. ``"nuts"`` additionally needs a trustworthy gradient: it is
-    admitted only once the target's gradient audit
-    ([LogDensity.verify_gradient][]) has passed — when no audit is stored
-    yet it is run here once — and the sampler then consumes the stored
-    (audited) gradient itself. NUTS step size and diagonal mass matrix come
-    from blackjax window adaptation.
+    scale. ``"nuts"`` also needs a gradient that agrees with finite
+    differences. Without a stored passed or failed audit, the gradient is
+    audited ([LogDensity.verify_gradient][]) at a chain start one standard
+    deviation from the initial point, and at a second one if that is
+    inconclusive, against a tolerance scaled with the solvers' ``rtol``. A
+    failed audit refuses NUTS and an inconclusive one warns. The sampler
+    then uses the target's stored gradient.
 
     Warmup: ``num_warmup`` transitions per chain are discarded for
-    ``"rmh"`` (burn-in). For ``"nuts"``, ``num_warmup`` is the length of the
-    window-adaptation run, executed once from the un-jittered initial point;
-    its draws are likewise discarded and every chain then runs ``num_steps``
-    transitions with the adapted parameters.
+    ``"rmh"`` (burn-in). For ``"nuts"`` they adapt the kernel as ``adapt``
+    says (see ``_run_nuts``), and each chain's kept draws continue from its
+    state at the end of the warmup.
 
     Randomness is threaded deterministically from ``key``: it is split once
     into (adaptation, jitter, chains) keys; chain ``c`` starts at the initial
     point plus ``0.5 * N(0, I)`` jitter in the sampling coordinate, drawn
-    from the ``c``-th split of the jitter key (overdispersed starts), and
-    consumes the ``c``-th split of the chains key for its transitions. The
-    same ``key`` therefore reproduces ``Draws.positions`` bit for bit, and
-    every chain evolves under its own independent key stream. Each chain's
-    key and start are fixed before the chains run, so every ``chain_map``
-    draws the same chains.
+    from the ``c``-th split of the jitter key (starts inside the posterior,
+    half a whitened standard deviation per coordinate), and consumes the
+    ``c``-th split of the chains key. The same ``key`` therefore reproduces
+    ``Draws.positions`` bit for bit, and every chain evolves under its own
+    independent key stream. Each chain's key and start are fixed before the
+    chains run, so every ``chain_map`` draws the same chains.
 
     ``chain_map`` decides how those chains reach the target. ``"vmap"``
     evaluates them as one batched call — the fastest route whenever the target
@@ -1098,7 +1274,11 @@ def _sample_target(
         init: Starting point in the target's coordinate; defaults to
             ``logdensity.init``.
         num_warmup: Warmup transitions per the kernel-specific behavior
-            above (default 500).
+            above (default 200).
+        adapt: The NUTS adaptation, as in [sample][]; ignored by ``"rmh"``.
+        mass: The NUTS mass matrix, as in [sample][].
+        step_size: The initial or fixed NUTS step size, as in [sample][].
+        max_tree_depth: The NUTS trajectory doublings per draw, as in [sample][].
         nuts_target_acceptance: The acceptance probability NUTS adaptation
             tunes its step size toward (default 0.8). Raise it (e.g. 0.95 or
             0.98) when the report shows divergent transitions — curved
@@ -1117,7 +1297,7 @@ def _sample_target(
             of range, ``chain_map="devices"`` was asked for a chain count that
             is not a multiple of the local device count, or ``kernel="nuts"``
             was requested for a target whose gradient audit failed or that has
-            no gradient at all — ``kernel="rmh"`` needs no gradient.
+            no gradient at all.
         TypeError: If ``whitening`` is not a [WhiteningTransform][].
         ConfigurationError: If ``chain_map="devices"`` runs on two or more
             local devices and an experiment of the target's problem solves
@@ -1145,11 +1325,14 @@ def _sample_target(
         raise ValueError(f"sample: chains must be a positive integer; got {chains}.")
     if num_steps < 1:
         raise ValueError(f"sample: num_steps must be a positive integer; got {num_steps}.")
-    if num_warmup < 0 or (kernel == "nuts" and num_warmup < 1):
+    if num_warmup < 0 or (kernel == "nuts" and adapt is not None and num_warmup < 1):
         raise ValueError(
             f"sample: num_warmup must be non-negative (and at least 1 for "
             f"kernel='nuts', where it sizes the adaptation run); got {num_warmup}."
         )
+    if kernel == "nuts":
+        dim = int(jnp.size(logdensity.init if init is None else init))
+        _check_nuts_options(adapt, mass, step_size, max_tree_depth, dim)
     nuts_target_acceptance = float(nuts_target_acceptance)
     if not 0.0 < nuts_target_acceptance < 1.0:
         raise ValueError(
@@ -1167,16 +1350,21 @@ def _sample_target(
             raise ValueError(
                 "sample kernel='nuts' requires a target with a gradient; gradient=None supports kernel='rmh'."
             )
-        if logdensity.gradient_check is None:
-            logdensity.verify_gradient()
-        if not logdensity.gradient_verified:
-            check = logdensity.gradient_check
+        check = logdensity.gradient_check
+        if check is None or check.verdict == "inconclusive":
+            check = _audit_chain_start(logdensity, key, whitening, init)
+        if check.verdict == "failed":
             raise ValueError(
-                "sample: kernel='nuts' is admitted only after a passing gradient "
-                f"audit, but the recorded audit failed (vector relative error "
-                f"{check.norm_rel_error:.3e} against tolerance {check.rtol:.1e}). "
-                "Fix the target's gradient before using NUTS, or use "
-                "kernel='rmh', which needs no gradient."
+                "sample: kernel='nuts' needs a gradient that agrees with finite differences, "
+                f"and the audit failed {check.describe(logdensity._coordinate)}. Fix the "
+                "target's gradient, or use kernel='rmh', which needs no gradient."
+            )
+        if check.verdict == "inconclusive":
+            warn_user(
+                "sample: the gradient audit was inconclusive at two chain starts, so NUTS "
+                f"runs on an unaudited gradient; the last audit was "
+                f"{check.describe(logdensity._coordinate)}.",
+                UserWarning,
             )
 
     import blackjax
@@ -1222,35 +1410,26 @@ def _sample_target(
         positions = pos[:, num_warmup:]
         info = {"acceptance_rate": acceptance[:, num_warmup:]}
     else:
-        adaptation = blackjax.window_adaptation(
-            blackjax.nuts, target_fn, target_acceptance_rate=nuts_target_acceptance
+        (positions, acceptance, divergent, integration_steps), adaptation = _run_nuts(
+            target_fn,
+            start,
+            starts,
+            key_adapt,
+            chain_keys,
+            chain_map,
+            num_steps=num_steps,
+            num_warmup=num_warmup,
+            adapt=adapt,
+            mass=mass,
+            step_size=step_size,
+            max_tree_depth=max_tree_depth,
+            target_acceptance=nuts_target_acceptance,
         )
-        (_, adapted), _ = adaptation.run(key_adapt, start, num_steps=num_warmup)
-        algorithm = blackjax.nuts(target_fn, **adapted)
-
-        def run_chain(rng_key: Array, position: Array) -> tuple:
-            state = algorithm.init(position)
-
-            def step(st, k):
-                st, step_info = algorithm.step(k, st)
-                return st, (
-                    st.position,
-                    step_info.acceptance_rate,
-                    step_info.is_divergent,
-                    step_info.num_integration_steps,
-                )
-
-            _, collected = jax.lax.scan(step, state, jax.random.split(rng_key, num_steps))
-            return collected
-
-        pos, acceptance, divergent, integration_steps = _run_chains(
-            run_chain, chain_keys, starts, chain_map
-        )
-        positions = pos
         info = {
             "acceptance_rate": acceptance,
             "is_divergent": divergent,
             "num_integration_steps": integration_steps,
+            "adaptation": adaptation,
         }
 
     if whitening is not None:
@@ -1267,6 +1446,184 @@ def _sample_target(
         _problem=logdensity._problem,
         chain_map=chain_map,
     )
+
+
+def _check_nuts_options(
+    adapt: Optional[str], mass: str, step_size: Optional[float], max_tree_depth: int, dim: int
+) -> None:
+    """Refuse a NUTS warmup setting [sample][] does not take, naming the accepted ones."""
+    if adapt not in _NUTS_ADAPTATIONS:
+        raise ValueError(f"sample: adapt must be one of {_NUTS_ADAPTATIONS}; got {adapt!r}.")
+    if mass not in ("diag", "dense"):
+        raise ValueError(f"sample: mass must be 'diag' or 'dense'; got {mass!r}.")
+    if mass == "dense" and adapt != "window":
+        raise ValueError(
+            f"sample: mass='dense' is adapted by adapt='window' only; got adapt={adapt!r}."
+        )
+    if mass == "dense" and dim > _DENSE_MASS_MAX:
+        raise ValueError(
+            f"sample: mass='dense' adapts at most {_DENSE_MASS_MAX} parameters, and this "
+            f"posterior has {dim}; use mass='diag'."
+        )
+    if step_size is not None and not (np.isfinite(step_size) and step_size > 0):
+        raise ValueError(f"sample: step_size must be positive; got {step_size}.")
+    if int(max_tree_depth) != max_tree_depth or max_tree_depth < 1:
+        raise ValueError(
+            f"sample: max_tree_depth must be a positive integer; got {max_tree_depth}."
+        )
+
+
+def _run_nuts(
+    target_fn: Callable,
+    start: Array,
+    starts: Array,
+    key_adapt: Array,
+    chain_keys: Array,
+    chain_map: str,
+    *,
+    num_steps: int,
+    num_warmup: int,
+    adapt: Optional[str],
+    mass: str,
+    step_size: Optional[float],
+    max_tree_depth: int,
+    target_acceptance: float,
+) -> tuple:
+    """Adapt NUTS over ``num_warmup`` steps as ``adapt`` says, then draw ``num_steps`` per chain.
+
+    ``"pooled"`` runs blackjax's ChEES adaptation over the batched chains (one step size and one
+    diagonal mass matrix from all of them) and hands both to NUTS; it needs ``chain_map="vmap"``
+    and a blackjax whose ChEES estimates a mass matrix, and otherwise adapts each chain as
+    ``"window"``. ``"window"`` (Stan's schedule), ``"step_size"`` (dual averaging, identity mass)
+    and ``None`` (fixed step) run inside each chain, so they obey ``chain_map`` as the draws do.
+    Every chain's kept draws continue from its warmup state, except one chain under
+    ``"window"``, which adapts from ``start`` and draws from its jittered start as before this
+    release, so a key keeps its draws.
+
+    Returns:
+        ``(positions, acceptance, divergent, integration_steps)`` with leading
+            ``(chains, num_steps)`` axes, and the ``info["adaptation"]`` record.
+    """
+    import blackjax
+    from blackjax.adaptation.base import get_filter_adapt_info_fn
+
+    chains, dim = (int(n) for n in starts.shape)
+    initial_step = 1.0 if step_size is None else float(step_size)
+    identity = jnp.ones((dim,), dtype=start.dtype)
+    method = adapt
+    if adapt == "pooled" and (
+        chains == 1
+        or chain_map != "vmap"
+        or "mass_matrix_estimation" not in inspect.signature(blackjax.chees_adaptation).parameters
+    ):
+        method = "window"
+
+    def nuts(parameters: dict) -> Any:
+        return blackjax.nuts(
+            target_fn,
+            parameters["step_size"],
+            parameters["inverse_mass_matrix"],
+            max_num_doublings=max_tree_depth,
+        )
+
+    def draw(algorithm: Any, state: Any, rng_key: Array) -> tuple:
+        def step(st, k):
+            st, step_info = algorithm.step(k, st)
+            return st, (
+                st.position,
+                step_info.acceptance_rate,
+                step_info.is_divergent,
+                step_info.num_integration_steps,
+            )
+
+        return jax.lax.scan(step, state, jax.random.split(rng_key, num_steps))[1]
+
+    def window() -> Any:
+        return blackjax.window_adaptation(
+            blackjax.nuts,
+            target_fn,
+            is_mass_matrix_diagonal=mass == "diag",
+            initial_step_size=initial_step,
+            target_acceptance_rate=target_acceptance,
+            adaptation_info_fn=get_filter_adapt_info_fn(),
+            max_num_doublings=max_tree_depth,
+        )
+
+    def fixed_mass_warmup(rng_key: Array, position: Array) -> tuple:
+        # Dual averaging of the step size alone ("step_size"), or plain steps (None).
+        da_init, da_update, da_final = blackjax.adaptation.step_size.dual_averaging_adaptation(
+            target_acceptance
+        )
+        kernel = blackjax.nuts.build_kernel()
+
+        def step(carry, k):
+            state, da = carry
+            size = initial_step if method is None else jnp.exp(da.log_step_size)
+            state, step_info = kernel(
+                k, state, target_fn, size, identity, max_num_doublings=max_tree_depth
+            )
+            if method is not None:
+                da = da_update(da, step_info.acceptance_rate)
+            return (state, da), None
+
+        carry = (blackjax.nuts.init(position, target_fn), da_init(initial_step))
+        (state, da), _ = jax.lax.scan(step, carry, jax.random.split(rng_key, num_warmup))
+        size = initial_step if method is None else da_final(da)
+        return state, {"step_size": size, "inverse_mass_matrix": identity}
+
+    if method == "window" and chains == 1:
+        (_, parameters), _ = window().run(key_adapt, start, num_steps=num_warmup)
+        algorithm = nuts(parameters)
+        collected = _run_chains(
+            lambda k, p: draw(algorithm, algorithm.init(p), k), chain_keys, starts, chain_map
+        )
+        step_sizes = jnp.full((chains,), parameters["step_size"])
+    elif method == "pooled":
+        import optax
+
+        chees = blackjax.chees_adaptation(
+            target_fn,
+            chains,
+            target_acceptance_rate=target_acceptance,
+            max_leapfrog_steps=2**max_tree_depth,
+            mass_matrix_estimation="diagonal",
+            adaptation_info_fn=get_filter_adapt_info_fn(),
+        )
+        optimizer = optax.adam(_CHEES_LEARNING_RATE)
+
+        @jax.jit
+        def pooled(rng_key: Array, positions: Array) -> tuple:
+            (states, found), _ = chees.run(rng_key, positions, initial_step, optimizer, num_warmup)
+            return states.position, {
+                key: found[key] for key in ("step_size", "inverse_mass_matrix")
+            }
+
+        positions, parameters = pooled(key_adapt, starts)
+        algorithm = nuts(parameters)
+        collected = _run_chains(
+            lambda k, p: draw(algorithm, algorithm.init(p), k), chain_keys, positions, chain_map
+        )
+        step_sizes = jnp.full((chains,), parameters["step_size"])
+    else:
+
+        def run_chain(rng_key: Array, position: Array) -> tuple:
+            key_warm, key_draw = jax.random.split(rng_key)
+            if method == "window":
+                state, parameters = window().run(key_warm, position, num_steps=num_warmup)[0]
+            else:
+                state, parameters = fixed_mass_warmup(key_warm, position)
+            return draw(nuts(parameters), state, key_draw), parameters["step_size"]
+
+        collected, step_sizes = _run_chains(run_chain, chain_keys, starts, chain_map)
+    adaptation = {
+        "method": method,
+        "step_size": step_sizes,
+        "mass": mass if method in ("pooled", "window") else "identity",
+        "max_tree_depth": int(max_tree_depth),
+        "warmup": num_warmup,
+        "acceptance_rate": float(jnp.mean(collected[1])),
+    }
+    return collected, adaptation
 
 
 # ---------------------------------------------------------------------------
@@ -1436,7 +1793,7 @@ def sbc(
         raise ValueError(
             f"sbc: the rank statistic takes {outcomes} possible values "
             f"(num_steps / thin + 1), which must divide evenly into ranks_bins "
-            f"(got {ranks_bins}). Adjust num_steps, thin, or ranks_bins — e.g. "
+            f"(got {ranks_bins}). Adjust num_steps, thin, or ranks_bins, e.g. "
             f"num_steps = (k * ranks_bins - 1) * thin for an integer k."
         )
 
@@ -1567,7 +1924,7 @@ def sbc(
         if p_value[j] < alpha:
             flags.append(
                 f"parameter {names[j]!r}: rank histogram departs from uniformity "
-                f"(chi-square p = {p_value[j]:.2e} < {alpha:g}) — the model, "
+                f"(chi-square p = {p_value[j]:.2e} < {alpha:g}): the model, "
                 "prior, and sampler are not jointly calibrated"
             )
 

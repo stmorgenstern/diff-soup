@@ -186,17 +186,17 @@ def _residual_report(experiment, x_flat: Any, *, parameters: Any = None) -> Resi
             if abs(mean) > 4.0 * se_mean:
                 flags.append(
                     f"channel {c.name!r}: standardized residual mean {mean:.3f} "
-                    "departs from zero — biased predictions or a missing offset"
+                    "departs from zero: biased predictions or a missing offset"
                 )
             if abs(std - 1.0) > 0.5:
                 flags.append(
                     f"channel {c.name!r}: standardized residual scale {std:.2f} "
-                    "departs from one — the declared noise scale disagrees with "
+                    "departs from one: the declared noise scale disagrees with "
                     "the data"
                 )
             if abs(lag1) > 5.0 * se_mean and abs(lag1) > 0.2:
                 flags.append(
-                    f"channel {c.name!r}: lag-1 autocorrelation {lag1:.2f} — "
+                    f"channel {c.name!r}: lag-1 autocorrelation {lag1:.2f}: "
                     "serial correlation the declared independent errors do not "
                     "allow (unmodeled dynamics or correlated noise)"
                 )
@@ -538,17 +538,17 @@ def mcmc_report(draws: Any, *, rhat_max: float = 1.01, ess_floor: float = 400.0)
     for j, name in enumerate(names):
         if np.isfinite(rhat[j]) and rhat[j] > rhat_max:
             flags.append(
-                f"parameter {name!r}: split-Rhat {rhat[j]:.3f} exceeds {rhat_max:g} — "
+                f"parameter {name!r}: split-Rhat {rhat[j]:.3f} exceeds {rhat_max:g}: "
                 "the chains have not mixed to a common distribution"
             )
         if ess_bulk[j] < ess_floor:
             flags.append(
-                f"parameter {name!r}: bulk ESS {ess_bulk[j]:.0f} is below {ess_floor:g} — "
+                f"parameter {name!r}: bulk ESS {ess_bulk[j]:.0f} is below {ess_floor:g}: "
                 "too few effective draws for a stable posterior mean"
             )
         if ess_tail[j] < ess_floor:
             flags.append(
-                f"parameter {name!r}: tail ESS {ess_tail[j]:.0f} is below {ess_floor:g} — "
+                f"parameter {name!r}: tail ESS {ess_tail[j]:.0f} is below {ess_floor:g}: "
                 "too few effective draws in the tails for stable interval endpoints"
             )
 

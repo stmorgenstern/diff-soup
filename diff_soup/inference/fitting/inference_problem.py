@@ -33,8 +33,9 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-import warnings
-from collections.abc import Callable
+import os
+import threading
+from collections.abc import Callable, Mapping
 from typing import Any, Optional, Union
 
 import equinox as eqx
@@ -42,7 +43,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision, cast_to_compute_dtype, compute_dtype_of
+from diff_soup._warnings import warn_user
 from diff_soup.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
     GroupedThetaSelection,
@@ -370,12 +373,12 @@ def _resolve_parameters(parameters: Optional[ParameterGroups], problem: Any) -> 
       order a joint problem gives its shared and per-experiment blocks. Declared
       names and explicit
       [LearnableSelector][diff_soup.inference.fitting.learnables.LearnableSelector]
-      values are resolved to leaf identity, while legacy model names retain their
+      values are resolved to slot keys of the problem's path table, while legacy model names retain their
       path-token matching behavior. Thus, a declared learnable whose public name is
       not a θ-leaf path token still resolves.
     * ``groups`` is a tuple of ``(group_name, kind, leaf_ids, tokens)`` records in
-      declaration order (locals first, then shared). ``leaf_ids`` are the leaf
-      identities a selector, a Recipe handle, or a declared-learnable name resolved
+      declaration order (locals first, then shared). ``leaf_ids`` are the slot
+      keys a selector, a Recipe handle, or a declared-learnable name resolved
       to; ``tokens`` are the plain names left to path-token matching. A group can
       carry both when it mixes declared learnables with path tokens.
     """
@@ -468,6 +471,45 @@ def _resolve_parameters(parameters: Optional[ParameterGroups], problem: Any) -> 
     else:
         theta_selection = None
     return theta_selection, tuple(groups)
+
+
+class ParameterValues(Mapping):
+    """The parameter values a flat vector in a fit's order holds, read by parameter.
+
+    Returned by `InferenceProblem.values(x)`. `values[rate]` is the value `fit[rate]`
+    reads, and a parameter that varies by experiment gives a mapping by experiment.
+    """
+
+    def __init__(self, schema: Any, x: Any):
+        """Read `x` through `schema`, a fit's parameter schema."""
+        self._schema = schema
+        self._x = x
+
+    def __getitem__(self, parameter: Any) -> Any:
+        """Return the value of `parameter`."""
+        return self._schema.value(parameter, self._x)
+
+    def __iter__(self):
+        """Iterate over the fitted parameters in the fit's order."""
+        return iter(self._schema.handles)
+
+    def __len__(self) -> int:
+        """Return the number of fitted parameters."""
+        return len(self._schema.entries)
+
+    def __repr__(self) -> str:
+        """Name the fitted parameters."""
+        return f"ParameterValues({[handle.name for handle in self._schema.handles]})"
+
+
+def parameter_values(schema: Any, x: Any) -> ParameterValues:
+    """Return the read-only view of `x` through `schema`, refusing a problem with none."""
+    if schema is None:
+        raise ValueError(
+            "values: this inference problem fits no declared parameters, so a flat "
+            "vector has no parameter values to read."
+        )
+    return ParameterValues(schema, x)
 
 
 # Marks a ParameterSchema whose fingerprint labels one inference problem's own fitted
@@ -571,7 +613,7 @@ def _recipe_parameter_schema(problem: Any, parameters: ParameterGroups, seam: An
 def _group_columns(seam: Any, groups: tuple) -> tuple:
     """Map each parameter group to its flat-vector column indices.
 
-    A group owns a column when that column's source θ-leaf identity is one the group
+    A group owns a column when that column's source θ-leaf slot key is one the group
     resolved (a selector, a Recipe handle, or a declared-learnable name — which
     resolves declared learnables whose public name is not a θ-leaf token), or when one
     of the group's remaining plain names appears in that column's path-token set (the
@@ -715,7 +757,327 @@ def _loss_grad_hessian_from_gradient(loss_and_grad_fn: Callable) -> Callable:
         hessian, (loss, grad) = jax.jacfwd(gradient_with_aux, has_aux=True)(x)
         return loss, grad, hessian
 
-    return loss_grad_hessian
+    return _MemoryCheckedHessian(loss_grad_hessian, tile="full")
+
+
+# The memory of an exact Hessian grows with the square of the parameter count:
+# every tangent direction of the forward-over-reverse product carries the whole
+# reverse tape. Measured on a decision-variable multishoot fit (CPU,
+# 2026-10-28): 4.2 / 16.1 / 63.2 GB of compiled temporaries at 83 / 163 / 323
+# parameters. Below this width the Hessian is used without measuring it first.
+_HESSIAN_GUARD_MIN_WIDTH = 64
+#: The share of the free device memory one Hessian evaluation may take.
+_HESSIAN_MEMORY_SHARE = 0.9
+
+
+class _HessianMemoryError(ConfigurationError):
+    """The exact Hessian needs more memory than the device has free."""
+
+
+def _cgroup_memory_headroom() -> Optional[int]:
+    """The bytes this process may still allocate under its cgroup v2 limits, or ``None``."""
+    try:
+        with open("/proc/self/cgroup") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    relative = next((line[3:] for line in lines if line.startswith("0::")), None)
+    if relative is None:
+        return None
+    headroom = None
+    path = os.path.normpath("/sys/fs/cgroup/" + relative.lstrip("/"))
+    while path.startswith("/sys/fs/cgroup"):
+        try:
+            with open(os.path.join(path, "memory.max")) as handle:
+                limit = handle.read().strip()
+            with open(os.path.join(path, "memory.current")) as handle:
+                current = int(handle.read().strip())
+        except (OSError, ValueError):
+            limit = "max"
+            current = 0
+        if limit != "max":
+            room = max(int(limit) - current, 0)
+            headroom = room if headroom is None else min(headroom, room)
+        if path == "/sys/fs/cgroup":
+            break
+        path = os.path.dirname(path)
+    return headroom
+
+
+def _host_available_memory() -> Optional[int]:
+    """The host memory available to this process in bytes, or ``None`` when unknown."""
+    available = None
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    available = int(line.split()[1]) * 1024
+                    break
+    except (OSError, ValueError, IndexError):
+        available = None
+    if available is None:
+        try:
+            import psutil
+
+            available = int(psutil.virtual_memory().available)
+        except Exception:  # psutil is optional; without it the host is unmeasured
+            available = None
+    headroom = _cgroup_memory_headroom()
+    if headroom is not None:
+        available = headroom if available is None else min(available, headroom)
+    return available
+
+
+def _free_device_memory(device: Any) -> Optional[int]:
+    """The bytes ``device`` can still allocate, or ``None`` when it cannot say."""
+    if device.platform == "cpu":
+        return _host_available_memory()
+    try:
+        stats = device.memory_stats() or {}
+    except Exception:  # a backend without allocator statistics is unmeasured
+        return None
+    limit = stats.get("bytes_limit")
+    if limit is None:
+        return None
+    return int(limit) - int(stats.get("bytes_in_use", 0))
+
+
+def _memory_need_and_free(compiled: Any) -> Optional[tuple]:
+    """``(need, free, platform)`` of a compiled evaluation, or ``None`` when unmeasured."""
+    try:
+        analysis = compiled.memory_analysis()
+    except Exception:  # not every backend implements the analysis
+        return None
+    if analysis is None:
+        return None
+    need = int(getattr(analysis, "temp_size_in_bytes", 0) or 0) + int(
+        getattr(analysis, "output_size_in_bytes", 0) or 0
+    )
+    device = jax.local_devices()[0]
+    free = _free_device_memory(device)
+    if free is None:
+        return None
+    return need, free, device.platform
+
+
+def _check_hessian_memory(compiled: Any, width: int, tile: Any) -> None:
+    """Raise `_HessianMemoryError` when a compiled Hessian needs more than the free memory.
+
+    ``compiled`` is the ahead-of-time compiled evaluation of ``width``
+    parameters in tiles of ``tile`` directions. A backend that reports no
+    memory figures passes.
+    """
+    measured = _memory_need_and_free(compiled)
+    if measured is None or measured[0] <= _HESSIAN_MEMORY_SHARE * measured[1]:
+        return
+    need, free, platform = measured
+    gib = 2.0**30
+    how = "whole" if tile in (None, "full") else f"in tiles of {tile} directions"
+    smaller = (
+        "a smaller hessian_tile= (8 or 16), " if tile in (None, "full") or int(tile) > 8 else ""
+    )
+    raise _HessianMemoryError(
+        f"The exact Hessian over {width} parameters, formed {how}, needs "
+        f"{need / gib:.1f} GiB and the {platform} device has {free / gib:.1f} GiB "
+        f"free. With NewtonTrustRegion pass {smaller}"
+        'hessian="gauss-newton", or subproblem="cg" with '
+        "x_scale=ds.inference.ConstantScale(...). For laplace and information, "
+        'use the expected curvature (curvature="expected", kind="expected").'
+    )
+
+
+class _JacobianMemoryError(ConfigurationError):
+    """The Gauss-Newton residual Jacobian needs more memory than the device has free."""
+
+
+def _jacobian_memory_reporter(knob: str) -> Callable:
+    """The memory check of a residual Jacobian whose tile the option ``knob`` sets."""
+
+    def check(compiled: Any, width: int, tile: Any) -> None:
+        measured = _memory_need_and_free(compiled)
+        if measured is None or measured[0] <= _HESSIAN_MEMORY_SHARE * measured[1]:
+            return
+        need, free, platform = measured
+        gib = 2.0**30
+        how = "whole" if tile in (None, "full") else f"in tiles of {tile} directions"
+        smaller = (
+            f"Pass a smaller {knob}= (8 or 16), or d"
+            if tile in (None, "full") or int(tile) > 8
+            else "D"
+        )
+        raise _JacobianMemoryError(
+            f"The Gauss-Newton residual Jacobian over {width} parameters, formed {how}, "
+            f"needs {need / gib:.1f} GiB and the {platform} device has {free / gib:.1f} GiB "
+            f"free. {smaller}eclare a ds.inference.StateBasis or fewer windows to shrink "
+            "the decision vector."
+        )
+
+    return check
+
+
+#: Set while a concrete check compiles: an enclosing check measures every
+#: nested Hessian, so the nested ones skip their own compilation.
+_ENCLOSING_CHECK = threading.local()
+
+
+class _MemoryCheckedHessian:
+    """A jitted Hessian evaluation whose memory is checked before its first run.
+
+    Above `_HESSIAN_GUARD_MIN_WIDTH` parameters the evaluation is compiled
+    ahead of time once per input shape and its memory compared with the free
+    memory of the device. A concrete input is compiled exactly as the call
+    compiles it, so the call reuses that compilation. A traced input (the
+    Hessian inside another jitted function) is measured on its shape, which
+    costs a second compilation, unless an enclosing check is compiling it.
+    ``report(compiled, width, tile)`` raises when the evaluation does not fit;
+    the exact Hessian's check by default, a residual Jacobian's through
+    `_jacobian_memory_reporter`.
+    """
+
+    def __init__(self, fn: Callable, *, tile: Any = "full", report: Callable = None):
+        self._fn = fn if hasattr(fn, "lower") else jax.jit(fn)
+        self.tile = tile
+        self._report = _check_hessian_memory if report is None else report
+        self._checked: set = set()
+
+    def lower(self, *args, **kwargs):
+        """Lower the wrapped jitted function, as `jax.jit(...).lower` does."""
+        return self._fn.lower(*args, **kwargs)
+
+    def check(self, x: Any) -> None:
+        """Compile for ``x`` and raise the memory error of the evaluation when it does not fit."""
+        shape = tuple(np.shape(x))
+        if len(shape) != 1 or shape[0] <= _HESSIAN_GUARD_MIN_WIDTH:
+            return
+        key = (shape, str(jnp.result_type(x)))
+        traced = isinstance(x, jax.core.Tracer)
+        if key in self._checked or (traced and getattr(_ENCLOSING_CHECK, "active", False)):
+            return
+        point = jax.ShapeDtypeStruct(shape, jnp.result_type(x)) if traced else x
+        enclosing = getattr(_ENCLOSING_CHECK, "active", False)
+        _ENCLOSING_CHECK.active = True
+        try:
+            compiled = self._fn.lower(point).compile()
+        finally:
+            _ENCLOSING_CHECK.active = enclosing
+        self._report(compiled, shape[0], self.tile)
+        self._checked.add(key)
+
+    def __call__(self, x: Any):
+        self.check(x)
+        return self._fn(x)
+
+
+#: The tiles ``"auto"`` tries for a residual Jacobian that does not fit whole, widest first.
+_AUTO_JACOBIAN_TILES = (32, 16, 8)
+
+
+class _TiledJacobian:
+    """A jitted ``x -> (residual, jacobian)`` that can also be formed in tiles.
+
+    ``build(tile)`` returns the evaluation pushing ``tile`` tangents at a time;
+    calling the object evaluates it with every tangent at once. The solvers
+    read [at_tile][diff_soup.inference.fitting.inference_problem._TiledJacobian.at_tile]
+    to tile a structured Jacobian instead of tiling the residual's directions.
+    """
+
+    def __init__(self, build: Callable):
+        self._build = build
+        self._jitted: dict = {}
+
+    def at_tile(self, tile: Any) -> Callable:
+        """The jitted evaluation in tiles of ``tile`` tangents, built once per tile."""
+        key = "full" if tile is None else tile
+        if key not in self._jitted:
+            self._jitted[key] = jax.jit(self._build(key))
+        return self._jitted[key]
+
+    def lower(self, x: Any):
+        """Lower the whole evaluation, as `jax.jit(...).lower` does."""
+        return self.at_tile("full").lower(x)
+
+    def __call__(self, x: Any):
+        return self.at_tile("full")(x)
+
+
+def checked_residual_jacobian(problem: Any, x: Any, tile: Any, *, knob: str) -> Any:
+    """``x -> (residual, jacobian)`` of a least-squares problem, memory-checked at ``x``.
+
+    The problem's structured Jacobian (a `_TiledJacobian`, such as fitted
+    window starts give) is used when it has one, else the residual's forward
+    Jacobian. ``tile`` is an int, ``"full"``, or ``"auto"``: whole when the
+    compiled evaluation fits in the free device memory, else the widest of
+    `_AUTO_JACOBIAN_TILES` that fits. The result's ``tile`` names the tile
+    used. ``knob`` is the solver option the memory error names.
+
+    Raises:
+        ConfigurationError: If no candidate tile fits.
+    """
+    from diff_soup.inference.solvers.tangent import value_and_jacfwd_tiled
+
+    at_tile = getattr(problem.residual_and_jacobian, "at_tile", None)
+    residual = problem.residual
+
+    def evaluation(chosen):
+        if at_tile is not None:
+            return at_tile(chosen)
+        return jax.jit(lambda point: value_and_jacfwd_tiled(residual, point, tile=chosen))
+
+    width = int(np.shape(x)[0])
+    if tile == "auto":
+        candidates = ["full"] + [t for t in _AUTO_JACOBIAN_TILES if t < width]
+    else:
+        candidates = ["full" if tile is None else tile]
+    report = _jacobian_memory_reporter(knob)
+    error = None
+    for candidate in candidates:
+        checked = _MemoryCheckedHessian(evaluation(candidate), tile=candidate, report=report)
+        try:
+            checked.check(x)
+        except _JacobianMemoryError as exc:
+            error = exc
+            continue
+        return checked
+    raise error
+
+
+def _estimation_window_jacobian(problem: Any) -> Optional[_TiledJacobian]:
+    """The structured Jacobian of an estimation problem over fitted window starts, or ``None``.
+
+    Its residual is the data rows of its data problem followed by the MAP prior
+    rows; the data rows take the data problem's window-block Jacobian.
+    """
+    data = getattr(problem, "diagnostic_problem", None)
+    blocks = getattr(problem, "_prior_blocks", None)
+    if data is None or data is problem or blocks is None:
+        return None
+    if not getattr(data, "fits_window_states", False) or data.batched_r_fn is not None:
+        return None
+    data_jacobian = data.stacked_rj_fn
+    if not isinstance(data_jacobian, _TiledJacobian):
+        return None
+
+    def prior_rows(x):
+        return jnp.concatenate(
+            [jnp.zeros((0,), dtype=x.dtype)] + [prior.residual(x[c]) for c, prior in blocks]
+        )
+
+    def build(tile):
+        data_rows = data_jacobian._build(tile)
+
+        def residual_and_jacobian(x):
+            residual, jacobian = data_rows(x)
+            if not blocks:
+                return residual, jacobian
+            rows = prior_rows(x)
+            return (
+                jnp.concatenate((residual, rows)),
+                jnp.concatenate((jacobian, jax.jacfwd(prior_rows)(x)), axis=0),
+            )
+
+        return residual_and_jacobian
+
+    return _TiledJacobian(build)
 
 
 def lower_residual_problem(
@@ -787,6 +1149,10 @@ def lower_residual_problem(
         residual_and_jacobian = getattr(problem, "stacked_rj_fn", None)
     if residual is None or residual_and_jacobian is None:
         residual, residual_and_jacobian = build_stacked_residual_fns(tuple(problem.segment_fns))
+    # Fitted window starts: the data rows take the window-block Jacobian.
+    window_jacobian = _estimation_window_jacobian(problem)
+    if window_jacobian is not None:
+        residual_and_jacobian = window_jacobian
     if getattr(evaluator, "loss_fn", None) is None:
         evaluator = _ResidualSeams(residual)
 
@@ -907,7 +1273,7 @@ def _resolve_spec_declared_bounds(inference_problem: Any, problem: Any):
 
     A declared bound binds a column when its parameter is a decision variable of
     this inference problem — learnable and selected into the flat vector. Columns are
-    found by leaf identity through its stable Recipe handle (a declared
+    found by slot key through its stable Recipe handle (a declared
     parameter's public name need not be a θ-leaf path token). A bounded learnable intentionally
     omitted by a nonempty
     [ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups]
@@ -946,13 +1312,12 @@ def _resolve_spec_declared_bounds(inference_problem: Any, problem: Any):
             entries.append((cols, lo, hi))
 
     if unenforceable:
-        warnings.warn(
+        warn_user(
             f"bounds declared on parameter(s) {sorted(set(unenforceable))} cannot "
             "be enforced: they are not decision variables of this inference problem. "
             "A parameter bound binds only when the parameter is declared "
             "learnable=True and selected into the fit; otherwise drop its "
             "bounds or pass bounds explicitly to the InferenceProblem.",
-            stacklevel=3,
         )
 
     if inference_problem.bounds is not None or not entries:
@@ -1786,7 +2151,8 @@ class InferenceProblem:
         _set(self, "_param_group_names", group_names)
         _set(self, "_param_group_cols", group_cols)
         _set(self, "_union_ts", None)
-        _set(self, "_solve_probe", None)
+        # One solve per window per evaluation, all windows in one batch.
+        _set(self, "_solve_probe", {"n": int(build._plan.n_segments)})
 
     # --- LM-engine duck-typed surface ---
     @property
@@ -1873,10 +2239,22 @@ class InferenceProblem:
             def rj_fn(x):
                 return value_and_jacfwd(r_fn, x)
 
+            if self._dv_build is not None:
+                # One solve tangent per block column, not per decision variable.
+                build = self._forward_window_build()
+                rj_fn = _TiledJacobian(
+                    lambda tile: lambda x: build.residual_and_jacobian(x, tile=tile)
+                )
+
             _set = object.__setattr__
             _set(self, "_stacked_r", r_fn)
             _set(self, "_stacked_rj", rj_fn)
         return self._stacked_r
+
+    def _forward_window_build(self) -> Any:
+        """The window build whose ``residual`` is the forward seam's, as ``stacked_r_fn`` evaluates it."""
+        (residual,) = self._residual_seam("forward")[0]
+        return residual.__self__
 
     @property
     def stacked_rj_fn(self) -> Callable:
@@ -2007,6 +2385,35 @@ class InferenceProblem:
         return self._seam.theta_frozen
 
     @property
+    def fits_window_states(self) -> bool:
+        """Whether the decision vector holds window start states (decision-variable multishoot)."""
+        return self._dv_build is not None
+
+    @property
+    def function_columns(self) -> tuple:
+        """The columns of the theta block that hold learnable-function (network) weights."""
+        from diff_soup.inference.fitting.learnables import learnable_function_leaf_ids
+
+        owners = (self.problem, getattr(self._seam.problem, "source", None))
+        ids = frozenset().union(
+            *(learnable_function_leaf_ids(owner) for owner in owners if owner is not None)
+        )
+        if not ids:
+            return ()
+        return tuple(i for i, leaf_id in enumerate(self._seam.theta_leaf_ids) if leaf_id in ids)
+
+    def values(self, x: Any) -> ParameterValues:
+        """Return the parameter values a flat vector in this problem's fit order holds.
+
+        Args:
+            x: A vector in the fit's order, such as `fit.params`, `StepInfo.params` or a checkpoint's vector.
+
+        Returns:
+            A read-only mapping from each fitted parameter to its value.
+        """
+        return parameter_values(self.parameter_schema, x)
+
+    @property
     def theta_names(self) -> tuple:
         """Stable flat order of learnable θ scalars.
 
@@ -2108,10 +2515,11 @@ class InferenceProblem:
 
     @property
     def trajectory_solves_per_eval(self) -> Optional[int]:
-        """Forward solves performed per residual evaluation (single-shoot probe).
+        """Forward solves performed per residual evaluation.
 
-        For single-shoot this is 1 once the residual has been traced — the
-        one-solve-over-the-union invariant.  ``None`` for multishoot.
+        A single shoot counts its traced solves: 1 once the residual has been
+        traced. Fitted window starts solve each window once per evaluation, all in
+        one batch, and count those solves. ``None`` for observed window starts.
         """
         return None if self._solve_probe is None else int(self._solve_probe["n"])
 

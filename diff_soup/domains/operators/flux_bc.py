@@ -159,3 +159,42 @@ def RobinBC(
             g=jnp.asarray(_g),
         ),
     )
+
+
+class _NormalDerivativeBC(eqx.Module):
+    """A prescribed outward normal derivative on one grid face, already evaluated.
+
+    Built for each residual evaluation from ``spec.bc.neumann`` and merged into
+    the ``bcs`` of ``laplacian`` / ``div_flux`` applied to the conditioned field.
+    The operator imposes it through a ghost value, so the face flux is the
+    operator's own diffusivity times ``value``.
+
+    Attributes:
+        axis: Grid axis normal to the face.
+        side: ``"low"`` or ``"high"``.
+        value: The outward normal derivative, a scalar or one value per face cell
+            (the grid shape with ``axis`` removed).
+        mask: ``1`` at the face cells the condition holds on and ``0`` elsewhere,
+            or ``None`` for the whole face.
+    """
+
+    axis: int = eqx.field(static=True)
+    side: str = eqx.field(static=True)
+    value: jax.Array
+    mask: Optional[jax.Array] = None
+
+
+class _MeshNormalDerivative(eqx.Module):
+    """A prescribed outward normal derivative on tagged mesh facets, already evaluated.
+
+    The mesh counterpart of [_NormalDerivativeBC][diff_soup.domains.operators.flux_bc._NormalDerivativeBC].
+    ``laplacian`` / ``div_flux`` applied to the conditioned field add the natural
+    boundary term ``int D value N_i dS`` with their own diffusivity ``D``.
+
+    Attributes:
+        facets: Indices of the selected rows of ``mesh.boundary_facets()``.
+        value: The outward normal derivative, a scalar or one value per selected facet.
+    """
+
+    facets: tuple = eqx.field(static=True)
+    value: jax.Array

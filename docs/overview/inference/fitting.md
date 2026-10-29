@@ -237,9 +237,10 @@ result = ds.inference.optsolve(infproblem, ds.inference.LevenbergMarquardt())
 ```
 
 - `optimizer=` is the optimization algorithm. The default is
-  `ds.inference.NewtonTrustRegion()`; `ds.inference.LevenbergMarquardt()`
-  is the damped least-squares choice
-  ([optimization solvers](solvers.md)).
+  `ds.inference.NewtonTrustRegion()`, which steps on the Gauss-Newton
+  matrix of the residual rows; `NewtonTrustRegion(hessian="true")` steps
+  on the exact Hessian. `ds.inference.LevenbergMarquardt()` is the damped
+  least-squares choice ([optimization solvers](solvers.md)).
 - `callbacks=` lets you monitor the progress of the optimization run.
   `ds.inference.LogCallback()` prints one line per step, and
   `ds.inference.LogCallback(log_file=...)` also writes those lines to a
@@ -292,7 +293,9 @@ The status flags:
 - `MAX_STEPS` is the step budget running out.
 - `STALLED` is a fit that stopped while its model still predicted a
   decrease, or after too many invalid trial steps in a row. A stalled
-  fit has not converged.
+  fit has not converged. `NewtonTrustRegion` and `LevenbergMarquardt`
+  stall when their trust radius or damping shrinks the step below its
+  tolerance, and record why in `result.info["stall_reason"]`.
 - `DERIVATIVE_ACCURACY` is `ds.inference.TrustRegion` converging to the
   accuracy of its gradient, which the time-stepping solves compute to
   about their relative tolerance. A tighter `rtol` lets the fit go
@@ -304,8 +307,12 @@ The status flags:
 - `SOLVER_FAILED` is the time-stepping solve at the solution failing
   before the end of the time interval.
 - `UNKNOWN` is the flag before any run.
-- `converged` is `True` for `SUCCESS`, `GRAD_TOL`, `STEP_TOL`, and
-  `COST_TOL`.
+- `converged` is `True` for `SUCCESS`, `GRAD_TOL`, `STEP_TOL`,
+  `COST_TOL`, and `DERIVATIVE_ACCURACY`. It means a local stopping test
+  passed, not that the fit found the best parameters. With a likelihood
+  declared, check every fit with
+  `ds.inference.residual_report(infproblem, result)`
+  ([goodness of fit](statistical-estimation.md#goodness-of-fit)).
 
 For example, a run limited to fifty steps, with the progress printed:
 
@@ -335,11 +342,21 @@ of `observe=`:
 - A function of the state, such as `lambda state: state.mean()`. The
   function may also take the keyword arguments `t`, the observation time,
   and `theta`, the current parameter values.
+- The name of a declared observation, such as `observe="mean_u"` for a `spec.observe` declaration named `mean_u`, read in its dimensional units.
 - The `predict` method of a subclass of
   `ds.inference.data.ObservationOperator`, which defines
   `predict(self, u, t, theta)`, as in the second example below. `u` is
   the state, `t` the observation time, and `theta` the current parameter
   values.
+
+To observe one field at a few probe cells, add the field's offset in
+the state to the cell indices:
+
+```python
+probes = problem.field_slice("u").start + jnp.array([5, 15, 25])
+probe_measurement = ds.inference.Measurement("probes", ts, data[:, [5, 15, 25]],
+                                             observe=lambda state: state[probes], weight=1e6)
+```
 
 For example, to add a second measurement that observes the spatial mean
 of the temperature at the later times only:
@@ -477,6 +494,12 @@ result = ds.inference.optsolve(ds.inference.InferenceProblem(
 result.diagnostics.jacobian_cond           # 5.4e14
 result.diagnostics.theta_singular_values   # one singular value near zero
 ```
+
+The weights of a learnable function (`spec.function(..., learnable=True)`)
+are left out of the test, since a network's weights are not determined
+one at a time. A fit of weights alone records a note in `warnings`
+instead, and `theta_singular_values` and `jacobian_cond` cover the other
+parameters only.
 
 The Fisher information, profile likelihoods, and design sensitivities
 behind these numbers are covered on [identifiability](identifiability.md).

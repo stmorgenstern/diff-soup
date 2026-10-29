@@ -14,6 +14,7 @@ import diff_soup as ds
 from tests.support.problems import (
     ConstrainedDAE,
     DecayODE,
+    SparseChainDAE,
     endpoint,
     reaction_diffusion_recipe,
 )
@@ -242,8 +243,8 @@ def test_a_float32_problem_solves_and_differentiates_in_float32_on_every_route(r
 
 
 def test_a_solver_inherits_the_problem_precision_and_a_disagreeing_policy_is_refused():
-    """A solver inherits the problem's precision and is refused when it disagrees with a
-    float32 problem or asks it of a double-only backend."""
+    """A solver inherits a float32 problem's precision, a disagreeing policy or double-only
+    backend is refused, and an initialization float32 cannot reach names the float64 policies."""
     single, y0 = DecayODE(ds.Precision.fp32()).problem, DecayODE.initial_state(jnp.float32)
 
     def solve(problem, **solver):
@@ -260,6 +261,22 @@ def test_a_solver_inherits_the_problem_precision_and_a_disagreeing_policy_is_ref
         solve(single, linear="klu")
     with pytest.raises(ds.ConfigurationError, match="double-precision residual"):
         ds.Precision(compute_dtype="float32", solve_mode="fp32_ir")
+
+    below = ds.ToleranceSpec(rtol=1e-4, atol=1e-6, ic_atol=1e-10)  # measured float32 floor 4.9e-8
+    chain = [SparseChainDAE(precision=p) for p in (ds.Precision.fp32(), None)]
+    ic32, ic64 = (ds.pdesolve(c.problem, ds.JIDA(linear="dense"), (0.0, 0.5), c.initial_state(), theta=_THETA, tolerances=below).result for c in chain)  # fmt: skip
+    assert ic32 == ds.RESULT.INCONSISTENT_IC and "Precision.fp32_ir()" in ds.RESULT[ic32]
+    assert ic64 == ds.RESULT.SUCCESS
+
+
+@pytest.mark.requires_cudss
+def test_the_stats_tell_the_mixed_float32_policy_from_end_to_end_float32():
+    """``stats.linear_solve_mode`` is ``"fp32_factor"`` for float32 factors under float64
+    compute (end-to-end float32 reports ``"fp32"``, asserted by the inheritance test)."""
+    problem, y0 = DecayODE(ds.Precision.fp32_factor()).problem, DecayODE.initial_state(jnp.float64)
+    solver = ds.JNDF(linear="cudss", **_LOOSE)
+    stats = ds.pdesolve(problem, solver, (0.0, 0.5), y0, theta=_THETA).stats
+    assert stats.linear_solve_mode == "fp32_factor"
 
 
 # measured 6.5e-7 (residual) and 2.8e-8 (Jacobian) relative to the float64 build in the max

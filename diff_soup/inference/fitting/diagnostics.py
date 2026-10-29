@@ -38,7 +38,6 @@ dtype; no hard fp64 casts.
 from __future__ import annotations
 
 import dataclasses
-import warnings
 from typing import Any, Optional
 
 import jax
@@ -46,6 +45,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._logging import log as logger
+from diff_soup._warnings import warn_user
 
 # Default θ-conditioning threshold above which the identifiability warning fires.
 # A condition number of 1e8 in fp64 means ~8 digits of precision are lost — the
@@ -75,7 +75,7 @@ class OptDiagnostics:
     issues an `IdentifiabilityWarning`.
 
     Attributes:
-        theta_singular_values: The singular values of the Jacobian with respect to the model parameters.
+        theta_singular_values: The singular values of the Jacobian with respect to the model parameters, learnable-function weights left out.
         jacobian_cond: The ratio of the largest to the smallest of them, `inf` when the smallest is zero.
         window_obs_rank: Per fitted window start, the rank of the window's observations with respect to it.
         continuity_defect_wrms: Per window boundary, the root mean square of the continuity mismatch, in state units.
@@ -83,7 +83,7 @@ class OptDiagnostics:
         per_series_cost: The cost of each measurement stream, or of each window under `Windows.from_data`.
         series_names: The stream names, parallel to `per_series_cost`, or `None`.
         param_group_names: The names of the parameter groups.
-        param_group_cond: The condition number of each parameter group, parallel to `param_group_names`.
+        param_group_cond: The condition number of each parameter group, parallel to `param_group_names`, `nan` for learnable-function weights.
         ad_mode: The derivative mode of the gradient.
         hessian: The curvature the optimizer used, `"true"` or `"gauss-newton"`.
         hessian_composition: The autodiff composition of the exact Hessian.
@@ -110,7 +110,10 @@ class OptDiagnostics:
 
 
 def _theta_jacobian(
-    problem: Any, x_flat: np.ndarray, jacobian: Optional[np.ndarray] = None
+    problem: Any,
+    x_flat: np.ndarray,
+    jacobian: Optional[np.ndarray] = None,
+    columns: Optional[tuple] = None,
 ) -> Optional[np.ndarray]:
     """Stack the residual Jacobian ``∂r/∂x`` at ``x_flat`` (host numpy).
 
@@ -128,20 +131,31 @@ def _theta_jacobian(
     diagnostic computed from this surrogate is identical to one from the full Jacobian,
     without gathering it.
 
+    ``columns`` restricts the Jacobian to those columns of ``x``: a recorded one is
+    sliced, a sharded Gram is sub-selected, and otherwise the residual is
+    differentiated with respect to that sub-vector alone, the other entries held at
+    ``x_flat``, so the cost is one tangent per column.
+
     Returns:
         The ``(n_rows, n_params)`` Jacobian as host numpy, or ``None`` if the
         problem exposes no residual closures.
     """
+    idx = None if columns is None else np.asarray(columns, dtype=int)
     if jacobian is not None:
-        return np.asarray(jacobian)
+        jac = np.asarray(jacobian)
+        return jac if idx is None else jac[:, idx]
     x = jnp.asarray(x_flat)
     if getattr(problem, "is_sharded", False):
         evaluate_lsq = getattr(problem, "evaluate_lsq_fn", None)
         if evaluate_lsq is not None:
             _cost, _jtr, jtj, _n_active, _any_failed = evaluate_lsq(x)
             gram = np.asarray(jtj)
+            if idx is not None:
+                gram = gram[np.ix_(idx, idx)]
             eigvals, eigvecs = np.linalg.eigh(gram)
             return np.sqrt(np.clip(eigvals, 0.0, None))[:, None] * eigvecs.T
+    if idx is not None:
+        return _restricted_jacobian(problem, x, idx)
     if "residual_jacobian" in (getattr(problem, "structure", None) or ()):
         _r, jac = problem.residual_and_jacobian(x)
         return np.asarray(jac)
@@ -157,6 +171,22 @@ def _theta_jacobian(
         blocks.append(np.asarray(jax.jacfwd(fn)(x)))
     if not blocks:
         return None
+    return np.concatenate(blocks, axis=0)
+
+
+def _restricted_jacobian(problem: Any, x: jax.Array, idx: np.ndarray) -> Optional[np.ndarray]:
+    """The residual Jacobian over the columns ``idx`` of ``x``, by ``jacfwd`` of that sub-vector."""
+    batched_r = getattr(problem, "batched_r_fn", None)
+    seg_fns = (batched_r,) if batched_r is not None else getattr(problem, "segment_fns", None)
+    if not seg_fns:
+        residual = getattr(problem, "residual", None)
+        seg_fns = (residual,) if callable(residual) else ()
+    if not seg_fns:
+        return None
+    cols = jnp.asarray(idx, dtype=jnp.int32)
+    blocks = [
+        np.asarray(jax.jacfwd(lambda z, fn=fn: fn(x.at[cols].set(z)))(x[cols])) for fn in seg_fns
+    ]
     return np.concatenate(blocks, axis=0)
 
 
@@ -208,19 +238,21 @@ def _per_series_cost(
     return tuple(costs), None
 
 
-def _per_group_cond(jac: Optional[np.ndarray], problem: Any) -> tuple:
+def _per_group_cond(jac: Optional[np.ndarray], tested: np.ndarray, problem: Any) -> tuple:
     """Return per-parameter-group θ-block condition numbers and their names.
 
-    For each named parameter group, slices the group's columns out of the θ-block
-    Jacobian and reports ``σ_max / σ_min`` (``inf`` on a rank-deficient block).
+    ``jac`` holds the θ-block columns ``tested``.  For each named parameter group,
+    slices the group's tested columns out of it and reports ``σ_max / σ_min``
+    (``inf`` on a rank-deficient block, ``nan`` for a group of network weights).
     """
     names = tuple(getattr(problem, "param_group_names", ()) or ())
     cols = tuple(getattr(problem, "param_group_cols", ()) or ())
     if jac is None or not names or len(names) != len(cols):
         return (), ()
+    position = {int(col): k for k, col in enumerate(tested)}
     conds: list = []
     for group_cols in cols:
-        idx = np.asarray(group_cols, dtype=int)
+        idx = np.asarray([position[int(c)] for c in group_cols if int(c) in position], dtype=int)
         if idx.size == 0:
             conds.append(float("nan"))
             continue
@@ -264,7 +296,7 @@ def compute_diagnostics(
             of a ``jacfwd``.
         theta_cond_warn: Condition-number threshold for the identifiability
             warning (default ``1e8``).
-        emit_warning: Whether to fire the real ``warnings.warn`` (set ``False`` to
+        emit_warning: Whether to emit the real warning (set ``False`` to
             collect the note without raising under ``-W error``).
 
     Returns:
@@ -283,25 +315,38 @@ def compute_diagnostics(
     cond = float("nan")
     theta_names = getattr(problem, "theta_names", None)
     n_theta = len(theta_names) if theta_names is not None else int(np.asarray(x_flat).size)
-    jac = _theta_jacobian(problem, x_flat, jacobian)
-    jac_theta_full = None
-    if jac is not None and jac.size and n_theta > 0:
-        jac_theta_full = jac[:, :n_theta]
-    if jac is not None and jac.size and n_theta > 0:
-        jac_theta = jac[:, :n_theta]
+    # The weights of a learnable function (a network) are not identifiable one by
+    # one, so the report and the rank tests read only the other columns, and the
+    # Jacobian is built over those alone: one tangent per tested column.
+    function_cols = {
+        int(c) for c in (getattr(problem, "function_columns", ()) or ()) if 0 <= int(c) < n_theta
+    }
+    tested = np.asarray([i for i in range(n_theta) if i not in function_cols], dtype=int)
+    jac_tested = None
+    if function_cols and tested.size == 0:
+        notes.append(
+            "optsolve: every fitted parameter is a learnable-function weight, so the "
+            "identifiability check was skipped."
+        )
+    elif function_cols:
+        jac_tested = _theta_jacobian(problem, x_flat, jacobian, columns=tuple(tested))
+    elif tested.size:
+        jac = _theta_jacobian(problem, x_flat, jacobian)
+        jac_tested = None if jac is None else jac[:, :n_theta]
+
+    if jac_tested is not None and jac_tested.size:
+        sv = np.linalg.svd(jac_tested, compute_uv=False)
+        smin = float(sv[-1]) if sv.size else 0.0
+        smax = float(sv[0]) if sv.size else 0.0
+        cond = float("inf") if smin <= 0.0 else smax / smin
         # Zero-column detection (a θ leaf the residual is blind to).
-        col_norms = np.linalg.norm(jac_theta, axis=0)
+        col_norms = np.linalg.norm(jac_tested, axis=0)
         max_col = float(np.max(col_norms)) if col_norms.size else 0.0
         zero_cols = (
-            np.where(col_norms <= _ZERO_COL_REL * max(max_col, 1.0))[0]
+            tested[np.where(col_norms <= _ZERO_COL_REL * max(max_col, 1.0))[0]]
             if max_col > 0.0
-            else np.arange(n_theta)
+            else tested
         )
-        sv_arr = np.linalg.svd(jac_theta, compute_uv=False)
-        sv = sv_arr
-        smin = float(sv_arr[-1]) if sv_arr.size else 0.0
-        smax = float(sv_arr[0]) if sv_arr.size else 0.0
-        cond = float("inf") if smin <= 0.0 else smax / smin
 
         if zero_cols.size > 0 or cond > theta_cond_warn:
             names = _theta_names(problem)
@@ -313,7 +358,8 @@ def compute_diagnostics(
                 )
                 detail = f"parameter(s) {bad} do not move the residual (zero Jacobian column)"
             else:
-                detail = f"theta-block condition number {cond:.2e} exceeds {theta_cond_warn:.0e}"
+                block = "theta-block" if not function_cols else "non-function theta-block"
+                detail = f"{block} condition number {cond:.2e} exceeds {theta_cond_warn:.0e}"
             msg = (
                 f"optsolve: the learnable-parameter Jacobian is rank deficient: {detail}. "
                 "The observations must determine every fitted parameter direction; "
@@ -321,14 +367,18 @@ def compute_diagnostics(
             )
             notes.append(msg)
             if emit_warning:
-                warnings.warn(msg, IdentifiabilityWarning, stacklevel=2)
+                warn_user(msg, IdentifiabilityWarning)
             logger.warning(msg)
 
     # --- per-stream cost split (by name when available) ------------------
     per_series, series_names = _per_series_cost(problem, x_flat, residual)
 
     # --- per-parameter-group conditioning --------------------------------
-    group_names, group_cond = _per_group_cond(jac_theta_full, problem)
+    # A fit of network weights alone builds no Jacobian; its groups report nan.
+    group_jac = jac_tested if jac_tested is not None and jac_tested.size else None
+    if function_cols and tested.size == 0:
+        group_jac = np.zeros((0, 0))
+    group_names, group_cond = _per_group_cond(group_jac, tested, problem)
 
     # --- window diagnostics (decision-variable mode only) ----------------
     window_obs_rank = None

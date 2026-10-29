@@ -1,4 +1,4 @@
-"""Fourier-feature and sinusoidal networks for physical coordinates."""
+"""Fourier-feature, sinusoidal and Gabor-wavelet networks for physical coordinates."""
 
 from __future__ import annotations
 
@@ -77,6 +77,19 @@ def _batched_mlp(mlp, x, out_size):
     return value[..., 0] if out_size == 1 else value
 
 
+def _sine_initialized_mlp(in_size, out_size, width, depth, omega_0, activation, key):
+    """Build an MLP with the SIREN weight initialization for frequency omega_0."""
+    keys = jax.random.split(key, depth + 2)
+    mlp = eqx.nn.MLP(in_size, out_size, width, depth, key=keys[0], activation=activation)
+    for index, layer in enumerate(mlp.layers):
+        limit = 1 / in_size if index == 0 else np.sqrt(6 / layer.weight.shape[1]) / omega_0
+        weight = jax.random.uniform(
+            keys[index + 1], layer.weight.shape, minval=-limit, maxval=limit
+        )
+        mlp = eqx.tree_at(lambda m: m.layers[index].weight, mlp, weight)
+    return mlp
+
+
 class FourierFeatureNet(eqx.Module):
     """A coordinate network with fixed sine and cosine input features.
 
@@ -145,10 +158,10 @@ class FourierFeatureNet(eqx.Module):
 class SIREN(eqx.Module):
     """Sinusoidal coordinate network with variance-preserving initialization.
 
-    Hidden layers apply sin(omega_0 * z); the output layer is linear.
+    Hidden layers apply sin(omega_0 * z) and the output layer is linear.
     The first weight matrix is uniform on [-1/in_size, 1/in_size], and
     later matrices on +/-sqrt(6/fan_in)/omega_0. Bounds and the optional
-    ``transform(x, raw)`` have the same meaning as in FourierFeatureNet.
+    `transform(x, raw)` have the same meaning as in FourierFeatureNet.
     """
 
     mlp: eqx.nn.MLP
@@ -175,17 +188,71 @@ class SIREN(eqx.Module):
             raise ValueError("SIREN sizes, depth, and omega_0 must be positive")
         self.in_size, self.out_size, self.omega_0 = in_size, out_size, float(omega_0)
         self.bounds, self.transform = _bounds(bounds, in_size), transform
-        keys = jax.random.split(key, depth + 2)
-        mlp = eqx.nn.MLP(
-            in_size, out_size, width, depth, key=keys[0], activation=lambda z: jnp.sin(omega_0 * z)
+        self.mlp = _sine_initialized_mlp(
+            in_size, out_size, width, depth, omega_0, lambda z: jnp.sin(omega_0 * z), key
         )
-        for index, layer in enumerate(mlp.layers):
-            limit = 1 / in_size if index == 0 else np.sqrt(6 / layer.weight.shape[1]) / omega_0
-            weight = jax.random.uniform(
-                keys[index + 1], layer.weight.shape, minval=-limit, maxval=limit
-            )
-            mlp = eqx.tree_at(lambda m: m.layers[index].weight, mlp, weight)
-        self.mlp = mlp
+
+    @classmethod
+    def from_domain(cls, domain, **kwargs):
+        """Take input dimension and normalization bounds from a domain."""
+        return cls(domain.dim, bounds=domain.bounds, **kwargs)
+
+    def __call__(self, x):
+        """Evaluate one coordinate or a batch with scalar-channel squeezing."""
+        normalized = _coordinates(x, self.in_size, self.bounds)
+        raw = _batched_mlp(self.mlp, normalized, self.out_size)
+        return raw if self.transform is None else self.transform(x, raw)
+
+    def learnable_paths(self) -> tuple[str, ...]:
+        """Return the fitted weight and bias paths in every layer."""
+        return tuple("mlp." + path for path in _array_paths(self.mlp))
+
+
+class WIRE(eqx.Module):
+    """Gabor-wavelet coordinate network (WIRE) with the SIREN initialization.
+
+    Hidden layers apply cos(omega_0 * z) * exp(-(s_0 * z)**2) and the output
+    layer is linear. The envelope keeps each unit local, so a compact feature
+    leaves the field smooth elsewhere. Weights, bounds and the optional
+    `transform(x, raw)` follow SIREN.
+    """
+
+    mlp: eqx.nn.MLP
+    in_size: int = eqx.field(static=True)
+    out_size: int = eqx.field(static=True)
+    omega_0: float = eqx.field(static=True)
+    s_0: float = eqx.field(static=True)
+    bounds: Any = eqx.field(static=True)
+    transform: Any = eqx.field(static=True)
+
+    def __init__(
+        self,
+        in_size,
+        *,
+        width=32,
+        depth=3,
+        key,
+        out_size=1,
+        omega_0=20.0,
+        s_0=10.0,
+        transform=None,
+        bounds=None,
+    ):
+        """Initialize Gabor layers and the final linear readout."""
+        if min(in_size, out_size, width, depth) < 1 or omega_0 <= 0 or s_0 <= 0:
+            raise ValueError("WIRE sizes, depth, omega_0 and s_0 must be positive")
+        omega_0, s_0 = float(omega_0), float(s_0)
+        self.in_size, self.out_size, self.omega_0, self.s_0 = in_size, out_size, omega_0, s_0
+        self.bounds, self.transform = _bounds(bounds, in_size), transform
+        self.mlp = _sine_initialized_mlp(
+            in_size,
+            out_size,
+            width,
+            depth,
+            omega_0,
+            lambda z: jnp.cos(omega_0 * z) * jnp.exp(-((s_0 * z) ** 2)),
+            key,
+        )
 
     @classmethod
     def from_domain(cls, domain, **kwargs):

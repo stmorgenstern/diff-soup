@@ -63,16 +63,18 @@ problem = spec.build(precision=ds.Precision(solve_mode="fp32_ir"))
 
 - `Precision.fp64()`, the default policy: full double precision.
 - `"fp32_ir"`, the recommended mixed-precision mode: float64 compute
-  with fp32 factors refined toward a full-precision residual. The
+  with float32 factors ([mixed precision](#mixed-precision)). The
   `Precision.fp32_ir()` preset bundles it with the sensitivity
   fields below.
 - `Precision.fp32()`: end-to-end float32. States, times, parameters
   inside the solve, residual and Jacobian assembly, the fp32 factors
   and solves, and both derivative directions run in float32. Grid
   stencils cast the grid's geometry, which is stored in float64, to the
-  field's dtype, so their arithmetic is float32 as well.
-- `Precision.fp32_factor()`: float64 compute with direct fp32
-  factors.
+  field's dtype, so their arithmetic is float32 as well. A
+  [custom operator](../modeling/operators.md#custom-operators) owns its
+  own casts.
+- `Precision.fp32_factor()`: float64 compute with float32 factors,
+  without refinement.
 - `Precision(solve_mode="adaptive")`: the engine switches between the
   refined fp32 mode and full precision at runtime, promoting on
   failure. `Solution.stats.precision_promotions` counts the
@@ -80,16 +82,53 @@ problem = spec.build(precision=ds.Precision(solve_mode="fp32_ir"))
 
 A float32 `compute_dtype` means float32 factors, so
 `Precision(compute_dtype="float32")` is the same policy as
-`Precision.fp32()`. Its default solve mode is stored as `"fp32"`, and
-`Solution.stats.linear_solve_mode` reports it. The two refining modes,
-`"fp32_ir"` and `"adaptive"`, measure a float64 residual and are
-refused under a float32 compute dtype. The mixed modes keep a float64
-compute dtype.
+`Precision.fp32()`. The two refining modes, `"fp32_ir"` and
+`"adaptive"`, measure a float64 residual and are refused under a
+float32 compute dtype. The mixed modes keep a float64 compute dtype.
+
+`Solution.stats.linear_solve_mode` names the mode a solve ran in:
+`"fp64"`, `"fp32_ir"`, `"fp32_factor"`, `"fp32"` (end to end) or
+`"adaptive"`.
 
 `Precision.jacobian_values_dtype` computes only the Jacobian entries
 at a narrower dtype, for example float32 entries under float64
 compute. The residual, the right-hand side, and all gradients stay at
 `compute_dtype`. It cannot be wider than `compute_dtype`.
+
+## Mixed precision
+
+The mixed modes, `fp32_ir` and `fp32_factor`, keep a float64 residual
+and solve with float32 factors. Their accuracy comes from that float64
+residual, against which Newton corrects the factor's error. In the
+measured cases (Gray-Scott on a 256x256 grid, PFHub benchmark 6 and a
+FEM mesh), refinement never changed the answer.
+
+`fp32_ir` is the recommended mixed mode. It costs the same as
+`fp32_factor` and also refines forward sensitivities, so `jax.jacfwd`
+through it reaches double precision. `fp32_factor` is the bare
+variant, with the same speed and no tangent refinement.
+
+A Gray-Scott solve at `rtol=1e-6` takes 4.1 s in `fp64`, 3.1 s in
+either mixed mode and 2.5 s in end-to-end `fp32` (RTX 4070 Ti).
+
+At tight tolerance on an ill-conditioned DAE, both mixed modes fall
+short of `fp64`. On PFHub benchmark 6 at `rtol=1e-8` they leave about
+six times the error of `fp64`, and `Precision.fp64()` is the choice
+there.
+
+End-to-end `fp32` is a different class. It is less accurate than the
+mixed modes, refuses tight tolerances and can fail consistent
+initialization on a DAE. Initialization stops when the residual 2-norm
+reaches `atol`, and float32 rounding alone leaves more than that on a
+fine grid: about 1e-4 on PFHub benchmark 6 at 201x200 nodes, against
+`atol=1e-6`. `Precision.fp32_ir()` or `Precision.fp64()` initializes in
+float64.
+
+On a GPU, an end-to-end `fp32` fit is not bitwise reproducible from run
+to run, because cuDSS and XLA float32 reductions are not deterministic.
+Step counts and the stop status can differ, and the fitted values agree
+to the solver tolerance. `fp32_ir` and `fp64` give reproducible step
+counts.
 
 ## Backends
 
@@ -126,7 +165,7 @@ The optimizers' termination tolerances follow the decision vector's
 dtype when they are left unset. `step_tol` and `cost_tol` become
 $\max(\text{default}, 10\,\varepsilon)$, with $\varepsilon$ the
 machine epsilon of that dtype: under float64 this is the default
-itself ($10^{-10}$ and $10^{-12}$), under float32 it is about
+itself ($10^{-8}$), under float32 it is about
 $1.2 \times 10^{-6}$. `grad_tol` stays the absolute $10^{-8}$ under
 float64. Under float32 it is relative to the gradient norm at the start
 of the fit, $\max(10^{-8}, 10\,\varepsilon)$ times that norm, because

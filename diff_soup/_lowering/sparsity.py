@@ -294,7 +294,7 @@ def _sparsity(
                                     f"{src_var_name!r}) declares an empty "
                                     "sparsity(), so lowering falls back to a "
                                     "dense d(target)/d(source) cross-block "
-                                    f"with {cross_nnz} entries — which exceeds "
+                                    f"with {cross_nnz} entries, which exceeds "
                                     f"the dense cap of {_MAX_DENSE_FALLBACK_NNZ}. "
                                     "Override sparsity() to return the actual "
                                     "(target_rows, source_cols) pattern of your "
@@ -566,7 +566,7 @@ def _family_self_block_sparsity(
         raise ValueError(
             f"family {fam.name!r}: member stencil declares the dense product "
             f"({r1.size} entries for a {member_state_size}-DOF member); "
-            "refusing the dense fallback — supply a sparse member stencil."
+            "refusing the dense fallback; supply a sparse member stencil."
         )
     fam_base = layout.offset_of((fam.name, fam.member_variables[0].name))
     base = fam_base + np.arange(int(fam.count), dtype=np.int64) * member_state_size

@@ -275,14 +275,14 @@ def _route_solves(
     or checks its residual (``"fp32"``), and a solution that misses its target
     is replaced by a full-precision factorization and solve, under ``vmap``
     only when some lane misses. ``flagged`` makes ``solve`` return
-    ``(x, fell_back, refinement_steps)`` as ``float64`` scalars.
+    ``(x, fell_back, refinement_steps)`` as scalars of the default float dtype.
 
     The callables return solutions only: the solves of a sweep need no order
     among themselves, and every later refactorization of the held matrix
     depends on the sweep's results (its setup predicate) or runs in a later
     iteration of the step loop, so it follows them.
     """
-    zero = jnp.zeros((), jnp.float64)
+    zero = jnp.zeros((), jnp.result_type(float))
     if route.reduced is None:
 
         def solve_full(rhs):

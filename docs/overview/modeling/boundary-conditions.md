@@ -13,6 +13,12 @@ Every condition takes exactly one selector:
   boolean node mask.
 - `tag=` and `node_indices=`: single-form spellings of the same
   selector.
+- `axis=` with `side=`: one face of a structured grid, `side="low"`
+  or `"high"` along that axis.
+  A per-cell `value=` or `value_fn=` array on a face is in storage
+  order with the face axis dropped. That is the order of
+  `grid.meshgrid()` without that axis, for example `X[:, 0]` for
+  `axis=1, side="low"` on a 2D grid.
 
 On grids, boundary locations are selected by node index, as in the
 running example's two pinned ends from
@@ -25,6 +31,10 @@ spec.bc.dirichlet("u", node_indices=np.array([0, n - 1]), value=0.0)
 - One-dimensional grids also name their outer node: `tag="surface"`
   selects the last node, the surface cell of a spherical or
   cylindrical grid.
+- On a two- or three-dimensional grid, a flux, Robin or Neumann
+  condition acts through one face. Its cells must lie on that face,
+  so `axis=2, side="low"` is the clear way to name it. A selection of
+  edge or corner cells alone lies on several faces and is refused.
 - On a scalar field, a node index pins the field's one value at that
   node.
 - On a vector field, several values live at each node, so nodes are
@@ -61,17 +71,27 @@ For a scalar field \(u\) with outward unit normal \(n\):
 - `spec.bc.flux(var, on=..., value=...)` prescribes the flux density
   of \(u\) through the boundary, \(-n \cdot F = g\) (\(F\) the flux
   of \(u\)), per unit boundary area and positive into the domain.
-- `spec.bc.neumann(var, on=..., value=...)` states the Neumann
-  condition \(\partial u / \partial n = s\).
+  For a diffusive flux this is \(D \, \partial u / \partial n = g\).
+- `spec.bc.neumann(var, on=..., value=...)` prescribes the outward
+  normal derivative itself, \(\partial u / \partial n = s\),
+  whatever the diffusivity. It needs `laplacian` or `div_flux`
+  applied to the field itself, `q.u`, which supplies \(D\).
 - `spec.bc.robin(var, on=..., alpha=..., beta=..., value=...)`
   states the mixed condition
   \(\alpha u + \beta \, n \cdot \nabla u = g\), assembled as a
   boundary flux with the same sign convention as `flux`. A zero
   `beta` states a Dirichlet condition and is refused. `alpha` and
   `beta` may be callables of time.
-- `spec.bc.periodic(var)` wraps the field on every axis of its
-  cartesian grid. A periodic field takes no other condition, and
-  every field sharing the grid is declared periodic too.
+- `spec.bc.inflow(var, axis=..., side=..., velocity=v, value=c_in)`
+  feeds a grid face, the Danckwerts condition
+  \(v c - D \, \partial c / \partial n = v c_{in}\). The face carries
+  the total flux \(v c_{in}\) into the domain, so it pairs with
+  `div_advect`, which carries no flux in through a face under any
+  scheme.
+- `spec.bc.periodic(var, axes=(0,))` wraps the field on the listed
+  axes of its cartesian grid, every axis when `axes` is omitted. The
+  other faces take any other condition, and every field sharing the
+  grid is periodic on the same axes.
 
 For a vector field, such as a displacement or a velocity:
 
@@ -97,6 +117,17 @@ spec.bc.flux("u", node_indices=np.array([0]), value=0.0)
 spec.bc.dirichlet("u", node_indices=np.array([n - 1]), value=0.0)
 ```
 
+A packed bed fed through its low-x face takes a velocity field, a
+per-axis dispersion and an inflow:
+
+```python
+@spec.equation(writes="c", reads=("c",))
+def transport(q):
+    return -q.ops.div_advect(q.c, (vx, 0.0, 0.0)) + q.ops.div_flux((D_ax, D_r, D_r), q.c)
+
+spec.bc.inflow("c", axis=0, side="low", velocity=v_in, value=c_feed)
+```
+
 ## Time-dependent and nonlinear conditions
 
 Every condition takes a constant `value=`, a scalar or an array with
@@ -113,16 +144,14 @@ to prescribe a spatial profile over the selected nodes.
 parameters, and the declared functions, the form for nonlinear
 kinetics such as reaction fluxes and for a fitted boundary value.
 Every condition kind accepts it. It applies on a tagged mesh boundary
-and on the end cells of a one-dimensional grid. Multi-dimensional
-grids take `value=` or `value_fn=`. The closure receives `q`, a view
+and on the cells of one grid face. The closure receives `q`, a view
 of the problem restricted to the selected facets, and returns a
 scalar or one value per facet:
 
 - `q.<field>` is the field's per-facet value. On a mesh it is the
-  face-mean of the nodal values. On a one-dimensional grid each
-  selected end cell is its own facet and the value is the cell's
-  own. Every field of the component the boundary belongs to is
-  readable.
+  face-mean of the nodal values. On a grid each selected cell is its
+  own facet and the value is the cell's own. Every field of the
+  component the boundary belongs to is readable.
 - `q.<global>` reads a declared [global](fields.md#globals), and
   `q.control.<name>` a [control](controls.md).
 - `q.p.<name>` and `q.fn.<name>` read the current parameter and
@@ -186,8 +215,14 @@ For the built system \(M(u, t)\,du/dt = f\):
   cell volume.
 - Where a Dirichlet condition and a flux condition select the same
   node, the Dirichlet replacement wins.
+- A Neumann condition acts through `laplacian` and `div_flux`
+  applied to the field itself, `q.u`. On a grid the boundary takes a
+  ghost value \(u + h s\) beyond the face, a ghost node on a
+  finite-difference grid. On a mesh the operator adds the boundary
+  term \(\int D s N_i \, dS\) with its own \(D\).
 - A periodic declaration acts through the operator bank. The wrap
-  applies to `laplacian`, `div_flux`, and `advect_upwind`.
+  applies to `laplacian`, `div_flux`, `advect_upwind`, and
+  `div_advect`.
   `gradient`, `divergence`, `face_flux`, and `curl` difference
   one-sidedly at the axis ends and are not yet supported on a
   periodic field, so they raise. File an issue for support, or

@@ -8,6 +8,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup import inference as inf
+from diff_soup.domains import cartesian_grid_1d
 from tests.support.inference import (
     TIMES,
     decay_experiment,
@@ -15,6 +16,7 @@ from tests.support.inference import (
     decay_values,
     mean_measurement,
     small_fit,
+    solver,
 )
 
 
@@ -52,6 +54,35 @@ def test_a_measurement_validates_its_declaration_and_loads_callable_values_once(
     assert len(calls) == 1
     with pytest.raises(ValueError, match="5 leading frames"):
         inf.Measurement("mean", TIMES, lambda: jnp.ones(5), shape=(4,))
+
+
+# measured 0.0 relative difference, workstation CPU 2026-10-28,
+# pytest tests/public_api/test_measurements.py::test_a_measurement_observes_a_declared_observation_by_name
+_NAMED = 1e-12
+
+
+def test_a_measurement_observes_a_declared_observation_by_name():
+    """Measurement(observe="mean_u") reads the spec.observe declaration in its dimensional units:
+    the fit equals the fit through the same quantity written as a function of the state."""
+    spec = ds.problem("measurements_named_observation")
+    spec.domain("line", cartesian_grid_1d(2, 0.0, 1.0, method="fvm"))
+    rate = spec.param("rate", value=0.45, learnable=True)
+    # The state holds u / 2, so the function of the state scales it back.
+    spec.field("u", mass="differential", scale=2.0, init=lambda x: jnp.ones_like(x))
+    spec.observe.scalar(name="mean_u", fn=lambda q: jnp.mean(q.u))
+    spec.equation(writes="u", reads=("u",))(lambda q: -q.p.rate * q.u)
+    model = spec.build()
+
+    def fit(observe):
+        measurement = mean_measurement(decay_values(), observe=observe)
+        experiment = inf.Experiment(
+            model, solver(), (0.0, 1.0), spec.assemble_state({}), (measurement,)
+        )
+        problem = inf.InferenceProblem(experiment, parameters=rate)
+        return small_fit(problem, inf.LevenbergMarquardt(max_steps=30))
+
+    named, function = fit("mean_u"), fit(lambda state: 2.0 * jnp.mean(state))
+    np.testing.assert_allclose(named.params, function.params, rtol=_NAMED)
 
 
 _OBSERVED = jnp.array([0.5, 1.2, 2.0])

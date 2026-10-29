@@ -50,7 +50,7 @@ def intercalation_flux(c_s, V, k):
 def particle(R=100.0, protocol="potentiostatic"):
     spec = ds.problem(f"particle_{protocol}")
     spec.domain("particle", spherical_grid_1d(n, R, method="fvm"))
-    spec.field("c", mass="differential", scale=1.0, init=lambda r: 0.2 + 0.0 * r)
+    spec.field("c", mass="differential", scale=1.0)
     spec.param("D", value=3e3, learnable=True, bounds=(1e2, 1e6))   # nm^2 / s, shared by every particle
     spec.param("k", value=10.0, learnable=True, bounds=(0.1, 1e3))  # nm / s, one value per particle
 
@@ -79,7 +79,8 @@ Particle A has \(R = 100\) nm and \(k = 30\) nm/s, particle B has
 \(R = 200\) nm and \(k = 15\) nm/s, particle C has \(R = 150\) nm and
 \(k = 20\) nm/s, and all three share \(D = 10^4\) nm\(^2\)/s. The six
 experiments are solved at those values
-and sampled at ten times with noise of scale \(10^{-3}\):
+and sampled at ten times with noise of scale \(10^{-3}\).
+Every particle starts at \(c = 0.2\):
 
 ```python
 solver = ds.JIDA()
@@ -90,7 +91,7 @@ experiments = []
 for label, R in particles.items():
     for protocol in ("potentiostatic", "galvanostatic"):
         problem = particle.build(R=R, protocol=protocol)
-        y0 = problem.assemble_state({})
+        y0 = problem.assemble_state({"c": 0.2})
         theta_true = ds.default_theta(problem, {D: 1e4, k: k_true[label]})
         sol = ds.pdesolve(problem, solver, (0.0, 2.0), y0, theta=theta_true, saveat=ds.SaveAt(ts=ts))
         data = sol.ys + 1e-3 * np.random.default_rng(len(experiments)).standard_normal(sol.ys.shape)

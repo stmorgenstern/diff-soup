@@ -37,7 +37,7 @@ class TerminationStatus(enum.Enum):
         DIVERGED: `BFGS` met an objective or gradient that is not finite.
         STOPPED: A callback raised `StopFit`.
         UNKNOWN: The status before any run.
-        STALLED: `TrustRegion` stopped without converging, after failed trials in a row or while its model still predicted a decrease.
+        STALLED: The fit stopped without converging: `TrustRegion` after failed trials in a row or while its model still predicted a decrease, and `NewtonTrustRegion` or `LevenbergMarquardt` when a step or cost test passed on a step the trust radius or damping held short.
         DERIVATIVE_ACCURACY: `TrustRegion` converged to the accuracy of its derivatives, which a tighter solver `rtol` improves.
     """
 
@@ -370,6 +370,7 @@ class OptInfo(TypedDict, total=False):
             Hessian (``"forward-over-reverse"``, ...), ``None`` for the
             Gauss-Newton matrix.
         subproblem: The trust-region subproblem method.
+        stall_reason: Why a ``NewtonTrustRegion`` or ``LevenbergMarquardt`` fit stalled: ``"radius_collapsed"``, ``"evaluation_noise"`` or ``"invalid_trials"``.
         linear_solver: The linear solver of the step equations.
         linear_solver_fallbacks: Factorizations that fell back to the
             regularized route (``NewtonTrustRegion``).
@@ -399,6 +400,8 @@ class OptInfo(TypedDict, total=False):
             the objective, the coordinate and the likelihood).
         schema_fingerprint: The parameter schema's fingerprint a loaded
             result was saved with.
+        schema_layout: The parameter layout a loaded result was saved with, as
+            JSON: each handle's name, kind, size and columns per owner.
         checkpoint_step: The attempt or step a checkpoint file was written
             after.
         accepted_count: The accepted steps at that checkpoint.
@@ -409,6 +412,7 @@ class OptInfo(TypedDict, total=False):
     hessian: str
     hessian_composition: Optional[str]
     subproblem: str
+    stall_reason: str
     linear_solver: str
     linear_solver_fallbacks: int
     linear_factorizations: int
@@ -430,6 +434,7 @@ class OptInfo(TypedDict, total=False):
     main_wall_time_s: float
     uq: dict
     schema_fingerprint: str
+    schema_layout: str
     checkpoint_step: int
     accepted_count: int
     attempt_count: int
@@ -486,6 +491,15 @@ def _jsonable_report(value: Any) -> Any:
     return value
 
 
+def _layout_text(schema: Any, info: Any) -> str:
+    """The parameter layout ``OptResult.save`` writes: the schema's, else the one loaded."""
+    if schema is None:
+        return str(info.get("schema_layout", ""))
+    from diff_soup.inference.fitting._layout import layout_text
+
+    return layout_text(schema)
+
+
 def _uq_text(uq: Any) -> str:
     """``info["uq"]`` as JSON when it is a mapping of JSON scalars, else ``""``."""
     if not isinstance(uq, dict) or not all(
@@ -525,19 +539,32 @@ def _attached(result: Any, problem: Any, recorded_uq: Any, file: str) -> Any:
             f"parameter schema; {type(problem).__name__} has none."
         )
     where = f"OptResult.load({file!r}, problem=...)"
-    recorded = _recorded_fingerprint(result)
-    if not recorded:
-        raise ValueError(
-            f"{where}: the file records no parameter schema fingerprint, so it cannot be "
-            f"checked against the problem's {str(schema.fingerprint)!r}; load it without "
-            "problem=."
-        )
-    if str(recorded) != str(schema.fingerprint):
-        raise ValueError(
-            f"{where}: the file holds a fit of another problem: its parameter schema "
-            f"fingerprint is {str(recorded)!r}, the problem's is {str(schema.fingerprint)!r}. "
-            "Load it with the problem it was fitted on."
-        )
+    recorded_layout = result.info.get("schema_layout")
+    if recorded_layout:
+        from diff_soup.inference.fitting._layout import describe_layout, layout_text
+
+        if recorded_layout != layout_text(schema):
+            raise ValueError(
+                f"{where}: the file holds a fit whose columns hold other handles than this "
+                f"problem's ({describe_layout(schema)}). Load it without problem= and pass "
+                "its params, in this problem's column order, where a start is taken."
+            )
+    else:
+        # A file saved before layouts were recorded is checked by its fingerprint.
+        recorded = _recorded_fingerprint(result)
+        if not recorded:
+            raise ValueError(
+                f"{where}: the file records no parameter layout or fingerprint, so it cannot "
+                "be checked against the problem; load it without problem= and pass its "
+                "params where a start is taken."
+            )
+        if str(recorded) != str(schema.fingerprint):
+            raise ValueError(
+                f"{where}: the file records no parameter layout, and its parameter schema "
+                f"fingerprint {str(recorded)!r} is not the problem's "
+                f"{str(schema.fingerprint)!r}. Load it without problem= and pass its params "
+                "where a start is taken."
+            )
     # A statistical problem (an MLE or MAP objective over a study) finalizes its fits with
     # ``finalize_opt_result``; any other problem only lends its schema.
     if not callable(getattr(problem, "finalize_opt_result", None)):
@@ -545,12 +572,9 @@ def _attached(result: Any, problem: Any, recorded_uq: Any, file: str) -> Any:
     kind = type(problem.objective).__name__
     uq = dict(recorded_uq) if recorded_uq else None
     if uq is not None:
-        if uq.get("study_fingerprint") != problem.study.fingerprint:
-            raise ValueError(
-                f"{where}: the file holds a fit of another study: its study fingerprint is "
-                f"{uq.get('study_fingerprint')!r}, the problem's is "
-                f"{problem.study.fingerprint!r}. Load it with the problem it was fitted on."
-            )
+        # A fit of another study of the same layout (another solver tolerance, data set or
+        # starting value) keeps its recorded study fingerprint, so a verb that would reuse
+        # what the fit recorded computes it again.
         if uq.get("objective") != kind:
             raise ValueError(
                 f"{where}: the file holds a {uq.get('objective')!r} fit and the problem's "
@@ -682,6 +706,7 @@ class OptResult(eqx.Module):
             "schema_fingerprint": np.asarray(
                 "" if self.parameter_schema is None else str(self.parameter_schema.fingerprint)
             ),
+            "schema_layout": np.asarray(_layout_text(self.parameter_schema, self.info)),
             "n_failed_segments": np.asarray(int(self.n_failed_segments)),
             "failed_segment_indices": np.asarray(
                 tuple(int(index) for index in self.failed_segment_indices), dtype=np.int64
@@ -729,13 +754,14 @@ class OptResult(eqx.Module):
 
         Args:
             path: The file path, with `.npz` appended when missing.
-            problem: The problem the fit was made on, used to restore `result[handle]` after checking that the file holds a fit of it.
+            problem: A problem of the same parameter layout, used to restore `result[handle]`. A fit under another solver tolerance or data set loads.
 
         Returns:
             The loaded `OptResult`.
 
         Raises:
-            ValueError: If `problem` is given and the file holds a fit of another problem.
+            ValueError: If `problem` is given and the file's columns hold other handles, or
+                its objective is another.
         """
         import json
 
@@ -745,6 +771,8 @@ class OptResult(eqx.Module):
                 key: _tupled(value) for key, value in json.loads(str(data["info_json"])).items()
             }
             info["schema_fingerprint"] = str(data["schema_fingerprint"])
+            if "schema_layout" in data.files and str(data["schema_layout"]):
+                info["schema_layout"] = str(data["schema_layout"])
             window_states = np.asarray(data["window_states"])
             mappings = {}
             for prefix in ("state", "work"):

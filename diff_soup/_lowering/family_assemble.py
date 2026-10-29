@@ -112,7 +112,7 @@ def _reject_one_arg(fam, var, value) -> None:
     if len(positional) < 2:
         raise ValueError(
             f"family {fam.name!r} field {var.name!r}: value callable must accept "
-            "two positional args (coords, m) — the member domain's node "
+            "two positional args (coords, m): the member domain's node "
             "coordinates and the per-member parameter slice. A one-arg "
             f"value(coords) is rejected (got {len(positional)} required "
             "positional arg(s))."

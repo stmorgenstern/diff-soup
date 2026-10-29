@@ -84,11 +84,21 @@ result.diagnostics.continuity_defect_wrms   # one defect per window, in state un
 ```
 
 The window starts are initialized from one solve at the starting
-parameters. `result.window_states` holds their fitted values, and
+parameters. With few probes of a large state, the data inside a window
+determine only some of its start values; the rest are held by the
+continuity rows and stay near that first solve, so multiple shooting does
+not by itself rescue a start the single shot cannot. `result.window_states`
+holds their fitted values, and
 `result.params` leads with the parameters. For a DAE, only the
 differential part of the state is fitted per window and the algebraic
 part is recovered from it
 ([consistent initialization](../simulation/consistent-init.md)).
+
+`ds.inference.NewtonTrustRegion` steps on the Gauss-Newton matrix here, as
+it does for every fit with residual rows
+([solvers](solvers.md#newton-trust-region)). The memory of the exact
+Hessian grows with the square of the decision vector, and a few hundred
+entries can already exceed the device.
 
 ## Options
 
@@ -105,6 +115,13 @@ The options, with their defaults:
 
 ## Batching and derivatives
 
+- Each window is solved once per evaluation, saving its frames on the
+  way, so a fit integrates the horizon once however many frames a window
+  holds.
+- A window's solve reads only the parameters and its own start. Its
+  Jacobian therefore pushes one tangent per parameter and one per entry
+  of a window start through all the windows at once, not one per
+  decision variable.
 - The windows solve as one batch. A `jax.vmap` over parameter values
   of the likelihood joins that batch, and so do the chains of
   [`ds.inference.sample`](mcmc.md#run-the-sampler).
@@ -124,7 +141,9 @@ The options, with their defaults:
   mismatch a reduced `StateBasis` cannot represent, and the diagnostics
   carry a note to widen the basis when it is large.
 - A decision vector beyond 2000 entries warns that the dense
-  Gauss-Newton solve is the cost wall.
+  Gauss-Newton solve is the cost wall. The exact Hessian reaches its
+  wall far earlier, and a fit that would exceed the device memory
+  stops before it starts with an error naming `hessian_tile=`.
 - Windows with fitted starts take exactly one measurement. A second
   measurement is refused.
 - `ds.inference.Experiment(..., initial_state=ds.inference.LearnedInitialState(guess))`

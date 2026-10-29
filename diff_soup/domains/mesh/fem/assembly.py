@@ -195,15 +195,24 @@ def assemble_lumped_mass(
                 for ni in range(svals_np.shape[1]):
                     mass[cells_np[e, ni]] += svals_np[qi, ni] * w
         if np.any(mass <= 0.0):
-            import warnings
+            from diff_soup._warnings import warn_user
 
-            warnings.warn(
+            if ele_type in _QUADRATIC_ELES:
+                cause = (
+                    f"Row sums of a quadratic {ele_type!r} basis are negative at the "
+                    f"corner nodes; use scheme='hrz' (or scheme='auto', the default)."
+                )
+            else:
+                cause = (
+                    f"Row sums of a linear {ele_type!r} basis are positive on every "
+                    f"valid element, so an element here has a non-positive measure: "
+                    f"check the mesh for inverted or degenerate cells."
+                )
+            warn_user(
                 f"row_sum lumping on element type {ele_type!r} produced "
-                f"non-positive mass entries (min = {float(mass.min()):.4e}). "
-                f"This will cause nonphysical dynamics in transient solves. "
-                f"Use scheme='hrz' (or scheme='auto', the default) instead.",
+                f"non-positive mass entries (min = {float(mass.min()):.4e}), which "
+                f"give nonphysical dynamics in transient solves. {cause}",
                 RuntimeWarning,
-                stacklevel=2,
             )
         return mass
 
@@ -227,8 +236,12 @@ def assemble_lumped_mass(
                 for ni in range(n_local):
                     diag_elem[ni] += svals_np[qi, ni] * svals_np[qi, ni] * w
             diag_sum = float(diag_elem.sum())
-            if diag_sum <= 0.0:
-                continue
+            if diag_sum <= 0.0 or total_elem <= 0.0:
+                raise ValueError(
+                    f"HRZ lumping found element {e} of type {ele_type!r} with a "
+                    f"non-positive measure (volume {total_elem:.4e}); the mesh has "
+                    f"an inverted or degenerate cell. Fix its node order or remove it."
+                )
             scale = total_elem / diag_sum
             diag_elem *= scale
             for ni in range(n_local):

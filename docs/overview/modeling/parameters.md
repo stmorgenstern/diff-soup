@@ -47,6 +47,19 @@ values in a result.
 - A [population](equations.md#populations)'s member closures read
   their per-member parameters through the member view as `m.<name>`.
 
+## Parameter values
+
+`ds.default_theta(problem, {D: 0.2})` returns the values a solve takes
+as `theta=`, with `D` set to `0.2`. Theta holds every floating-point
+array of the problem, the declared parameters among them.
+
+```python
+theta = ds.default_theta(problem, {D: 0.2})
+theta[D]                                          # 0.2
+theta = theta.replace(D, 0.3)                     # a new theta with D set to 0.3
+ds.parameter_gradient(jax.grad(loss)(theta), D)   # dloss/dD
+```
+
 ## Named functions
 
 `spec.function(name, fn, learnable=False, prior=None,
@@ -146,3 +159,8 @@ D = particle.handle("D")
   ([hierarchical fits](../inference/hierarchical.md)). A declaration
   keeps its size and its `learnable=` flag across builds.
 - A name no build declares is refused.
+- `problem.assemble_state` on a built problem ignores `init=`. Pass the
+  initial values to it, as
+  [initial conditions](fields.md#initial-conditions) describes.
+  `recipe.spec(**inputs)` returns the recipe's `ProblemSpec`, whose
+  `assemble_state({})` applies `init=`.

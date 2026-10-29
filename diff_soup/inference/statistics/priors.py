@@ -98,7 +98,7 @@ class Prior(eqx.Module):
 def _check_coordinate(coordinate: str) -> str:
     if coordinate not in COORDINATES:
         raise ValueError(
-            f"prior coordinate must be one of {COORDINATES} — 'x' for a density "
+            f"prior coordinate must be one of {COORDINATES}: 'x' for a density "
             f"on the physical parameters, 'z' for one on the inference "
             f"coordinate; got {coordinate!r}."
         )

@@ -914,7 +914,7 @@ def _profile_engine(
 
 
 def _validate_fit(problem: EstimationProblem, fit: OptResult) -> None:
-    """Require the exact Study/schema/objective that produced ``fit``."""
+    """Require a converged fit of this problem's parameter layout and objective."""
     if fit.parameter_schema is None:
         raise ValueError(
             "profile requires an OptResult with handle-based parameter schema "
@@ -929,9 +929,6 @@ def _validate_fit(problem: EstimationProblem, fit: OptResult) -> None:
             f"profile: fit objective is {type(fit.objective).__name__!r}, but the problem "
             f"objective is {expected_objective!r}."
         )
-    fit_fingerprint = dict(fit.info).get("uq", {}).get("study_fingerprint")
-    if fit_fingerprint is not None and fit_fingerprint != problem.study.fingerprint:
-        raise ValueError("profile: OptResult Study provenance does not match the problem.")
     if int(fit.n_failed_segments) != 0:
         raise ValueError(
             "profile refuses a fit with failed forward-solve segments; failed "
@@ -1061,11 +1058,15 @@ def _profile_facade(
         raise TypeError("profile fit must be an optimization OptResult.")
     _validate_fit(problem, fit)
     if getattr(problem.diagnostic_problem, "is_decision_variable", False):
+        n_theta = sum(
+            len(occurrence.columns)
+            for entry in problem.parameter_schema.entries
+            for occurrence in entry.occurrences
+        )
         raise ValueError(
-            "profile does not support an EstimationProblem lowered with "
-            "decision-variable multishoot: its fitted vector mixes physical "
-            "parameters with window states. Rebuild the Study with single "
-            "shooting or observed-state windows before profiling a handle."
+            "profile refits every other coordinate at each point of the curve, and the "
+            "window starts of a multiple-shooting fit are not parameters; refit with single "
+            f"shooting from fit.params[:{n_theta}] and profile that fit."
         )
     entry, occurrence = _resolve_occurrence(problem, handle, owner)
 

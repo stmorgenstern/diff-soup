@@ -8,7 +8,7 @@ The methods, grouped by kind:
 
 - Differential operators: `laplacian`, `div_flux`, `gradient` (alias
   `grad`), `divergence` (alias `div`), `curl`, `advect_upwind`,
-  `face_flux`.
+  `div_advect`, `face_flux`.
 - Mass and integration weights: `mass`, `lumped_mass`.
 - Solid and fluid mechanics: `strain`, `linear_elastic_stress`,
   `deformation_gradient`, `cauchy_stress_from_S_F`, `strain_rate`,
@@ -40,5 +40,6 @@ The methods, grouped by kind:
             - mass
             - lumped_mass
             - advect_upwind
+            - div_advect
             - as_weak
             - for_residual

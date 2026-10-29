@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import warnings
 from typing import Any
 
 import numpy as np
@@ -31,6 +30,7 @@ import numpy as np
 from diff_soup._distributed import assert_decision_value, local_value
 from diff_soup._errors import ConfigurationError
 from diff_soup._logging import log as logger
+from diff_soup._warnings import warn_user
 from diff_soup.inference._abc import RESUME
 from diff_soup.inference.fitting._protocols import StatisticalInferenceProblem
 from diff_soup.inference.fitting.result import OptResult, TerminationStatus
@@ -120,10 +120,10 @@ def _surface_failures(result: OptResult, problem: Any) -> OptResult:
     msg = (
         f"optsolve: {n_failed} of {n_seg} segment PDE solve(s) did not reach t_end "
         f"(segments {failed_indices}); their residuals were penalized with a "
-        f"sentinel. The fit may be unreliable — raise the solver's max_steps or "
+        f"sentinel. The fit may be unreliable; raise the solver's max_steps or "
         f"loosen its tolerances."
     )
-    warnings.warn(msg, stacklevel=2)
+    warn_user(msg)
     logger.warning(msg)
     return dataclasses.replace(
         result,
@@ -307,8 +307,8 @@ def _attach_diagnostics(result: OptResult, problem: Any) -> OptResult:
     Computed at the converged params from the data residual and Jacobian the
     optimizer recorded there (``info["final_data_residual"]`` /
     ``info["final_data_jacobian"]``); an optimizer that records none costs one
-    extra ``jacfwd`` and one residual evaluation of the residual closures at
-    the solution.  Fires
+    extra ``jacfwd`` over the columns that are not learnable-function weights and
+    one residual evaluation of the residual closures at the solution.  Fires
     [IdentifiabilityWarning][diff_soup.inference.fitting.diagnostics.IdentifiabilityWarning]
     when
     the θ-block is rank-deficient, and records the warning text plus the
@@ -358,22 +358,51 @@ def _foreign(problem: Any, recorded: Any) -> bool:
     )
 
 
-def _checkpoint_source(problem: Any, directory: Any) -> Any:
-    """The newest attempt file of ``directory`` as a result to resume from, or ``None``."""
-    from diff_soup.inference.fitting.callbacks import _attempt_files
+def _recorded_layout_text(text: str) -> str:
+    """A saved parameter layout (``info["schema_layout"]``) as ``rate: 0, source@cell-a: 1``."""
+    import json
 
-    files = _attempt_files(directory)
+    labels = []
+    for name, _kind, _size, occurrences in json.loads(text):
+        for owner, columns in occurrences:
+            label = name if owner is None else f"{name}@{owner}"
+            labels.append((tuple(columns), f"{label}: {', '.join(str(c) for c in columns)}"))
+    return "; ".join(label for _, label in sorted(labels))
+
+
+def _checkpoint_source(problem: Any, directory: Any) -> Any:
+    """The newest checkpoint of ``directory`` as a result to resume from, or ``None``.
+
+    The newest ``attempt-`` file of a solver that resumes its state, else the
+    newest ``step-`` file of the others. A checkpoint whose parameters are laid
+    out otherwise than ``problem``'s is refused.
+    """
+    from diff_soup.inference.fitting.callbacks import checkpoint_files
+
+    files = checkpoint_files(directory)
     if not files:
         return None
     newest = files[-1]
     result = OptResult.load(newest)
+    where = f"optsolve(checkpoint={str(directory)!r}) holds {newest.name} of another problem"
+    schema = getattr(problem, "parameter_schema", None)
+    recorded_layout = result.info.get("schema_layout")
+    if schema is not None and recorded_layout:
+        from diff_soup.inference.fitting._layout import describe_layout, layout_text
+
+        if str(recorded_layout) != layout_text(schema):
+            raise ValueError(
+                f"{where}: its parameters are laid out as "
+                f"({_recorded_layout_text(str(recorded_layout))}), this problem's as "
+                f"({describe_layout(schema)}); give a directory of this problem or an "
+                "empty one."
+            )
     recorded = _recorded_fingerprint(result)
     if _foreign(problem, recorded):
         raise ValueError(
-            f"optsolve(checkpoint={str(directory)!r}) holds {newest.name} of another problem: "
-            f"its parameter schema fingerprint is {str(recorded)!r}, this problem's is "
-            f"{str(problem.parameter_schema.fingerprint)!r}; give a directory of this problem "
-            "or an empty one."
+            f"{where}: its parameter schema fingerprint is {str(recorded)!r}, this problem's "
+            f"is {str(problem.parameter_schema.fingerprint)!r}; give a directory of this "
+            "problem or an empty one."
         )
     return result
 
@@ -412,6 +441,37 @@ def _resume_from(problem: Any, resume: Any) -> tuple[Any, Any]:
     return with_start(result), result.state
 
 
+def _offers_gauss_newton(problem: Any) -> bool:
+    """Whether ``problem`` has residual rows, so a Gauss-Newton matrix.
+
+    Every declared problem does: its measurements are rows, a non-Gaussian
+    likelihood through its exact deviance rows, and its priors are rows. An
+    optimization problem does when its structure holds ``"gauss_newton"``.
+    """
+    if isinstance(problem, StatisticalInferenceProblem):
+        return True
+    structure = getattr(problem, "structure", None)
+    if structure is not None:
+        return "gauss_newton" in structure
+    return getattr(problem, "segment_fns", None) is not None
+
+
+def _resolved_optimizer(problem: Any, optimizer: Any) -> Any:
+    """``optimizer`` with its ``"auto"`` curvature resolved for ``problem``.
+
+    `NewtonTrustRegion(hessian="auto")` steps on the Gauss-Newton matrix
+    whenever the problem has residual rows, and on the exact Hessian otherwise.
+    """
+    if optimizer is None:
+        from diff_soup.inference.solvers.newton_trust_region import NewtonTrustRegion
+
+        optimizer = NewtonTrustRegion()
+    for_problem = getattr(optimizer, "_for_problem", None)
+    if callable(for_problem):
+        optimizer = for_problem(_offers_gauss_newton(problem))
+    return optimizer
+
+
 def optsolve(
     problem: Any,
     optimizer: Any = None,
@@ -431,7 +491,7 @@ def optsolve(
 
     Args:
         problem: The problem to fit.
-        optimizer: The optimizer, `ds.inference.NewtonTrustRegion()` when `None`.
+        optimizer: The optimizer, `ds.inference.NewtonTrustRegion()` when `None`, which steps on the Gauss-Newton matrix of the residual rows.
         callbacks: [Callback][diff_soup.inference.Callback] objects called during the fit.
         diagnostics: If `True`, attach the fit diagnostics to the result.
         run_restricted_initialization: If `True` and the trajectory sets `warm_start_steps`, first fit the parameters alone for that many steps.
@@ -450,12 +510,7 @@ def optsolve(
 
     warn_if_float32_default()
 
-    if optimizer is None:
-        from diff_soup.inference.solvers.newton_trust_region import (
-            NewtonTrustRegion,
-        )
-
-        optimizer = NewtonTrustRegion()
+    optimizer = _resolved_optimizer(problem, optimizer)
 
     callbacks = tuple(callbacks)
     if checkpoint is not None:

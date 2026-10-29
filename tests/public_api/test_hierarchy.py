@@ -190,16 +190,28 @@ def test_a_joint_result_resolves_shared_and_owner_handles(owners):
         np.testing.assert_allclose(float(fit[decay.source][owner]), source, atol=1e-4)
 
 
-def test_a_fit_warm_starts_the_same_study_and_refuses_another_schema(owners):
-    """with_start(fit) starts at the fit's point; a fit of another schema is refused."""
+def test_a_fit_warm_starts_the_same_study_and_refuses_another_layout(owners):
+    """with_start(fit) starts at the fit's point; a fit whose columns hold other handles is
+    refused."""
     _, study, fit = owners
     problem = inf.InferenceProblem(study).with_start(fit)
     np.testing.assert_array_equal(problem.x0, np.asarray(fit.params))
     schema = fit.parameter_schema
-    foreign = dataclasses.replace(
-        fit, parameter_schema=type(schema)(schema.entries, fingerprint=schema.fingerprint + "-x")
+    size = np.size(fit.params)
+    moved = tuple(
+        dataclasses.replace(
+            entry,
+            occurrences=tuple(
+                dataclasses.replace(
+                    occurrence, columns=tuple((c + 1) % size for c in occurrence.columns)
+                )
+                for occurrence in entry.occurrences
+            ),
+        )
+        for entry in schema.entries
     )
-    with pytest.raises(ValueError, match="fingerprint"):
+    foreign = dataclasses.replace(fit, parameter_schema=type(schema)(moved, fingerprint="other"))
+    with pytest.raises(ValueError, match="lays its parameters out"):
         inf.InferenceProblem(study).with_start(foreign)
 
 

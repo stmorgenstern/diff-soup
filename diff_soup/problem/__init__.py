@@ -75,40 +75,85 @@ from diff_soup.timestepping.vsvo.common.contract import register_problem_coercio
 
 
 def default_theta(problem, values=None):
-    """Return a problem's default parameter values, with chosen parameters replaced.
+    """Return a problem's parameter values, with chosen parameters replaced.
+
+    Theta holds every floating-point array of the problem: the declared
+    parameters and functions, the mass diagonal, the initial multipliers and
+    the family member parameters. A number or an array is broadcast to each
+    array of the parameter. A function also takes a module of its declared
+    structure.
 
     Args:
         problem: A built problem, such as a [`LoweredProblem`][diff_soup.problem.LoweredProblem].
-        values: Mapping from a parameter returned by `spec.param` or `spec.function` to its value, broadcast to that parameter's shape and dtype.
+        values: Mapping from a parameter returned by `spec.param` or `spec.function` to its value.
 
     Returns:
         The parameter pytree, ready to pass as `theta=`.
 
     Raises:
-        ValueError: If a parameter in `values` is not declared on this problem.
+        TypeError: If a key is not a parameter, or a value is not numeric or is complex for a real parameter.
+        ValueError: If a parameter is not declared on this problem or holds no array, or its value is `None` or does not fit.
     """
-    surface = get_or_build_solver_view(problem).default_theta
-    theta = surface() if callable(surface) else surface
+    own = getattr(problem, "default_theta", None)
+    if callable(own):
+        theta = own()
+    else:
+        surface = get_or_build_solver_view(problem).default_theta
+        theta = surface() if callable(surface) else surface
+    if values is None:
+        return theta
+    from collections.abc import Mapping
+
+    if not isinstance(values, Mapping):
+        raise TypeError(
+            "default_theta: values must map parameters returned by spec.param or "
+            f"spec.function to their values; got {type(values).__name__}."
+        )
     if not values:
         return theta
 
-    import jax
-    import jax.numpy as jnp
+    from diff_soup.problem._registry import declared_handle_value, theta_replace
 
-    from diff_soup.problem._registry import handle_leaf_ids
-
-    replacements: dict = {}
     for handle, value in values.items():
-        for leaf_id in handle_leaf_ids(problem, handle):
-            replacements[leaf_id] = value
-
-    def _replace(leaf):
-        value = replacements.get(id(leaf))
+        if not (hasattr(handle, "identity") and hasattr(handle, "name")):
+            raise TypeError(
+                "default_theta: keys must be parameters returned by spec.param or "
+                f"spec.function, not {type(handle).__name__} {handle!r}."
+            )
         if value is None:
-            return leaf
-        return jnp.broadcast_to(jnp.asarray(value, dtype=leaf.dtype), jnp.shape(leaf))
+            raise ValueError(
+                f"default_theta: the value for {handle.name!r} is None; pass a scalar, "
+                "an array or, for a function, a module."
+            )
+        # The problem's own declarations: a handle of another builder is refused here.
+        declared_handle_value(problem, handle)
+    return theta_replace(theta, values, caller="default_theta")
 
-    return jax.tree_util.tree_map(_replace, theta)
+
+def parameter_gradient(grads, handle):
+    """Return the gradient with respect to a parameter, read from a gradient of theta.
+
+    `ds.parameter_gradient(jax.grad(loss)(theta), D)` is `dloss/dD` in the shape
+    of `D`, or for a function a module of the gradients of its learnable arrays.
+    Theta holds `D` once for each equation that reads it, and this sums those
+    copies, so on theta itself it returns that many times `D`.
+
+    Args:
+        grads: A gradient of theta, such as `jax.grad(loss)(theta)`.
+        handle: A parameter returned by `spec.param` or `spec.function`, or a tuple of them.
+
+    Returns:
+        The gradient with respect to `handle`, or for a tuple a dictionary keyed by parameter.
+
+    Raises:
+        TypeError: If `handle` is not one returned by `spec.param` or `spec.function`.
+        ValueError: If the problem does not declare `handle`, or it holds no array.
+    """
+    from diff_soup.problem._registry import theta_value
+
+    if isinstance(handle, tuple):
+        return {each: parameter_gradient(grads, each) for each in handle}
+    return theta_value(grads, handle, caller="parameter_gradient", total=True)
 
 
 __all__ = [
@@ -119,6 +164,7 @@ __all__ = [
     "lower",
     # Default differentiable-parameter pytree accessor
     "default_theta",
+    "parameter_gradient",
     # Boundary-set selectors (where a BC / boundary integral applies)
     "BoundarySet",
     "tags",

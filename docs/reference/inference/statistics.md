@@ -16,6 +16,8 @@ and [identifiability](../../overview/inference/identifiability.md).
 
 ::: diff_soup.inference.laplace
 
+::: diff_soup.inference.evidence
+
 ::: diff_soup.inference.identifiability
 
 ::: diff_soup.inference.profile

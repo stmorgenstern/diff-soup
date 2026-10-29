@@ -47,6 +47,9 @@ import diff_soup._jax_typed_ffi  # noqa: F401
 # wiring layer, so it may import every layer.
 import diff_soup._lowering  # noqa: F401 — side-effect: registers the provider.
 from diff_soup import distributed
+
+# ``compile`` compiles one ``pdesolve`` call ahead of time without running it.
+from diff_soup._compile import compile
 from diff_soup._distributed import global_mesh, mesh_groups
 from diff_soup._errors import (
     BackendError,
@@ -108,6 +111,7 @@ from diff_soup.problem import (
     VarRef,
     default_theta,
     lower,
+    parameter_gradient,
     tags,
     topology_report,
 )
@@ -220,6 +224,7 @@ __all__ = [
     "ParameterSet",
     "lower",
     "default_theta",
+    "parameter_gradient",
     "learnables",
     # ---- Layer 2: the solver problem model ----
     "MassProblem",
@@ -239,6 +244,7 @@ __all__ = [
     "RowOwner",
     # ---- forward-simulation entry point ----
     "pdesolve",
+    "compile",
     # ---- full-state algebraic projection ----
     "project_algebraic",
     "AlgebraicProjectionOptions",

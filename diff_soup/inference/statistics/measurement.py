@@ -7,6 +7,7 @@ import inspect
 from collections.abc import Callable, Mapping
 from typing import Any
 
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
@@ -52,15 +53,76 @@ class _ObserveAdapter:
         return self.observe(state)
 
 
-def _observe_adapter(observe: Callable | None) -> Callable:
+@dataclasses.dataclass(frozen=True, eq=False)
+class _NamedObservation:
+    """Read one declared observation (``spec.observe.*``) of a model, in dimensional units.
+
+    Two readouts of the same name on models of one structure compare equal, so
+    experiments that observe the same declaration keep the joint's batched kernel.
+    During a fit the model is rebuilt from the trial theta, so an observation that
+    reads a parameter sees the trial value.
+    """
+
+    name: str
+    model: Any = dataclasses.field(metadata={"fingerprint": False})
+    static: Any = dataclasses.field(metadata={"fingerprint": False})
+    key: Any = dataclasses.field(metadata={"fingerprint": False})
+
+    @classmethod
+    def of(cls, model: Any, name: str, measurement: str) -> _NamedObservation:
+        """Resolve ``name`` against the observations ``model`` declares."""
+        declared = tuple(item.name for item in getattr(model, "observables", ()))
+        if name not in declared:
+            listed = ", ".join(repr(item) for item in declared) or "none"
+            raise ValueError(
+                f"Measurement {measurement!r} observe={name!r} names no declared observation "
+                f"of the model; it declares {listed}."
+            )
+        key_of = getattr(model, "structure_key", None)
+        key = key_of() if callable(key_of) else None
+        static = eqx.partition(model, eqx.is_inexact_array)[1]
+        return cls(name, model, static, ("id", id(model)) if key is None else key)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, _NamedObservation)
+            and self.name == other.name
+            and self.key == other.key
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.name, self.key))
+
+    def __call__(self, state, *, t=None, theta=None):
+        """Evaluate the observation on one solver state at time ``t``."""
+        model = self.model
+        if theta is not None:
+            model = eqx.combine(getattr(theta, "inner", theta), self.static)
+        state = jnp.asarray(state)
+        size = int(model.state_size())
+        extra = int(model.constraint_dim())
+        lam = None
+        if extra and state.shape[-1] == size + extra:
+            state, lam = state[..., :size], state[..., size:]
+        time = jnp.zeros((), dtype=state.dtype) if t is None else t
+        return model.observe(state, time, lam, names=(self.name,))[self.name]
+
+
+def _observe_adapter(observe: Callable | str | None) -> Callable | str:
     """Accept the friendly ``observe(state)`` and advanced keyword signatures."""
     if observe is None:
         return _ObserveAdapter(None, False, False)
-    if isinstance(observe, _ObserveAdapter):
+    if isinstance(observe, (_ObserveAdapter, _NamedObservation)):
+        return observe
+    if isinstance(observe, str):
+        # A declared observation's name, resolved against the model by Experiment.
+        if not observe:
+            raise ValueError("Measurement observe names a declared observation; got ''.")
         return observe
     if not callable(observe):
         raise TypeError(
-            f"Measurement observe must be callable or None; got {type(observe).__name__}."
+            "Measurement observe must be callable, a declared observation's name, or None; "
+            f"got {type(observe).__name__}."
         )
     try:
         parameters = inspect.signature(observe).parameters.values()
@@ -89,7 +151,7 @@ class Measurement:
         values: The observed values with one row per time, or a function of no arguments returning them, called once when first needed.
         weight: A positive weight on the squared residual, a scalar or an array that broadcasts against `values`.
         likelihood: The noise model, such as [Gaussian][diff_soup.inference.Gaussian].
-        observe: A function `observe(state)`, optionally taking `t=` and `theta=`, giving the observed quantity, or `None` to observe the state.
+        observe: The observed quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, the name of a `spec.observe` declaration, or `None` for the state.
         mask: One boolean per time, `True` where the time carries a measurement.
         shape: The shape of `values`, checked against them.
         dtype: The dtype of `values`, checked against them.
@@ -101,7 +163,7 @@ class Measurement:
     _: dataclasses.KW_ONLY
     weight: Any = None
     likelihood: Likelihood | None = None
-    observe: Callable | None = None
+    observe: Callable | str | None = None
     mask: Any = None
     shape: tuple | None = None
     dtype: Any = None
@@ -440,6 +502,15 @@ class Experiment:
         if self.schedule is not None:
             _check_schedule(self.schedule, model, (t0, t1), self.trajectory)
 
+        measurements = tuple(
+            dataclasses.replace(
+                measurement,
+                observe=_NamedObservation.of(model, measurement.observe, measurement.name),
+            )
+            if isinstance(measurement.observe, str)
+            else measurement
+            for measurement in measurements
+        )
         channels = tuple(measurement._channel() for measurement in measurements)
         delegate = _CompiledExperiment(
             problem=self.model,

@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use diff-soup in your work, please cite it as below."
 type: software
 title: "diff-soup: differentiable, GPU-native JAX library for stiff PDEs and DAEs"
-version: 1.0.0
-date-released: "2026-10-26"
+version: 1.1.0
+date-released: "2026-10-29"
 authors:
   - family-names: Degnan-Morgenstern
     given-names: Samuel
@@ -18,3 +18,18 @@ keywords:
   - PDE
   - GPU
   - sparse direct solver
+identifiers:
+  - type: url
+    value: "https://arxiv.org/abs/2610.37333v1"
+    description: "The diff-soup paper on arXiv"
+preferred-citation:
+  type: article
+  title: "diff-soup: GPU-native Differentiable Simulation and Inference for Large-scale Stiff Dynamical Systems"
+  authors:
+    - family-names: Degnan-Morgenstern
+      given-names: Samuel
+    - family-names: Bazant
+      given-names: Martin Z.
+  journal: "arXiv preprint arXiv:2610.37333"
+  year: 2026
+  url: "https://arxiv.org/abs/2610.37333v1"

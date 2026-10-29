@@ -3,7 +3,7 @@
 <p align="left">
   <a href="https://github.com/stmorgenstern/diff-soup/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-blue.svg" alt="License: BSD 3-Clause"></a>
   <a href="https://stmorgenstern.github.io/diff-soup/"><img src="https://img.shields.io/badge/Documentation-online-blue.svg" alt="Docs"></a>
-  <a href="#citation"><img src="https://img.shields.io/badge/arXiv-coming%20soon-b31b1b.svg?style=flat" alt="arXiv"></a>
+  <a href="https://arxiv.org/abs/2610.37333v1"><img src="https://img.shields.io/badge/arXiv-2610.37333-b31b1b.svg?style=flat" alt="arXiv"></a>
 </p>
 
 diff-soup is a software package written in JAX for modeling, simulation, and inference of (stiff) dynamical systems governed by ODEs, DAEs, and PDEs.
@@ -118,13 +118,13 @@ diff-soup is released under the BSD 3-Clause License, see [LICENSE](https://gith
 
 ## Citation
 
-If you use diff-soup, please cite the paper (preprint forthcoming).
+If you use diff-soup, please cite the paper, [arXiv:2610.37333](https://arxiv.org/abs/2610.37333v1).
 
 ```bibtex
 @article{degnanmorgenstern2026diffsoup,
     title={diff-soup: {GPU}-native Differentiable Simulation and Inference for Large-scale Stiff Dynamical Systems},
     author={Samuel Degnan-Morgenstern and Martin Z. Bazant},
-    journal={arXiv preprint arXiv:XXXX.XXXXX},
+    journal={arXiv preprint arXiv:2610.37333},
     year={2026},
 }
 ```

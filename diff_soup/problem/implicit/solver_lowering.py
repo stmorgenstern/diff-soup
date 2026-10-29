@@ -8,7 +8,7 @@ constructions.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Optional
 
 import equinox as eqx
@@ -18,6 +18,7 @@ import numpy as np
 
 from diff_soup.linear import SparseTopology
 from diff_soup.problem._cache import BoundedContentCache
+from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
 from diff_soup.problem.implicit._coo import coo_matvec
 from diff_soup.problem.implicit.operator import MassOperator
 from diff_soup.problem.implicit.problems import ImplicitProblem, MassProblem
@@ -33,9 +34,50 @@ __all__ = [
 
 
 class _IRTheta(eqx.Module):
-    """Dynamic Recipe leaves in the historical ``theta.inner`` shape."""
+    """The parameter values a solve takes as `theta`: every floating-point array of a built problem.
+
+    It holds the declared parameters and functions, the mass diagonal, the
+    initial multipliers and the family member parameters. Read and set a
+    declared parameter by the object `spec.param` or `spec.function` returned.
+
+    ```python
+    theta = ds.default_theta(problem)
+    theta[D]                    # the value of D
+    theta = theta.replace(D, 0.2)
+    ds.parameter_gradient(jax.grad(loss)(theta), D)   # dloss/dD
+    ```
+    """
 
     inner: object
+    table: Optional[ThetaTable] = eqx.field(static=True, default=None)
+
+    def __getitem__(self, parameter):
+        """Return a parameter's value, or a function's module holding its learnable arrays.
+
+        On a gradient of theta, read `D` with
+        [`parameter_gradient`][diff_soup.problem.parameter_gradient], not `grads[D]`.
+
+        Raises:
+            TypeError: If `parameter` is not one returned by `spec.param` or `spec.function`.
+            ValueError: If the problem does not declare `parameter`, or it holds no array.
+        """
+        return theta_value(self, parameter, caller="theta[...]")
+
+    def replace(self, parameter, value=None):
+        """Return a copy with one parameter, or several, set to new values.
+
+        Pass `replace(D, value)` or a mapping `replace({D: value, k: other})`.
+        The rules for values are those of
+        [`default_theta`][diff_soup.problem.default_theta].
+
+        Raises:
+            TypeError: If a key is not a parameter, or a value is not numeric or is complex for a real parameter.
+            ValueError: If the problem does not declare a parameter or it holds no array, or a value is `None` or does not fit.
+        """
+        values = (
+            parameter if value is None and isinstance(parameter, Mapping) else {parameter: value}
+        )
+        return theta_replace(self, values, caller="theta.replace")
 
 
 def augmented_rhs_sparsity(topology, n_u: int, n_lam: int):
@@ -55,19 +97,37 @@ def augmented_rhs_sparsity(topology, n_u: int, n_lam: int):
     return SparseTopology(rows=np.concatenate(rows), cols=np.concatenate(cols), n_dofs=n)
 
 
+def _pinned_mask(pinned_rows, n: int) -> np.ndarray:
+    """Boolean mask of the pinned rows (Dirichlet and symmetry rows of differential fields)."""
+    mask = np.zeros((int(n),), dtype=bool)
+    if pinned_rows is not None and len(pinned_rows):
+        mask[np.asarray(pinned_rows, dtype=np.int64)] = True
+    return mask
+
+
 def _check_derivative_field(
     structure: DAEStructure,
     offsets: dict[str, tuple[int, int]],
     out_field: str,
     in_field: str,
+    pinned: Optional[np.ndarray] = None,
 ) -> tuple[int, int]:
+    """Check that ``in_field`` is differential, apart from its pinned rows.
+
+    A boundary condition pins some rows of a differential field to algebraic
+    rows. Those rows are exempt: the derivative-form lowering drops them, and
+    their pinned residual stands.
+    """
     if in_field not in offsets:
         raise ValueError(
             f"the derivative expression writing {out_field!r} references "
             f"{in_field!r}, which is not a declared field"
         )
     in_off, in_size = offsets[in_field]
-    if not np.all(structure.differential_vars[in_off : in_off + in_size]):
+    rows = structure.differential_vars[in_off : in_off + in_size]
+    if pinned is not None:
+        rows = rows | pinned[in_off : in_off + in_size]
+    if not np.any(structure.differential_vars[in_off : in_off + in_size]) or not np.all(rows):
         raise ValueError(
             f"the equation writing {out_field!r} takes the time derivative "
             f"of algebraic field {in_field!r}"
@@ -87,11 +147,17 @@ def _lower_implicit_forms(
     rhs_sparsity,
     max_fy_reuse_steps: Optional[int],
     precision: Any = None,
+    pinned_rows=None,
 ):
-    """Lower nonlinear-in-slope rows to an exact fully implicit residual."""
+    """Lower nonlinear-in-slope rows to an exact fully implicit residual.
+
+    Pinned rows (see ``_check_derivative_field``) keep their pinned residual,
+    and their slopes are held at zero inside the derivative expressions.
+    """
     from diff_soup.problem._spec.derivative_expr import slope_context
 
     n = int(n_u) + int(n_lam)
+    pinned = _pinned_mask(pinned_rows, n)
     rows_list, cols_list = [], []
     form_rows: set[int] = set()
     for form in forms:
@@ -101,23 +167,28 @@ def _lower_implicit_forms(
                 f"the derivative-form equation writes {out_field!r}, which has no flat slot"
             )
         out_off, out_size = field_offsets[out_field]
-        form_rows.update(range(out_off, out_off + out_size))
+        out_rows = np.arange(out_off, out_off + out_size, dtype=np.int64)
+        out_rows = out_rows[~pinned[out_rows]]
+        form_rows.update(out_rows.tolist())
         if form.get("nonlinear"):
             for in_field in form["ydot_fields"]:
                 in_off, in_size = _check_derivative_field(
-                    structure, field_offsets, out_field, in_field
+                    structure, field_offsets, out_field, in_field, pinned
                 )
-                rows_list.append(
-                    np.repeat(np.arange(out_off, out_off + out_size, dtype=np.int64), in_size)
-                )
-                cols_list.append(
-                    np.tile(np.arange(in_off, in_off + in_size, dtype=np.int64), out_size)
-                )
+                in_cols = np.arange(in_off, in_off + in_size, dtype=np.int64)
+                in_cols = in_cols[~pinned[in_cols]]
+                rows_list.append(np.repeat(out_rows, in_cols.size))
+                cols_list.append(np.tile(in_cols, out_rows.size))
         else:
             for in_field, term_rows, term_cols in form["terms"]:
-                in_off, _ = _check_derivative_field(structure, field_offsets, out_field, in_field)
-                rows_list.append(np.asarray(term_rows, dtype=np.int64) + out_off)
-                cols_list.append(np.asarray(term_cols, dtype=np.int64) + in_off)
+                in_off, _ = _check_derivative_field(
+                    structure, field_offsets, out_field, in_field, pinned
+                )
+                rows = np.asarray(term_rows, dtype=np.int64) + out_off
+                cols = np.asarray(term_cols, dtype=np.int64) + in_off
+                keep = ~(pinned[rows] | pinned[cols])
+                rows_list.append(rows[keep])
+                cols_list.append(cols[keep])
 
     base_idx = np.asarray(
         [i for i in structure.differential_indices if i not in form_rows], dtype=np.int64
@@ -131,8 +202,11 @@ def _lower_implicit_forms(
     form_mask[sorted(form_rows)] = True
     field_slices = tuple((name, int(off), int(size)) for name, (off, size) in field_offsets.items())
 
+    pinned_idx = np.flatnonzero(pinned)
+
     def residual(t, y, ydot, theta, control):
-        slopes = {name: ydot[off : off + size] for name, off, size in field_slices}
+        free_ydot = ydot.at[pinned_idx].set(0.0) if pinned_idx.size else ydot
+        slopes = {name: free_ydot[off : off + size] for name, off, size in field_slices}
         with slope_context(slopes):
             rhs_with_slopes = rhs(t, y, theta, control)
         plain_rhs = rhs(t, y, theta, control)
@@ -163,11 +237,17 @@ def _lower_linear_forms(
     rhs_sparsity,
     max_fy_reuse_steps: Optional[int],
     precision: Any = None,
+    pinned_rows=None,
 ):
-    """Lower recorded linear derivative forms to one mass operator."""
+    """Lower recorded linear derivative forms to one mass operator.
+
+    Pinned rows (see ``_check_derivative_field``) keep their pinned residual,
+    and their slopes are held at zero inside the derivative expressions.
+    """
     from diff_soup.problem._spec.derivative_expr import slope_context
 
     n = int(n_u) + int(n_lam)
+    pinned = _pinned_mask(pinned_rows, n)
     rows_list, cols_list = [], []
     state_rows_list, state_cols_list = [], []
     form_rows: set[int] = set()
@@ -178,11 +258,18 @@ def _lower_linear_forms(
                 f"the derivative-form equation writes {out_field!r}, which has no flat slot"
             )
         out_off, out_size = field_offsets[out_field]
-        form_rows.update(range(out_off, out_off + out_size))
+        out_rows = np.arange(out_off, out_off + out_size, dtype=np.int64)
+        out_rows = out_rows[~pinned[out_rows]]
+        form_rows.update(out_rows.tolist())
         for in_field, term_rows, term_cols in terms:
-            in_off, _ = _check_derivative_field(structure, field_offsets, out_field, in_field)
-            rows_list.append(np.asarray(term_rows, dtype=np.int64) + out_off)
-            cols_list.append(np.asarray(term_cols, dtype=np.int64) + in_off)
+            in_off, _ = _check_derivative_field(
+                structure, field_offsets, out_field, in_field, pinned
+            )
+            rows = np.asarray(term_rows, dtype=np.int64) + out_off
+            cols = np.asarray(term_cols, dtype=np.int64) + in_off
+            keep = ~(pinned[rows] | pinned[cols])
+            rows_list.append(rows[keep])
+            cols_list.append(cols[keep])
 
         state_deps = form.get("state_deps", None)
         if state_deps == ():
@@ -200,7 +287,6 @@ def _lower_linear_forms(
                 dep_cols = np.concatenate(ranges) if ranges else np.zeros(0, np.int64)
         if dep_cols is None:
             dep_cols = np.arange(n, dtype=np.int64)
-        out_rows = np.arange(out_off, out_off + out_size, dtype=np.int64)
         state_rows_list.append(np.repeat(out_rows, dep_cols.size))
         state_cols_list.append(np.tile(dep_cols, out_rows.size))
 
@@ -224,12 +310,15 @@ def _lower_linear_forms(
             n_dofs=n,
         )
 
+    pinned_idx = np.flatnonzero(pinned)
+
     def apply(t, y, theta, control, ydot):
         base = jnp.zeros((n,), dtype=ydot.dtype)
         if base_idx.size:
             mass = mass_values(t, y, theta, control)
             base = base.at[base_idx].set(mass[base_idx] * ydot[base_idx])
-        slopes = {name: ydot[off : off + size] for name, off, size in field_slices}
+        free_ydot = ydot.at[pinned_idx].set(0.0) if pinned_idx.size else ydot
+        slopes = {name: free_ydot[off : off + size] for name, off, size in field_slices}
         with slope_context(slopes, include_residual=False):
             derivative_action = rhs(t, y, theta, control)
         return base + jnp.where(jnp.asarray(form_mask), derivative_action, 0.0)
@@ -273,15 +362,19 @@ def lower_mass_form(
     field_offsets: Optional[dict[str, tuple[int, int]]] = None,
     max_fy_reuse_steps: Optional[int] = None,
     precision: Any = None,
+    pinned_rows=None,
 ):
     """Build the solver problem from explicit mass-form facts.
 
     ``precision`` is the problem's [Precision][diff_soup._precision.Precision],
     recorded on the returned solver problem (``None`` keeps the default).
+    ``pinned_rows`` are the algebraic rows of differential fields (Dirichlet
+    and symmetry rows), which the derivative forms leave pinned.
     """
     forms = tuple(forms or ())
     if forms:
         kwargs = dict(
+            pinned_rows=pinned_rows,
             structure=structure,
             n_u=n_u,
             n_lam=n_lam,
@@ -349,9 +442,9 @@ _IR_SOLVER_PROBLEMS = BoundedContentCache(capacity=_IR_SOLVER_PROBLEM_CACHE_CAPA
 
 
 def default_theta_from_ir(problem):
-    """Partition current inexact IR leaves for the explicit theta channel."""
+    """Partition a lowered problem's inexact leaves into theta, with the problem's path table."""
     theta, _static = eqx.partition(problem, eqx.is_inexact_array)
-    return _IRTheta(inner=theta)
+    return _IRTheta(inner=theta, table=theta_table(problem))
 
 
 def _static_equal(a, b) -> bool:
@@ -418,6 +511,13 @@ def _build_solver_problem(problem, source_static):
             entry[0][1]: (int(entry[1]), int(entry[2]))
             for entry in tuple(problem._layout_entries or ())
         }
+        # Rows a boundary condition pins inside a differential field: the
+        # field has mass on its other rows, and these are algebraic.
+        pinned_rows = []
+        for off, size in field_offsets.values():
+            rows = np.arange(off, off + size)
+            if np.any(mass_host[rows] != 0.0):
+                pinned_rows.extend(rows[~mask[rows]].tolist())
         mass_mode = problem.mass_mode()
         control_evaluator = getattr(problem, "_controls_fn", None)
         control_bindings = (
@@ -535,6 +635,7 @@ def _build_solver_problem(problem, source_static):
             field_offsets=field_offsets,
             max_fy_reuse_steps=getattr(problem, "max_fy_reuse_steps", None),
             precision=getattr(problem, "precision", None),
+            pinned_rows=tuple(pinned_rows),
         )
 
     return lowered

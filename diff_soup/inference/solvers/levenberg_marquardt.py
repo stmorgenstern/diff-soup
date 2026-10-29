@@ -21,7 +21,7 @@ method.  Construct the solver and call [LevenbergMarquardt.solve][diff_soup.infe
 from __future__ import annotations
 
 import time
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import equinox as eqx
 import jax
@@ -42,17 +42,15 @@ from diff_soup.inference.solvers._termination import (
     DEFAULT_STEP_TOL,
     absolute_tolerance,
     gradient_tolerance,
+    model_held_the_step,
     relative_tolerance,
+    stall_reason_of,
     step_budget,
 )
 from diff_soup.inference.solvers.factorization import (
     cholesky_factor,
     solve_augmented_qr,
     solve_factorized_normal,
-)
-from diff_soup.inference.solvers.tangent import (
-    jacfwd_from_pushforward,
-    linearize_value,
 )
 
 # A failed evaluation of the trial predicate ``problem.is_valid``: the compiled program
@@ -168,6 +166,25 @@ def _gn_step_normal(
     return delta, dnorm, pred_red, Jtr, grad_norm
 
 
+def _gauss_newton_decrease(gram, gradient, point, lb=None, ub=None) -> float:
+    """The decrease the Gauss-Newton model predicts for its undamped step at ``point``.
+
+    The step is the minimum-norm minimizer of ``g.T p + 0.5 p.T G p`` over the
+    range of ``G`` (eigenvalues above ``n * eps`` of the largest), projected onto
+    the box when bounds are given.
+    """
+    gram = 0.5 * (gram + gram.T)
+    values, vectors = jnp.linalg.eigh(gram)
+    cutoff = values.shape[0] * jnp.finfo(values.dtype).eps * jnp.maximum(values[-1], 0.0)
+    coefficients = vectors.T @ gradient
+    keep = values > cutoff
+    safe = jnp.where(keep, values, 1.0)
+    step = -vectors @ jnp.where(keep, coefficients / safe, 0.0)
+    if lb is not None:
+        step = jnp.clip(point + step, lb, ub) - point
+    return float(local_value(-(gradient @ step + 0.5 * step @ (gram @ step))))
+
+
 # ---------------------------------------------------------------------------
 # Solver
 # ---------------------------------------------------------------------------
@@ -193,6 +210,7 @@ class LevenbergMarquardt(OptSolver):
         max_step_norm: The longest step allowed, or `0` for no limit.
         linear_solver: `"cholesky"`, `"qr"`, `"solve"`, or `"auto"` for QR in single precision with a full Jacobian and Cholesky otherwise.
         x_scale: The parameter scaling of the damping, `JacScale()` by default.
+        jacobian_tile: How many Jacobian directions are formed at once: 8 to 128, `"full"`, or `"auto"`, whole when that fits the free memory.
         callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
     """
 
@@ -211,6 +229,7 @@ class LevenbergMarquardt(OptSolver):
     max_step_norm: float = eqx.field(static=True, default=5.0)
     linear_solver: str = eqx.field(static=True, default="auto")
     x_scale: XScale = eqx.field(default_factory=JacScale)
+    jacobian_tile: Any = eqx.field(static=True, default="auto")
     callbacks: tuple = eqx.field(static=True, default=())
 
     def solve(self, problem, *, callbacks=()) -> OptResult:
@@ -253,7 +272,6 @@ class LevenbergMarquardt(OptSolver):
             _gauss_newton = problem.gauss_newton
             _value = problem.value
         else:
-            _r_fn = problem.residual
             _rj_fn = problem.residual_and_jacobian
         if self.linear_solver not in ("auto", "cholesky", "qr", "solve"):
             raise ConfigurationError(
@@ -315,11 +333,21 @@ class LevenbergMarquardt(OptSolver):
 
         has_reg = reg is not None and reg.residual(x).shape[0] > 0
 
+        # The residual Jacobian, whole under jacobian_tile="auto" when it fits in the
+        # free memory, else in tiles; the problem's structured Jacobian when it has one.
+        jacobian = None
+        if not (use_reduced or use_lanes):
+            from diff_soup.inference.fitting.inference_problem import checked_residual_jacobian
+
+            jacobian = checked_residual_jacobian(
+                problem, x, self.jacobian_tile, knob="jacobian_tile"
+            )
+
         # --- Evaluation helpers (JAX arrays, no numpy mid-loop) -----------
 
         def eval_rj(x_jax):
             """Residual + Jacobian, with regularisation, all on device."""
-            r_pde, J_pde = _rj_fn(x_jax)
+            r_pde, J_pde = (_rj_fn if jacobian.tile == "full" else jacobian)(x_jax)
             ok = jnp.all(jnp.isfinite(r_pde))
             if has_reg:
                 r = jnp.concatenate([r_pde, reg.residual(x_jax)])
@@ -329,15 +357,14 @@ class LevenbergMarquardt(OptSolver):
             return r, J, r_pde, ok
 
         def eval_r_linearized(x_jax):
-            """Evaluate a trial once and retain its forward linearization."""
-            r_pde, pushforward = linearize_value(_r_fn, x_jax)
+            """Evaluate a trial once, with its Jacobian."""
+            r_pde, J_pde = jacobian(x_jax)
             ok = jnp.all(jnp.isfinite(r_pde))
             r = jnp.concatenate([r_pde, reg.residual(x_jax)]) if has_reg else r_pde
-            return 0.5 * jnp.sum(r**2), r_pde, ok, pushforward
+            return 0.5 * jnp.sum(r**2), r_pde, ok, J_pde
 
-        def eval_rj_linearized(x_jax, r_pde, pushforward):
-            """Materialize an accepted Jacobian without repeating its primal."""
-            J_pde = jacfwd_from_pushforward(pushforward, x_jax, r_pde)
+        def eval_rj_linearized(x_jax, r_pde, J_pde):
+            """An accepted trial's Jacobian, kept from its evaluation."""
             if has_reg:
                 return (
                     jnp.concatenate([r_pde, reg.residual(x_jax)]),
@@ -402,6 +429,7 @@ class LevenbergMarquardt(OptSolver):
         n_resid_evals, n_jac_evals = 1, 1
         trial_predicate_rejections = 0
         status = TerminationStatus.MAX_STEPS
+        stall_reason = None
         # ``max_steps=0`` makes no step: the start point is returned.
         n_steps = 0
 
@@ -486,9 +514,7 @@ class LevenbergMarquardt(OptSolver):
                     elif use_lanes:
                         cost_trial_j, trial_jtr, trial_jtj, trial_ok = eval_lanes(x_trial)
                     else:
-                        cost_trial_j, trial_r, trial_ok, trial_pushforward = eval_r_linearized(
-                            x_trial
-                        )
+                        cost_trial_j, trial_r, trial_ok, trial_jacobian = eval_r_linearized(x_trial)
                     cost_trial = float(local_value(cost_trial_j))
                     trial_ok = bool(local_value(trial_ok))
                 except _EVALUATION_FAILURES:
@@ -499,6 +525,10 @@ class LevenbergMarquardt(OptSolver):
 
             actual_red = cost - cost_trial
             rho = actual_red / max(pred_red_f, 1e-30)
+            # The model at the point this step was taken from, for the stall test.
+            attempt_point = x
+            attempt_gram = JtJ_red if use_reduced or use_lanes else JtJ
+            threshold = cost_threshold(cost, cost_tol, cost_atol)
 
             if assert_decision_value(
                 rho > self.accept_cutoff and trial_ok, label="Levenberg-Marquardt"
@@ -519,7 +549,7 @@ class LevenbergMarquardt(OptSolver):
                     elif use_lanes:
                         Jtr_red, JtJ_red = trial_jtr, trial_jtj
                     else:
-                        r, J = eval_rj_linearized(x, trial_r, trial_pushforward)
+                        r, J = eval_rj_linearized(x, trial_r, trial_jacobian)
                 except _EVALUATION_FAILURES:
                     # The step stays accepted and the next step's model uses the
                     # statistics of the previous point. On the dense path the
@@ -567,19 +597,34 @@ class LevenbergMarquardt(OptSolver):
             # reduction and therefore miss the gain-ratio acceptance cutoff.
             # Step/cost convergence describe that stationary trial itself, so
             # they require a valid evaluation but not formal acceptance.
+            stop = None
             if assert_decision_value(
                 trial_ok and dnorm_f < step_tol * (1.0 + x_norm), label="Levenberg-Marquardt"
             ):
-                status = TerminationStatus.STEP_TOL
-                break
-            # The cost-change test is relative to the cost itself, so where a fit
-            # stops does not depend on the units of its residual rows; an
-            # absolute floor is ``cost_atol``, which the caller sets.
-            if assert_decision_value(
-                trial_ok and abs(actual_red) < cost_threshold(cost, cost_tol, cost_atol),
+                stop = TerminationStatus.STEP_TOL
+            # The cost-change test is relative to the cost at the step's start, so
+            # where a fit stops does not depend on the units of its residual rows;
+            # an absolute floor is ``cost_atol``, which the caller sets. It needs
+            # the model to agree with the decrease (SciPy's ratio), or a model that
+            # predicts no decrease the tolerance can see.
+            elif assert_decision_value(
+                trial_ok
+                and abs(actual_red) < threshold
+                and (rho > 0.25 or pred_red_f <= threshold),
                 label="Levenberg-Marquardt",
             ):
-                status = TerminationStatus.COST_TOL
+                stop = TerminationStatus.COST_TOL
+            if stop is not None:
+                status = stop
+                full_decrease = _gauss_newton_decrease(attempt_gram, Jtr, attempt_point, lb, ub)
+                if assert_decision_value(
+                    model_held_the_step(full_decrease, pred_red_f, threshold),
+                    label="Levenberg-Marquardt stall",
+                ):
+                    status = TerminationStatus.STALLED
+                    stall_reason = stall_reason_of(
+                        invalid=False, noise=not accepted and abs(actual_red) < threshold
+                    )
                 break
 
         wall_time = time.perf_counter() - t0_wall
@@ -637,6 +682,8 @@ class LevenbergMarquardt(OptSolver):
             info={
                 "trial_predicate_rejections": trial_predicate_rejections,
                 "linear_solver": resolved_linear_solver,
+                "jacobian_tile": None if jacobian is None else jacobian.tile,
+                **({} if stall_reason is None else {"stall_reason": stall_reason}),
                 **final_arrays,
             },
         )

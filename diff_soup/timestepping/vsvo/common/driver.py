@@ -57,6 +57,10 @@ import numpy as np
 
 from diff_soup._adjoints import ForwardAdjoint
 from diff_soup._errors import ConfigurationError
+from diff_soup._jax_compat import Primitive as _Primitive
+from diff_soup._jax_compat import ad as _ad
+from diff_soup._jax_compat import batching as _batching
+from diff_soup._jax_compat import mlir as _mlir
 from diff_soup._jax_compat import partial_eval as _partial_eval
 from diff_soup._precision import Precision, cast_to_compute_dtype
 from diff_soup._solution import result_from_code
@@ -1166,7 +1170,7 @@ def _loop_init(
     # mode); ``None`` otherwise so the default fp64 solve carries no counters.
     _prec = getattr(engine, "precision", None)
     _reports_reduced = getattr(_prec, "solve_mode", "fp64") in ("fp32", "fp32_ir", "adaptive")
-    reduced_zero = jnp.zeros((), jnp.float64) if _reports_reduced else None
+    reduced_zero = jnp.zeros((), jnp.result_type(float)) if _reports_reduced else None
 
     # The explicit grid is consumed once, front to back. Accepted-step output
     # instead owns a direct-write prefix and may seed its first slot with the
@@ -2626,12 +2630,13 @@ def _loop_fns(
                 state.ir_refinement_steps
                 if state.ir_refinement_steps is None or report.ir_refinement_steps is None
                 else state.ir_refinement_steps
-                + jnp.asarray(report.ir_refinement_steps, jnp.float64)
+                + jnp.asarray(report.ir_refinement_steps, jnp.result_type(float))
             ),
             fp64_fallbacks=(
                 state.fp64_fallbacks
                 if state.fp64_fallbacks is None or report.fp64_fallbacks is None
-                else state.fp64_fallbacks + jnp.asarray(report.fp64_fallbacks, jnp.float64)
+                else state.fp64_fallbacks
+                + jnp.asarray(report.fp64_fallbacks, jnp.result_type(float))
             ),
             multirhs_solves=(
                 state.multirhs_solves
@@ -2709,9 +2714,13 @@ def _finalize(
     # ran against.
     _backend = getattr(engine, "backend", None)
     _linear_name = getattr(type(_backend), "backend_name", None) if _backend is not None else None
-    _solve_mode = getattr(getattr(engine, "precision", None), "solve_mode", None)
+    _precision = getattr(engine, "precision", None)
+    _solve_mode = getattr(_precision, "solve_mode", None)
+    if _solve_mode == "fp32" and np.dtype(_precision.compute_dtype).itemsize > 4:
+        # Float32 factors under float64 compute: the fp32_factor policy, not end-to-end fp32.
+        _solve_mode = "fp32_factor"
     _adjoint_ckpts = getattr(adjoint, "checkpoints", None)
-    _zero_f64 = jnp.zeros((), jnp.float64)
+    _zero_f64 = jnp.zeros((), jnp.result_type(float))
 
     stats = SolverStats(
         accepts=final.accepts,
@@ -2952,8 +2961,20 @@ def _solve_core(
     )
 
     if adjoint.is_forward_only:
-        # True early-exit primal; forward-mode (JVP) differentiable.
-        final = jax.lax.while_loop(cond_fun, body_fun, init_state)
+        # True early-exit primal; forward-mode (JVP) differentiable. The
+        # custom-JVP wrapper only turns reverse mode into a public error.
+        final = _forward_loop(
+            engine,
+            problem,
+            cfg,
+            has_affect,
+            control_folds_theta,
+            init_state,
+            ts_grid,
+            t1,
+            theta,
+            control0,
+        )
     else:
         # Checkpointed replay loop: the primal early-exits the same way, and
         # the attached reverse rule replays segments from online checkpoints
@@ -2981,7 +3002,7 @@ _COMPOSABLE_REVERSE_ERROR = (
     "Reverse-mode differentiation was applied directly to a solve running the "
     "composable forward-sensitivity mode (ForwardAdjoint(composable=True)). "
     "This mode computes forward sensitivities (jax.jvp / jax.jacfwd) and "
-    "supports differentiating functions of those sensitivities — for example "
+    "supports differentiating functions of those sensitivities, for example "
     "jax.jacrev(jax.jacfwd(solve)), or jax.grad of a scalar criterion of "
     "jax.jacfwd(solve). For a reverse-mode gradient of the solution itself, "
     "solve with adjoint=CheckpointAdjoint() instead."
@@ -3021,6 +3042,99 @@ def _is_reverse_linearize_tangent(leaf) -> bool:
         leaf = getattr(leaf, "val", None)
         depth += 1
     return False
+
+
+_FORWARD_ONLY_REVERSE_ERROR = (
+    "Reverse-mode differentiation (jax.grad, jax.vjp, jax.jacrev) was applied to a "
+    "solve running the forward-only adjoint, which is the default and supports "
+    "jax.jvp and jax.jacfwd only. For a reverse-mode gradient, solve with "
+    "adjoint=ds.CheckpointAdjoint(). For reverse mode over forward sensitivities, "
+    "use adjoint=ds.ForwardAdjoint(composable=True)."
+)
+
+# An identity on the forward-only loop's input tangents. Forward mode passes
+# through it unchanged. Reverse mode partially evaluates it with unknown
+# tangents before it reaches the loop (top level and inside jit alike), and
+# its rule raises the public message there instead of JAX's raw while-loop
+# error. The transpose rule is a second line of defence.
+_forward_only_tangent_p = _Primitive("diffsoup_forward_only_tangent")
+_forward_only_tangent_p.def_impl(lambda x: x)
+_forward_only_tangent_p.def_abstract_eval(lambda aval: aval)
+_mlir.register_lowering(
+    _forward_only_tangent_p, _mlir.lower_fun(lambda x: x, multiple_results=False)
+)
+_batching.primitive_batchers[_forward_only_tangent_p] = lambda args, dims: (
+    _forward_only_tangent_p.bind(args[0]),
+    dims[0],
+)
+
+
+def _forward_only_tangent_jvp(primals, tangents):
+    (x,), (dx,) = primals, tangents
+    out = _forward_only_tangent_p.bind(x)
+    return out, (dx if type(dx) is _ad.Zero else _forward_only_tangent_p.bind(dx))
+
+
+def _forward_only_tangent_partial_eval(trace, tracer):
+    if not tracer.pval.is_known():
+        raise ValueError(_FORWARD_ONLY_REVERSE_ERROR)
+    return trace.default_process_primitive(_forward_only_tangent_p, (tracer,), {})
+
+
+def _forward_only_tangent_transpose(cotangent, x):
+    raise ValueError(_FORWARD_ONLY_REVERSE_ERROR)
+
+
+_ad.primitive_jvps[_forward_only_tangent_p] = _forward_only_tangent_jvp
+_ad.primitive_transposes[_forward_only_tangent_p] = _forward_only_tangent_transpose
+_partial_eval.custom_partial_eval_rules[_forward_only_tangent_p] = (
+    _forward_only_tangent_partial_eval
+)
+
+
+def _forward_loop_impl(
+    engine, problem, cfg, has_affect, control_folds_theta, init_state, ts_grid, t1, theta, control0
+):
+    """The forward-only step loop: the plain early-exit ``jax.lax.while_loop``."""
+    cond_fun, body_fun = _loop_fns(
+        engine, problem, cfg, has_affect, control_folds_theta, ts_grid, t1, theta, control0
+    )
+    return jax.lax.while_loop(cond_fun, body_fun, init_state)
+
+
+@eqx.filter_custom_jvp
+def _forward_loop(
+    engine, problem, cfg, has_affect, control_folds_theta, init_state, ts_grid, t1, theta, control0
+):
+    """The forward-only step loop, with a forward rule that refuses reverse mode.
+
+    The primal and the forward rule run the same plain loop, so forward-mode
+    results are unchanged. The rule marks the input tangents so that reverse
+    mode stops with a message naming the reverse adjoint.
+    """
+    return _forward_loop_impl(
+        engine,
+        problem,
+        cfg,
+        has_affect,
+        control_folds_theta,
+        init_state,
+        ts_grid,
+        t1,
+        theta,
+        control0,
+    )
+
+
+@_forward_loop.def_jvp
+def _forward_loop_jvp(primals, tangents):
+    tangents = jax.tree_util.tree_map(
+        lambda t: None if t is None else _forward_only_tangent_p.bind(t),
+        tangents,
+        is_leaf=lambda t: t is None,
+    )
+    final, d_final = eqx.filter_jvp(_forward_loop_impl, primals, tangents)
+    return final, _canon_tangent(final, d_final)
 
 
 def _canon_tangent(primal, tangent):

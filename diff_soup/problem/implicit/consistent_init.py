@@ -1177,7 +1177,7 @@ def check_consistent_init(
         raise ValueError(
             "consistent initialization cannot be analyzed: the joint matrix "
             "(the algebraic columns of F_y and the differential columns of "
-            "F_ydot) has non-finite entries at the solved point — the "
+            "F_ydot) has non-finite entries at the solved point: the "
             "residual's derivatives are not finite there. Supply seeds inside "
             "the residual's domain."
         )
@@ -1204,12 +1204,17 @@ def check_consistent_init(
             "the missing coupling."
         )
     if not bool(converged):
+        remedy = (
+            "Raise max_iters, loosen tol, or supply closer algebraic-value and slope seeds."
+            if jnp.asarray(y_star).dtype != jnp.float32
+            else "In float32 the residual's own rounding can exceed tol; loosen tol, or "
+            "initialize in float64 with Precision.fp32_ir() or Precision.fp64()."
+        )
         raise ValueError(
             "consistent initialization did not converge: after "
             f"{int(iterations)} Newton iterations the residual 2-norm is "
             f"{float(norm):.3e} against the tolerance {icp.tol:.1e}, with a "
-            "nonsingular joint matrix at the last iterate. Raise max_iters, "
-            "loosen tol, or supply closer algebraic-value and slope seeds."
+            f"nonsingular joint matrix at the last iterate. {remedy}"
         )
     return ConsistentInitResult(
         y=y_star,

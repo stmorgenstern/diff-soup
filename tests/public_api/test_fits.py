@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -10,12 +13,14 @@ import pytest
 
 import diff_soup as ds
 from diff_soup import inference as inf
+from diff_soup.domains import cartesian_grid_1d
 from tests.support.inference import (
     TRUE_RATE,
     decay_experiment,
     decay_recipe,
     decay_study,
     small_fit,
+    solver,
 )
 
 # measured 2.8e-6 (LM, NTR, BFGS) off the true rate 0.6 at solver rtol 1e-6,
@@ -36,10 +41,25 @@ def lm_fit(single):
 
 
 def test_levenberg_marquardt_recovers_the_rate_of_a_single_experiment(single, lm_fit):
-    """LevenbergMarquardt on one experiment ends converged at the true rate."""
+    """LevenbergMarquardt on one experiment ends converged at the true rate, and on fitted window
+    starts a Jacobian formed 8 directions at a time steps as the whole one does."""
     decay, _ = single
     assert lm_fit.converged
     np.testing.assert_allclose(float(lm_fit[decay.rate]), TRUE_RATE, atol=_RATE_ATOL)
+    wide = decay_recipe("fits_decay_windows", nodes=12)
+    windows = inf.InferenceProblem(
+        decay_experiment(wide),
+        parameters=wide.rate,
+        trajectory=inf.Multishoot(inf.Windows.uniform(2)),
+    )
+    whole, tiled = (
+        small_fit(windows, inf.LevenbergMarquardt(max_steps=20, jacobian_tile=tile))
+        for tile in ("full", 8)
+    )
+    assert (whole.info["jacobian_tile"], tiled.info["jacobian_tile"]) == ("full", 8)
+    # 13 decision variables, 11 steps each; measured 0.0 worst difference, workstation CPU
+    # 2026-10-28, pytest tests/public_api/test_fits.py
+    np.testing.assert_allclose(tiled.params, whole.params, rtol=0.0, atol=1e-12)
 
 
 def test_the_result_reports_point_status_steps_handle_values_and_final_rows(single, lm_fit):
@@ -138,3 +158,81 @@ def test_trust_region_on_a_lowered_study_recovers_shared_and_owner_parameters(jo
     sources = [float(fit[decay.source][owner]) for owner in ("cell-a", "cell-b", "cell-c")]
     # measured 7.9e-6, the run above
     np.testing.assert_allclose(sources, [-0.05, 0.0, 0.05], atol=1e-4)
+
+
+def _network_problem(name, *, blind_rate=False, n_experiments=1):
+    """A reaction ``u' = f(u)`` fitted by a tanh network with two identical hidden units.
+
+    Identical units have identical Jacobian columns, so the weights are not
+    identifiable one by one. ``blind_rate`` adds a scalar ``rate`` the data cannot see.
+    More than one experiment makes a joint fit, each from its own start.
+    """
+    network = eqx.nn.MLP("scalar", "scalar", 2, 1, activation=jnp.tanh, key=jax.random.PRNGKey(0))
+    network = eqx.tree_at(
+        lambda net: (net.layers[0].weight, net.layers[0].bias, net.layers[1].weight),
+        network,
+        (jnp.full((2, 1), 0.5), jnp.full((2,), 0.1), jnp.full((1, 2), -0.3)),
+    )
+    spec = ds.problem(name)
+    spec.domain("line", cartesian_grid_1d(3, 0.0, 1.0, method="fvm"))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: 1.0 + x)
+    handles = (spec.function("reaction", network, learnable=True, pointwise=True),)
+    if blind_rate:
+        handles += (spec.param("rate", value=0.3, learnable=True),)
+
+    @spec.equation(writes="u", reads=("u",))
+    def reaction(q):
+        blind = 0.0 * q.p.rate if blind_rate else 0.0
+        return q.fn.reaction(q.u) + blind
+
+    problem = spec.build()
+    times = jnp.linspace(0.0, 0.8, 9)
+
+    def experiment(k):
+        y0 = spec.assemble_state({}) + 0.2 * k
+        data = jax.vmap(lambda t: (y0 - 0.4) * jnp.exp(-0.5 * t) + 0.4)(times)
+        return inf.Experiment(
+            problem, solver(), (0.0, 0.8), y0, (inf.Measurement("u", times, data),)
+        )
+
+    experiments = tuple(experiment(k) for k in range(n_experiments))
+    return inf.InferenceProblem(
+        experiments[0] if n_experiments == 1 else experiments, parameters=handles
+    )
+
+
+# Levenberg-Marquardt records the Jacobian it ends on; Optax records none, so
+# the diagnostics build their own over the columns that are not network weights.
+_NETWORK_FITS = pytest.mark.parametrize(
+    ("n_experiments", "optimizer"),
+    [(1, inf.LevenbergMarquardt(max_steps=3)), (2, inf.Optax(optax.adam(1e-2), max_steps=3))],
+    ids=["one-experiment-lm", "two-experiments-optax"],
+)
+
+
+@_NETWORK_FITS
+def test_a_network_fit_records_a_note_instead_of_an_identifiability_warning(
+    n_experiments, optimizer
+):
+    """optsolve on network weights alone, one experiment or a joint, warns nothing and notes the skipped check."""
+    problem = _network_problem(f"fits_network_{n_experiments}", n_experiments=n_experiments)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fit = inf.optsolve(problem, optimizer)
+    assert any("learnable-function weight" in note for note in fit.diagnostics.warnings)
+    # No column is tested, so no Jacobian is built or reported.
+    assert fit.diagnostics.theta_singular_values is None
+
+
+@_NETWORK_FITS
+def test_a_blind_scalar_beside_a_network_still_raises_the_identifiability_warning(
+    n_experiments, optimizer
+):
+    """A scalar parameter the data cannot see is named in the warning, network weights or not."""
+    problem = _network_problem(
+        f"fits_network_blind_{n_experiments}", blind_rate=True, n_experiments=n_experiments
+    )
+    with pytest.warns(inf.fitting.IdentifiabilityWarning, match="rate"):
+        fit = inf.optsolve(problem, optimizer)
+    # The report covers the one scalar column, not the seven network weights.
+    assert fit.diagnostics.theta_singular_values.shape == (1,)

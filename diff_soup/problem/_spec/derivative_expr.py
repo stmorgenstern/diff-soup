@@ -231,10 +231,23 @@ class TimeDerivativeRef(DerivativeExpr):
         return True
 
 
-class DerivativeScale(DerivativeExpr):
-    """A derivative expression scaled by a derivative-free value."""
+def scale_size_error(coeff_len: int, size: int) -> ValueError:
+    """The refusal of a scaling coefficient whose length fits no reading."""
+    return ValueError(
+        f"scaling coefficient of length {coeff_len} does not match the expression size {size}"
+    )
 
-    __slots__ = ("expr", "coeff")
+
+class DerivativeScale(DerivativeExpr):
+    """A derivative expression scaled by a derivative-free value.
+
+    A one-dimensional coefficient of another length than the expression is
+    kept as a per-cell coefficient (``per_cell``) when it scales a field's
+    derivative directly; the build reads it against the field's mesh and
+    refuses it on a grid or when the length is not the number of cells.
+    """
+
+    __slots__ = ("expr", "coeff", "per_cell")
 
     def __init__(self, expr: DerivativeExpr, coeff):
         if isinstance(coeff, DerivativeExpr):
@@ -243,13 +256,14 @@ class DerivativeScale(DerivativeExpr):
                 "derivative expressions directly to state a nonlinear residual"
             )
         coeff_len = _static_len(coeff)
-        if coeff_len not in (1, expr.size):
-            raise ValueError(
-                f"scaling coefficient of length {coeff_len} does not match the "
-                f"expression size {expr.size}"
-            )
+        per_cell = coeff_len not in (1, expr.size)
+        if per_cell and not (
+            np.ndim(coeff) == 1 and isinstance(expr, (TimeDerivativeRef, DerivativeScale))
+        ):
+            raise scale_size_error(coeff_len, expr.size)
         self.expr = expr
         self.coeff = coeff
+        self.per_cell = per_cell
 
     @property
     def size(self) -> int:
@@ -379,6 +393,11 @@ class DerivativeSum(DerivativeExpr):
             )
         (size,) = sizes
         for r in residual_terms:
+            if np.ndim(r) >= 2:
+                # Values at a mesh's quadrature points (a quad-native field
+                # after arithmetic, ``(n_cells, n_q, ...)``): the residual
+                # finalizer integrates them to one value per node.
+                continue
             r_len = _static_len(r)
             if r_len not in (1, size):
                 raise ValueError(

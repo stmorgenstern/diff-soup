@@ -25,19 +25,33 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.statistics.laplace import LaplacePosterior
+from diff_soup.inference.statistics.estimation import EstimationProblem
+from diff_soup.inference.statistics.laplace import LaplacePosterior, _evidence_refusal, laplace
+from diff_soup.inference.statistics.measurement import require_likelihoods
 from diff_soup.inference.statistics.priors import Prior
 
 __all__ = [
     "EvidenceResult",
     "PriorDominatedDirection",
     "PriorSensitivity",
+    "evidence",
     "laplace_evidence",
 ]
 
 _CURVATURE_RTOL = 2e-7
 _CURVATURE_ATOL = 2e-10
 _DEFAULT_NULL_TOL = 1e-10
+#: A stored factor reconstructs its curvature to within this many epsilons of its dtype,
+#: relative to ``|L| |L|^T``, the scale of a Cholesky factor's backward error. Measured: 1.2
+#: eps at most for float32 factors of random SPD matrices of size 2 to 50 and condition up to
+#: 1e6, where the same error is up to 8e4 eps of the entry itself, workstation 2026-10-28,
+#: bugfix/fpass/f5_synth.py.
+_FACTOR_EPS = 100.0
+
+
+def _eps(*arrays: Any) -> float:
+    """The machine epsilon of the narrowest floating dtype among ``arrays``."""
+    return max(float(np.finfo(np.asarray(a).dtype).eps) for a in arrays)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -182,7 +196,10 @@ def _validate_factor(
     if not np.all(np.isfinite(total)):
         raise ValueError("laplace_evidence: Cholesky factor reconstructs non-finite curvature.")
     expected = data_curvature + stored_prior
-    if not np.allclose(total, expected, rtol=_CURVATURE_RTOL, atol=_CURVATURE_ATOL):
+    rtol = _FACTOR_EPS * _eps(
+        posterior.precision_factor, posterior._data_curvature, posterior.prior_precision
+    )
+    if np.any(np.abs(total - expected) > rtol * (np.abs(factor) @ np.abs(factor).T)):
         raise ValueError(
             "laplace_evidence: precision factor does not match the recorded data and prior "
             "curvature; a valid unmodified SPD Cholesky factor is required."
@@ -364,9 +381,14 @@ def laplace_evidence(posterior: LaplacePosterior, prior: Any) -> EvidenceResult:
         what="stationarity tolerance",
     )
     if gradient_norm < 0.0 or tolerance <= 0.0 or gradient_norm > tolerance:
+        provenance = posterior.provenance if isinstance(posterior.provenance, Mapping) else {}
+        basis = provenance.get("stationarity_basis")
         raise ValueError(
             "laplace_evidence refuses a non-stationary mode: the recorded gradient norm "
-            f"{gradient_norm:.3g} exceeds the stationarity tolerance {tolerance:.3g}."
+            f"{gradient_norm:.3g} exceeds the stationarity tolerance {tolerance:.3g}"
+            + ("" if basis is None else f", set by the {basis}")
+            + ". A fit stopped early needs more optimizer steps; a fit whose gradient the "
+            "solve limits needs a tighter solver tolerance, not a tighter optimizer tolerance."
         )
 
     _prior_declarations(prior)
@@ -394,7 +416,7 @@ def laplace_evidence(posterior: LaplacePosterior, prior: Any) -> EvidenceResult:
     if stored_prior.shape != prior_curvature.shape or not np.allclose(
         stored_prior,
         prior_curvature,
-        rtol=_CURVATURE_RTOL,
+        rtol=max(_CURVATURE_RTOL, _FACTOR_EPS * _eps(posterior.prior_precision)),
         atol=_CURVATURE_ATOL,
     ):
         raise ValueError(
@@ -434,3 +456,30 @@ def laplace_evidence(posterior: LaplacePosterior, prior: Any) -> EvidenceResult:
         provenance=posterior.provenance,
         warnings=warnings,
     )
+
+
+def evidence(problem: Any, fit: Any, *, curvature: str = "observed") -> EvidenceResult:
+    """Approximate the log marginal likelihood of the data at a MAP fit, by Laplace's method.
+
+    The value is `log p(y | mode) + log p(mode) + d/2 log(2 pi) - 1/2 log det H`, with `H` the
+    posterior precision of `ds.inference.laplace(problem, fit)` and the priors the problem
+    declares. A fit that is not at a stationary point is refused.
+
+    Args:
+        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] with
+            `objective=MAP()`, whose measurements all declare a likelihood.
+        fit: The [`OptResult`][diff_soup.inference.OptResult] of the MAP fit, a parameter vector,
+            or a mapping from every fitted handle to its value.
+        curvature: `"observed"` or `"expected"`, as `curvature=` of `laplace`.
+
+    Returns:
+        An `EvidenceResult` whose `log_evidence` is the value and whose other fields are its terms.
+    """
+    if not isinstance(problem, EstimationProblem):
+        raise TypeError("evidence requires an InferenceProblem.")
+    require_likelihoods(problem, "evidence")
+    refusal = _evidence_refusal(problem)
+    if refusal is not None:
+        raise ValueError(refusal)
+    posterior = laplace(problem, fit, curvature=curvature)
+    return laplace_evidence(posterior, posterior._evidence_prior)

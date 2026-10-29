@@ -40,9 +40,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import LoweringError
-from diff_soup.domains.operators.dispatch import finalize_residual
+from diff_soup.domains.operators.dispatch import finalize_residual, recorded_stencil_reach
 from diff_soup.problem._ir._merged_view import MergedView
 from diff_soup.problem._ir.bc import FluxBC, _BoundaryFn
+from diff_soup.problem._ir.derivative_ir import capture_forms, stamp_capture_error
 from diff_soup.problem._ir.equation import MultiEquation
 from diff_soup.problem._ir.family import Family
 from diff_soup.problem._ir.var_ref import VarRef
@@ -269,7 +270,7 @@ def _validate_member_params(fam: Family) -> dict[str, jax.Array]:
                 f"Family {fam.name!r} member_params[{name!r}] is not an array "
                 f"leaf (got {type(value).__name__}); each member param must be a "
                 f"jnp.asarray-able array with leading axis == count (={count}) "
-                f"or a shared scalar — a per-member Python list/closure "
+                f"or a shared scalar. A per-member Python list/closure "
                 f"silently causes one re-trace per member."
             ) from exc
         if arr.ndim == 0:
@@ -459,10 +460,8 @@ class _FamilyResidualBlock:
         try:
             self._capture_member_forms()
         except Exception as exc:  # noqa: BLE001 — stamped, re-raised at the read.
-            note = f"{type(exc).__name__}: {exc}"
-            for _eq, cell in self._member_form_cells():
-                if cell is not None and not cell.get("captured") and not cell.get("captured_plain"):
-                    cell.setdefault("capture_error", note)
+            stamp_capture_error((cell for _eq, cell in self._member_form_cells()), exc)
+        self._check_member_reach()
         self._has_forms = any(
             cell is not None and cell.get("captured") for _eq, cell in self._member_form_cells()
         )
@@ -496,7 +495,7 @@ class _FamilyResidualBlock:
                         f"written by the residual-form equation and also by "
                         f"{getattr(eq, 'name', '?')!r}; a field stated as a "
                         "derivative-expression residual must be written by "
-                        "that one equation — fold the extra terms into it."
+                        "that one equation; fold the extra terms into it."
                     )
 
     # ------------------------------------------------------------------
@@ -529,15 +528,52 @@ class _FamilyResidualBlock:
                 gather_row.setdefault(inp, jnp.asarray(1.0))
         return u_row, m_row, member_globals, gather_row
 
+    def _check_member_reach(self) -> None:
+        """Refuse a member equation whose grid operators read past ``stencil_radius``.
+
+        Member kernels are not stencil-probed, so the declared radius (one cell
+        by default) is the Jacobian pattern. Tracing each member equation once
+        records the reach of every wide operator it calls (``div_advect`` under
+        ``"tvd"`` or ``"weno3"`` reads two cells upstream); a reach past the
+        radius would give a structurally wrong sparse Jacobian. A closure that
+        fails to trace is left to the solve to report.
+
+        Raises:
+            LoweringError: if a member equation reads past the declared radius.
+        """
+        if not self._fam.member_equations:
+            return
+        u_row, m_row, member_globals, gather_row = self._synthetic_member_inputs()
+        view = self._build_member_view(u_row, gather_row, member_globals)
+        m, ctx = _MemberView(m_row), _FamilyCtx(self._tag_ops)
+        radius = int(self._fam.stencil_radius or 1)
+        for eq in self._fam.member_equations:
+            with recorded_stencil_reach() as calls:
+                try:
+                    jax.eval_shape(lambda fn=eq.rhs_fn: fn(view, ctx, m, jnp.asarray(0.0)))
+                except Exception:  # noqa: BLE001 - reported where the solve evaluates it.
+                    pass
+            wide = [call for call in calls if call[0] > radius]
+            if wide:
+                reach, call = max(wide)
+                raise LoweringError(
+                    f"family {self._fam.name!r}: member equation "
+                    f"{getattr(eq, 'name', '?')!r} calls {call}, which reads {reach} cells "
+                    f"per axis, but the family's stencil_radius is {radius}, so its sparse "
+                    f"Jacobian would miss entries. Declare stencil_radius={reach} on "
+                    'spec.family, or pass scheme="central" or "upwind".'
+                )
+
     def _capture_member_forms(self) -> None:
         """Eagerly evaluate each member equation once so form cells capture.
 
         Runs host-side at block construction (concrete inputs, one member),
-        per equation, so a closure that cannot evaluate at the synthetic state
-        stamps only ITS cell with the failure.  Idempotent — captured cells
-        make the evaluation a plain pass-through.  Afterwards, probes each
-        captured linear form's coefficient state dependence by re-evaluating
-        at per-field-perturbed member states.
+        per equation, through the shared capture pass
+        ([capture_forms][diff_soup.problem._ir.derivative_ir.capture_forms]),
+        so a closure that cannot evaluate at the synthetic state stamps only
+        its own cell with the failure.  Decided cells are skipped.
+        Afterwards, probes each captured linear form's coefficient state
+        dependence by re-evaluating at per-field-perturbed member states.
         """
         if not self._fam.member_equations:
             return
@@ -546,13 +582,7 @@ class _FamilyResidualBlock:
         m = _MemberView(m_row)
         ctx = _FamilyCtx(self._tag_ops)
         for eq, cell in self._member_form_cells():
-            if cell is None or cell.get("captured") or cell.get("captured_plain"):
-                continue
-            try:
-                with jax.ensure_compile_time_eval():
-                    eq.rhs_fn(view, ctx, m, jnp.asarray(0.0))
-            except Exception as exc:  # noqa: BLE001 — stamped, re-raised at the read.
-                cell.setdefault("capture_error", f"{type(exc).__name__}: {exc}")
+            capture_forms((cell,), lambda rhs_fn=eq.rhs_fn: rhs_fn(view, ctx, m, jnp.asarray(0.0)))
         self._probe_member_form_state_deps(u_row, m_row, member_globals, gather_row)
 
     def _probe_member_form_state_deps(self, u_row, m_row, member_globals, gather_row):

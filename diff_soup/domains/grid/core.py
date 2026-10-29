@@ -134,6 +134,15 @@ class Grid1D(Domain):
         """
         return self.nodes[:, None]  # (n, 1)
 
+    @property
+    def coordinates(self) -> tuple[Array]:
+        """The cell-centre positions along the axis, as a 1-tuple of `nodes`."""
+        return (self.nodes,)
+
+    def meshgrid(self) -> tuple[Array]:
+        """Return `(nodes,)`, the one-axis case of [GridND.meshgrid][diff_soup.domains.GridND.meshgrid]."""
+        return (self.nodes,)
+
     def in_field_dtype(self, field: Float[Array, "..."]) -> "Grid1D":
         """This grid with its floating-point geometry in the dtype of ``field``.
 
@@ -587,8 +596,27 @@ class GridND(Domain):
         Returns:
             An array of shape `(num_nodes, dim)`.
         """
-        grids = jnp.meshgrid(*[ax.nodes for ax in self.axes], indexing="ij")
-        return jnp.stack([g.ravel() for g in grids], axis=-1)
+        return jnp.stack([g.ravel() for g in self.meshgrid()], axis=-1)
+
+    @property
+    def coordinates(self) -> tuple[Array, ...]:
+        """The cell-centre positions along each axis, one 1D array per axis."""
+        return tuple(axis.nodes for axis in self.axes)
+
+    def meshgrid(self) -> tuple[Array, ...]:
+        """Return one coordinate array of shape `shape` per axis.
+
+        The arrays are in field storage order, so `grid.meshgrid()[k].ravel()`
+        equals `grid.node_coordinates()[:, k]`.
+
+        !!! example
+
+            ```python
+            x, y = grid.meshgrid()
+            u0 = (jnp.sin(jnp.pi * x) * jnp.sin(jnp.pi * y)).ravel()
+            ```
+        """
+        return tuple(jnp.meshgrid(*self.coordinates, indexing="ij"))
 
     def in_field_dtype(self, field: Float[Array, "..."]) -> "GridND":
         """This grid with the geometry of every axis in the dtype of ``field``.

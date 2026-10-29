@@ -21,10 +21,12 @@ Requirements:
 The wheel bundles the KLU sparse solver and installs JAX 0.11. It does
 not include SuperLU_MT, which a [source build](#install-from-source)
 adds. The GPU extras add the CUDA build of JAX and the cuDSS sparse
-solver, so no compiler or CUDA toolkit is needed. Meshing complex
-geometries uses gmsh, which installs with the `mesh` extra, for example
-`pip install "diff-soup[cu13,mesh]"`. gmsh needs the system OpenGL utility
-library (`libglu1-mesa` on Debian and Ubuntu, `mesa-libGLU` on RHEL and Fedora).
+solver, so no compiler or CUDA toolkit is needed. The `mesh` extra installs
+gmsh, which meshes complex geometries, and meshio, which reads and writes mesh
+files, for example `pip install "diff-soup[cu13,mesh]"`. OpenCV, which
+`mask_to_mesh` uses to trace image masks, installs with diff-soup. gmsh needs
+the system OpenGL utility library (`libglu1-mesa` on Debian and Ubuntu,
+`mesa-libGLU` on RHEL and Fedora).
 
 ## Enable float64
 
@@ -38,6 +40,10 @@ jax.config.update("jax_enable_x64", True)
 ```
 
 Exporting `JAX_ENABLE_X64=1` before starting Python does the same.
+
+`import diff_soup` also turns on JAX's constant hoisting, so a compiled
+program takes the mesh arrays it uses as arguments instead of embedding them.
+This works whether `jax` is imported before or after `diff_soup`.
 
 ## Install from source
 

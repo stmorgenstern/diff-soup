@@ -41,7 +41,6 @@ the latest declarations the moment anything reads it.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -50,6 +49,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
+from diff_soup._warnings import warn_user
 from diff_soup.domains.boundary_set import BoundarySet, from_nodes, tags
 from diff_soup.problem._ir.equation import Equation, MultiEquation
 from diff_soup.problem._ir.family import Family
@@ -273,7 +273,8 @@ class _MemberResidualFormAdapter(eqx.Module):
     a slope context (the member kernel installs a member-local one) it
     evaluates the expression against the provided per-member slopes.
 
-    The captured structure cell records the expression's MEMBER-LOCAL pattern
+    The structure cell, filled by the family block's build-time capture pass
+    only, records the expression's MEMBER-LOCAL pattern
     (rows/cols within one member's field block); the lowered problem expands it
     across the population when surfacing ``derivative_forms()``.  A member
     derivative expression may only reference this family's member fields —
@@ -297,7 +298,7 @@ class _MemberResidualFormAdapter(eqx.Module):
 
     @property
     def _derivative_form(self) -> dict:
-        """The captured member-local structure cell (empty until evaluated)."""
+        """The captured member-local structure cell (empty until the capture pass)."""
         return self.cell.data
 
     def _check_member_only(self, referenced) -> None:
@@ -317,49 +318,35 @@ class _MemberResidualFormAdapter(eqx.Module):
             ImplicitResidualIR,
             evaluate_expression,
             normalize_expression,
+            record_form,
+            record_plain,
             zero_slopes_for,
         )
-        from diff_soup.problem._spec.derivative_expr import (
-            DerivativeExpr,
-            current_slopes,
-            slope_context_includes_residual,
-        )
+        from diff_soup.problem._spec.derivative_expr import DerivativeExpr, current_slopes
 
         result = self.inner(view, ctx, m, t)
         form_cell = self.cell.data
         if not isinstance(result, DerivativeExpr):
-            if not form_cell.get("captured"):
-                form_cell["captured_plain"] = True
+            record_plain(form_cell)
             return result
+        from .build import _check_cell_scales, _slope_evaluation
+
         slopes = current_slopes()
         if slopes is not None:
-            return evaluate_expression(
-                result,
-                slopes,
-                int(result.size),
-                include_residual=slope_context_includes_residual(),
-            )
+            return _slope_evaluation(result, slopes, ctx)
+        _check_cell_scales(result, ctx)
         ir = normalize_expression(result, out_size=int(result.size))
+        # Coefficient state dependence is probed by the family residual block
+        # after its capture pass; conservative until then.
+        record_form(
+            form_cell,
+            self.field_name,
+            ir,
+            state_deps=lambda: form_cell.get("state_deps"),
+            check_fields=self._check_member_only,
+        )
         if isinstance(ir, ImplicitResidualIR):
-            if not form_cell.get("captured"):
-                self._check_member_only(ir.ydot_fields)
-                form_cell["out_field"] = self.field_name
-                form_cell["terms"] = ()
-                form_cell["nonlinear"] = True
-                form_cell["ydot_fields"] = ir.ydot_fields
-                form_cell["captured"] = True
             return evaluate_expression(result, zero_slopes_for(result), int(result.size))
-        if not form_cell.get("captured"):
-            self._check_member_only(term.in_field for term in ir.terms)
-            form_cell["out_field"] = self.field_name
-            form_cell["terms"] = tuple(
-                (term.in_field, term.pattern[0], term.pattern[1]) for term in ir.terms
-            )
-            form_cell["nonlinear"] = False
-            # Coefficient state-dependence is probed by the family residual
-            # block after its build-time capture pass; conservative until then.
-            form_cell.setdefault("state_deps", None)
-            form_cell["captured"] = True
         return -ir.residual_part()
 
 
@@ -435,7 +422,7 @@ def _validate_closure_is_two_arg(fn: Callable, name: str) -> None:
     ]
     if len(required_positional) != 2:
         raise TypeError(
-            f"family equation {name!r}: closure must be 2-arg (q, m) — the "
+            f"family equation {name!r}: closure must be 2-arg (q, m): the "
             "q-accessor and the per-member view; got "
             f"{len(required_positional)} required positional arg(s)."
         )
@@ -735,7 +722,7 @@ class _FamilyHandle:
         if shape is not None and self.is_ragged:
             raise ValueError(
                 f"family {self.name!r} field {name!r}: shape= cannot be given "
-                "for a ragged family — each size bucket's field takes its own "
+                "for a ragged family; each size bucket's field takes its own "
                 "member domain's node count."
             )
         if any(v.name == name for v in self._member_vars):
@@ -765,14 +752,14 @@ class _FamilyHandle:
                         f"family {self.name!r} field {name!r}: a per-member scalar "
                         f"(shape (1,)) must be mass='algebraic' (0 = f, closed by "
                         f"its own member equation); received mass={mass!r}. A "
-                        "differential per-member scalar has no member mass row — "
+                        "differential per-member scalar has no member mass row; "
                         "declare it algebraic, or make it a profile field on the "
                         "member domain."
                     )
             elif member_size != n_nodes:
                 raise ValueError(
                     f"family {self.name!r} field {name!r}: a multi-dim member field "
-                    f"(shape {shape_k}) is not supported — a family member field is "
+                    f"(shape {shape_k}) is not supported: a family member field is "
                     "a single 1-D radial profile or a per-member algebraic scalar "
                     "(shape=(1,), mass='algebraic'). Reformulate the physics on the "
                     "shared unit ball with the size entering only as the scalar "
@@ -1025,7 +1012,7 @@ class _FamilyHandle:
         if self.is_ragged:
             raise NotImplementedError(
                 f"family {self.name!r}: coupling a ragged family's field is "
-                "not supported — the buckets carry different member sizes. "
+                "not supported: the buckets carry different member sizes. "
                 "Author one uniform family per size and couple each."
             )
         if not any(v.name == name for v in self._member_vars):
@@ -1376,12 +1363,11 @@ def make_family(
         buckets = _bucketize_domains(name, int(count), domain)
         domain = buckets[0][0]
     if count > _SOFT_COUNT_CEILING:
-        warnings.warn(
+        warn_user(
             f"family {name!r}: count={count} exceeds the soft ceiling of "
             f"{_SOFT_COUNT_CEILING}; large populations are legal but assemble a "
-            "wide vmap batch — confirm this is intended.",
+            "wide vmap batch; confirm this is intended.",
             UserWarning,
-            stacklevel=3,
         )
     coerced = _coerce_member_params(name, int(count), dict(params or {}))
     return _FamilyHandle(

@@ -316,7 +316,7 @@ def heat(q):
 ### Coordinate networks
 
 A coordinate network is a function of position, \(x \mapsto f(x)\), with
-a network in place of the expansion. Two are provided, and both take one
+a network in place of the expansion. Three are provided, and each takes one
 coordinate or every node at once.
 
 - `FourierFeatureNet(in_size, *, n_frequencies=8, width=32, depth=2, key,
@@ -327,6 +327,10 @@ coordinate or every node at once.
 - `SIREN(in_size, *, width=32, depth=3, key, out_size=1, omega_0=30.0,
   transform=None, bounds=None)` is a network with the sine activation
   \(\sin(\omega_0 z)\) in every hidden layer and a linear output.
+- `WIRE(in_size, *, width=32, depth=3, key, out_size=1, omega_0=20.0,
+  s_0=10.0, transform=None, bounds=None)` is SIREN with the Gabor wavelet
+  \(\cos(\omega_0 z)\, e^{-(s_0 z)^2}\) in place of the sine
+  (Saragadam et al., 2023). The defaults are the paper's.
 - `bounds=` gives the range of each coordinate, one `(lo, hi)` pair per
   dimension, mapped onto \([-1, 1]\) before the network.
   `from_domain(domain, ...)` takes the dimension and the bounds from a
@@ -334,6 +338,11 @@ coordinate or every node at once.
 - `transform=` is a function `transform(x, raw)` of the position and the
   raw output, applied to the result, `lambda x, raw: jnp.exp(raw)` for a
   positive field.
+
+\(\omega_0\) sets how fast a unit oscillates. In WIRE, \(s_0\) sets how
+local it is, so a compact feature such as a front or a streak leaves the
+field smooth elsewhere. SIREN suits a field that varies everywhere at one
+scale.
 
 For example, to fit a diffusivity field on the rod:
 
