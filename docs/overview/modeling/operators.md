@@ -117,7 +117,7 @@ so both drop to the upstream value there, which is first order.
 
 The wider stencil reaches the Jacobian: the build widens the sparse
 pattern on its own, and a [family](equations.md#populations) member kernel
-declares `stencil_radius=2`. On a 64 by 16 by 16 grid one sparse
+declares `stencil_radius=2`, which the build checks. On a 64 by 16 by 16 grid one sparse
 factorization costs about four times central's on a CPU and a fifth
 more on a GPU.
 

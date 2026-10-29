@@ -38,6 +38,9 @@ so the assembly scatter merges contributions across the periodic boundary.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
@@ -792,6 +795,26 @@ def dispatch_advect_upwind(domain: Domain, u: Array, velocity, bcs: "Sequence | 
     raise NotImplementedError(f"advect_upwind is not implemented for {type(domain).__name__}.")
 
 
+# The wide grid operators called inside ``recorded_stencil_reach``, as
+# ``(cells per axis, call)``; ``None`` outside it.
+_STENCIL_REACH: contextvars.ContextVar = contextvars.ContextVar("stencil_reach", default=None)
+
+
+@contextlib.contextmanager
+def recorded_stencil_reach():
+    """Collect ``(reach, call)`` for each grid operator called inside that reads past one cell.
+
+    A kernel that is not stencil-probed (a family member kernel) reads this to
+    check its declared reach.
+    """
+    calls: list = []
+    token = _STENCIL_REACH.set(calls)
+    try:
+        yield calls
+    finally:
+        _STENCIL_REACH.reset(token)
+
+
 def dispatch_div_advect(
     domain: Domain,
     u: Array,
@@ -843,6 +866,9 @@ def dispatch_div_advect(
                 f"flow enters through with spec.bc.inflow, not a {type(bc).__name__}."
             )
         periodic_axes.add(int(bc.axis))
+    calls = _STENCIL_REACH.get()
+    if calls is not None and scheme in ("tvd", "weno3"):
+        calls.append((2, f'div_advect(scheme="{scheme}")'))
     if isinstance(domain, Grid1D):
         (v0,) = normalize_velocity(velocity, 1, (domain.n,), op_name="div_advect")
         return div_advect_1d(

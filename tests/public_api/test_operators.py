@@ -359,8 +359,8 @@ def test_grid_transport_takes_per_axis_dispersion_velocity_fields_and_an_inflow(
         c = jnp.asarray(np.random.default_rng(0).uniform(0.0, 1.0, 40))
         ops, outward = Operators(cartesian_grid_1d(40, 0.0, 1.0)), jnp.sign(c - jnp.roll(c, 1))
         peak_or_dip = (outward * jnp.sign(c - jnp.roll(c, -1)) > 0)[1:-1]
-        rates = [-ops.div_advect(c, v, **kw) * outward for kw in _LIMITED for v in (0.7, -0.7)]
-        assert np.max(np.asarray(rates)[:, 1:-1][:, peak_or_dip]) <= 0.0
+        rates = [-ops.div_advect(c, v, **kw) for kw in [{}, *_LIMITED] for v in (0.7, -0.7)]
+        assert np.max((np.asarray(rates) * np.asarray(outward))[:, 1:-1][:, peak_or_dip]) <= 0.0
         return
     elif claim == "limited jacobian":
         c, line = jnp.asarray(np.linspace(1.0, 0.0, 42) ** 2), cartesian_grid_1d(42, 0.0, 1.0)
