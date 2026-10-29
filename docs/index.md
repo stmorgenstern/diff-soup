@@ -73,16 +73,16 @@ from the Julia [SciML](https://sciml.ai/) ecosystem.
 ## Citing diff-soup
 
 The methods behind diff-soup are described in the preprint
-[arXiv:XXXX.XXXXX](https://arxiv.org/abs/XXXX.XXXXX).
+[arXiv:2610.37333](https://arxiv.org/abs/2610.37333v1).
 
 If you use diff-soup in your work, please cite:
 
 ```bibtex
-@article{diffsoup,
-  title   = {},
-  author  = {},
-  journal = {arXiv preprint arXiv:XXXX.XXXXX},
-  year    = {},
+@article{degnanmorgenstern2026diffsoup,
+  title   = {diff-soup: {GPU}-native Differentiable Simulation and Inference for Large-scale Stiff Dynamical Systems},
+  author  = {Samuel Degnan-Morgenstern and Martin Z. Bazant},
+  journal = {arXiv preprint arXiv:2610.37333},
+  year    = {2026},
 }
 ```
 

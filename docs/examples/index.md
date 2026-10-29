@@ -1,6 +1,6 @@
 # Worked examples
 
-Each worked example reproduces a full workflow from the diff-soup paper at
+Each worked example reproduces a full workflow from the [diff-soup paper](https://arxiv.org/abs/2610.37333v1) at
 a size that fits one workstation GPU. The configuration cell of each
 notebook lists the paper's settings next to the ones it runs.
 

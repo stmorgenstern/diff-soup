@@ -1,9 +1,11 @@
 # Tutorials
 
-Each tutorial solves one physical problem, checks the answer against an
-exact solution, a reference or a conservation law, and uses the problem
-to teach one feature of diff-soup. Every notebook runs unchanged on a
-CPU or a GPU, and none assumes you are an expert in its field.
+In this section, we provide a series of tutorials on the modeling,
+simulation, and inference capabilities of diff-soup. We demonstrate these
+features on a unique physical system for each tutorial, to showcase a
+diverse range of models diff-soup can simulate. For more advanced inference
+workflows, we also provide the [worked examples](../examples/index.md)
+section providing code demos of the examples in the [diff-soup paper](https://arxiv.org/abs/2610.37333v1).
 
 - [Basic PDE example](basic_pde.ipynb): the Allen-Cahn equation for a
   moving phase boundary. A model declared with the Recipe API, solved with
