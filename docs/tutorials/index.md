@@ -5,13 +5,13 @@ exact solution, a reference or a conservation law, and uses the problem
 to teach one feature of diff-soup. Every notebook runs unchanged on a
 CPU or a GPU, and none assumes you are an expert in its field.
 
-- [Your first simulation](first_simulation.ipynb): the moving boundary
-  between two phases of a material. A model declared with the Recipe API,
-  solved with `pdesolve` and checked against its exact solution.
+- [Basic PDE example](basic_pde.ipynb): the Allen-Cahn equation for a
+  moving phase boundary. A model declared with the Recipe API, solved with
+  `pdesolve` and checked against its exact solution.
 - [Stiff reaction-diffusion at scale](stiff_reaction_diffusion.ipynb):
   two reacting chemicals whose spots divide until they fill a square.
   The solver, the tolerances, the linear backend and the precision of a
-  large stiff solve, one with both very fast and very slow time scales.
+  large stiff solve.
 - [Phase separation with electrostatics](dae_electrostatics.ipynb): a
   charged species unmixing while its electric potential follows at every
   instant. Constraints solved alongside the equations in time, and
