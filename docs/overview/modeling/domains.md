@@ -131,7 +131,9 @@ quadratic `TRI6` elements.
   (boxes).
 - `polygons_to_tagged_mesh` names each region's outer edges after the
   region, and the edges two regions share after both, sorted and joined
-  by `|` (`"bowl|soup"`).
+  by `|` (`"bowl|soup"`). `segment_tags={region: [...]}` with
+  `segment_names=` splits a region's outer edges as on one polygon
+  ([regions](#regions)).
 - Declarations select tags by name (`tag="rim"`) or by a composable
   expression: `on=ds.tags("boundary") - ds.tags("rim")` is every
   boundary edge except the rim group.
@@ -154,6 +156,22 @@ k = 0.1 * mesh.cell_indicator("soup") + 1.0 * mesh.cell_indicator("bowl")
 @spec.equation(writes="u", reads=("u",))
 def cool(q):
     return q.ops.div_flux(k, q.u)           # one conductivity per cell
+```
+
+One region's outer edges can meet different conditions, such as the
+bowl's wall in air and its foot on a table. `segment_tags` gives each
+polygon edge of a region a tag, with ids repeated to group edges, and
+`segment_names` names the tags. A region left out keeps its own name,
+and the interface keeps `"bowl|soup"`:
+
+```python
+on_table = [p[1] == q[1] == 0.0 for p, q in zip(bowl, bowl[1:] + bowl[:1])]
+mesh = polygons_to_tagged_mesh(
+    {"soup": soup, "bowl": bowl},
+    mesh_size=2.0,
+    segment_tags={"bowl": [3 if edge else 2 for edge in on_table]},
+    segment_names={2: "wall", 3: "table"},
+)
 ```
 
 ### Example: a bowl of soup

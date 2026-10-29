@@ -572,6 +572,8 @@ def polygons_to_tagged_mesh(
     regions: Dict[str, List[Tuple[float, float]]],
     *,
     mesh_size: float = 1.0,
+    segment_tags: Optional[Dict[str, List[int]]] = None,
+    segment_names: Optional[dict] = None,
     order: int = 1,
     verbose: bool = False,
 ) -> TaggedMesh:
@@ -581,9 +583,17 @@ def polygons_to_tagged_mesh(
     The edges two regions share are tagged with both names, sorted and joined by `|`,
     such as `"bowl|soup"`. The tag group `"boundary"` holds the whole outer boundary.
 
+    `segment_tags` splits a region's outer edges as
+    [polygon_to_tagged_mesh][diff_soup.domains.geometry.polygon_to_tagged_mesh] does:
+    one integer per polygon edge, with ids repeated to group edges, and
+    `segment_names` naming each id (`segment_tags={"bowl": [1, 1, 2, 1]}` with
+    `segment_names={1: "bowl", 2: "table"}`). Interface edges keep their `"a|b"` tag.
+
     Args:
         regions: The polygon of each region by name, where a later region takes any overlap with an earlier one.
         mesh_size: The target element size.
+        segment_tags: The tag of each polygon edge, by region name. A region left out keeps one tag, its name.
+        segment_names: The name of each id in `segment_tags`, such as `{2: "table"}`. Defaults to `"<region>_seg_<i>"`, after the first polygon edge `i` carrying the id.
         order: `1` for TRI3 elements, `2` for TRI6.
         verbose: If `True`, show gmsh's output.
 
@@ -592,7 +602,9 @@ def polygons_to_tagged_mesh(
 
     Raises:
         ValueError: If there are no regions, a polygon has fewer than three
-            vertices, a name contains `|`, or a region ends up with no cells.
+            vertices, a name contains `|`, a region ends up with no cells, or
+            `segment_tags` and `segment_names` do not match the regions, their
+            edges and each other.
     """
     gmsh = import_optional("gmsh")
 
@@ -612,6 +624,7 @@ def polygons_to_tagged_mesh(
                 f"polygons_to_tagged_mesh: region {name!r} needs at least 3 vertices, "
                 f"got {len(polygon)}"
             )
+    segments = _checked_segments(regions, names, segment_tags, segment_names)
 
     gmsh.initialize()
     try:
@@ -669,6 +682,10 @@ def polygons_to_tagged_mesh(
                 "later covers all of it"
             )
     edges, tags, tag_names, outer_ids = _region_boundary_edges(cells, region, names)
+    if segments is not None:
+        tags, tag_names, outer_ids = _split_outer_edges(
+            coords, edges, tags, tag_names, regions, names, *segments
+        )
     tag_groups = None if "boundary" in tag_names.values() else {"boundary": tuple(outer_ids)}
     return TaggedMesh(
         points=coords,
@@ -681,6 +698,119 @@ def polygons_to_tagged_mesh(
         cell_tags=(region + 1).astype(np.int32),
         cell_tag_names={name: k + 1 for k, name in enumerate(names)},
     )
+
+
+def _checked_segments(regions, names, segment_tags, segment_names):
+    """``(segment_tags, segment_names)`` checked against the regions, or ``None``.
+
+    Raises:
+        ValueError: If `segment_names` comes without `segment_tags`, `segment_tags`
+            names an unknown region or gives one region the wrong number of tags,
+            or a name is missing, unused, repeated, contains `|`, or is the name of
+            a region whose edges keep their default tag.
+    """
+    if segment_tags is None:
+        if segment_names is not None:
+            raise ValueError(
+                "polygons_to_tagged_mesh: segment_names names the ids of segment_tags; "
+                "pass segment_tags as well"
+            )
+        return None
+    tags_of = {str(name): [int(t) for t in seg] for name, seg in segment_tags.items()}
+    unknown = sorted(set(tags_of) - set(names))
+    if unknown:
+        raise ValueError(
+            f"polygons_to_tagged_mesh: segment_tags names {unknown}, which are not "
+            f"regions; the regions are {names}"
+        )
+    for name, seg in tags_of.items():
+        if len(seg) != len(regions[name]):
+            raise ValueError(
+                f"polygons_to_tagged_mesh: segment_tags[{name!r}] has {len(seg)} tags, "
+                f"but region {name!r} has {len(regions[name])} polygon edges"
+            )
+    used = []  # every id, in the order the regions first use it
+    for name in names:
+        for t in tags_of.get(name, ()):
+            if t not in used:
+                used.append(t)
+    if segment_names is None:
+        name_of: dict = {}
+        for name in names:
+            for i, t in enumerate(tags_of.get(name, ())):
+                name_of.setdefault(t, f"{name}_seg_{i}")
+    else:
+        name_of = {int(t): str(n) for t, n in segment_names.items()}
+        missing = [t for t in used if t not in name_of]
+        unused = sorted(set(name_of) - set(used))
+        if missing or unused:
+            raise ValueError(
+                "polygons_to_tagged_mesh: segment_names must name exactly the ids in "
+                f"segment_tags; missing {missing}, unused {unused}"
+            )
+    taken = [name_of[t] for t in used] + [n for n in names if n not in tags_of]
+    for n in taken:
+        if "|" in n:
+            raise ValueError(
+                f"polygons_to_tagged_mesh: segment name {n!r} contains '|', which joins "
+                "the two names of an interface tag"
+            )
+        if taken.count(n) > 1:
+            hint = (
+                f"region {n!r} has no segment_tags, so its outer edges carry its name"
+                if n in names and n not in tags_of
+                else "give the edges one id instead"
+            )
+            raise ValueError(f"polygons_to_tagged_mesh: two edge tags are named {n!r}; {hint}")
+    return tags_of, name_of
+
+
+def _split_outer_edges(coords, edges, tags, tag_names, regions, names, tags_of, name_of):
+    """Retag the outer edges of the regions in ``tags_of`` by the polygon edge they lie on.
+
+    The ids of ``tags_of`` are kept; the default region tags and the interface tags
+    that remain are renumbered after the largest of them, in their original order.
+
+    Returns:
+        ``(tags, tag_names, outer_ids)``, as from ``_region_boundary_edges``.
+    """
+    n_regions = len(names)
+    used = sorted({t for seg in tags_of.values() for t in seg})
+    new_tags = tags.copy()
+    span = float(np.ptp(coords, axis=0).max())
+    for k, name in enumerate(names):
+        if name not in tags_of:
+            continue
+        rows = np.flatnonzero(tags == k + 1)
+        if rows.size == 0:
+            continue
+        mid = 0.5 * (coords[edges[rows, 0]] + coords[edges[rows, 1]])
+        polygon = np.asarray(regions[name], dtype=float)
+        a, b = polygon, np.roll(polygon, -1, axis=0)
+        ab = b - a
+        # Distance from each edge midpoint to each polygon edge (as a segment).
+        s = np.einsum("pmd,md->pm", mid[:, None, :] - a[None], ab) / np.einsum("md,md->m", ab, ab)
+        foot = a[None] + np.clip(s, 0.0, 1.0)[..., None] * ab[None]
+        dist = np.linalg.norm(mid[:, None, :] - foot, axis=2)
+        nearest = dist.argmin(axis=1)
+        if dist[np.arange(rows.size), nearest].max() > 1e-8 * span:
+            raise RuntimeError(
+                f"polygons_to_tagged_mesh: an outer edge of region {name!r} lies on none "
+                "of its polygon edges"
+            )
+        new_tags[rows] = np.asarray(tags_of[name], dtype=np.int32)[nearest]
+    # Renumber the tags that stay (untouched regions, interfaces) after the user's ids.
+    kept = [t for t in sorted(tag_names) if not (t <= n_regions and names[t - 1] in tags_of)]
+    renumber = {t: max(used) + 1 + i for i, t in enumerate(kept)}
+    lookup = np.zeros(max(tag_names) + 1, dtype=np.int64)
+    lookup[list(renumber)] = list(renumber.values())
+    stays = np.isin(tags, kept)
+    new_tags[stays] = lookup[tags[stays]]
+    present = set(np.unique(new_tags).tolist())
+    out_names = {t: name_of[t] for t in used if t in present}
+    out_names.update({renumber[t]: tag_names[t] for t in kept})
+    outer_ids = [t for t in used if t in present] + [renumber[t] for t in kept if t <= n_regions]
+    return new_tags.astype(np.int32), out_names, outer_ids
 
 
 def _counter_clockwise(points: np.ndarray, cells: np.ndarray) -> np.ndarray:
