@@ -34,6 +34,9 @@ theme:
         icon: material/brightness-4
         name: Switch to light mode
 
+hooks:
+  - docs_hooks.py
+
 plugins:
   - search
   - autorefs
@@ -134,7 +137,17 @@ nav:
           - Cohorts across an allocation: overview/inference/cohorts.md
   - Tutorials:
       - tutorials/index.md
-  - Worked examples: examples/index.md
+      - Your first simulation: tutorials/first_simulation.ipynb
+      - Stiff reaction-diffusion at scale: tutorials/stiff_reaction_diffusion.ipynb
+      - Phase separation with electrostatics: tutorials/dae_electrostatics.ipynb
+      - Cooling a bowl of soup: tutorials/cooling_soup.ipynb
+      - Gradients through a shock: tutorials/gradients_burgers.ipynb
+      - Fitting a nerve pulse: tutorials/fitting_fitzhugh_nagumo.ipynb
+      - Learning a soil's diffusivity: tutorials/neural_soil_diffusivity.ipynb
+  - Worked examples:
+      - examples/index.md
+      - Learning constitutive laws from a phase-separation movie: examples/inverse_cahn_hilliard.ipynb
+      - Learning a catalyst activity field: examples/activity_field.ipynb
   - API reference:
       - reference/index.md
       - Modeling:
