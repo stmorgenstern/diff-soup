@@ -5,10 +5,10 @@ a size that fits one workstation GPU. The configuration cell of each
 notebook lists the paper's settings next to the ones it runs.
 
 - [Learning constitutive laws from a phase-separation movie](inverse_cahn_hilliard.ipynb):
-  the laws that set how a two-component material unmixes, its chemical
-  potential and diffusivity, inferred with their uncertainty from one
-  noisy movie of the unmixing.
+  the chemical potential and diffusivity of a phase-separating binary
+  mixture, inferred with their uncertainty from one noisy movie of the
+  Cahn-Hilliard dynamics.
 - [Learning a catalyst activity field](activity_field.ipynb): how
-  strongly the catalyst works at each point inside a three-dimensional
+  the spatially varying catalyst activity inside a three-dimensional
   packed-bed reactor, learned from noisy concentrations by a neural
   network trained through the reactor simulation.

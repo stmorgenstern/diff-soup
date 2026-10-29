@@ -13,19 +13,21 @@ CPU or a GPU, and none assumes you are an expert in its field.
   The solver, the tolerances, the linear backend and the precision of a
   large stiff solve.
 - [Phase separation with electrostatics](dae_electrostatics.ipynb): a
-  charged species unmixing while its electric potential follows at every
-  instant. Constraints solved alongside the equations in time, and
-  stopping a solve when a condition is met.
+  charged species phase-separating under the Cahn-Hilliard equation,
+  coupled to the Poisson equation for its potential. A DAE with an
+  algebraic field, consistent initialization, and an event that stops the
+  solve.
 - [Cooling a bowl of soup](cooling_soup.ipynb): when soup in a ceramic
   bowl cools to 60 °C. Triangle meshes with two materials and heat
   leaving through their edges.
 - [Gradients through a shock](gradients_burgers.ipynb): a wave
-  steepening into a shock. Derivatives of a simulation with respect to
-  its inputs, and their cost as the number of inputs grows.
+  steepening into a shock under the viscous Burgers equation. Forward-
+  and reverse-mode derivatives through the solve, and their cost as the
+  number of inputs grows.
 - [Fitting a nerve pulse](fitting_fitzhugh_nagumo.ipynb): a pulse on a
-  nerve fibre recorded by four noisy electrodes. A model's parameters
-  fitted to data, their uncertainty, and how well the data pin them
-  down.
+  nerve fibre recorded by four noisy electrodes. FitzHugh-Nagumo
+  parameters fitted to data, their uncertainty and their
+  identifiability.
 - [Learning a soil's diffusivity with a neural network](neural_soil_diffusivity.ipynb):
   water soaking into dry garden soil. A neural network inside the model,
   trained through the simulation on several experiments.
