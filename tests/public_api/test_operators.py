@@ -32,7 +32,7 @@ from diff_soup.domains import (
 # tests/public_api/test_operators.py -k composes;
 # measured at most 8.9e-16 on every stencil, rotation, divergence and residual-row check below
 # (0.0 on the control-unit rows), CPU VM 2026-10-22, pytest tests/public_api/test_operators.py;
-# measured at most 8.9e-16 on the transport checks (8.9e-16 on central, 1.1e-16 on the upwind
+# measured at most 8.9e-16 on the transport checks (4.4e-16 central, 8.9e-16 upwind, 1.1e-16
 # inflow balance, 0.0 on the rest), workstation CPU 2026-10-28, pytest
 # tests/public_api/test_operators.py -k grid_transport
 _EXACT = 1e-12
@@ -296,17 +296,15 @@ def _bed_cells(method):
 
 @pytest.mark.parametrize("method", ["fvm", "fdm"])
 @pytest.mark.parametrize(
-    "claim",
-    ["equal axes", "no y", "velocity field", "central", "inflow balance", "upwind inflow balance"],
+    "claim", ["equal axes", "no y", "velocity field", "central", "upwind", "inflow balance"]
 )
 def test_grid_transport_takes_per_axis_dispersion_velocity_fields_and_an_inflow(method, claim):
     """``div_flux`` with the same cell diffusivity on both axes equals the shared one, and with
     ``(1.5, 0)`` the 1-D operator along x; ``advect_upwind`` with velocity arrays equal to constants equals the
-    constant form; ``div_advect`` by default gives each interior face the mean of ``v c`` in its
-    two cells, the paper's ``(v c[i+1] - v c[i-1]) / 2h`` for a velocity field on a 3-D grid,
-    and refuses another scheme; and with ``-div_advect`` under either scheme and an inflow
-    ``0.5 * 2`` on the low-x face, the rate of change of the integral is the inflow minus the
-    outflow ``v c`` on the high-x face."""
+    constant form; ``div_advect`` gives each interior face the mean of ``v c`` in its two cells under
+    ``"central"`` (the default) and the mean velocity of its two cells times the upstream value under
+    ``"upwind"``, and refuses another scheme; with ``-div_advect`` and an inflow ``0.5 * 2`` on the
+    low-x face, the rate of change of the integral is the inflow minus the outflow ``v c`` on the high-x face."""
     grid, coords, field = _bed_cells(method)
     ops = Operators(grid)
     if claim == "equal axes":
@@ -321,24 +319,26 @@ def test_grid_transport_takes_per_axis_dispersion_velocity_fields_and_an_inflow(
     elif claim == "velocity field":
         uniform = (jnp.full(18, 0.3), jnp.full(18, -0.2))
         got, expected = ops.advect_upwind(field, uniform), ops.advect_upwind(field, (0.3, -0.2))
-    elif claim == "central":
+    elif claim in ("central", "upwind"):
         box = cartesian_grid_3d(5, 3, 2, 1.0, 0.6, 0.4, method=method)
         xyz = np.asarray(box.node_coordinates())
         u = jnp.asarray(1.0 + xyz[:, 0] * xyz[:, 1])
         c = jnp.asarray(np.sin(3.0 * xyz[:, 0]) + xyz[:, 2])
         with pytest.raises(ValueError, match='"central" or "upwind"'):
             Operators(box).div_advect(c, (u, 0.0, 0.0), scheme="quick")
-        got = Operators(box).div_advect(c, (u, 0.0, 0.0)).reshape(5, 3, 2)[1:-1]
-        uc = (u * c).reshape(5, 3, 2)
-        expected = (uc[2:] - uc[:-2]) / (2 * np.diff(np.unique(xyz[:, 0]))[0])
+        kw = {} if claim == "central" else {"scheme": claim}  # central is the default
+        got = Operators(box).div_advect(c, (u, 0.0, 0.0), **kw).reshape(5, 3, 2)[1:-1]
+        u, c = u.reshape(5, 3, 2), c.reshape(5, 3, 2)
+        if claim == "central":
+            face = 0.5 * ((u * c)[:-1] + (u * c)[1:])
+        else:
+            face = 0.5 * (u[:-1] + u[1:]) * c[:-1]  # u > 0, so the low cell is upstream
+        expected = (face[1:] - face[:-1]) / np.diff(np.unique(xyz[:, 0]))[0]
     else:
-        kw = {"scheme": "upwind"} if claim == "upwind inflow balance" else {}
         speed = jnp.asarray(0.5 + 0.1 * coords[:, 1])
         spec = ds.problem(f"inflow_{method}").domain("bed", grid)
         spec.field("c", mass="differential", scale=1.0)
-        spec.equation(writes="c", reads=("c",))(
-            lambda q: -q.ops.div_advect(q.c, (speed, 0.0), **kw)
-        )
+        spec.equation(writes="c", reads=("c",))(lambda q: -q.ops.div_advect(q.c, (speed, 0.0)))
         spec.bc.inflow("c", axis=0, side="low", velocity=0.5, value=2.0)
         rows = spec.build().physics_residual(
             spec.assemble_state({"c": field}), jnp.zeros(0), jnp.asarray(0.0)
