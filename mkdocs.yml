@@ -35,7 +35,11 @@ theme:
         name: Switch to light mode
 
 hooks:
-  - docs_hooks.py
+  - docs/hooks.py
+
+# The hook is build code, not a page or an asset of the site.
+exclude_docs: |
+  hooks.py
 
 plugins:
   - search
