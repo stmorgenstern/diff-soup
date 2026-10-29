@@ -583,8 +583,7 @@ def polygons_to_tagged_mesh(
     The edges two regions share are tagged with both names, sorted and joined by `|`,
     such as `"bowl|soup"`. The tag group `"boundary"` holds the whole outer boundary.
 
-    `segment_tags` splits a region's outer edges as
-    [polygon_to_tagged_mesh][diff_soup.domains.geometry.polygon_to_tagged_mesh] does:
+    `segment_tags` splits a region's outer edges as `polygon_to_tagged_mesh` does:
     one integer per polygon edge, with ids repeated to group edges, and
     `segment_names` naming each id (`segment_tags={"bowl": [1, 1, 2, 1]}` with
     `segment_names={1: "bowl", 2: "table"}`). Interface edges keep their `"a|b"` tag.
