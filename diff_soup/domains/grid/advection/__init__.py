@@ -1,4 +1,4 @@
-"""First-order upwind advection on collocated cartesian grids, and the periodic tag.
+"""Advection on collocated cartesian grids, and the periodic tag.
 
 [Operators.advect_upwind][diff_soup.domains.operators.Operators.advect_upwind]
 evaluates the advective term ``v . grad u`` on a cartesian

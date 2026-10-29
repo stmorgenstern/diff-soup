@@ -15,13 +15,18 @@ numerically probing the assembled residual:
 * probe an interior cell first, then cells in bands near each boundary,
   deepening the bands until the measured reach stops growing (a
   boundary-modified scheme can read farther into the interior than the
-  interior stencil suggests), at two random states, and take the union.
+  interior stencil suggests), at two random states and two smooth monotone
+  ones, and take the union.
 
 Probing measures the dependencies ACTIVE at the probe states: a dependency
-whose coefficient is exactly zero at both random states (and at every probed
-cell) stays invisible and is under-declared.  Two independent states and the
-per-cell probes make this unlikely for physical models, but it is the
-documented residual risk of a numerical-probing approach.
+whose coefficient is exactly zero at every probe state (and at every probed
+cell) stays invisible and is under-declared.  A flux limiter is the common
+case: it reads the second upstream cell only where the data are monotone,
+which a random state gives at a third of the cells or fewer, so the two
+smooth states (rising and falling along every axis) are probed too.
+Independent states and the per-cell probes make a miss unlikely for physical
+models, but it is the documented residual risk of a numerical-probing
+approach.
 
 The union is widened with the radius-1 star so inference can only ever add
 entries relative to the default declaration.  Blocks whose measured offsets
@@ -152,6 +157,20 @@ def _probe_cells(shape: tuple[int, ...], depths: tuple[int, ...]) -> np.ndarray:
                 m[d] = idx_d
                 cells.add(int(m @ strides))
     return np.asarray(sorted(cells), dtype=np.int64)
+
+
+def _smooth_state(shape: tuple[int, ...], rising: bool) -> np.ndarray:
+    """Per-cell values in ``[1, 1.5]``, convex and monotone along every axis.
+
+    Rising, the ratio of successive differences is below one in the rising
+    direction; falling, in the other.  Between them a flux limiter sees a ratio
+    in ``(0, 1)`` for either flow direction, where every limiter reads its
+    second upstream cell.
+    """
+    axes = [np.arange(n) / max(n - 1, 1) for n in shape]
+    grids = np.meshgrid(*axes, indexing="ij")
+    q = sum((g if rising else 1.0 - g) ** 2 for g in grids) / len(shape)
+    return 1.0 + 0.5 * q.reshape(-1)
 
 
 def _star1_offsets(ndim: int) -> set[tuple[int, ...]]:
@@ -368,19 +387,32 @@ def _infer_stencil_offsets(
                     probed.update(new_cells.tolist())
         return state_accum
 
-    clean_states = 0
-    for _draw in range(_MAX_STATE_DRAWS):
-        if clean_states >= _N_PROBE_STATES:
-            break
+    def _draw():
         u_np = rng.uniform(0.5, 1.5, size=state_size)
         lam_np = rng.uniform(0.5, 1.5, size=constraint_dim)
-        t_val = float(rng.uniform(0.0, 1.0))
+        return u_np, lam_np, float(rng.uniform(0.0, 1.0))
+
+    def _accumulate(u_np, lam_np, t_val) -> bool:
         state_accum = _probe_state(u_np, lam_np, t_val)
         if state_accum is None:
-            continue
-        clean_states += 1
+            return False
         for key, offs in state_accum.items():
             accum.setdefault(key, set()).update(offs)
+        return True
+
+    clean_states = 0
+    for _attempt in range(_MAX_STATE_DRAWS):
+        if clean_states >= _N_PROBE_STATES:
+            break
+        clean_states += _accumulate(*_draw())
+    for rising in (True, False):
+        u_np, lam_np, t_val = _draw()
+        for comp, shape, _periodic_axes, pairs in blocks:
+            smooth = _smooth_state(shape, rising)
+            for read_var, d_in, _writes in pairs.values():
+                start = offset_of((comp.name, read_var.name))
+                u_np[start : start + smooth.size * d_in] = np.repeat(smooth, d_in)
+        _accumulate(u_np, lam_np, t_val)  # a non-finite smooth state is skipped
 
     if clean_states == 0:
         comp_names = sorted({comp.name for comp, _s, _p, _pairs in blocks})

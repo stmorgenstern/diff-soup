@@ -86,7 +86,7 @@ For a scalar field \(u\) with outward unit normal \(n\):
   feeds a grid face, the Danckwerts condition
   \(v c - D \, \partial c / \partial n = v c_{in}\). The face carries
   the total flux \(v c_{in}\) into the domain, so it pairs with
-  `div_advect`, which carries no flux in through a face under either
+  `div_advect`, which carries no flux in through a face under any
   scheme.
 - `spec.bc.periodic(var, axes=(0,))` wraps the field on the listed
   axes of its cartesian grid, every axis when `axes` is omitted. The

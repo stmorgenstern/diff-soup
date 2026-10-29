@@ -1,12 +1,13 @@
-r"""Upwind and central advection on collocated (cell/node-centered) cartesian grids.
+r"""Upwind, central, TVD and WENO advection on collocated (cell/node-centered) cartesian grids.
 
 These kernels approximate the advective term :math:`\mathbf{v}\cdot\nabla u`
 directly on a collocated grid — the field and every velocity component live at
 the same cell centers / nodes.  The value is differenced in place, one axis at
 a time.  [div_advect_1d][diff_soup.domains.grid.advection.collocated.div_advect_1d]
 and [div_advect_nd][diff_soup.domains.grid.advection.collocated.div_advect_nd]
-give the conservative form :math:`\nabla\cdot(\mathbf{v} u)` from upwind or
-central face fluxes.  A velocity is a constant per axis or a cell-centred field per axis.
+give the conservative form :math:`\nabla\cdot(\mathbf{v} u)` from flux-limited
+(TVD), WENO3, central or upwind face fluxes.  A velocity is a constant per axis
+or a cell-centred field per axis.
 
 Because the advective (non-conservative) form reads only nodal values and the
 distance between adjacent collocation points, the numerics are identical for the
@@ -58,12 +59,56 @@ from diff_soup.domains.grid._dtype import (
 from diff_soup.domains.grid._sweep import sweep_axis
 
 __all__ = [
+    "SCHEMES",
+    "LIMITERS",
     "advect_upwind_1d",
     "advect_upwind_nd",
     "div_advect_1d",
     "div_advect_nd",
     "normalize_velocity",
 ]
+
+
+SCHEMES = ("tvd", "weno3", "central", "upwind")
+LIMITERS = ("van_leer", "koren", "minmod")
+
+# The van Leer slope divides by |back| + |fwd|; this guard keeps a flat region
+# (0/0) at a zero slope with finite derivatives, its square a normal float32.
+_VAN_LEER_EPS = 1e-18
+# The WENO3 smoothness guard; Jiang and Shu used 1e-6, and 1e-10 lets the weights
+# see jumps in small fields too.
+_WENO_EPS = 1e-10
+
+
+def _limited_change(limiter: str, back: Array, fwd: Array) -> Array:
+    """``phi(r) * fwd`` with ``r = back / fwd``, the limited change from the upwind cell.
+
+    ``back`` is the difference from the cell upstream of the upwind cell and
+    ``fwd`` the difference to the downwind cell.  Koren and minmod are written
+    without a division; van Leer's harmonic mean carries ``_VAN_LEER_EPS``.
+    """
+    if limiter == "van_leer":
+        return (back * jnp.abs(fwd) + jnp.abs(back) * fwd) / (
+            jnp.abs(back) + jnp.abs(fwd) + _VAN_LEER_EPS
+        )
+    s = jnp.sign(fwd)
+    a, b = s * back, jnp.abs(fwd)  # r = a / b
+    if limiter == "koren":
+        return s * jnp.maximum(0.0, jnp.minimum(jnp.minimum(2.0 * a, (b + 2.0 * a) / 3.0), 2.0 * b))
+    return s * jnp.maximum(0.0, jnp.minimum(a, b))
+
+
+def _face_value(scheme: str, limiter: str, far: Array, up: Array, down: Array) -> Array:
+    """The upwind-biased face value from the cells ``far``, ``up`` and ``down`` of the flow."""
+    if scheme == "tvd":
+        return up + 0.5 * _limited_change(limiter, up - far, down - up)
+    # WENO3-JS weights d_k / (eps + beta_k)**2, multiplied through by both squares
+    # and by 1 / (sum of both) so a flat float32 region keeps finite derivatives.
+    beta_far, beta_near = _WENO_EPS + (up - far) ** 2, _WENO_EPS + (down - up) ** 2
+    total = beta_far + beta_near
+    w_far = (1.0 / 3.0) * (beta_near / total) ** 2
+    w_near = (2.0 / 3.0) * (beta_far / total) ** 2
+    return (w_far * (1.5 * up - 0.5 * far) + w_near * 0.5 * (up + down)) / (w_far + w_near)
 
 
 def normalize_velocity(
@@ -242,49 +287,69 @@ def div_advect_1d(
     velocity: Float[Array, "..."],
     *,
     periodic: bool = False,
-    scheme: str = "central",
+    scheme: str = "tvd",
+    limiter: str = "van_leer",
 ) -> Float[Array, "n"]:
     r"""Conservative approximation of :math:`\partial (v c)/\partial x`.
 
-    Under ``"upwind"`` each interior face carries the flux ``v_f c_up``: ``v_f`` is
-    the velocity at the face (the mean of the two neighbouring cell velocities for
-    a velocity field) and ``c_up`` the value of the cell upstream of it. Under
-    ``"central"`` it carries the mean of the two neighbouring cell fluxes ``v c``,
-    which is second order. Under either scheme a boundary face carries the
-    outgoing flux ``v_b c_b`` when the flow leaves through it and nothing when the
-    flow enters, so an inflow comes only from a boundary condition. The cell
-    value is the net outflow times ``face_area / cell_volume``, which conserves
-    the integral up to the boundary fluxes.
+    Each interior face carries ``v_f c_f``: ``v_f`` is the velocity at the face
+    (the mean of the two neighbouring cell velocities for a velocity field) and
+    ``c_f`` a value reconstructed from the side the flow comes from, by the sign
+    of ``v_f``.  Under ``"upwind"`` ``c_f`` is the upstream cell value.  Under
+    ``"tvd"`` it is the upstream value plus half the limited change
+    ``phi(r) (c_down - c_up)``, with ``r`` the ratio of the upstream difference
+    to the downstream one (van Leer, Koren or minmod ``phi``).  Under
+    ``"weno3"`` it is the third-order WENO-JS blend of the two two-cell
+    reconstructions, with smoothness guard ``1e-10``.  Under ``"central"`` the
+    face carries the mean of the two neighbouring cell fluxes ``v c`` instead.
+    An interior face whose upstream cell is a boundary cell has no second
+    upstream cell, and ``"tvd"`` and ``"weno3"`` take the upstream value there.
+
+    Under every scheme a boundary face carries the outgoing flux ``v_b c_b``
+    when the flow leaves through it and nothing when the flow enters, so an
+    inflow comes only from a boundary condition. The cell value is the net
+    outflow times ``face_area / cell_volume``, which conserves the integral up
+    to the boundary fluxes.
 
     Args:
         grid: 1D collocated grid.
         c: Field values, shape ``(n,)``.
         velocity: Advection speed, a constant or one value per cell.
         periodic: If ``True``, the two end faces are one face, wrapped.
-        scheme: ``"central"`` or ``"upwind"``, the interior face flux.
+        scheme: ``"tvd"``, ``"weno3"``, ``"central"`` or ``"upwind"``, the interior
+            face flux.
+        limiter: ``"van_leer"``, ``"koren"`` or ``"minmod"``, the ``"tvd"`` limiter.
 
     Returns:
         ``d(v c)/dx`` at each cell, shape ``(n,)``, in ``c``'s dtype.
     """
     grid = grid_in_field_dtype(grid, c)
+    n = grid.n
     v = narrow_to_field_dtype(velocity, c)
     if v.ndim == 0:
-        v_inner = jnp.broadcast_to(v, (grid.n - 1,))
+        v_inner = jnp.broadcast_to(v, (n - 1,))
         v_low, v_high, v_wrap = v, v, v
     else:
         v_inner = 0.5 * (v[:-1] + v[1:])
         v_low, v_high, v_wrap = v[0], v[-1], 0.5 * (v[-1] + v[0])
-
-    def upwind(vf, left, right):
-        return jnp.maximum(vf, 0.0) * left + jnp.minimum(vf, 0.0) * right
+    v_face = jnp.concatenate([v_inner, v_wrap[None]])  # face k joins cells k and k + 1 (mod n)
 
     if scheme == "central":
         vc = v * c
-        inner = 0.5 * (vc[:-1] + vc[1:])
-        wrap = 0.5 * (vc[-1] + vc[0])
+        face_flux = 0.5 * (vc + jnp.roll(vc, -1))
     else:
-        inner = upwind(v_inner, c[:-1], c[1:])
-        wrap = upwind(v_wrap, c[-1], c[0])
+        right, right2, left = jnp.roll(c, -1), jnp.roll(c, -2), jnp.roll(c, 1)
+        if scheme == "upwind":
+            from_low, from_high = c, right
+        else:
+            from_low = _face_value(scheme, limiter, left, c, right)
+            from_high = _face_value(scheme, limiter, right2, right, c)
+            if not periodic:
+                k = np.arange(n)
+                from_low = jnp.where(k >= 1, from_low, c)
+                from_high = jnp.where(k <= n - 3, from_high, right)
+        face_flux = jnp.maximum(v_face, 0.0) * from_low + jnp.minimum(v_face, 0.0) * from_high
+    inner, wrap = face_flux[:-1], face_flux[-1]
     if periodic:
         low, high = wrap, wrap
     else:
@@ -300,7 +365,8 @@ def div_advect_nd(
     c: Float[Array, "..."],
     velocity_per_axis: tuple[Array, ...],
     periodic_axes: tuple[int, ...] = (),
-    scheme: str = "central",
+    scheme: str = "tvd",
+    limiter: str = "van_leer",
 ) -> Float[Array, "..."]:
     r"""Conservative :math:`\nabla\cdot(\mathbf{v} c)` on an N-D grid.
 
@@ -313,7 +379,9 @@ def div_advect_nd(
         c: Field values, grid-shaped.
         velocity_per_axis: One entry per axis, a constant or a grid-shaped field.
         periodic_axes: Axes whose end faces wrap.
-        scheme: ``"central"`` or ``"upwind"``, the interior face flux.
+        scheme: ``"tvd"``, ``"weno3"``, ``"central"`` or ``"upwind"``, the interior
+            face flux.
+        limiter: ``"van_leer"``, ``"koren"`` or ``"minmod"``, the ``"tvd"`` limiter.
 
     Returns:
         ``div(v c)`` at each cell, grid-shaped, in ``c``'s dtype.
@@ -324,7 +392,7 @@ def div_advect_nd(
         per = d in periodic_axes
         out = out + sweep_axis(
             lambda col, vcol, _ax=ax, _per=per: div_advect_1d(
-                _ax, col, vcol, periodic=_per, scheme=scheme
+                _ax, col, vcol, periodic=_per, scheme=scheme, limiter=limiter
             ),
             c,
             d,

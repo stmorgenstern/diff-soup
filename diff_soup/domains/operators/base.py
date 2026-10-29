@@ -330,7 +330,7 @@ class AbstractOperator(eqx.Module):
         raise self._capability_error("advect_upwind", "upwind advection assembly")
 
     def div_advect(self, *args, **kwargs):
-        """Conservative advection of a field, called as `div_advect(u, velocity, *, scheme="central", bcs=None, t=None)`.
+        """Conservative advection of a field, called as `div_advect(u, velocity, *, scheme="tvd", limiter="van_leer", bcs=None, t=None)`.
 
         The base class raises `NotImplementedError`.
         """
@@ -511,18 +511,20 @@ class Operators(AbstractOperator):
         field: _NodealOrField,
         velocity: Any,
         *,
-        scheme: str = "central",
+        scheme: str = "tvd",
+        limiter: str = "van_leer",
         bcs: "Sequence | None" = None,
         t: "Array | None" = None,
     ) -> Float[Array, "..."]:
         """Advection in conservative form ∇·(v u), on a grid.
 
-        Under `"central"` an interior face carries the mean of `v u` in its two cells. Under `"upwind"` it carries the mean velocity of its two cells times the upstream value. A boundary face carries only an outgoing flux, so a transport equation writes `-q.ops.div_advect(q.c, v)` and feeds an inlet with `spec.bc.inflow`.
+        Each interior face carries the face velocity times a face value taken from the side the flow comes from. Under `"tvd"` the face value is the upstream value plus a limited share of the change to the downstream one: second order where `u` is smooth, and no new extrema at any cell Péclet number. Under `"weno3"` it is the third-order WENO reconstruction of Jiang and Shu. Under `"upwind"` it is the upstream value. Under `"central"` the face carries the mean of `v u` in its two cells instead. A face next to a boundary cell lacks the second upstream cell, and `"tvd"` and `"weno3"` drop to the upstream value there. A boundary face carries only an outgoing flux, so a transport equation writes `-q.ops.div_advect(q.c, v)` and feeds an inlet with `spec.bc.inflow`.
 
         Args:
             field: The advected field.
             velocity: One constant speed for every axis, or a sequence with one entry per axis, each a constant or one value per cell.
-            scheme: The face flux, `"central"` (default, second order) or `"upwind"` (first order).
+            scheme: The face flux, `"tvd"` (default, flux-limited second order), `"weno3"` (third order), `"central"` (second order, unlimited) or `"upwind"` (first order).
+            limiter: The `"tvd"` limiter, `"van_leer"` (default), `"koren"` or `"minmod"`.
             bcs: Periodic conditions only, which problems declare with `spec.bc.periodic`.
             t: Ignored.
 
@@ -531,7 +533,7 @@ class Operators(AbstractOperator):
         """
         del t
         u = self._as_dofs(field)
-        return _d.dispatch_div_advect(self.domain, u, velocity, bcs, scheme)
+        return _d.dispatch_div_advect(self.domain, u, velocity, bcs, scheme, limiter)
 
     def gradient(self, u: _NodealOrField) -> Float[Array, "..."]:
         """The gradient ∇u, pointwise on a one-dimensional grid.
@@ -1254,10 +1256,10 @@ class _PeriodicOperatorView(AbstractOperator):
         """Upwind advection with the declared periodic wrap merged into ``bcs``."""
         return self._wrappable("advect_upwind")(field, velocity, bcs=self._with_periodic(bcs), t=t)
 
-    def div_advect(self, field, velocity, *, scheme="central", bcs=None, t=None):
+    def div_advect(self, field, velocity, *, scheme="tvd", limiter="van_leer", bcs=None, t=None):
         """Conservative advection with the declared periodic wrap merged into ``bcs``."""
         return self._wrappable("div_advect")(
-            field, velocity, scheme=scheme, bcs=self._with_periodic(bcs), t=t
+            field, velocity, scheme=scheme, limiter=limiter, bcs=self._with_periodic(bcs), t=t
         )
 
     # ------------------------------------------------------------------

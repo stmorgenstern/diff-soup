@@ -200,8 +200,9 @@ def member_decay(q, m):
   differentiable and vmappable leaves, so a fit can learn them.
 - `stencil_radius=r` declares how far a member kernel's Jacobian
   reaches on the member grid, in cells per axis. The default reach
-  is one cell, which the built-in operators satisfy. Declare `2` for
-  a composed `laplacian(laplacian(c))`. Over-declaring is safe.
+  is one cell, which the built-in operators satisfy except
+  `div_advect` under `"tvd"` (the default) and `"weno3"`. Declare `2`
+  for those, or for a composed `laplacian(laplacian(c))`. Over-declaring is safe.
   Under-declaring is not detected and gives a structurally wrong
   sparse Jacobian.
 - `members.field_decl(name, mass="algebraic", shape=(1,))` declares a

@@ -48,6 +48,8 @@ from diff_soup.domains.base import Domain
 from diff_soup.domains.grid import Grid1D, GridND
 from diff_soup.domains.grid.advection.bcs import PeriodicBC
 from diff_soup.domains.grid.advection.collocated import (
+    LIMITERS,
+    SCHEMES,
     advect_upwind_1d,
     advect_upwind_nd,
     div_advect_1d,
@@ -795,14 +797,15 @@ def dispatch_div_advect(
     u: Array,
     velocity,
     bcs: "Sequence | None" = None,
-    scheme: str = "central",
+    scheme: str = "tvd",
+    limiter: str = "van_leer",
 ):
     """Route the conservative advection ``div(v u)`` to the grid kernels.
 
-    Each interior face carries the central or the upwind flux; a boundary face
-    carries only an outgoing flux, so an inflow enters through ``spec.bc.inflow``.
-    ``"fvm"`` and ``"fdm"`` grids share the kernel, which weights each face by
-    ``face_area / cell_volume``.
+    Each interior face carries the TVD, WENO3, central or upwind flux; a
+    boundary face carries only an outgoing flux, so an inflow enters through
+    ``spec.bc.inflow``. ``"fvm"`` and ``"fdm"`` grids share the kernel, which
+    weights each face by ``face_area / cell_volume``.
 
     Args:
         domain: A cartesian [Grid1D][] or [GridND][].
@@ -810,13 +813,20 @@ def dispatch_div_advect(
         velocity: A constant, or a per-axis sequence of constants or cell arrays.
         bcs: Optional [PeriodicBC][diff_soup.domains.grid.advection.bcs.PeriodicBC]
             tags; any other condition is rejected.
-        scheme: ``"central"`` or ``"upwind"``.
+        scheme: ``"tvd"``, ``"weno3"``, ``"central"`` or ``"upwind"``.
+        limiter: ``"van_leer"``, ``"koren"`` or ``"minmod"``, used by ``"tvd"``.
 
     Returns:
         ``div(v u)`` at the cells, matching ``u``'s layout.
     """
-    if scheme not in ("central", "upwind"):
-        raise ValueError(f'div_advect: scheme must be "central" or "upwind"; got {scheme!r}.')
+    if scheme not in SCHEMES:
+        raise ValueError(
+            f'div_advect: scheme must be "tvd", "weno3", "central" or "upwind"; got {scheme!r}.'
+        )
+    if limiter not in LIMITERS:
+        raise ValueError(
+            f'div_advect: limiter must be "van_leer", "koren" or "minmod"; got {limiter!r}.'
+        )
     _reject_staggered(domain, "div_advect")
     dt = domain.discretization_type
     if dt not in ("fvm", "fdm"):
@@ -835,11 +845,13 @@ def dispatch_div_advect(
         periodic_axes.add(int(bc.axis))
     if isinstance(domain, Grid1D):
         (v0,) = normalize_velocity(velocity, 1, (domain.n,), op_name="div_advect")
-        return div_advect_1d(domain, u, v0, periodic=(0 in periodic_axes), scheme=scheme)
+        return div_advect_1d(
+            domain, u, v0, periodic=(0 in periodic_axes), scheme=scheme, limiter=limiter
+        )
     if isinstance(domain, GridND):
         vpa = normalize_velocity(velocity, domain.dim, tuple(domain.shape), op_name="div_advect")
         u_grid = _reshape_to_grid(domain, u)
-        out = div_advect_nd(domain, u_grid, vpa, tuple(sorted(periodic_axes)), scheme)
+        out = div_advect_nd(domain, u_grid, vpa, tuple(sorted(periodic_axes)), scheme, limiter)
         return out.reshape(-1) if u.ndim == 1 else out
     raise NotImplementedError(f"div_advect is not implemented for {type(domain).__name__}.")
 

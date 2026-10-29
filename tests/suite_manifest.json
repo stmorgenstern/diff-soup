@@ -9,8 +9,8 @@
     "public_api": {
       "files": 19,
       "functions": 175,
-      "collected": 275,
-      "lines": 5550
+      "collected": 277,
+      "lines": 5590
     },
     "contracts": {
       "files": 17,

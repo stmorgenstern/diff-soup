@@ -11,6 +11,8 @@ constant curl ``k`` is ``k`` times the lumped mass.
 
 from __future__ import annotations
 
+import itertools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -294,17 +296,26 @@ def _bed_cells(method):
     return grid, coords, field
 
 
-@pytest.mark.parametrize("method", ["fvm", "fdm"])
+_TRANSPORT = ["equal axes", "no y", "velocity field", "central", "upwind", "inflow balance"]
+_LIMITED = [{"scheme": "tvd", "limiter": name} for name in ("van_leer", "koren", "minmod")]
+
+
 @pytest.mark.parametrize(
-    "claim", ["equal axes", "no y", "velocity field", "central", "upwind", "inflow balance"]
+    "method, claim",
+    [(method, claim) for claim in _TRANSPORT for method in ("fvm", "fdm")]
+    + [("fvm", claim) for claim in ("limited orders", "no new extrema", "limited jacobian")],
 )
 def test_grid_transport_takes_per_axis_dispersion_velocity_fields_and_an_inflow(method, claim):
     """``div_flux`` with the same cell diffusivity on both axes equals the shared one, and with
     ``(1.5, 0)`` the 1-D operator along x; ``advect_upwind`` with velocity arrays equal to constants equals the
     constant form; ``div_advect`` gives each interior face the mean of ``v c`` in its two cells under
-    ``"central"`` (the default) and the mean velocity of its two cells times the upstream value under
+    ``"central"`` and the mean velocity of its two cells times the upstream value under
     ``"upwind"``, and refuses another scheme; with ``-div_advect`` and an inflow ``0.5 * 2`` on the
-    low-x face, the rate of change of the integral is the inflow minus the outflow ``v c`` on the high-x face."""
+    low-x face, the rate of change of the integral is the inflow minus the outflow ``v c`` on the
+    high-x face. On ``exp(x)`` the interior error of ``"tvd"`` (each limiter) falls at second order
+    and of ``"weno3"`` at third, for either flow direction; under ``"tvd"`` no local maximum of a
+    rough profile rises and no minimum falls; and the sparse Jacobian of a ``"tvd"`` problem, whose
+    stencil reaches two cells upstream, equals ``jax.jacfwd`` of its residual."""
     grid, coords, field = _bed_cells(method)
     ops = Operators(grid)
     if claim == "equal axes":
@@ -324,16 +335,44 @@ def test_grid_transport_takes_per_axis_dispersion_velocity_fields_and_an_inflow(
         xyz = np.asarray(box.node_coordinates())
         u = jnp.asarray(1.0 + xyz[:, 0] * xyz[:, 1])
         c = jnp.asarray(np.sin(3.0 * xyz[:, 0]) + xyz[:, 2])
-        with pytest.raises(ValueError, match='"central" or "upwind"'):
+        with pytest.raises(ValueError, match='"tvd", "weno3", "central" or "upwind"'):
             Operators(box).div_advect(c, (u, 0.0, 0.0), scheme="quick")
-        kw = {} if claim == "central" else {"scheme": claim}  # central is the default
-        got = Operators(box).div_advect(c, (u, 0.0, 0.0), **kw).reshape(5, 3, 2)[1:-1]
+        got = Operators(box).div_advect(c, (u, 0.0, 0.0), scheme=claim).reshape(5, 3, 2)[1:-1]
         u, c = u.reshape(5, 3, 2), c.reshape(5, 3, 2)
         if claim == "central":
             face = 0.5 * ((u * c)[:-1] + (u * c)[1:])
         else:
             face = 0.5 * (u[:-1] + u[1:]) * c[:-1]  # u > 0, so the low cell is upstream
         expected = (face[1:] - face[:-1]) / np.diff(np.unique(xyz[:, 0]))[0]
+    elif claim == "limited orders":
+        error = []
+        for n in (40, 80):
+            line = cartesian_grid_1d(n, 0.0, 1.0, method=method)
+            c = jnp.exp(jnp.asarray(line.node_coordinates()).ravel())
+            for kw, v in itertools.product([*_LIMITED, {"scheme": "weno3"}], (1.0, -1.0)):
+                error.append(np.abs(Operators(line).div_advect(c, v, **kw) - v * c)[2:-2].max())
+        # measured ratios 3.83 to 3.93 for "tvd", 7.72 to 7.78 for "weno3", workstation CPU
+        # 2026-10-29, pytest tests/public_api/test_operators.py -k "limited orders"
+        got, expected = np.array(error[:8]) / np.array(error[8:]), [3.5] * 6 + [7.0] * 2
+        return np.testing.assert_array_less(expected, got)
+    elif claim == "no new extrema":
+        c = jnp.asarray(np.random.default_rng(0).uniform(0.0, 1.0, 40))
+        ops, outward = Operators(cartesian_grid_1d(40, 0.0, 1.0)), jnp.sign(c - jnp.roll(c, 1))
+        peak_or_dip = (outward * jnp.sign(c - jnp.roll(c, -1)) > 0)[1:-1]
+        rates = [-ops.div_advect(c, v, **kw) * outward for kw in _LIMITED for v in (0.7, -0.7)]
+        assert np.max(np.asarray(rates)[:, 1:-1][:, peak_or_dip]) <= 0.0
+        return
+    elif claim == "limited jacobian":
+        c, line = jnp.asarray(np.linspace(1.0, 0.0, 42) ** 2), cartesian_grid_1d(42, 0.0, 1.0)
+        got, expected, lam, t = [], [], jnp.zeros(0), jnp.asarray(0.0)
+        for kw in _LIMITED:  # on this convex monotone c every limiter reads both upstream cells
+            spec = ds.problem(f"limited_{kw['limiter']}").domain("line", line)
+            spec.field("c", mass="differential", scale=1.0)
+            spec.equation(writes="c", reads=("c",))(lambda q: -q.ops.div_advect(q.c, -1.0, **kw))
+            problem = spec.build()
+            values, *_, pattern = problem.physics_jacobian_blocks(c, lam, t)
+            got.append(jnp.zeros((42, 42)).at[pattern.rows, pattern.cols].add(values))
+            expected.append(jax.jacfwd(lambda u: problem.physics_residual(u, lam, t)[0])(c))
     else:
         speed = jnp.asarray(0.5 + 0.1 * coords[:, 1])
         spec = ds.problem(f"inflow_{method}").domain("bed", grid)
