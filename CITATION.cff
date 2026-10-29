@@ -18,3 +18,18 @@ keywords:
   - PDE
   - GPU
   - sparse direct solver
+identifiers:
+  - type: url
+    value: "https://arxiv.org/abs/2610.37333v1"
+    description: "The diff-soup paper on arXiv"
+preferred-citation:
+  type: article
+  title: "diff-soup: GPU-native Differentiable Simulation and Inference for Large-scale Stiff Dynamical Systems"
+  authors:
+    - family-names: Degnan-Morgenstern
+      given-names: Samuel
+    - family-names: Bazant
+      given-names: Martin Z.
+  journal: "arXiv preprint arXiv:2610.37333"
+  year: 2026
+  url: "https://arxiv.org/abs/2610.37333v1"
