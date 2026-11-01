@@ -340,3 +340,49 @@ def test_pdesolve_takes_the_problems_own_theta_and_reads_writes_and_differentiat
     grads = jax.grad(lambda t: final(t).sum() + t[rate] ** 2)(theta.replace(rate, 0.5))
     # measured 3.5e-5 off the exact derivative, CPU workstation 2026-10-28
     np.testing.assert_allclose(ds.parameter_gradient(grads, rate), exact, atol=1e-4)
+
+
+def _priced(a_scale, b_scale=1.0):
+    """``u' = -(a + b) u`` with normal priors of standard deviations ``a_scale`` and ``b_scale``."""
+    spec = ds.problem("prior_decay")
+    spec.domain("rod", ds.cartesian_grid_1d(3, 0.0, 1.0, method="fvm"))
+    spec.field("u", mass="differential", scale=1.0)
+    spec.param("a", value=0.2, learnable=True, prior=inf.NormalPrior(mean=0.2, scale=a_scale))
+    spec.param("b", value=0.1, learnable=True, prior=inf.NormalPrior(mean=0.1, scale=b_scale))
+    spec.equation(writes="u", reads=("u",))(lambda q: -(q.p.a + q.p.b) * q.u)
+    return spec
+
+
+@pytest.mark.parametrize("scales", [(0.25, 1.0), (1.0, 0.25)])
+def test_each_build_of_a_template_is_fitted_under_its_own_prior(scales):
+    """Builds of one template that differ only in a prior's scale are fitted, each after both
+    were built, under their own prior: precision 16 for scale 0.25 and 1 for scale 1."""
+    priced = ds.recipe(_priced)
+    for scale in scales:
+        priced.build(a_scale=scale)
+    for scale in scales:
+        experiment = _experiment(priced, inputs={"a_scale": scale})
+        fit = inf.InferenceProblem(experiment, parameters=priced.handle("a"), objective=inf.MAP())
+        assert float(fit.prior_precision(fit.x0)[0, 0]) == scale**-2
+
+
+def test_a_study_takes_each_owners_prior_and_refuses_an_owner_whose_builds_disagree():
+    """A parameter varying by owner takes each owner's prior from its experiments' builds, and
+    MAP refuses an owner whose experiments' builds declare different priors."""
+    priced = ds.recipe(_priced)
+    a, b = priced.handle("a"), priced.handle("b")
+
+    def study(scales, owners):
+        experiments = [
+            _experiment(priced, inputs={"a_scale": 1.0, "b_scale": scale}, id=index)
+            for index, scale in enumerate(scales)
+        ]
+        parameters = ds.ParameterSet(shared=(a,), varying={"cell": (b,)})
+        return inf.Study(
+            experiments, parameters=parameters, clusters={"cell": owners}, independent=True
+        )
+
+    fit = inf.InferenceProblem(study((0.25, 0.5, 0.5), ("x", "y", "y")), objective=inf.MAP())
+    np.testing.assert_array_equal(np.diag(fit.prior_precision(fit.x0)), [1.0, 16.0, 4.0])
+    with pytest.raises(ValueError, match="sharing 'b' of owner 'x' declare different priors"):
+        inf.InferenceProblem(study((0.25, 0.5), ("x", "x")), objective=inf.MAP())

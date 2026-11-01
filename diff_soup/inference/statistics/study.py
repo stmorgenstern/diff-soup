@@ -685,8 +685,16 @@ class Study:
                 child.persist_window_initialization()
         return children, holders
 
+    def _declarations_of(self, handle: Any, indices: Any) -> tuple:
+        """The declarations of ``handle`` in the builds of the experiments at ``indices``."""
+        return tuple(self.experiments[index]._declarations[handle.name] for index in indices)
+
     def parameter_schema(self, problem: Any) -> ParameterSchema:
-        """Compile handle occurrences against an already-lowered flat layout."""
+        """Compile handle occurrences against an already-lowered flat layout.
+
+        Each occurrence records the declarations of the experiments behind it,
+        so a MAP takes every prior from the experiments' own builds.
+        """
         group_columns = {
             name: tuple(int(column) for column in columns)
             for name, columns in zip(
@@ -707,10 +715,13 @@ class Study:
                     f"handle {handle.name!r} exposes {size} values but optimizer group "
                     f"owns {len(columns)} columns."
                 )
+            everyone = self._declarations_of(handle, range(len(self.experiments)))
             entries.append(
                 ParameterEntry(
                     handle=handle,
-                    occurrences=(ParameterOccurrence(owner=None, columns=columns),),
+                    occurrences=(
+                        ParameterOccurrence(owner=None, columns=columns, declarations=everyone),
+                    ),
                     size=size,
                     decode=decode,
                 )
@@ -741,7 +752,14 @@ class Study:
                         raise ValueError(
                             f"owner group {group_name!r} has {len(columns)} columns; expected {size}."
                         )
-                    occurrences.append(ParameterOccurrence(owner=owner, columns=columns))
+                    members = [index for index, label in enumerate(labels) if label == owner]
+                    occurrences.append(
+                        ParameterOccurrence(
+                            owner=owner,
+                            columns=columns,
+                            declarations=self._declarations_of(handle, members),
+                        )
+                    )
                 entries.append(
                     ParameterEntry(
                         handle=handle,

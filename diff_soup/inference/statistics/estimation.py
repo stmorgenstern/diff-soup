@@ -30,6 +30,7 @@ from diff_soup.inference.statistics.measurement import (
 )
 from diff_soup.inference.statistics.priors import compile_prior
 from diff_soup.inference.statistics.study import Study
+from diff_soup.problem._ir.lower import prior_digest
 from diff_soup.utils.ad_guards import reverse_linearization_observed
 
 
@@ -144,19 +145,39 @@ def _measurement_log_normalizer(study: Study, holders: tuple | None = None) -> f
 
 
 def _compile_prior_blocks(schema: Any, objective: Any) -> tuple:
-    """Compile each handle occurrence exactly once for a physical MAP."""
+    """Compile each handle occurrence exactly once for a physical MAP.
+
+    An occurrence takes its prior from the declarations of the experiments
+    behind it, which must agree, or from the entry's handle where the schema
+    records none.
+    """
     if isinstance(objective, MLE):
         return ()
     blocks = []
-    missing = []
+    missing = set()
     for entry in schema.entries:
-        declaration = getattr(entry.handle, "prior", None)
-        if declaration is None:
-            missing.append(entry.handle.name)
-            continue
-        prior = compile_prior(declaration, entry.handle, entry.size)
         for occurrence in entry.occurrences:
-            blocks.append((jnp.asarray(occurrence.columns, dtype=jnp.int32), prior))
+            declarations = tuple(
+                {id(item): item for item in occurrence.declarations or (entry.handle,)}.values()
+            )
+            declared = [getattr(item, "prior", None) is not None for item in declarations]
+            if not any(declared):
+                missing.add(entry.handle.name)
+                continue
+            priors = [
+                compile_prior(item.prior, item, entry.size)
+                for item, has_prior in zip(declarations, declared)
+                if has_prior
+            ]
+            if not all(declared) or len({prior_digest(prior) for prior in priors}) > 1:
+                where = "" if occurrence.owner is None else f" of owner {occurrence.owner!r}"
+                raise ValueError(
+                    f"MAP: the experiments sharing {entry.handle.name!r}{where} declare "
+                    "different priors for it; experiments that share a parameter must "
+                    "declare one prior. Declare the same prior in each build, or let the "
+                    "parameter vary by experiment."
+                )
+            blocks.append((jnp.asarray(occurrence.columns, dtype=jnp.int32), priors[0]))
     if missing:
         raise ValueError(
             f"MAP requires a proper prior on every fitted handle; missing priors for "
