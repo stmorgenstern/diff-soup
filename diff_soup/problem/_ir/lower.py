@@ -31,6 +31,7 @@ AST-enforced).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Callable
 from typing import Any, Optional
@@ -453,12 +454,12 @@ def _value_copy(
     The copy is ``eqx.combine(theta, static)`` with ``source``'s static
     partition: new tuple, dict and module nodes down to every leaf, so it shares
     only immutable things (arrays, functions, static fields) with ``source`` and
-    with other copies.  Equal values and bounds return the memoized object,
-    whose handle metadata (the bounds' and declarations' handles, matched by
+    with other copies.  Equal values, bounds and priors return the memoized
+    object, whose handle metadata (the bounds' and declarations' handles, matched by
     name) becomes the caller's; a traced value (lowering inside a
     transformation) has no bytes to digest, so its copy is not memoized.
     """
-    digest = _value_digest(theta, bounds)
+    digest = _value_digest(theta, bounds, declarations)
     made: list = []
 
     def _make() -> LoweredProblem:
@@ -492,8 +493,14 @@ def _value_copy(
     return copy
 
 
-def _value_digest(theta: Any, bounds: Optional[tuple]) -> Optional[str]:
-    """SHA-256 of the value leaves (dtype, shape and bytes, in order) and the bounds.
+def _value_digest(
+    theta: Any, bounds: Optional[tuple], declarations: Optional[tuple] = None
+) -> Optional[str]:
+    """SHA-256 of the value leaves (dtype, shape and bytes, in order), the bounds and the priors.
+
+    The priors are those of ``declarations``. A fit reads each parameter's prior
+    from the declarations of its problem, so problems that differ only in a
+    prior are two problems.
 
     ``None`` when a leaf is traced: a value inside a transformation has no bytes.
     """
@@ -512,6 +519,11 @@ def _value_digest(theta: Any, bounds: Optional[tuple]) -> Optional[str]:
                 h.update(f"|bound:{getattr(handle, 'name', handle)}:{bool(learnable)}".encode())
                 for limit in tuple(limits):
                     _digest_value(h, limit)
+        for declaration in declarations or ():
+            prior = getattr(declaration, "prior", None)
+            if prior is not None:
+                h.update(f"|prior:{getattr(declaration, 'name', declaration)}".encode())
+                _digest_prior(h, prior)
     except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError):
         return None
     return h.hexdigest()
@@ -528,6 +540,35 @@ def _digest_value(h: Any, value: Any) -> None:
         return
     h.update(f"|{array.dtype.str}:{array.shape}:".encode())
     h.update(np.ascontiguousarray(array).tobytes())
+
+
+def _digest_prior(h: Any, prior: Any) -> None:
+    """Feed a prior's type and field values to the hash ``h``.
+
+    A dataclass (an ``eqx.Module`` included) is read field by field and a tuple
+    or list item by item, so an array field enters by its bytes, never by a
+    repr that may elide them.
+    """
+    if dataclasses.is_dataclass(prior) and not isinstance(prior, type):
+        h.update(f"|{type(prior).__module__}.{type(prior).__qualname__}(".encode())
+        for field in dataclasses.fields(prior):
+            h.update(f"{field.name}=".encode())
+            _digest_prior(h, getattr(prior, field.name))
+        h.update(b")")
+    elif isinstance(prior, (tuple, list)):
+        h.update(f"|{type(prior).__name__}[".encode())
+        for item in prior:
+            _digest_prior(h, item)
+        h.update(b"]")
+    else:
+        _digest_value(h, prior)
+
+
+def prior_digest(prior: Any) -> str:
+    """SHA-256 of a prior's type and field values, equal for priors equal in content."""
+    h = hashlib.sha256()
+    _digest_prior(h, prior)
+    return h.hexdigest()
 
 
 def _initial_bordered_values(eqset: EquationSet, reference: Any) -> Any:

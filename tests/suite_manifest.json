@@ -3,7 +3,7 @@
     "test_files": 43,
     "test_functions": 390,
     "collected_tests": 565,
-    "source_lines": 14100
+    "source_lines": 14125
   },
   "tier_budgets": {
     "public_api": {
