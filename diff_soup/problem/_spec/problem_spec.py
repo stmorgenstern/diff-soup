@@ -1471,7 +1471,8 @@ class ProblemSpec:
     def build(self, *, layout=None, precision=None):
         """Validate the recipe and lower it into a solve-ready problem.
 
-        Recipes equal in structure and values return the same problem.
+        Recipes equal in structure and values, bounds and priors included,
+        return the same problem.
 
         Args:
             layout: Device placement, a [`Layout`][diff_soup.Layout], or `None` for the default.
@@ -1489,8 +1490,8 @@ class ProblemSpec:
             (ps, ps.bounds, ps.learnable) for ps in self._params.values() if ps.bounds is not None
         )
         handles = tuple(self._params.values()) + tuple(self._functions.values())
-        # Bounds are values, not structure: they take part in the returned
-        # problem's identity. The geometry names are the parameters that scale a
+        # Bounds and priors are values, not structure: they take part in the
+        # returned problem's identity. The geometry names are the parameters that scale a
         # grid; an experiment checks the values it gives them.
         problem = lower_declared(
             self.to_equation_set(),
