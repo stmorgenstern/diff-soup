@@ -667,11 +667,12 @@ class SolverView:
                 solve of a reverse sweep.
         """
         theta = self.default_theta() if theta is None else theta
-        route_name, _ = self.initialization_backend(backend)
         if route == "auto":
             ic_route = "reduced" if reduced_route_eligible(self.problem) else "joint"
         else:
             ic_route = route
+        block = int(self.structure.algebraic_indices.size) if ic_route == "reduced" else self.n
+        route_name, _ = resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
         key = (
             float(tol),
             int(max_iters),
@@ -711,15 +712,23 @@ class SolverView:
 
         Returns ``(name, instance)`` exactly as
         [consistent_initial_state][diff_soup.problem.implicit.solver_problem.SolverView.consistent_initial_state]
-        resolves its ``backend`` argument for this problem: ``"auto"`` stays
+        resolves its ``backend`` argument for this problem's automatic solve route:
+        ``"auto"`` stays
         dense for a dense-mode linearization plan and otherwise picks the
         platform's route from the system size; a concrete name or a
-        [LinearSolver][diff_soup.linear.LinearSolver] instance is honored. The
+        [LinearSolver][diff_soup.linear.LinearSolver] instance is honored unless
+        its bound ``layout.n_dofs`` differs from the initialization system size,
+        in which case initialization uses Dense without changing the step backend. The
         instance is ``None`` on the dense route. Callers that batch
         initialization solves (for example projected output sampling) read the
         resolved backend's capabilities from the returned instance.
         """
-        return resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=self.n)
+        block = (
+            int(self.structure.algebraic_indices.size)
+            if reduced_route_eligible(self.problem)
+            else self.n
+        )
+        return resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
 
     def startup_slope(
         self,
