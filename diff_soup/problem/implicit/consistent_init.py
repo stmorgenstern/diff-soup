@@ -190,7 +190,7 @@ class ConsistentInitResult(eqx.Module):
         ydot: The consistent derivative, zero on algebraic rows.
         residual_norm: The residual 2-norm at `y` and `ydot`.
         iterations: The Newton iterations used.
-        converged: Whether `residual_norm` reached `tol`.
+        converged: Whether the final residual passed the absolute plus relative gate.
     """
 
     y: jax.Array
@@ -251,6 +251,7 @@ class ConsistentInitPlan:
         plan=None,
         *,
         tol: float = 1e-12,
+        rtol: float = 0.0,
         max_iters: int = 30,
         chord_iters: int = 8,
         backend="auto",
@@ -265,7 +266,12 @@ class ConsistentInitPlan:
         Args:
             problem: The solver problem.
             plan: Optional prebuilt linearization plan for ``problem``.
-            tol: Absolute residual 2-norm gate for convergence.
+            tol: Absolute residual 2-norm target for Newton iterations.
+            rtol: Relative final residual gate, scaled by the initial residual
+                2-norm. Positive values also allow eight machine epsilons
+                times the residual scale from componentwise state/slopes
+                rounding. Zero retains the absolute-only gate. Newton still
+                attempts the absolute target first.
             max_iters: Total Newton iteration budget (chord and exact phases
                 together).
             chord_iters: Iteration budget for the frozen-factor (chord)
@@ -315,6 +321,9 @@ class ConsistentInitPlan:
         self.d_idx = structure.differential_indices
         self.n_a = int(self.a_idx.size)
         self.tol = float(tol)
+        self.rtol = float(rtol)
+        if not np.isfinite(self.rtol) or self.rtol < 0.0:
+            raise ValueError("rtol must be finite and nonnegative")
         self.max_iters = int(max_iters)
         self.chord_iters = int(chord_iters)
         self.layout = layout
@@ -453,6 +462,7 @@ def build_consistent_init_plan(
     plan=None,
     *,
     tol: float = 1e-12,
+    rtol: float = 0.0,
     max_iters: int = 30,
     chord_iters: int = 8,
     backend="auto",
@@ -467,6 +477,7 @@ def build_consistent_init_plan(
         problem,
         plan,
         tol=tol,
+        rtol=rtol,
         max_iters=max_iters,
         chord_iters=chord_iters,
         backend=backend,
@@ -639,7 +650,29 @@ def _k_solver(icp, t, y, ydot, theta, control):
 _CHORD_CONTRACTION_LIMIT = 0.5
 
 
-def _phased_newton(icp: ConsistentInitPlan, z0, residual_at, make_solver):
+def _roundoff_gate(icp, t, y, ydot, theta, control):
+    """Eight-epsilon residual scale for componentwise rounding of state/slopes.
+
+    Uses ``||abs(F_y) abs(y) + abs(F_ydot) abs(ydot)||2``, restricted to
+    algebraic rows on the reduced route. Sparse plans stay sparse.
+    """
+    plan = icp.plan
+    fy = plan.fy_values(t, y, ydot, theta, control)
+    fd = plan.fydot_values(t, y, ydot, theta, control)
+    if plan.mode == "dense":
+        scale = jnp.abs(fy) @ jnp.abs(y) + jnp.abs(fd) @ jnp.abs(ydot)
+    else:
+        scale = jnp.zeros_like(y)
+        for values, topology, state in (
+            (fy, plan.fy_topology, y), (fd, plan.fydot_topology, ydot)
+        ):
+            scale = scale.at[topology.rows].add(jnp.abs(values) * jnp.abs(state[topology.cols]))
+    if icp.route == "reduced":
+        scale = scale[icp.a_idx]
+    return 8 * jnp.finfo(y.dtype).eps * jnp.linalg.norm(scale)
+
+
+def _phased_newton(icp: ConsistentInitPlan, z0, residual_at, make_solver, roundoff_at):
     """Chord phase over one frozen factor, then fresh-Jacobian exact Newton.
 
     The chord phase factors the iteration matrix once at the seed and reuses
@@ -712,7 +745,13 @@ def _phased_newton(icp: ConsistentInitPlan, z0, residual_at, make_solver):
         (norm0 > icp.tol) & jnp.isfinite(norm0), solve_phases, already_done, None
     )
     norm = jnp.linalg.norm(r)
-    converged = (norm <= icp.tol) & jnp.isfinite(norm)
+    # Preserve the absolute Newton target and its returned digits. Only the
+    # final gate admits relative residuals and componentwise round-off, after
+    # the absolute solve has been tried. An explicit rtol=0 keeps it strict.
+    roundoff = (jax.lax.cond(norm > icp.tol, roundoff_at, lambda _: jnp.zeros_like(norm), z)
+                if icp.rtol > 0.0 else jnp.zeros_like(norm))
+    gate = icp.tol + icp.rtol * norm0 + roundoff
+    converged = (norm <= gate) & jnp.isfinite(norm) & jnp.isfinite(norm0) & jnp.isfinite(gate)
     return z, norm, iterations, converged
 
 
@@ -741,7 +780,11 @@ def _newton_primal(icp: ConsistentInitPlan, t0, y0, ydot_guess, theta, control):
         y, ydot = _embed(icp, y0, z)
         return _k_solver(icp, t0, y, ydot, theta, control)
 
-    z, norm, iterations, converged = _phased_newton(icp, z0, residual_at, make_solver)
+    def roundoff_at(z):
+        y, ydot = _embed(icp, y0, z)
+        return _roundoff_gate(icp, t0, y, ydot, theta, control)
+
+    z, norm, iterations, converged = _phased_newton(icp, z0, residual_at, make_solver, roundoff_at)
     y_star, ydot_star = _embed(icp, y0, z)
     return y_star, ydot_star, norm, iterations, converged
 
@@ -784,7 +827,7 @@ def consistent_ic_root(icp, t0, y0, ydot_guess, theta, control):
 def _consistent_ic_root_jvp(icp, primals, tangents):
     """Tangent: exact implicit solve in the joint unknowns at the root."""
     t0, y0, ydot_guess, theta, control = primals
-    _dt0, dy0, _dydot_guess, dtheta, dcontrol = tangents
+    dt0, dy0, _dydot_guess, dtheta, dcontrol = tangents
     # The primal through the entry itself: differentiating this rule again
     # differentiates the root by this rule, never through the Newton loop.
     out = consistent_ic_root(icp, t0, y0, ydot_guess, theta, control)
@@ -797,6 +840,11 @@ def _consistent_ic_root_jvp(icp, primals, tangents):
     dy0_pinned = _zero_where_not(valid, jnp.where(diff_mask, dy0, 0.0))
     dtheta, dcontrol = _zero_where_not(valid, (dtheta, dcontrol))
     _, rhs_dot = jax.jvp(pinned_residual, (y0, theta, control), (dy0_pinned, dtheta, dcontrol))
+    _, time_dot = jax.jvp(
+        lambda t: icp.plan._residual(t, y_star, ydot_star, theta, control),
+        (t0,), (_zero_where_not(valid, dt0),),
+    )
+    rhs_dot = rhs_dot + time_dot
     dz = _gated_root_tangent(icp, values, icp.n, rhs_dot, valid)
 
     dy = jnp.where(diff_mask, dy0, dz)
@@ -893,7 +941,11 @@ def _reduced_newton_primal(icp: ConsistentInitPlan, t0, y0, theta, control):
         y = y0.at[a_idx].set(z, unique_indices=True, indices_are_sorted=True)
         return _g_solver(icp, t0, y, theta, control)
 
-    z, _norm, iterations, converged = _phased_newton(icp, z0, residual_at, make_solver)
+    def roundoff_at(z):
+        y = y0.at[a_idx].set(z, unique_indices=True, indices_are_sorted=True)
+        return _roundoff_gate(icp, t0, y, zeros, theta, control)
+
+    z, _norm, iterations, converged = _phased_newton(icp, z0, residual_at, make_solver, roundoff_at)
     y_star = y0.at[a_idx].set(z, unique_indices=True, indices_are_sorted=True)
     return y_star, iterations, converged
 
@@ -928,7 +980,7 @@ def _reduced_ic_root(icp, t0, y0, theta, control):
 def _reduced_ic_root_jvp(icp, primals, tangents):
     """Tangent: exact implicit solve on the algebraic block at the root."""
     t0, y0, theta, control = primals
-    _dt0, dy0, dtheta, dcontrol = tangents
+    dt0, dy0, dtheta, dcontrol = tangents
     # The primal through the entry itself, as in the joint rule.
     out = _reduced_ic_root(icp, t0, y0, theta, control)
     y_star, iterations, converged = out
@@ -941,6 +993,11 @@ def _reduced_ic_root_jvp(icp, primals, tangents):
     dy0_pinned = _zero_where_not(valid, jnp.where(diff_mask, dy0, 0.0))
     dtheta, dcontrol = _zero_where_not(valid, (dtheta, dcontrol))
     _, rhs_dot = jax.jvp(pinned_residual, (y0, theta, control), (dy0_pinned, dtheta, dcontrol))
+    _, time_dot = jax.jvp(
+        lambda t: icp.plan._residual(t, y_star, jnp.zeros_like(y_star), theta, control)[a_idx],
+        (t0,), (_zero_where_not(valid, dt0),),
+    )
+    rhs_dot = rhs_dot + time_dot
     dz = _gated_root_tangent(icp, values, icp.n_a, rhs_dot, valid)
 
     dz_full = jnp.zeros_like(y_star).at[a_idx].set(dz, unique_indices=True, indices_are_sorted=True)
@@ -960,9 +1017,8 @@ def _reconstruct_slopes(icp: ConsistentInitPlan, t0, y, theta, control):
     residual at zero slopes. Invertibility is a value property checked here,
     at the solved point: a non-finite or zero diagonal entry on a
     differential slot fails loudly — the returned slopes are NaN and
-    ``diag_ok`` is false. ``t0`` carries no derivative.
+    ``diag_ok`` is false.
     """
-    t0 = jax.lax.stop_gradient(t0)
     diff_mask = jnp.asarray(icp.diff_mask)
     diag = icp._derivative_apply(t0, y, theta, control, jnp.ones_like(y))
     f = -icp.plan._residual(t0, y, jnp.zeros_like(y), theta, control)
@@ -1031,6 +1087,7 @@ def consistent_initial_state(
     plan=None,
     init_plan: Optional[ConsistentInitPlan] = None,
     tol: float = 1e-12,
+    rtol: float = 0.0,
     max_iters: int = 30,
     chord_iters: int = 8,
     backend="auto",
@@ -1041,7 +1098,7 @@ def consistent_initial_state(
 
     It holds the differential values of `y0` and solves for the algebraic values and the
     differential slopes with Newton's method. The result is differentiable with respect to
-    `y0` and `theta`.
+    `t0`, `y0`, `theta` and `control`.
 
     Args:
         problem: The problem from `spec.build()`, or a `MassProblem` or `ImplicitProblem`.
@@ -1053,6 +1110,9 @@ def consistent_initial_state(
         plan: A prebuilt linearization plan, or `None` to build one.
         init_plan: A prebuilt `ConsistentInitPlan`, which overrides every setting below it.
         tol: The residual 2-norm at which Newton's method stops.
+        rtol: Relative final gate scaled by the initial residual 2-norm, after
+            attempting the absolute target. Positive values also enable the
+            state/slopes round-off allowance; zero keeps the absolute-only gate.
         max_iters: The total Newton iteration budget.
         chord_iters: The first iterations, which reuse one factorization before each later
             iteration refactors.
@@ -1072,6 +1132,7 @@ def consistent_initial_state(
             problem,
             plan,
             tol=tol,
+            rtol=rtol,
             max_iters=max_iters,
             chord_iters=chord_iters,
             backend=backend,
@@ -1125,6 +1186,7 @@ def check_consistent_init(
     plan=None,
     init_plan: Optional[ConsistentInitPlan] = None,
     tol: float = 1e-12,
+    rtol: float = 0.0,
     max_iters: int = 30,
 ) -> ConsistentInitResult:
     """Solve for a consistent initial state, and raise with a diagnosis when there is none.
@@ -1142,6 +1204,9 @@ def check_consistent_init(
         plan: A prebuilt linearization plan, or `None` to build one.
         init_plan: A prebuilt `ConsistentInitPlan`, which overrides every setting below it.
         tol: The residual 2-norm at which Newton's method stops.
+        rtol: Relative final gate scaled by the initial residual 2-norm, after
+            attempting the absolute target. Positive values also enable the
+            state/slopes round-off allowance; zero keeps the absolute-only gate.
         max_iters: The total Newton iteration budget.
 
     Returns:
@@ -1156,7 +1221,7 @@ def check_consistent_init(
         init_plan
         if init_plan is not None
         else ConsistentInitPlan(
-            problem, plan, tol=tol, max_iters=max_iters, backend="dense", route="joint"
+            problem, plan, tol=tol, rtol=rtol, max_iters=max_iters, backend="dense", route="joint"
         )
     )
     if icp.route != "joint":
@@ -1167,6 +1232,7 @@ def check_consistent_init(
             problem,
             icp.plan,
             tol=icp.tol,
+            rtol=icp.rtol,
             max_iters=icp.max_iters,
             backend="dense",
             route="joint",

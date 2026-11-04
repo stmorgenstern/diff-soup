@@ -1314,7 +1314,7 @@ def _loop_init(
         else:
             evaluation_ok = jnp.asarray(True)
             event_state = entry_state
-        value = jnp.asarray(event.cond_fn(t0, event_state, None, control=event_control0)).reshape(
+        value = jnp.asarray(event.cond_fn(t0, event_state, theta, control=event_control0)).reshape(
             ()
         )
         root_finder = getattr(event, "root_finder", None)
@@ -1351,7 +1351,7 @@ def _loop_init(
                     state_tq = projected_tq.state
                 else:
                     state_tq = state_seed
-                return jnp.asarray(event.cond_fn(tq, state_tq, None, control=control_tq)).reshape(
+                return jnp.asarray(event.cond_fn(tq, state_tq, theta, control=control_tq)).reshape(
                     ()
                 )
 
@@ -1778,7 +1778,7 @@ def _loop_fns(
                     cf(
                         state.t_prev,
                         pack_state(state.y_last, state.lam_last),
-                        None,
+                        theta_local,
                         control=control_at(state.t_prev),
                     )
                 )
@@ -1788,7 +1788,7 @@ def _loop_fns(
                     cf(
                         t_new,
                         pack_state(report.y_new, report.lam_new),
-                        None,
+                        theta_local,
                         control=control_at(t_new),
                     )
                 )
@@ -1805,6 +1805,7 @@ def _loop_fns(
                 state_at=event_state_at if _has_projected_events else None,
                 state_status=event_state_status if _has_projected_events else None,
                 active=accepted,
+                args=theta_local,
             )
             # Root-finder tolerances are static Python values and may be
             # strong float64. Keep the crossing on the solve's numeric lane

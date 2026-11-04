@@ -772,6 +772,105 @@ def _merge(merged: Any, part: Any, take: Any, count: int) -> Any:
     return jnp.where(mask, part.astype(merged.dtype), merged)
 
 
+def _flow(view, solver, t, state, theta, control):
+    """Full flow, including algebraic rows, from the initialization manifold."""
+
+    def initialize(time, value):
+        return view.consistent_initial_state(
+            time, value, theta, control, tol=solver.atol, rtol=solver.rtol, backend=solver.linear,
+        )
+
+    initial = initialize(t, state)
+    _, slope = jax.jvp(
+        lambda time, value: initialize(time, value).y,
+        (t, state), (jnp.ones_like(t), initial.ydot),
+    )
+    return jnp.where(initial.converged, slope, jnp.nan)
+
+
+def _segment_solve_impl(problem, solver, span, state, times, theta, control, options):
+    """One unchanged primal solve, with moving-boundary flow derivatives."""
+    solution = pdesolve(
+        problem, solver, span, state, saveat=SaveAt(ts=times, ordered=True),
+        theta=theta, control_state0=control, **options,
+    )
+    # The merged schedule owns no problem object; keep this AD boundary array-only.
+    return eqx.tree_at(lambda s: s.prob, solution, None)
+
+
+_segment_solve = eqx.filter_custom_jvp(_segment_solve_impl)
+
+
+@_segment_solve.def_jvp
+def _segment_solve_jvp(primals, tangents):
+    """Differentiate at fixed internal times and attach the boundary flow terms."""
+    problem, solver, span, state, times, theta, control, options = primals
+    dproblem, dsolver, dspan, dstate, dtimes, dtheta, dcontrol, doptions = tangents
+    if all(value is None for value in dspan):
+        return eqx.filter_jvp(_segment_solve_impl, primals, tangents)
+    view = get_or_build_solver_view(problem)
+    units = _field_units(view)
+    dstart, dend = dspan
+    start_slope = None
+    if dstart is not None:
+        stored = view.to_internal_state(state)
+        start_slope = _flow(view, solver, span[0], stored, theta, control)
+        slope = start_slope
+        if units is not None:
+            slope = slope.at[:view.n_u].multiply(units[0])
+        dstate = (jnp.zeros_like(state) if dstate is None else dstate) - slope * dstart
+    # Adaptive step times are frozen by the step-root rule. Apply the flow-map
+    # boundary terms explicitly: -Phi f(start) dstart and +f(end) dend.
+    out, dout = eqx.filter_jvp(
+        _segment_solve_impl, primals,
+        (dproblem, dsolver, (None, None), dstate, dtimes, dtheta, dcontrol, doptions),
+    )
+    dout = jax.tree_util.tree_map(
+        lambda value, tangent: jnp.zeros_like(value)
+        if tangent is None and eqx.is_inexact_array(value) else tangent,
+        out, dout, is_leaf=lambda value: value is None,
+    )
+    if dstart is not None:
+        at_start = (times == span[0])[:, None]
+        dout = eqx.tree_at(
+            lambda s: s.ys, dout,
+            dout.ys + jnp.where(at_start, start_slope[:view.n_u] * dstart, 0.0),
+        )
+        if dout.lambdas is not None:
+            dout = eqx.tree_at(
+                lambda s: s.lambdas, dout,
+                dout.lambdas + jnp.where(at_start, start_slope[view.n_u:] * dstart, 0.0),
+            )
+    if dend is not None or dtimes is not None:
+        terminal = out.terminal
+        stored = jnp.concatenate([terminal.y, terminal.lam])
+        end_slope = _flow(view, solver, terminal.t, stored, theta, control)
+        # SaveAt clips queries to the span. At equality its min/max rule
+        # halves the query-time tangent; use the smooth endpoint limit.
+        query_dot = jnp.zeros_like(times) if dtimes is None else dtimes
+        at_end = ((times == span[1]) & out.ok)[:, None]
+        dout = eqx.tree_at(
+            lambda s: s.ys, dout,
+            jnp.where(at_end, dout.terminal.y + query_dot[:, None] * end_slope[:view.n_u], dout.ys),
+        )
+        if dout.lambdas is not None:
+            dout = eqx.tree_at(
+                lambda s: s.lambdas, dout,
+                jnp.where(at_end, dout.terminal.lam + query_dot[:, None] * end_slope[view.n_u:],
+                          dout.lambdas),
+            )
+    if dend is not None:
+        correction = jnp.where(out.ok, end_slope * dend, 0.0)
+        dout = eqx.tree_at(
+            lambda s: (s.terminal.y, s.terminal.lam, s.terminal.t, s.stats.t_reached), dout,
+            (dout.terminal.y + correction[:view.n_u],
+             dout.terminal.lam + correction[view.n_u:],
+             jnp.where(out.ok, dend, dout.terminal.t),
+             jnp.where(out.ok, dend, dout.stats.t_reached)),
+        )
+    return out, dout
+
+
 def solve_schedule(
     problem: Any,
     solver: Any,
@@ -784,6 +883,7 @@ def solve_schedule(
     theta: Any = None,
     adjoint: Any = None,
     dt0: Any = None,
+    max_steps: int = 10_000,
 ) -> tuple[Solution, SegmentEnds]:
     """Solve the segments of a schedule one after another and merge their samples.
 
@@ -839,6 +939,12 @@ def solve_schedule(
     ``jax.jit``, ``jax.vmap``, ``jax.jacfwd``, and ``jax.grad`` with a reverse
     adjoint such as ``CheckpointAdjoint``.
 
+    Moving boundaries use the flow-map terms ``-Phi f(start) dstart`` and
+    ``f(end) dend`` while the adaptive mesh stays fixed under differentiation.
+    A sample exactly at a switch belongs to the preceding segment; its
+    derivative is that segment's smooth endpoint limit. A fixed query crossing
+    a discontinuous operating switch has no two-sided derivative.
+
     Args:
         problem: What ``pdesolve`` accepts; its model must declare an
             operational control table.
@@ -854,6 +960,8 @@ def solve_schedule(
             pad and are not valid.
         theta: The parameters, as for ``pdesolve``.
         adjoint: The differentiation strategy, as for ``pdesolve``.
+        max_steps: Step-attempt budget for each segment, as for ``pdesolve``.
+            The default is 10,000, including rejected attempts.
         dt0: The first step a segment's solve starts from when it carries no
             step, passed to its ``pdesolve`` as ``dt0=``; ``0`` lets the
             integrator estimate it, and it may be traced. ``None`` passes no
@@ -904,7 +1012,6 @@ def solve_schedule(
     samples_count = int(times.shape[0])
     n_u, n_lam = int(view.n_u), int(view.n_lam)
     idle = _IDLE_FRACTION * (t_end - t0)
-    saveat = SaveAt(ts=times, ordered=True)
     carrying = _may_carry(schedule)
     if carrying:
         base_step = jnp.asarray(_configured_step(solver) if dt0 is None else dt0, dtype=dtype)
@@ -933,20 +1040,21 @@ def solve_schedule(
                 "target_terms": jnp.where(run, terms, carry.last_terms),
                 "target_origin": jnp.where(run, start, carry.last_start),
             }
-        solution = pdesolve(
-            problem,
+        # Preserve the authored array aliases used by ThetaTable. Filtering
+        # a LoweredProblem through custom_jvp rebuilds those arrays separately.
+        solution = _segment_solve(
+            view,
             solver,
             (jnp.where(run, start, carry.last_end), jnp.where(run, stop, carry.last_end + idle)),
             carry.y,
-            saveat=saveat,
-            theta=theta,
-            adjoint=adjoint,
-            control_state0=ControlState.operating(
+            times,
+            theta,
+            ControlState.operating(
                 mode=jnp.where(run, mode, carry.last_mode),
                 target=jnp.where(run, target, carry.last_target),
                 **varying,
             ),
-            **extra,
+            dict(adjoint=adjoint, max_steps=max_steps, **extra),
         )
         return solution, start, end, stop, run
 

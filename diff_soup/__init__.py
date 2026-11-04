@@ -63,7 +63,14 @@ from diff_soup._precision import Precision
 
 # ``Schedule``/``Segment`` describe an operating protocol: segments that each hold
 # one row of a model's operational control table at a constant target.
-from diff_soup._schedule import Schedule, Segment
+from diff_soup._schedule import (
+    Schedule,
+    ScheduleArrays,
+    Segment,
+    SegmentEnds,
+    schedule_arrays,
+    solve_schedule,
+)
 from diff_soup._solution import RESULT
 from diff_soup._version import __version__ as __version__
 
@@ -110,6 +117,7 @@ from diff_soup.problem import (
     TransferOp,
     VarRef,
     default_theta,
+    jacobian_nnz,
     lower,
     parameter_gradient,
     tags,
@@ -240,6 +248,7 @@ __all__ = [
     "NodalInjectOp",
     # ---- iteration-matrix structure diagnostics ----
     "topology_report",
+    "jacobian_nnz",
     "TopologyReport",
     "RowOwner",
     # ---- forward-simulation entry point ----
@@ -284,6 +293,10 @@ __all__ = [
     # ---- operating protocols ----
     "Schedule",
     "Segment",
+    "ScheduleArrays",
+    "SegmentEnds",
+    "schedule_arrays",
+    "solve_schedule",
     # ---- differentiation strategies ----
     "ForwardAdjoint",
     "CheckpointAdjoint",

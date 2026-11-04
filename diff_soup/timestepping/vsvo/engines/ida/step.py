@@ -651,6 +651,7 @@ class IDAEngine(eqx.Module):
                 control,
                 ydot0=jnp.concatenate([ydot0, jnp.zeros((n_lam,), dtype=dtype)]),
                 tol=ic_gate_tolerance(self.atol, self.ic_tol),
+                rtol=self.rtol if self.ic_rtol is None else self.ic_rtol,
                 backend=self.backend,
                 layout=ic_layout,
                 precision=ic_precision,
