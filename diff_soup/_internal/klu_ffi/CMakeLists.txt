@@ -11,7 +11,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # against their headers. KLU_VENDOR_DIR names the tree that holds
 # include/suitesparse/klu.h and lib/lib<name>.so.<N>; it defaults to the
 # vendored SuiteSparse tree committed in the repository.
-set(KLU_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor" CACHE PATH
+set(_KLU_DEFAULT_VENDOR "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
+if(APPLE AND EXISTS "/opt/homebrew/opt/suite-sparse/include/suitesparse/klu.h")
+    # The vendored tree holds Linux .so files; on macOS link Homebrew's SuiteSparse.
+    set(_KLU_DEFAULT_VENDOR "/opt/homebrew/opt/suite-sparse")
+endif()
+set(KLU_VENDOR_DIR "${_KLU_DEFAULT_VENDOR}" CACHE PATH
     "Tree holding include/suitesparse/klu.h and the SuiteSparse shared libraries in lib/")
 get_filename_component(KLU_VENDOR_DIR "${KLU_VENDOR_DIR}" ABSOLUTE)
 set(_KLU_INC "${KLU_VENDOR_DIR}/include/suitesparse")
@@ -54,7 +59,11 @@ endif()
 # development link, so each library is resolved by glob: the shortest match
 # is the soname itself, which is what the module records as its dependency.
 function(_klu_resolve_soname OUT_VAR STEM)
-    file(GLOB _hits "${_KLU_LIBDIR}/lib${STEM}.so.[0-9]*")
+    if(APPLE)
+        file(GLOB _hits "${_KLU_LIBDIR}/lib${STEM}.[0-9]*.dylib")
+    else()
+        file(GLOB _hits "${_KLU_LIBDIR}/lib${STEM}.so.[0-9]*")
+    endif()
     list(LENGTH _hits _count)
     if(_count EQUAL 0)
         message(FATAL_ERROR "klu_ffi: no lib${STEM}.so.<N> under ${_KLU_LIBDIR}.")
@@ -63,7 +72,12 @@ function(_klu_resolve_soname OUT_VAR STEM)
     set(_best_dots 999)
     foreach(_hit ${_hits})
         get_filename_component(_name "${_hit}" NAME)
-        string(REGEX REPLACE "^.*\\.so\\." "" _suffix "${_name}")
+        if(APPLE)
+            string(REGEX REPLACE "^lib${STEM}\\." "" _suffix "${_name}")
+            string(REGEX REPLACE "\\.dylib$" "" _suffix "${_suffix}")
+        else()
+            string(REGEX REPLACE "^.*\\.so\\." "" _suffix "${_name}")
+        endif()
         string(REGEX MATCHALL "\\." _dots "${_suffix}")
         list(LENGTH _dots _ndots)
         if(_ndots LESS _best_dots)
@@ -108,9 +122,14 @@ endif()
 
 # A checkout build finds the SuiteSparse libraries in the vendored tree by
 # absolute path; an installed module finds them in lib/ next to itself.
+if(APPLE)
+    set(_KLU_INSTALL_RPATH "${_KLU_LIBDIR}")
+else()
+    set(_KLU_INSTALL_RPATH "\$ORIGIN/lib")
+endif()
 set_target_properties(_native_klu PROPERTIES
     BUILD_RPATH "${_KLU_LIBDIR}"
-    INSTALL_RPATH "\$ORIGIN/lib"
+    INSTALL_RPATH "${_KLU_INSTALL_RPATH}"
     BUILD_WITH_INSTALL_RPATH OFF
     INSTALL_RPATH_USE_LINK_PATH OFF
 )
@@ -137,6 +156,8 @@ endif()
 install(TARGETS _native_klu
     LIBRARY DESTINATION diff_soup/_internal/klu_ffi
 )
+# On macOS the module records Homebrew's absolute install names, so nothing is bundled.
+if(NOT APPLE)
 set(_KLU_BUNDLE "")
 foreach(_stem ${_KLU_STEMS} gomp gfortran quadmath gcc_s)
     file(GLOB _found "${_KLU_LIBDIR}/lib${_stem}.so.[0-9]*")
@@ -146,6 +167,7 @@ install(FILES ${_KLU_BUNDLE}
     DESTINATION diff_soup/_internal/klu_ffi/lib
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
 )
+endif()
 file(GLOB _KLU_LICENSES "${CMAKE_CURRENT_SOURCE_DIR}/licenses/*")
 install(FILES ${_KLU_LICENSES}
     DESTINATION diff_soup/_internal/klu_ffi/licenses
@@ -158,7 +180,9 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
 # LDFLAGS; it would let a SuiteSparse in that prefix shadow the bundled one.
 # The installed module's search path is rewritten to exactly $ORIGIN/lib
 # (DT_RPATH, so it covers the bundled libraries' own dependencies too).
-find_program(KLU_FFI_PATCHELF patchelf)
+if(NOT APPLE)
+    find_program(KLU_FFI_PATCHELF patchelf)
+endif()
 if(KLU_FFI_PATCHELF)
     install(CODE "
         file(GLOB _klu_so \"\${CMAKE_INSTALL_PREFIX}/diff_soup/_internal/klu_ffi/_native_klu*.so\")
@@ -171,7 +195,7 @@ if(KLU_FFI_PATCHELF)
             endif()
         endforeach()
     ")
-else()
+elseif(NOT APPLE)
     message(WARNING
         "klu_ffi: patchelf not found, so the installed _native_klu keeps the build's search "
         "path after \$ORIGIN/lib. Install patchelf (a pip wheel) for a self-contained install.")
