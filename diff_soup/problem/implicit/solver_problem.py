@@ -621,6 +621,7 @@ class SolverView:
         *,
         ydot0=None,
         tol,
+        rtol=0.0,
         max_iters=30,
         backend="auto",
         route="auto",
@@ -644,7 +645,7 @@ class SolverView:
         leaves the defaults. ``reverse_precision`` is the dtype policy of the
         transposed solve a reverse sweep runs at the root (``None`` uses
         ``precision``). One static solve plan per resolved
-        ``(tol, max_iters, linear route, solve route, layout, precision,
+        ``(tol, rtol, max_iters, linear route, solve route, layout, precision,
         reverse_precision)`` tuple is cached on the view so repeat solves reuse one
         compiled program. Both routes are resolved BEFORE keying, so every
         spelling that lands on the same solve shares one plan — and one
@@ -657,7 +658,10 @@ class SolverView:
             theta: Problem parameters. ``None`` uses [default_theta][].
             control: Control values read by the residual, or ``None``.
             ydot0: Optional initial slope guess.
-            tol: Absolute residual 2-norm gate for convergence.
+            tol: Absolute residual 2-norm target for Newton iterations.
+            rtol: Relative final gate scaled by the initial residual 2-norm,
+                applied after attempting the absolute target. Positive values
+                also enable the componentwise state/slopes round-off allowance.
             max_iters: Newton iteration budget.
             backend: Linear-backend selection for the initialization system.
             route: ``"auto"``, ``"joint"``, or ``"reduced"`` solve route.
@@ -675,6 +679,7 @@ class SolverView:
         route_name, _ = resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
         key = (
             float(tol),
+            float(rtol),
             int(max_iters),
             route_name,
             ic_route,
@@ -689,6 +694,7 @@ class SolverView:
                 self.problem,
                 self.plan,
                 tol=tol,
+                rtol=rtol,
                 max_iters=max_iters,
                 backend=backend,
                 route=ic_route,

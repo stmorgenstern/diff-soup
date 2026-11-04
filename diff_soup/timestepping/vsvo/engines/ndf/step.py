@@ -491,6 +491,7 @@ class NDFEngine(eqx.Module):
             control,
             ydot0=jnp.concatenate([ydot0, jnp.zeros((n_lam,), dtype=dtype)]),
             tol=ic_gate_tolerance(self.atol, self.ic_tol),
+            rtol=self.rtol if self.ic_rtol is None else self.ic_rtol,
             max_iters=self.ic_max_newton_iters,
             backend=self.backend,
             layout=ic_layout,

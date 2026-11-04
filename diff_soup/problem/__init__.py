@@ -68,6 +68,7 @@ from diff_soup.problem.implicit import (
 from diff_soup.problem.implicit.topology_report import (
     RowOwner,
     TopologyReport,
+    jacobian_nnz,
     topology_report,
 )
 from diff_soup.problem.parameters import ParameterSet
@@ -187,6 +188,7 @@ __all__ = [
     "NodalInjectOp",
     # Iteration-matrix structure diagnostics
     "topology_report",
+    "jacobian_nnz",
     "TopologyReport",
     "RowOwner",
     # Identity/ownership
