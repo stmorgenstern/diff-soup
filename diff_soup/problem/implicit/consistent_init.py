@@ -157,12 +157,17 @@ def resolve_backend_route(backend, *, plan_mode: str, n_dofs: int):
     memoised process-globally on topology content. An iterative backend
     ([Krylov][diff_soup.linear.Krylov]) resolves to its exact inner backend:
     the initialization's Newton steps and its implicit-function derivative
-    solve with exact inverses.
+    solve with exact inverses. If that backend exposes a bound ``layout.n_dofs``
+    different from the initialization system size, initialization uses Dense
+    at every size and on every platform; the time-stepping backend is unchanged.
     """
     if isinstance(backend, LinearSolver):
         from diff_soup.linear._krylov import exact_backend
 
         backend = exact_backend(backend)
+        bound_size = getattr(getattr(backend, "layout", None), "n_dofs", None)
+        if bound_size is not None and int(bound_size) != n_dofs:
+            return "dense", None
         name = backend.backend_name
         return name, (None if name == "dense" else backend)
     if isinstance(backend, str):
