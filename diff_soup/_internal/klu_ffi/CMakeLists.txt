@@ -92,7 +92,11 @@ target_include_directories(_native_klu PRIVATE
 )
 
 target_link_libraries(_native_klu PRIVATE ${_KLU_LIBS})
-target_link_options(_native_klu PRIVATE "-Wl,-rpath-link,${_KLU_LIBDIR}")
+# -rpath-link is a GNU ld option; Apple's ld rejects it (the vendored libs
+# are found through the rpath set below on macOS).
+if(NOT APPLE)
+    target_link_options(_native_klu PRIVATE "-Wl,-rpath-link,${_KLU_LIBDIR}")
+endif()
 
 # Link libstdc++ and libgcc statically so the module runs on hosts whose
 # system libstdc++ is older than the build compiler's.
