@@ -37,7 +37,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 
 from diff_soup._solution import RESULT, is_successful
-from diff_soup.utils.lanes import lane_cond
+from diff_soup.utils.lanes import _any_lane_p
 
 
 class SolverStats(eqx.Module):
@@ -736,14 +736,19 @@ def fill_saveat_window(
         return _fill(operand, start + jnp.arange(window, dtype=jnp.int32))
 
     def _cover(operand):
-        return lane_cond(overflow, _full, _windowed, operand)
+        return jax.lax.cond(_any_lane_p.bind(overflow), _full, _windowed, operand)
 
     # An attempt that covers no save time (every rejected attempt, most
     # accepted ones) evaluates nothing; under vmap the fill runs when some
     # lane covers a save time, and the full grid only when some lane overflows.
     covers = hi > cursor
-    buffers, pending = lane_cond(
-        covers, _cover, lambda operand: operand, (buffers, pending), false_is_free=True
+    # The writes already mask each lane by its own [cursor, hi) interval;
+    # both fill paths produce the same valid rows on a non-overflow lane.
+    # Select only which work the batch needs, not between whole output
+    # buffers. lane_cond's per-leaf where would retain old full trajectories
+    # across both nested conditionals (four extra copies in the arena).
+    buffers, pending = jax.lax.cond(
+        _any_lane_p.bind(covers), _cover, lambda operand: operand, (buffers, pending)
     )
     evaluations = jnp.where(
         covers,
