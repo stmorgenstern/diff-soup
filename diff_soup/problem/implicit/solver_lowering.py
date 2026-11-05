@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup.linear import SparseTopology
+from diff_soup.problem._ad.tangent_pattern import tangent_pattern
 from diff_soup.problem._cache import BoundedContentCache
 from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
 from diff_soup.problem.implicit._coo import coo_matvec
@@ -95,6 +96,33 @@ def augmented_rhs_sparsity(topology, n_u: int, n_lam: int):
         rows += [np.repeat(state, n_lam), np.repeat(lam, n_u), np.repeat(lam, n_lam)]
         cols += [np.tile(lam, n_u), np.tile(state, n_lam), np.tile(lam, n_lam)]
     return SparseTopology(rows=np.concatenate(rows), cols=np.concatenate(cols), n_dofs=n)
+
+
+def _exact_rhs_sparsity(problem, rhs, n: int, operational: bool):
+    """The pattern of ``drhs/dy`` read from its tangent map, plus the diagonal.
+
+    Time, parameters and the operating point stand for any value, so every mode
+    of an operational control table counts.
+    """
+    from diff_soup.timestepping.control_state import ControlState
+
+    zero = jnp.zeros((), dtype=problem.mass_diagonal().dtype)
+    control = (
+        ControlState.operating(mode=jnp.zeros((), dtype=jnp.int32), target=zero, current_seed=zero)
+        if operational
+        else None
+    )
+    rows, cols = tangent_pattern(
+        lambda y, t, theta, state: rhs(t, y, theta, state),
+        jnp.zeros((n,), dtype=zero.dtype),
+        zero,
+        eqx.partition(problem, eqx.is_inexact_array)[0],
+        control,
+    )
+    diagonal = np.arange(n, dtype=np.int32)
+    return SparseTopology(
+        rows=np.concatenate((rows, diagonal)), cols=np.concatenate((cols, diagonal)), n_dofs=n
+    )
 
 
 def _pinned_mask(pinned_rows, n: int) -> np.ndarray:
@@ -622,6 +650,14 @@ def _build_solver_problem(problem, source_static):
                     values = values.at[jnp.asarray(bc_indices, dtype=jnp.int32)].set(0)
                 return jnp.concatenate([values, jnp.zeros((n_lam,), values.dtype)])
 
+        if problem._exact_sparsity:
+            if forms:
+                raise ValueError(
+                    "exact_sparsity reads the pattern from a residual with an explicit "
+                    "mass; this problem has q.dt terms. Divide by the mass instead, or "
+                    "build without exact_sparsity."
+                )
+            rhs_sparsity = _exact_rhs_sparsity(problem, rhs, n, _has_operational)
         lowered = lower_mass_form(
             structure=structure,
             n_u=n_u,

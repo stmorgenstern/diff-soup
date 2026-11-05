@@ -162,6 +162,9 @@ class LoweredProblem(eqx.Module):
     # view uses it to prove structural equivalence across optimization/OED
     # problem instances without comparing numeric leaves or closure identity.
     _structure_key: Any = eqx.field(static=True, default=None)
+    # Whether the solver reads this problem's Jacobian pattern from the residual's
+    # tangent map instead of ``_topo`` and a dense border; see ``ProblemSpec.build``.
+    _exact_sparsity: bool = eqx.field(static=True, default=False)
 
     def structure_key(self):
         """Hashable compile-relevant identity used by the solver view."""
