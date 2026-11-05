@@ -168,8 +168,8 @@ class BoundaryIntegralConstraint(Constraint):
 class OperationalControlConstraint(Constraint):
     """Constraint record that closes a current unknown with one row of an operating table.
 
-    The active row is `current - target`, `voltage - target`, or
-    `power - target`, chosen at run time by the mode and target of an operating
+    The active row is `current - target`, `voltage - target`,
+    `power - target`, or `voltage - target * current`, chosen by the mode and target of an operating
     [`ControlState`][diff_soup.ControlState].
 
     Attributes:
@@ -177,7 +177,7 @@ class OperationalControlConstraint(Constraint):
         closes: Global current unknown the row determines.
         current_fn: Function `(q, ctx, t)` returning the current, or `None` when `field` supplies it.
         voltage_fn: Function `(q, ctx, t)` returning the voltage.
-        modes: Rows of the table, a subset of `"current"`, `"voltage"`, `"power"`, indexed by the mode.
+        modes: A subset of `"current"`, `"voltage"`, `"power"`, `"resistance"`, indexed by the mode.
         seed_voltage_threshold: Voltage magnitude above which a power mode without a current seed starts from `target / V`.
         field: Field whose summed residual rows give the current, or `None`.
     """

@@ -2025,7 +2025,7 @@ def _build_full_jac_blocks_fn(
             row_lo = layout.offset_of((owner_comp.name, field_var.name))
             row_hi = row_lo + int(field_var.size)
             fallback_names.append(c.name)
-            if "power" not in c.modes and _field_eq_is_fully_declared(
+            if not {"power", "resistance"}.intersection(c.modes) and _field_eq_is_fully_declared(
                 owner_comp, field_var, _residual_bank(owner_comp), threaded_globals
             ):
                 # The current enters its row linearly, so the row's derivative
@@ -2039,7 +2039,7 @@ def _build_full_jac_blocks_fn(
                 held_names.append(c.name)
                 required_by.append((c.name, ()))
             else:
-                # A power row multiplies the current by the voltage, and an
+                # Power/resistance rows scale the current by voltage/target, and an
                 # under-declared field equation would drop a column from
                 # ``Avals``: differentiate the field's residual rows directly.
                 shortcut_meta.append(("fallback", _lam_off, dim_c))

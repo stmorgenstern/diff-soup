@@ -393,8 +393,9 @@ class SolverView:
         ``target / V``. A nonzero power target at near-zero voltage with no
         explicit seed fails here — before any Newton iteration — with a typed
         error; under tracing (where no value is concrete) the guarded select
-        keeps the prior slot instead. Non-power modes write only an explicit
-        seed.
+        keeps the prior slot instead. Resistance defaults to ``V / target``;
+        a zero target without an explicit seed raises eagerly and keeps the
+        prior slot under tracing. Other modes write only an explicit seed.
         """
         from diff_soup._errors import ConfigurationError
 
@@ -458,6 +459,15 @@ class SolverView:
                     )
                 else:
                     slot = prior
+            elif modes[int(mode)] == "resistance":
+                if float(target) == 0.0:
+                    raise ConfigurationError(
+                        f"operational control {table.name!r}: resistance mode with "
+                        "zero target is a short circuit with no usable default "
+                        "current start; supply a current seed "
+                        "(ControlState.operating(current_seed=...))."
+                    )
+                slot = v0 / target
             else:
                 slot = prior
         else:
@@ -469,7 +479,15 @@ class SolverView:
             ok_v = jnp.abs(v0) > thr
             v_safe = jnp.where(ok_v, v0, jnp.ones_like(v0))
             power_default = jnp.where(ok_v, target / v_safe, prior)
-            slot = jnp.where(has_seed, seed_val, jnp.where(is_power, power_default, prior))
+            resistance_mask = jnp.asarray(np.array([m == "resistance" for m in modes]))
+            is_resistance = jnp.take(resistance_mask, mode)
+            ok_r = target != 0
+            r_safe = jnp.where(ok_r, target, jnp.ones_like(target))
+            resistance_default = jnp.where(ok_r, v0 / r_safe, prior)
+            default = jnp.where(
+                is_power, power_default, jnp.where(is_resistance, resistance_default, prior)
+            )
+            slot = jnp.where(has_seed, seed_val, default)
         return lam0.at[off].set(jnp.asarray(slot, dtype=lam0.dtype))
 
     def default_theta(self):

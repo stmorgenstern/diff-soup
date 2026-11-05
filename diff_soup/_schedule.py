@@ -2,7 +2,7 @@
 
 A model that declares an operational control table
 (``spec.control.operational(...)``) closes one algebraic unknown with one of the
-rows ``current``, ``voltage`` or ``power``, chosen at run time by a mode index and
+rows ``current``, ``voltage``, ``power`` or ``resistance``, chosen by a mode index and
 a target. A ``Schedule`` lists ``Segment`` entries, each of which holds one of
 those rows at a target for a duration: a charge at constant current, then a
 hold at constant voltage, and so on. A target is a constant, or a polynomial in
@@ -47,7 +47,7 @@ __all__ = [
     "solve_schedule",
 ]
 
-_MODES = ("current", "voltage", "power")
+_MODES = ("current", "voltage", "power", "resistance")
 _ARRAY_FIELDS = ("mode", "target", "duration", "active", "stop_kind", "stop_level", "carry_step")
 # A segment that does not run still executes one solve, because under ``vmap``
 # both sides of a choice execute. That solve spans this fraction of the whole
@@ -144,12 +144,13 @@ def _mode_names(modes: Any) -> Optional[tuple]:
 class Segment:
     """One step of a `Schedule`, holding one row of the operating table at a target for a duration.
 
-    Pass exactly one of `current`, `voltage`, or `power`. A tuple target is a polynomial in the time since the segment started, constant term first. All values are concrete numbers, built outside `jax.jit`.
+    Pass exactly one of `current`, `voltage`, `power`, or `resistance`. A tuple target is a polynomial in the time since the segment started, constant term first. All values are concrete numbers, built outside `jax.jit`.
 
     Args:
         current: Target of the current row.
         voltage: Target of the voltage row.
         power: Target of the power row.
+        resistance: Target of the resistance row, ``voltage - target * current``.
         duration: Positive length of the segment.
     """
 
@@ -163,9 +164,10 @@ class Segment:
         current: Any = None,
         voltage: Any = None,
         power: Any = None,
+        resistance: Any = None,
         duration: Any,
     ) -> None:
-        """Build a segment from exactly one of ``current``, ``voltage``, ``power``.
+        """Build a segment from one current, voltage, power or resistance target.
 
         Args:
             current: The current to hold: a number, or the coefficients of a
@@ -173,11 +175,12 @@ class Segment:
                 term first.
             voltage: The voltage to hold, in the same forms.
             power: The power to hold, in the same forms.
+            resistance: The resistance to hold, in the same forms.
             duration: How long to hold it; a positive finite number.
 
         Raises:
-            TypeError: If none or more than one of ``current``, ``voltage`` and
-                ``power`` is given, or a value is not a real number or a
+            TypeError: If none or more than one of ``current``, ``voltage``,
+                ``power``, ``resistance`` is given, or a value is not a real number or a
                 sequence of them (a boolean, a multi-dimensional array, a
                 traced value).
             ValueError: If a value is not finite, a sequence of coefficients
@@ -185,13 +188,18 @@ class Segment:
         """
         given = tuple(
             (name, value)
-            for name, value in (("current", current), ("voltage", voltage), ("power", power))
+            for name, value in (
+                ("current", current),
+                ("voltage", voltage),
+                ("power", power),
+                ("resistance", resistance),
+            )
             if value is not None
         )
         if len(given) != 1:
             received = "none of them" if not given else " and ".join(f"{n}=" for n, _ in given)
             raise TypeError(
-                "a Segment holds exactly one mode: pass one of current=, voltage= or power= "
+                "a Segment holds exactly one mode: pass one of current=, voltage=, power= or resistance= "
                 f"with its target; got {received}."
             )
         mode, target = given[0]
