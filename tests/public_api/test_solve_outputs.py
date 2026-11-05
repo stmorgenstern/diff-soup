@@ -17,6 +17,7 @@ _THETA = jnp.asarray(0.4)
 _TIGHT = {"rtol": 1e-7, "atol": 1e-9}
 _ROOT = {"rtol": 1e-10, "atol": 1e-12}
 _FINE = {"rtol": 1e-8, "atol": 1e-10}
+_RESISTANCE = {"rtol": 1e-10, "atol": 1e-12}
 _VDP = {"rtol": 1e-6, "atol": 1e-8}
 _PROJECTED = ds.DenseOutputPolicy(mode="projected")
 # measured worst event-time error 1.1e-9 (projected DAE cutoff; 1.0e-13 for a time event),
@@ -387,6 +388,33 @@ def test_an_operational_switch_changes_the_row_and_owns_its_samples_by_epoch():
     )
     with pytest.raises(ds.ConfigurationError, match="single smooth interpolant"):
         solve(dense=True)
+
+
+@pytest.mark.parametrize("current_seed", [None, 0.2])
+def test_resistance_control_seeds_and_solves_the_known_load(current_seed):
+    """V = u - 2 I and V = 3 I imply I = u/5 and u = 2 exp(-4t/5)."""
+    problem = operational_cell(modes=("current", "voltage", "power", "resistance")).build()
+    initial = jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))])
+    control = ds.ControlState.operating(mode=3, target=3.0, current_seed=current_seed)
+    times = jnp.asarray([0.0, 0.1, 0.5])
+    solution = ds.pdesolve(
+        problem,
+        ds.JIDA(linear="dense", **_RESISTANCE),
+        (0.0, 0.5),
+        initial,
+        control_state0=control,
+        saveat=ds.SaveAt(ts=times, output=_PROJECTED),
+        max_steps=400,
+    )
+    assert bool(solution.ok)
+    expected_u = 2.0 * np.exp(-0.8 * np.asarray(times))
+    # Measured relative error 1.263e-10 for both seeds, workstation 2026-11-05,
+    # .ports/control_seed_check.py against the closed form in this test's docstring.
+    np.testing.assert_allclose(solution.ys, np.repeat(expected_u[:, None], 4, axis=1), rtol=1e-8)
+    np.testing.assert_allclose(solution.lambdas[:, 0], expected_u / 5.0, rtol=1e-8)
+    schedule = ds.Schedule([ds.Segment(resistance=3.0, duration=0.5)])
+    arrays = ds.schedule_arrays(schedule, problem.operational_modes())
+    np.testing.assert_array_equal(arrays.mode, [3])
 
 
 def test_schedules_and_segments_are_value_types_that_validate_their_entries():
