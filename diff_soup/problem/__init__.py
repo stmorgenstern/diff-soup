@@ -63,7 +63,9 @@ from diff_soup.problem.implicit import (
     MassProblem,
     ResidualLinearization,
     ResidualSparsity,
+    SolverView,
     get_or_build_solver_view,
+    solver_view,
 )
 from diff_soup.problem.implicit.topology_report import (
     RowOwner,
@@ -189,6 +191,8 @@ __all__ = [
     # Iteration-matrix structure diagnostics
     "topology_report",
     "jacobian_nnz",
+    "solver_view",
+    "SolverView",
     "TopologyReport",
     "RowOwner",
     # Identity/ownership

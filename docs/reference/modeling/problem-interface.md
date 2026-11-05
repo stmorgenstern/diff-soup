@@ -63,6 +63,17 @@ compiles it.
 
 ::: diff_soup.problem.topology_report
 
+::: diff_soup.problem.jacobian_nnz
+
+::: diff_soup.problem.solver_view
+
+::: diff_soup.problem.SolverView
+    options:
+      members:
+        - residual
+        - full_topology
+        - mass_dependence
+
 ::: diff_soup.problem.TopologyReport
     options:
       members: false

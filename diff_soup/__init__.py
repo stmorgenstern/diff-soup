@@ -120,6 +120,7 @@ from diff_soup.problem import (
     jacobian_nnz,
     lower,
     parameter_gradient,
+    solver_view,
     tags,
     topology_report,
 )
@@ -249,6 +250,7 @@ __all__ = [
     # ---- iteration-matrix structure diagnostics ----
     "topology_report",
     "jacobian_nnz",
+    "solver_view",
     "TopologyReport",
     "RowOwner",
     # ---- forward-simulation entry point ----
