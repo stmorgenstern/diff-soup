@@ -123,7 +123,9 @@ def set_lowering_ops(provider: Optional[Callable[..., _LoweringAnalysis]]) -> No
     _OPS_PROVIDER = provider
 
 
-def _build_analysis(eqset: EquationSet, *, precision: Precision) -> _LoweringAnalysis:
+def _build_analysis(
+    eqset: EquationSet, *, precision: Precision, probe_stencils: bool = True
+) -> _LoweringAnalysis:
     """Run the host analysis pass via the injected provider.
 
     The residual / Jacobian / sparsity / mass-diagonal construction requires
@@ -135,6 +137,8 @@ def _build_analysis(eqset: EquationSet, *, precision: Precision) -> _LoweringAna
         eqset: The EquationSet to analyse.
         precision: The dtype policy (its ``compute_dtype`` drives the
             boundary-cast law at closure entry).
+        probe_stencils: Whether to measure stencils at probe states. The exact
+            pattern of an ``exact_sparsity`` build needs no probes.
 
     Returns:
         The [_LoweringAnalysis][].
@@ -152,7 +156,7 @@ def _build_analysis(eqset: EquationSet, *, precision: Precision) -> _LoweringAna
             "via diff_soup.problem._ir.lower.set_lowering_ops(provider) before "
             "calling lower()."
         )
-    return _OPS_PROVIDER(eqset, precision=precision)
+    return _OPS_PROVIDER(eqset, precision=precision, probe_stencils=probe_stencils)
 
 
 def _assemble_lowered_problem(
@@ -162,6 +166,7 @@ def _assemble_lowered_problem(
     layout: Layout,
     precision: Precision,
     structure_key: Any,
+    exact_sparsity: bool = False,
     boundary: Optional[dict] = None,
     initial_lambda_si: Any = None,
 ) -> LoweredProblem:
@@ -209,6 +214,7 @@ def _assemble_lowered_problem(
         precision=precision,
         quad_fields=getattr(eqset, "quad_fields", frozenset()),
         _structure_key=structure_key,
+        _exact_sparsity=exact_sparsity,
     )
 
 
@@ -265,6 +271,7 @@ def lower_declared(
     *,
     layout: Optional[Layout] = None,
     precision: Optional[Precision] = None,
+    exact_sparsity: bool = False,
     bounds: Optional[tuple] = None,
     declarations: Optional[tuple] = None,
     geometry_scales: Optional[tuple] = None,
@@ -280,6 +287,8 @@ def lower_declared(
         eqset: The EquationSet to lower.
         layout: Device-placement policy (default = single device).
         precision: Dtype policy (default = fp64).
+        exact_sparsity: Hold only the Jacobian entries a tangent can reach; see
+            ``ProblemSpec.build``.
         bounds: ``(handle, (lower, upper), learnable)`` per bounded declared
             parameter; ``None`` attaches none.
         declarations: The declaration handles of the build, matched by name.
@@ -302,16 +311,19 @@ def lower_declared(
     key = compose_content_key(
         structure_hash, layout=layout, precision=precision, scales=eqset.scales
     )
+    if exact_sparsity:
+        key = ("exact_sparsity", key)
     built: list = []
 
     def _build() -> tuple:
-        analysis = _build_analysis(eqset, precision=precision)
+        analysis = _build_analysis(eqset, precision=precision, probe_stencils=not exact_sparsity)
         template = _assemble_lowered_problem(
             analysis,
             eqset,
             layout=layout,
             precision=precision,
             structure_key=key,
+            exact_sparsity=exact_sparsity,
         )
         built.append(template)
         return template, analysis
@@ -327,6 +339,7 @@ def lower_declared(
             layout=layout,
             precision=precision,
             structure_key=key,
+            exact_sparsity=exact_sparsity,
             boundary=_rewrapped_boundary_slots(analysis, eqset),
             initial_lambda_si=_initial_bordered_values(eqset, analysis.initial_lambda_si),
         )
