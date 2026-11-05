@@ -80,6 +80,7 @@ class CuDSS(LinearSolver):
     batch_layout: str = eqx.field(static=True, default="stacked")
 
     backend_name = "cudss"
+    platforms = ("cuda",)
     # The settings: every analyze option of the one-device route. The
     # options of the per-call solver of a model axis across processes stay
     # analyze options only.

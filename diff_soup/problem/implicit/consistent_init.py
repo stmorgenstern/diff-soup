@@ -59,6 +59,7 @@ from diff_soup.linear import LinearSolver, SparseTopology
 from diff_soup.linear._resolver import BackendResolver
 from diff_soup.nonlinear._kkt import LinearPlan, RouteFactor, linear_route, transposable_solve
 from diff_soup.problem.implicit.linearize import build_linearization_plan
+from diff_soup.utils.placement import default_platform
 
 __all__ = [
     "ConsistentInitPlan",
@@ -173,7 +174,7 @@ def resolve_backend_route(backend, *, plan_mode: str, n_dofs: int):
     if isinstance(backend, str):
         if backend == "auto" and plan_mode == "dense":
             return "dense", None
-        platform = "gpu" if jax.default_backend() == "gpu" else "cpu"
+        platform = default_platform()
         name = BackendResolver(backend=backend).choose(block_size=n_dofs, platform=platform)
         return name, (None if name == "dense" else _backend_instance(name))
     raise ValueError(
