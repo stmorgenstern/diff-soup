@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 44,
-    "test_functions": 396,
-    "collected_tests": 603,
-    "source_lines": 14392
+    "test_functions": 397,
+    "collected_tests": 605,
+    "source_lines": 14418
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 18,
-      "functions": 166,
-      "collected": 256,
-      "lines": 5664
+      "functions": 167,
+      "collected": 258,
+      "lines": 5690
     },
     "performance_contracts": {
       "files": 2,
@@ -292,7 +292,7 @@
     },
     {
       "file": "tests/contracts/test_linear_complex.py",
-      "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a battery impedance operator, the plain transpose, real factors with complex right-hand sides, value lanes, empty factors refactored in a loop, and jvp and vjp against central differences"
+      "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a battery impedance operator, the plain transpose, real factors with complex right-hand sides, value lanes, empty factors refactored in a loop, jvp and vjp against central differences, and the bytes a KLU factor holds"
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",

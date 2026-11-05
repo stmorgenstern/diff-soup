@@ -516,8 +516,13 @@ int64_t NumericBytes(const klu_numeric* num, bool complex) {
     // factorization; the row scaling is real either way.
     const int64_t entry = static_cast<int64_t>(sizeof(double)) * (complex ? 2 : 1);
     int64_t bytes = 0;
+    // klu_factor allocates LUsize uninitialised and sets an entry only for a block it factors
+    // with the kernel, which also sets the block's LUbx; a singleton block keeps its LUbx NULL
+    // and its LUsize unset (KLU 2.3, klu_factor.c, factor2), so only kernel blocks count.
     for (int32_t block = 0; block < num->nblocks; ++block) {
-        bytes += static_cast<int64_t>(num->LUsize[block]) * entry;
+        if (num->LUbx[block] != nullptr) {
+            bytes += static_cast<int64_t>(num->LUsize[block]) * entry;
+        }
     }
     bytes += n * entry;  // diagonal of U
     if (num->Rs != nullptr) {
@@ -1035,6 +1040,7 @@ NB_MODULE(_native_klu, m) {
             int64_t live_slots = 0;
             int64_t live_analyses = 0;
             int64_t live_sites = 0;
+            int64_t live_lu_entries = 0;
             {
                 nb::gil_scoped_release release;
                 std::lock_guard<std::mutex> lock(LibraryMutex());
@@ -1042,6 +1048,11 @@ NB_MODULE(_native_klu, m) {
                 live_slots = static_cast<int64_t>(Reg().slots.size());
                 live_analyses = static_cast<int64_t>(Reg().analyses.size());
                 live_sites = static_cast<int64_t>(Reg().sites.size());
+                for (const auto& entry : Reg().slots) {
+                    if (const klu_numeric* num = entry.second->numeric) {
+                        live_lu_entries += static_cast<int64_t>(num->lnz) + num->unz;
+                    }
+                }
             }
             nb::dict d;
             d["factorizations"] = s.factorizations;
@@ -1055,12 +1066,14 @@ NB_MODULE(_native_klu, m) {
             d["live_slots"] = live_slots;
             d["live_analyses"] = live_analyses;
             d["live_sites"] = live_sites;
+            d["live_lu_entries"] = live_lu_entries;
             return d;
         },
         "Process-wide counters of factorizations (klu_factor), refactorizations "
         "(klu_refactor kept), refactorizations replaced by a factorization, rebuilds started "
         "by a solve, solves, refused and singular requests, calls refused for a released "
-        "context, and live objects.");
+        "context, live objects, and the entries of L and U (diagonals included) over the live "
+        "numeric factorizations.");
     m.def(
         "reset_stats",
         []() {
