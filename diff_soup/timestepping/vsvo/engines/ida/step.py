@@ -169,8 +169,8 @@ def _advance_linearization_provenance(generations, *, setups, converged, correct
 
     A fired setup re-assembles the iteration matrix at the attempt's
     predictor and rebuilds its numeric factor, so the point, matrix, and
-    factor counters advance together; a gate-closed attempt leaves every
-    counter in place. The returned certificate attests exactness at the
+    factor counters advance together, once per setup; a gate-closed attempt
+    leaves every counter in place. The returned certificate attests exactness at the
     accepted root: it authorizes factor reuse only when the attempt converged
     on the freshly assembled matrix without applying a Newton correction —
     the one case in which the accepted root coincides with the factorization
@@ -179,8 +179,8 @@ def _advance_linearization_provenance(generations, *, setups, converged, correct
 
     Args:
         generations: The carry's generation record at attempt entry.
-        setups: Whether the attempt performed at least one linear-solver
-            setup (traced boolean).
+        setups: The number of linear-solver setups the attempt performed
+            (traced integer): two when the gate fired and the fresh retry ran.
         converged: The corrector's convergence predicate (traced boolean).
         correction: The converged Newton correction ``ee``; an exactly zero
             correction means the root equals the setup-time predictor.
@@ -189,11 +189,16 @@ def _advance_linearization_provenance(generations, *, setups, converged, correct
         ``(generations, certificate)`` — the advanced record and the
         certificate issued at this attempt's acceptance decision.
     """
+    setups = jnp.asarray(setups)
     bumped = generations.bump("point", "matrix", "factor")
+    twice = bumped.bump("point", "matrix", "factor")
     advanced = jax.tree_util.tree_map(
-        lambda new, old: jnp.where(setups, new, old), bumped, generations
+        lambda two, one, old: jnp.where(setups > 1, two, jnp.where(setups > 0, one, old)),
+        twice,
+        bumped,
+        generations,
     )
-    candidate = jnp.logical_and(jnp.asarray(converged), jnp.asarray(setups))
+    candidate = jnp.logical_and(jnp.asarray(converged), setups > 0)
     root_exact = lane_cond(
         candidate,
         lambda _: jnp.logical_and(candidate, jnp.all(correction == 0.0)),
@@ -1241,7 +1246,7 @@ class IDAEngine(eqx.Module):
             promo_delta = None
         provenance, certificate = _advance_linearization_provenance(
             carry.generations,
-            setups=nls.nsetups > 0,
+            setups=nls.nsetups,
             converged=nls.converged,
             correction=nls.ee,
         )
