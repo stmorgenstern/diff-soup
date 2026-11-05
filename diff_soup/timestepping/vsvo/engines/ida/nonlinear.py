@@ -119,6 +119,15 @@ _DIRECT_PASS_FACTOR = 1e-4
 """First-iteration direct-acceptance factor on ``toldel``; the direct test is
 ``delnrm <= 1e-4 * toldel``."""
 
+_FIRST_PASS_NORM = 1.0
+"""Largest first-iteration correction a carried rate memory may accept.
+
+With algebraic rows out of the error test, this is the only bound on them. The
+rate memory describes the last iteration that measured one, often on a fresh
+matrix, where it can be orders of magnitude below the rate of the aged matrix now
+in use, and it is never updated while steps converge on their first iteration. So
+a larger correction takes a second iteration, which measures the rate."""
+
 _SCHUR_EPS = 1e-12
 """Tikhonov regularization for the small Schur-complement solve over the global
 block (matches the shared nonlinear layer's default)."""
@@ -339,6 +348,7 @@ def ida_corrector(
     detect_precision: bool = False,
     live: Optional[jax.Array] = None,
     held_current: Optional[jax.Array] = None,
+    suppressalg: bool = False,
 ) -> IDANlsResult:
     """Solve ``F = 0`` for the fixed-leading-coefficient correction ``ee``.
 
@@ -438,6 +448,9 @@ def ida_corrector(
             when a replay may have moved the storage. Where it holds, a
             gate-closed attempt makes no native call at all and passes the
             matrix on without a copy.
+        suppressalg: Whether the error test leaves out the algebraic rows.
+            Then a first-iteration correction above ``_FIRST_PASS_NORM`` takes
+            a second iteration, whatever the carried rate memory says.
 
     Returns:
         The [IDANlsResult]
@@ -486,11 +499,14 @@ def ida_corrector(
 
     conv_bound = NEWTON_CONV_COEFF
     direct_floor = _DIRECT_PASS_FACTOR * DIRECT_TEST_TOL
+    first_floor = _FIRST_PASS_NORM
     if newton_tol_factor != 1.0:
         conv_bound = NEWTON_CONV_COEFF * float(newton_tol_factor)
         direct_floor = direct_floor * float(newton_tol_factor)
+        first_floor = first_floor * float(newton_tol_factor)
     epsnewt = jnp.asarray(conv_bound, dtype=dtype)
     direct_pass = jnp.asarray(direct_floor, dtype=dtype)
+    first_pass = jnp.asarray(first_floor, dtype=dtype)
     ratemax = jnp.asarray(NEWTON_DIVERGENCE_RATE, dtype=dtype)
 
     # A gate-closed attempt reuses the supplied held matrix and coupling blocks
@@ -759,6 +775,8 @@ def ida_corrector(
             rate_new = jnp.where(is_first, jnp.asarray(0.0, dtype=dtype), rate_actual)
             direct_conv = jnp.logical_and(is_first, dn <= direct_pass)
             tol_conv = (ss_new * dn) <= epsnewt
+            if suppressalg:
+                tol_conv = tol_conv & (jnp.logical_not(is_first) | (dn <= first_pass))
             converged_now = jnp.logical_or(
                 direct_conv, jnp.logical_and(jnp.logical_not(diverged_now), tol_conv)
             )
@@ -1040,6 +1058,7 @@ def ida_corrector_root(
     detect_precision: bool = False,
     live: Optional[jax.Array] = None,
     held_current: Optional[jax.Array] = None,
+    suppressalg: bool = False,
 ) -> IDANlsResult:
     """One corrector attempt with the accepted root behind its derivative boundary.
 
@@ -1126,6 +1145,7 @@ def ida_corrector_root(
             detect_precision=detect_precision,
             live=p_live,
             held_current=p_held_current,
+            suppressalg=suppressalg,
         )
 
     def primal_fn(t, cj, q, theta, control, guess, primal_args):
