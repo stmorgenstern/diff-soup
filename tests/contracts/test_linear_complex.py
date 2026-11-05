@@ -18,6 +18,7 @@ from diff_soup.linear import (
     SolveContext,
     SolveStatus,
     SparseTopology,
+    SuperLU,
     analyze,
     empty_factor,
     factor,
@@ -30,6 +31,7 @@ from diff_soup.linear import (
 BACKENDS = [
     pytest.param(Dense, id="dense"),
     pytest.param(KLU, id="klu", marks=pytest.mark.requires_klu),
+    pytest.param(SuperLU, id="superlu", marks=pytest.mark.requires_superlu),
 ]
 N, BC_ROW = 24, 3
 # measured at most 2.7e-16 relative against NumPy over every random-system solve below, CPU
