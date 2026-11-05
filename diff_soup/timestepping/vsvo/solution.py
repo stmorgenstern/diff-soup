@@ -553,17 +553,29 @@ def place_saveat_sample(buffers, pending, slot, rows, write):
     """
     discard = int(buffers[0].shape[0]) - 1
     slot = jnp.asarray(slot, jnp.int32)
-    if pending is None:
-        target = jnp.where(write, slot, discard)
-        return tuple(b.at[target].set(r) for b, r in zip(buffers, rows)), None
-    pending_slot, pending_rows = pending
-    flush = jnp.logical_and(jnp.logical_and(write, slot != pending_slot), pending_slot >= 0)
-    target = jnp.where(flush, pending_slot, discard)
-    buffers = tuple(b.at[target].set(r) for b, r in zip(buffers, pending_rows))
-    pending_rows = tuple(
-        jnp.where(write, jnp.asarray(r, p.dtype), p) for r, p in zip(rows, pending_rows)
+
+    # The writes mask each lane by ``write``; the branch only skips the work of
+    # the attempts on which no lane places a sample, which are most of them.
+    def place(operand):
+        buffers, pending = operand
+        if pending is None:
+            target = jnp.where(write, slot, discard)
+            return tuple(b.at[target].set(r) for b, r in zip(buffers, rows)), None
+        pending_slot, pending_rows = pending
+        flush = jnp.logical_and(jnp.logical_and(write, slot != pending_slot), pending_slot >= 0)
+        target = jnp.where(flush, pending_slot, discard)
+        buffers = tuple(b.at[target].set(r) for b, r in zip(buffers, pending_rows))
+        pending_rows = tuple(
+            jnp.where(write, jnp.asarray(r, p.dtype), p) for r, p in zip(rows, pending_rows)
+        )
+        return buffers, (jnp.where(write, slot, pending_slot), pending_rows)
+
+    return jax.lax.cond(
+        _any_lane_p.bind(jnp.asarray(write, jnp.bool_)),
+        place,
+        lambda operand: operand,
+        (tuple(buffers), pending),
     )
-    return buffers, (jnp.where(write, slot, pending_slot), pending_rows)
 
 
 def _write_saveat_rows(buffers, pending, idx, rows, covered, last, any_new):

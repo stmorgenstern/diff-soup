@@ -98,6 +98,79 @@ _all_live_lanes_p = _live_reduction(
 )
 
 
+def _lane_where_batch(args, dims):
+    """Select per lane on an axis that batches ``pred``; keep the primitive for an outer one."""
+    pred, taken, other = args
+    pred_dim, taken_dim, other_dim = dims
+    size = next(a.shape[d] for a, d in zip(args, dims) if d is not None)
+
+    def lanes(x, d):
+        return jnp.broadcast_to(x, (size, *x.shape)) if d is None else jnp.moveaxis(x, d, 0)
+
+    taken, other = lanes(taken, taken_dim), lanes(other, other_dim)
+    if pred_dim is None:
+        return _lane_where_p.bind(pred, taken, other), 0
+    pred = jnp.moveaxis(pred, pred_dim, 0)
+    pred = jnp.expand_dims(pred, tuple(range(pred.ndim, taken.ndim)))
+    return jnp.where(pred, taken, other), 0
+
+
+def _lane_where_jvp(primals, tangents):
+    """The tangent of a lane select: the same select of the two tangents."""
+    pred, taken, other = primals
+    out = _lane_where_p.bind(pred, taken, other)
+    _, dtaken, dother = tangents
+    if type(dtaken) is ad.Zero and type(dother) is ad.Zero:
+        return out, ad.Zero(jax.typeof(out).to_tangent_aval())
+    return out, _lane_where_p.bind(pred, ad.instantiate_zeros(dtaken), ad.instantiate_zeros(dother))
+
+
+def _lane_where_transpose(cotangent, pred, taken, other):
+    """The transpose of a lane select: each lane's cotangent goes to the operand it took."""
+    assert not ad.is_undefined_primal(pred)
+    if type(cotangent) is ad.Zero:
+        return (
+            None,
+            *(ad.Zero(a.aval) if ad.is_undefined_primal(a) else None for a in (taken, other)),
+        )
+    zeros = jnp.zeros_like(cotangent)
+    return (
+        None,
+        _lane_where_p.bind(pred, cotangent, zeros) if ad.is_undefined_primal(taken) else None,
+        _lane_where_p.bind(pred, zeros, cotangent) if ad.is_undefined_primal(other) else None,
+    )
+
+
+#: ``taken`` unbatched; under ``vmap``, ``where(pred, taken, other)`` per lane.
+_lane_where_p = Primitive("diffsoup_lane_where")
+_lane_where_p.def_impl(lambda pred, taken, other: taken)
+_lane_where_p.def_abstract_eval(lambda pred, taken, other: taken)
+mlir.register_lowering(
+    _lane_where_p, mlir.lower_fun(lambda pred, taken, other: taken, multiple_results=False)
+)
+batching.primitive_batchers[_lane_where_p] = _lane_where_batch
+ad.primitive_jvps[_lane_where_p] = _lane_where_jvp
+ad.primitive_transposes[_lane_where_p] = _lane_where_transpose
+
+
+def lane_where(pred: Any, taken: Any, other: Any) -> Any:
+    """``where(pred, taken, other)`` whose unbatched form is ``taken`` and reads nothing else.
+
+    For a selection whose predicate can differ from true only on a lane of a batch: a lane
+    a batched loop keeps alive after it finished, or a lane that took a branch only because
+    another lane needed it. Unbatched, the caller guarantees ``pred`` holds, so ``other`` is
+    dead after this call and XLA can update it in place. Under ``vmap`` with a per-lane
+    ``pred`` each lane keeps its own side, for every level of nesting.
+
+    Args:
+        pred: Scalar boolean predicate (per lane under ``vmap``).
+        taken: The array of the lanes where ``pred`` holds, and the result unbatched.
+        other: The array of the other lanes.
+    """
+    pred = jnp.asarray(pred, dtype=jnp.bool_)
+    return _lane_where_p.bind(pred, taken, other)
+
+
 def _dispatch(pred, true_fun, false_fun, operands, false_is_free, any_lane, all_lanes):
     """Run the branches some lane takes; ``any_lane()``/``all_lanes()`` reduce ``pred``."""
 
@@ -183,4 +256,4 @@ def live_lane_cond(
     return _dispatch(pred, true_fun, false_fun, operands, false_is_free, *lanes)
 
 
-__all__ = ["lane_cond", "live_lane_cond"]
+__all__ = ["lane_cond", "lane_where", "live_lane_cond"]

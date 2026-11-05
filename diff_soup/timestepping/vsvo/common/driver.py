@@ -74,7 +74,7 @@ from diff_soup.timestepping.events import (
     resolve_in_loop,
 )
 from diff_soup.timestepping.saveat import _build_save_plan, default_output_plan, output_emitter
-from diff_soup.utils.lanes import lane_cond
+from diff_soup.utils.lanes import lane_cond, lane_where
 
 from ..interpolation import CubicHermiteInterpolation
 from ..solution import (
@@ -480,6 +480,31 @@ def _select_adjoint(adjoint: Any) -> Any:
     )
 
 
+def _accuracy_guard_runs(engine, dtype) -> bool:
+    """Whether the accuracy-limit guard can fire, so that each attempt must form its norm."""
+    rtol = getattr(engine, "rtol", None)
+    return not isinstance(rtol, float) or rtol < 1e3 * float(jnp.finfo(dtype).eps)
+
+
+def _tolerance_scale(engine, problem, y, lam, ewt, dtype) -> jax.Array:
+    """The factor the tolerances would have to grow by for the accuracy to be achievable."""
+    uround = jnp.asarray(jnp.finfo(dtype).eps, dtype)
+    prior_y = jax.lax.stop_gradient(pack_state(y, lam))
+    ewt = jax.lax.stop_gradient(ewt)
+    if getattr(engine, "suppressalg", False):
+        resolve_mask = getattr(engine, "_id_mask", None)
+        raw_mask = (
+            resolve_mask(problem, dtype)
+            if resolve_mask is not None
+            else jnp.asarray(problem.id_mask, dtype=dtype)
+        )
+        guard_mask = jax.lax.stop_gradient(raw_mask)
+    else:
+        guard_mask = None
+    nrm = jax.lax.stop_gradient(wrms_norm(prior_y, ewt, mask=guard_mask))
+    return jax.lax.stop_gradient(uround * nrm)
+
+
 def _safe_ratio(num: jax.Array, den: jax.Array) -> jax.Array:
     """Return ``num / den`` with a unit fallback when ``den`` is zero."""
     ok = den != 0
@@ -535,11 +560,14 @@ def _select_no_buffer(pred, new, old):
 
     The buffers of ``new`` are kept as-is: the body's ``.at[].set()`` writes
     must survive; only the non-buffer leaves revert to ``old`` on lanes where
-    ``pred`` is true.
+    ``pred`` is true. ``pred`` is a loop's finished flag, true only on a lane
+    of a batch, so an unbatched body reads no ``old`` leaf here and the carry's
+    large arrays can be updated in place.
     """
     saved = _buffer_fields(new)
+    keep = jnp.logical_not(pred)
     picked = jax.tree_util.tree_map(
-        lambda n, o: jnp.where(pred, o, n), _strip_buffers(new), _strip_buffers(old)
+        lambda n, o: lane_where(keep, n, o), _strip_buffers(new), _strip_buffers(old)
     )
     return eqx.tree_at(_buffer_fields, picked, saved, is_leaf=lambda x: x is None)
 
@@ -2160,14 +2188,13 @@ def _loop_fns(
             # build here cost one projection on EVERY attempted step (~10 s
             # of a 23 s full-scale cutoff solve). The skipped arm's value is
             # never read.
-            u_stop = lane_cond(
+            y_stop, lam_stop = lane_cond(
                 event_stop,
-                lambda _: selected_event_state(idx, t_star),
-                lambda _: pack_state(report.y_new, report.lam_new),
+                lambda _: unpack_state(selected_event_state(idx, t_star), n_u),
+                lambda _: (report.y_new, report.lam_new),
                 None,
                 false_is_free=True,
             )
-            y_stop, lam_stop = unpack_state(u_stop, n_u)
             y_last = jnp.where(event_stop, y_stop, y_last)
             lam_last = jnp.where(event_stop, lam_stop, lam_last)
 
@@ -2208,20 +2235,21 @@ def _loop_fns(
             # post-affect state and is appended below, where that state
             # exists.
             if not _has_affect:
-                appended = state.event_log.append(
-                    t=t_star,
-                    index=idx,
-                    kind=ev_kind,
-                    direction=ev_direction,
-                    y=u_stop,
-                    pre_y=u_stop,
-                    pre_epoch=sample_epoch,
-                    post_epoch=sample_epoch,
-                )
-                event_log = jax.tree_util.tree_map(
-                    lambda new, old: jnp.where(event_stop, new, old),
-                    appended,
-                    state.event_log,
+
+                def _append_fire(_):
+                    return state.event_log.append(
+                        t=t_star,
+                        index=idx,
+                        kind=ev_kind,
+                        direction=ev_direction,
+                        y=pack_state(y_stop, lam_stop),
+                        pre_y=pack_state(y_stop, lam_stop),
+                        pre_epoch=sample_epoch,
+                        post_epoch=sample_epoch,
+                    )
+
+                event_log = lane_cond(
+                    event_stop, _append_fire, lambda _: state.event_log, None, false_is_free=True
                 )
             # With an affect in play the log was already updated where the
             # post-affect state exists (the affect block above).
@@ -2488,22 +2516,15 @@ def _loop_fns(
         # Every input and the result are wrapped in ``stop_gradient``: this
         # is a termination diagnostic, not part of the differentiated
         # trajectory, and must add no traced leaf to the loop's tangent.
-        if hasattr(state.engine_carry, "ewt"):
-            uround = jnp.asarray(jnp.finfo(dtype).eps, dtype)
-            prior_y = jax.lax.stop_gradient(pack_state(state.y_last, state.lam_last))
-            ewt = jax.lax.stop_gradient(state.engine_carry.ewt)
-            if getattr(engine, "suppressalg", False):
-                resolve_mask = getattr(engine, "_id_mask", None)
-                raw_mask = (
-                    resolve_mask(problem, dtype)
-                    if resolve_mask is not None
-                    else jnp.asarray(problem.id_mask, dtype=dtype)
-                )
-                guard_mask = jax.lax.stop_gradient(raw_mask)
-            else:
-                guard_mask = None
-            nrm = jax.lax.stop_gradient(wrms_norm(prior_y, ewt, mask=guard_mask))
-            tolsf_now = jax.lax.stop_gradient(uround * nrm)
+        #
+        # The law ``ewt = 1/(rtol*|y| + atol)`` bounds every row of ``y*ewt`` by
+        # ``1/rtol``, so the factor cannot exceed ``uround/rtol``: a solve whose
+        # ``rtol`` is far above the roundoff forms this norm once, for the
+        # report, on its final state (see ``_finalize``).
+        if _accuracy_guard_runs(engine, dtype) and hasattr(state.engine_carry, "ewt"):
+            tolsf_now = _tolerance_scale(
+                engine, problem, state.y_last, state.lam_last, state.engine_carry.ewt, dtype
+            )
             too_much_acc = jnp.logical_and(state.step > 0, tolsf_now > 1.0)
         else:
             tolsf_now = state.tolsf
@@ -2823,7 +2844,13 @@ def _finalize(
     # The achieved tolerance scale factor, for an engine whose carry supports
     # the accuracy-limit guard; ``None`` (no info payload at all, matching
     # today's every-solve behavior) for one that does not.
-    info = {"tolsf": final.tolsf} if has_ewt else None
+    if has_ewt and not _accuracy_guard_runs(engine, dtype):
+        tolsf = _tolerance_scale(
+            engine, problem, final.y_last, final.lam_last, final.engine_carry.ewt, dtype
+        )
+    else:
+        tolsf = final.tolsf
+    info = {"tolsf": tolsf} if has_ewt else None
 
     # The exact stopping point, independent of the requested output grid: an
     # event stop holds the crossing state, a completed solve the endpoint

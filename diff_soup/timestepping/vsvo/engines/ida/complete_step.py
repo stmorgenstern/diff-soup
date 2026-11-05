@@ -114,7 +114,7 @@ def _step_ratio_eta(err_knew, kk_next, hh, hmax_inv, hmin):
     return jnp.where(tmp >= _ETA_MAX_FX, eta_grow, jnp.where(tmp <= _ETA_MIN_FX, eta_shrink, one))
 
 
-def _advance_phi(phi, ee, kused, maxord):
+def advance_phi(phi, ee, kused, maxord=MAXORD):
     """Fold the converged correction into the divided-difference history.
 
     Saves ``ee`` into ``phi[kused+1]`` when the order allows (the slot a future
@@ -131,13 +131,14 @@ def _advance_phi(phi, ee, kused, maxord):
     """
     kp1_idx = jnp.clip(kused + 1, 0, MXORDP1 - 1)
     save_active = kused < maxord
-    phi = phi.at[kp1_idx].set(jnp.where(save_active, ee, phi[kp1_idx]))
-
+    rows = []
+    higher = ee
     for j in range(MXORDP1 - 1, -1, -1):
-        higher = ee if j == MXORDP1 - 1 else phi[j + 1]
+        row = jnp.where(save_active & (j == kp1_idx), ee, phi[j])
         addend = jnp.where(j == kused, ee, higher)
-        phi = phi.at[j].set(jnp.where(j <= kused, phi[j] + addend, phi[j]))
-    return phi
+        higher = jnp.where(j <= kused, row + addend, row)
+        rows.append(higher)
+    return jnp.stack(rows[::-1])
 
 
 def ida_complete_step(
@@ -153,14 +154,14 @@ def ida_complete_step(
     maxord: int = MAXORD,
     ns_for_raise_gate: jax.Array | None = None,
 ) -> tuple[IDAState, jax.Array, jax.Array]:
-    """Complete an accepted step: choose the next order/step and advance ``phi``.
+    """Complete an accepted step: choose the next order and step.
 
     Runs the successful-step bookkeeping (increment the step count, record the
     used order/step), latches out of the startup phase once the order stops
-    climbing, chooses the next order and step size (startup doubling or the
-    normal LOWER/MAINTAIN/RAISE controller with its step-ratio deadband), and
-    folds the converged correction ``state.ee`` into the divided-difference
-    history.
+    climbing, and chooses the next order and step size (startup doubling or the
+    normal LOWER/MAINTAIN/RAISE controller with its step-ratio deadband). The
+    caller folds the correction into the history with [advance_phi][], where
+    it knows the attempt was accepted.
 
     Args:
         state: The carried step state after a converged, error-test-passing
@@ -188,12 +189,10 @@ def ida_complete_step(
 
     Returns:
         A 3-tuple ``(new_state, phase_action, err_knew)``: the updated state
-        (``nst``, ``kused``, ``kk``, ``hused``, ``hh``, ``eta``, ``phase`` and
-        the advanced ``phi``), the order-action code taken this step (one of
-        the ``ACTION_*`` sentinels, for the trace), and the error estimate at
-        the chosen next order (for the trace). Every control output is
-        gradient-dead; only the advanced ``phi`` carries the accepted
-        trajectory's gradient (it is linear in ``phi`` and ``ee``).
+        (``nst``, ``kused``, ``kk``, ``hused``, ``hh``, ``eta``, ``phase``),
+        the order-action code taken this step (one of the ``ACTION_*``
+        sentinels, for the trace), and the error estimate at the chosen next
+        order (for the trace). Every control output is gradient-dead.
     """
     kk = state.kk
     kused_prev = state.kused
@@ -252,11 +251,8 @@ def ida_complete_step(
     phase_action = jnp.where(is_startup, action_startup, action).astype(jnp.int32)
     err_knew = jnp.where(is_startup, err_k, err_knew_normal)
 
-    # --- History advance uses the accepted (pre-controller) order kused_new.
-    phi_new = _advance_phi(phi, ee, kused_new, maxord)
-
     new_state = eqx.tree_at(
-        lambda s: (s.nst, s.kused, s.kk, s.hused, s.hh, s.eta, s.phase, s.phi),
+        lambda s: (s.nst, s.kused, s.kk, s.hused, s.hh, s.eta, s.phase),
         state,
         (
             jax.lax.stop_gradient(nst_new),
@@ -266,13 +262,13 @@ def ida_complete_step(
             jax.lax.stop_gradient(hh_new),
             jax.lax.stop_gradient(eta_new),
             jax.lax.stop_gradient(phase_latched),
-            phi_new,
         ),
     )
     return new_state, jax.lax.stop_gradient(phase_action), jax.lax.stop_gradient(err_knew)
 
 
 __all__ = [
+    "advance_phi",
     "ida_complete_step",
     "ACTION_UNSET",
     "ACTION_DOUBLE",

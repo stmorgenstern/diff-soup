@@ -64,7 +64,9 @@ from diff_soup.timestepping.vsvo.common.adaptive import (
 )
 from diff_soup.timestepping.vsvo.common.linear_ops import (
     empty_held,
+    held_solves,
     linearize,
+    refactor_held,
 )
 from diff_soup.timestepping.vsvo.common.weights import wrms_norm
 from diff_soup.utils import safe_div, safe_power
@@ -336,6 +338,7 @@ def ida_corrector(
     jacobian_values_dtype=None,
     detect_precision: bool = False,
     live: Optional[jax.Array] = None,
+    held_current: Optional[jax.Array] = None,
 ) -> IDANlsResult:
     """Solve ``F = 0`` for the fixed-leading-coefficient correction ``ee``.
 
@@ -430,6 +433,11 @@ def ida_corrector(
             live lane takes them; a live lane computes exactly what it
             computes with ``None``, and a lane that is not live may receive
             another branch's result. Unbatched it is not read.
+        held_current: Whether the factor storage holds the held matrix because
+            an earlier attempt of this execution refactored it, or ``None``
+            when a replay may have moved the storage. Where it holds, a
+            gate-closed attempt makes no native call at all and passes the
+            matrix on without a copy.
 
     Returns:
         The [IDANlsResult]
@@ -592,11 +600,16 @@ def ida_corrector(
             )
         )
 
+    # A forward loop whose storage holds the held matrix goes through one branch:
+    # a gate-closed attempt then passes the matrix on untouched, without a copy
+    # for each conditional it would otherwise cross.
+    one_branch = has_frozen and not inexact and not adaptive and held_current is not None
     if not has_frozen or inexact:
         # Without blocks to reuse, and on an iterative route (whose operator is
         # the current matrix at every attempt, the setup gate deciding only the
         # preconditioner's rebuild), the attempt assembles the matrix fresh.
         blocks_use, fydot_use, njac_primary = _factored(_assemble_fresh_pack(None))
+        a_use, b_use, c_use, d_use = blocks_use
     else:
         fydot_reuse = (
             frozen_fydot if frozen_fydot is not None else problem.zero_state_partials(dtype)[1]
@@ -606,10 +619,32 @@ def ida_corrector(
         def _reuse_pack(_operand):
             return (a_frozen_primary, b_frozen, c_frozen, d_frozen), fydot_reuse, zero_i32_pack
 
-        blocks_use, fydot_use, njac_primary = live_lane_cond(
-            call_lsetup, _setup_pack, _reuse_pack, None, live=live, false_is_free=True
-        )
-    a_use, b_use, c_use, d_use = blocks_use
+        def _primary_pack(_operand):
+            return live_lane_cond(
+                call_lsetup, _setup_pack, _reuse_pack, None, live=live, false_is_free=True
+            )
+
+        if one_branch:
+
+            def _setup_held(_operand):
+                (a_new, *rest), fydot_new, njac_new = _primary_pack(None)
+                refreshed = refactor_held(held_frozen, a_new, call_lsetup, linear=linear)
+                return refreshed, tuple(rest), fydot_new, njac_new
+
+            call_native = call_lsetup | jnp.logical_not(jnp.asarray(held_current, jnp.bool_))
+            held_setup, (b_use, c_use, d_use), fydot_use, njac_primary = live_lane_cond(
+                call_native,
+                _setup_held,
+                lambda _: (held_frozen, (b_frozen, c_frozen, d_frozen), fydot_reuse, zero_i32_pack),
+                None,
+                live=live,
+                false_is_free=True,
+            )
+            blocks_use = (None, b_use, c_use, d_use)
+            a_use = None
+        else:
+            blocks_use, fydot_use, njac_primary = _primary_pack(None)
+            a_use, b_use, c_use, d_use = blocks_use
 
     def _linearize(held, a_block, b_block, c_block, d_block, refresh, cache, factor_key):
         """Refactor the held state block where it was replaced; make the border/Schur data current.
@@ -624,16 +659,22 @@ def ida_corrector(
         refactored on every iteration.
         """
         rung = ctx.prec_rung if adaptive else None
-        held, solve, solve_many = linearize(
-            held,
-            a_block,
-            refresh,
-            linear=linear,
-            rung=rung,
-            rung_changed=ctx.rung_changed if adaptive else None,
-            flagged=flagged,
-            **linear_test,
-        )
+        if a_block is None:
+            # The one branch above has already refactored it.
+            solve, solve_many = held_solves(
+                held, linear=linear, rung=rung, flagged=flagged, **linear_test
+            )
+        else:
+            held, solve, solve_many = linearize(
+                held,
+                a_block,
+                refresh,
+                linear=linear,
+                rung=rung,
+                rung_changed=ctx.rung_changed if adaptive else None,
+                flagged=flagged,
+                **linear_test,
+            )
         if n_lam > 0:
             if cache is not None:
                 cache, du_b_built, schur_built = refresh_border_cache(
@@ -828,7 +869,7 @@ def ida_corrector(
     cache_in = border_cache if caching else None
 
     held1, solve0, du_b0, schur_solve0, cache1, dub0, sb0 = _linearize(
-        held_frozen,
+        held_setup if one_branch else held_frozen,
         a_use,
         b_use,
         c_use,
@@ -888,13 +929,15 @@ def ida_corrector(
     du_b_builds = dub0 + dub_retry
     schur_builds = sb0 + sb_retry
 
-    converged = jnp.where(need_retry, carry2.converged, carry1.converged)
-    diverged = jnp.where(need_retry, carry2.diverged, carry1.diverged)
-    ee = jnp.where(need_retry, carry2.ee, carry1.ee)
-    iterations = jnp.where(need_retry, carry2.iterations, carry1.iterations)
-    delnrm = jnp.where(need_retry, carry2.delnrm, carry1.delnrm)
-    rate = jnp.where(need_retry, carry2.rate, carry1.rate)
-    ss_out = jnp.where(need_retry, carry2.ss, carry1.ss)
+    # ``carry2`` is the sweep the attempt keeps: the retry where it ran, the
+    # first sweep elsewhere (a lane the step loop discards may hold either).
+    converged = carry2.converged
+    diverged = carry2.diverged
+    ee = carry2.ee
+    iterations = carry2.iterations
+    delnrm = carry2.delnrm
+    rate = carry2.rate
+    ss_out = carry2.ss
 
     zero_i32 = jnp.asarray(0, dtype=jnp.int32)
     one_i32 = jnp.asarray(1, dtype=jnp.int32)
@@ -996,6 +1039,7 @@ def ida_corrector_root(
     jacobian_values_dtype=None,
     detect_precision: bool = False,
     live: Optional[jax.Array] = None,
+    held_current: Optional[jax.Array] = None,
 ) -> IDANlsResult:
     """One corrector attempt with the accepted root behind its derivative boundary.
 
@@ -1049,6 +1093,7 @@ def ida_corrector_root(
             p_nstlj,
             p_cj,
             p_live,
+            p_held_current,
         ) = primal_args
         ctx_p = IDANlsContext(
             t=t,
@@ -1080,6 +1125,7 @@ def ida_corrector_root(
             jacobian_values_dtype=jacobian_values_dtype,
             detect_precision=detect_precision,
             live=p_live,
+            held_current=p_held_current,
         )
 
     def primal_fn(t, cj, q, theta, control, guess, primal_args):
@@ -1101,6 +1147,7 @@ def ida_corrector_root(
         nstlj,
         frozen_cj,
         live,
+        held_current,
     )
 
     def offering_extractor(aux, t, cj, theta, control, primal_args):
