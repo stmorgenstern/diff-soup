@@ -45,6 +45,16 @@
 // the slot from the operand first, so a solve never reads a factor built
 // from other values.
 //
+// Complex values: every handler has a complex128 twin (the targets ending in
+// _c128) that factors with pzgstrf and solves with zgstrs on the same
+// analysis, column ordering and slot machinery. A transposed solve is the
+// plain transpose A^T (trans = TRANS), never the conjugate transpose. A slot
+// records whether it holds real or complex factors, and a call of the other
+// kind factors it afresh, as a call with other values does. SuperLU_MT keeps
+// the storage sizes of each precision's last factorization in that
+// precision's own state, so the refactorization rule above is applied per
+// kind.
+//
 // Shared storage: a factor that empty_factor(..., storage=...) started names a slot keyed by
 // (context id, device ordinal, analysis, storage key, empty-lane marker) instead of a site's
 // slot, shared by every call site and program on that device; its calls carry the storage key.
@@ -71,6 +81,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -92,6 +103,22 @@
 #include "xla/ffi/api/ffi.h"
 
 #include "slu_mt_ddefs.h"
+// The complex128 routines. slu_mt_zdefs.h cannot share a translation unit with
+// slu_mt_ddefs.h (both define GlobalLU_t), so the few entry points used here are
+// declared from it directly; every other type they take is precision-free.
+#include "slu_dcomplex.h"
+extern "C" {
+void zCreate_CompCol_Matrix(SuperMatrix*, int_t, int_t, int_t, doublecomplex*, int_t*, int_t*,
+                            Stype_t, Dtype_t, Mtype_t);
+void zCreate_Dense_Matrix(SuperMatrix*, int_t, int_t, doublecomplex*, int_t, Stype_t, Dtype_t,
+                          Mtype_t);
+void pzgstrf(superlumt_options_t*, SuperMatrix*, int_t*, SuperMatrix*, SuperMatrix*, Gstat_t*,
+             int_t*);
+void pzgstrf_init(int_t, fact_t, trans_t, yes_no_t, int_t, int_t, double, yes_no_t, double,
+                  int_t*, int_t*, void*, int_t, SuperMatrix*, SuperMatrix*,
+                  superlumt_options_t*, Gstat_t*);
+void zgstrs(trans_t, SuperMatrix*, SuperMatrix*, int_t*, int_t*, SuperMatrix*, Gstat_t*, int_t*);
+}
 
 namespace ffi = xla::ffi;
 namespace nb = nanobind;
@@ -134,10 +161,10 @@ int Nprocs() {
 }
 
 struct Stats {
-    int64_t factorizations = 0;    // pdgstrf with refact = NO
-    int64_t refactorizations = 0;  // pdgstrf with refact = YES
+    int64_t factorizations = 0;    // pdgstrf or pzgstrf with refact = NO
+    int64_t refactorizations = 0;  // pdgstrf or pzgstrf with refact = YES
     int64_t rebuilds = 0;          // factorizations started by a solve
-    int64_t solves = 0;            // dgstrs calls
+    int64_t solves = 0;            // dgstrs or zgstrs calls
     int64_t nonfinite = 0;         // factor requests refused for non-finite values
     int64_t released_context_errors = 0;  // calls refused because their context was released
 };
@@ -177,7 +204,9 @@ struct Slot {
     std::shared_ptr<Analysis> analysis;
     bool has_storage = false;          // L, U and the refactorization structure exist
     bool has_values = false;           // `values` holds the operand of the last factor request
+    bool complex = false;              // values, csc, L and U are complex128
     int32_t status = kSingular;
+    // The values and the compressed-column values, two doubles per entry when complex.
     std::vector<double> values;
     std::vector<double> csc;
     std::vector<int_t> perm_c;
@@ -204,7 +233,8 @@ struct Registry {
     int64_t next_analysis = 1;
     int32_t next_slot = 1;
     int64_t next_site = 1;  // ids of sites made by site_create
-    int64_t last_factored_analysis = 0;
+    int64_t last_factored_analysis = 0;          // of the latest pdgstrf
+    int64_t last_factored_complex_analysis = 0;  // of the latest pzgstrf
     Stats stats;
 };
 
@@ -271,17 +301,23 @@ void ComputeFillBounds(Analysis& a, const Slot& slot) {
     a.ucol_bound = std::min(limit, width * lc + n);
 }
 
-// Factor `values` (the caller's coordinate entries) into `slot`. Caller holds
-// the library mutex. Returns the slot's status, or kAllocationFailed.
+// Factor `values` (the caller's coordinate entries; two doubles per entry, real then imaginary
+// part, when `Complex`) into `slot`. Caller holds the library mutex. Returns the slot's status,
+// or kAllocationFailed.
+template <bool Complex>
 int32_t FactorSlot(Slot& slot, const double* values) {
+    constexpr int64_t width = Complex ? 2 : 1;  // doubles per entry
     Registry& reg = Reg();
     Analysis& a = *slot.analysis;
     const int64_t nnz = a.nnz_entries;
-    slot.values.assign(values, values + nnz);
+    slot.values.assign(values, values + width * nnz);
     slot.has_values = true;
 
-    for (int64_t k = 0; k < nnz; ++k) {
+    for (int64_t k = 0; k < width * nnz; ++k) {
         if (!std::isfinite(values[k])) {
+            // A slot whose storage is of the other kind cannot be refactored as this kind.
+            if (slot.complex != Complex) FreeStorage(slot);
+            slot.complex = Complex;
             slot.status = kNonfinite;
             ++reg.stats.nonfinite;
             return slot.status;
@@ -289,19 +325,29 @@ int32_t FactorSlot(Slot& slot, const double* values) {
     }
 
     const int64_t nnz_csc = static_cast<int64_t>(a.rowind.size());
-    slot.csc.assign(static_cast<size_t>(nnz_csc), 0.0);
+    slot.csc.assign(static_cast<size_t>(width * nnz_csc), 0.0);
     for (int64_t k = 0; k < nnz; ++k) {
         if (!a.zeroed[k]) {
-            slot.csc[a.entry_to_csc[k]] += values[k];
+            if constexpr (Complex) {
+                slot.csc[2 * a.entry_to_csc[k]] += values[2 * k];
+                slot.csc[2 * a.entry_to_csc[k] + 1] += values[2 * k + 1];
+            } else {
+                slot.csc[a.entry_to_csc[k]] += values[k];
+            }
         }
     }
     for (int64_t p : a.unit_diagonal) {
-        slot.csc[p] += 1.0;
+        slot.csc[width * p] += 1.0;
     }
 
-    const bool refact = slot.has_storage && reg.last_factored_analysis == a.id;
+    // SuperLU_MT keeps the storage sizes of each precision's last factorization apart, so a
+    // refactorization needs a slot of this kind whose analysis that precision factored last.
+    const int64_t last_factored =
+        Complex ? reg.last_factored_complex_analysis : reg.last_factored_analysis;
+    const bool refact = slot.has_storage && slot.complex == Complex && last_factored == a.id;
     if (!refact) {
         FreeStorage(slot);
+        slot.complex = Complex;
         slot.perm_c = a.perm_c;  // pdgstrf_init post-orders it in place
         slot.perm_r.assign(static_cast<size_t>(a.n), 0);
         slot.options = superlumt_options_t{};
@@ -310,15 +356,27 @@ int32_t FactorSlot(Slot& slot, const double* values) {
     const int_t nprocs = static_cast<int_t>(Nprocs());
     SuperMatrix A{};
     SuperMatrix AC{};
-    dCreate_CompCol_Matrix(&A, a.n, a.n, static_cast<int_t>(nnz_csc), slot.csc.data(),
-                           a.rowind.data(), a.colptr.data(), SLU_NC, SLU_D, SLU_GE);
+    if constexpr (Complex) {
+        zCreate_CompCol_Matrix(&A, a.n, a.n, static_cast<int_t>(nnz_csc),
+                               reinterpret_cast<doublecomplex*>(slot.csc.data()), a.rowind.data(),
+                               a.colptr.data(), SLU_NC, SLU_Z, SLU_GE);
+    } else {
+        dCreate_CompCol_Matrix(&A, a.n, a.n, static_cast<int_t>(nnz_csc), slot.csc.data(),
+                               a.rowind.data(), a.colptr.data(), SLU_NC, SLU_D, SLU_GE);
+    }
     Gstat_t gstat{};
     StatAlloc(a.n, nprocs, a.panel_size, a.relax, &gstat);
     StatInit(a.n, nprocs, &gstat);
 
-    pdgstrf_init(nprocs, DOFACT, NOTRANS, refact ? YES : NO, a.panel_size, a.relax,
-                 a.pivot_threshold, NO, 0.0, slot.perm_c.data(), slot.perm_r.data(), nullptr, 0,
-                 &A, &AC, &slot.options, &gstat);
+    if constexpr (Complex) {
+        pzgstrf_init(nprocs, DOFACT, NOTRANS, refact ? YES : NO, a.panel_size, a.relax,
+                     a.pivot_threshold, NO, 0.0, slot.perm_c.data(), slot.perm_r.data(), nullptr,
+                     0, &A, &AC, &slot.options, &gstat);
+    } else {
+        pdgstrf_init(nprocs, DOFACT, NOTRANS, refact ? YES : NO, a.panel_size, a.relax,
+                     a.pivot_threshold, NO, 0.0, slot.perm_c.data(), slot.perm_r.data(), nullptr,
+                     0, &A, &AC, &slot.options, &gstat);
+    }
 
     if (!refact) {
         if (a.ucol_bound == 0) {
@@ -333,7 +391,11 @@ int32_t FactorSlot(Slot& slot, const double* values) {
     omp_set_dynamic(0);
     omp_set_num_threads(static_cast<int>(nprocs));
     int_t info = 0;
-    pdgstrf(&slot.options, &AC, slot.perm_r.data(), &slot.L, &slot.U, &gstat, &info);
+    if constexpr (Complex) {
+        pzgstrf(&slot.options, &AC, slot.perm_r.data(), &slot.L, &slot.U, &gstat, &info);
+    } else {
+        pdgstrf(&slot.options, &AC, slot.perm_r.data(), &slot.L, &slot.U, &gstat, &info);
+    }
     g_fill_ucol = 0;
     g_fill_lsub = 0;
 
@@ -356,7 +418,11 @@ int32_t FactorSlot(Slot& slot, const double* values) {
     }
 
     slot.has_storage = true;
-    reg.last_factored_analysis = a.id;
+    if constexpr (Complex) {
+        reg.last_factored_complex_analysis = a.id;
+    } else {
+        reg.last_factored_analysis = a.id;
+    }
     if (refact) {
         ++reg.stats.refactorizations;
     } else {
@@ -366,8 +432,9 @@ int32_t FactorSlot(Slot& slot, const double* values) {
     return slot.status;
 }
 
-bool SameValues(const Slot& slot, const double* values) {
-    if (!slot.has_values) {
+// Whether `slot` was last asked to factor exactly `values`, of the kind `complex`.
+bool SameValues(const Slot& slot, const double* values, bool complex) {
+    if (!slot.has_values || slot.complex != complex) {
         return false;
     }
     const size_t bytes = slot.values.size() * sizeof(double);
@@ -541,8 +608,9 @@ ffi::Error AllocationError(const Analysis& a) {
 }
 
 // Factor into `slot` and write its status, or return the allocation error.
+template <bool Complex>
 ffi::Error FactorInto(Slot& slot, const double* values, int32_t* status) {
-    const int32_t result = FactorSlot(slot, values);
+    const int32_t result = FactorSlot<Complex>(slot, values);
     if (result == kAllocationFailed) {
         return AllocationError(*slot.analysis);
     }
@@ -559,7 +627,8 @@ int64_t SlotBytes(const Slot& slot) {
         const auto* lstore = static_cast<const SCPformat*>(slot.L.Store);
         const auto* ustore = static_cast<const NCPformat*>(slot.U.Store);
         const int64_t nnz = static_cast<int64_t>(lstore->nnz) + static_cast<int64_t>(ustore->nnz);
-        bytes += nnz * static_cast<int64_t>(sizeof(double) + sizeof(int_t));
+        const int64_t value_size = slot.complex ? 2 * sizeof(double) : sizeof(double);
+        bytes += nnz * (value_size + static_cast<int64_t>(sizeof(int_t)));
         bytes += 3 * static_cast<int64_t>(slot.analysis->n) * static_cast<int64_t>(sizeof(int_t));
     }
     return bytes;
@@ -569,7 +638,18 @@ int64_t SlotBytes(const Slot& slot) {
 // XLA FFI handlers
 // --------------------------------------------------------------------------
 
-ffi::Error CheckValues(const Slot& slot, ffi::Buffer<ffi::F64>& values) {
+// Whether a buffer of element type T holds complex128 entries.
+template <ffi::DataType T>
+constexpr bool kComplex = T == ffi::C128;
+
+// The entries of a value or right-hand-side buffer as doubles (two per complex entry).
+template <ffi::DataType T>
+const double* Doubles(ffi::Buffer<T>& buffer) {
+    return reinterpret_cast<const double*>(buffer.typed_data());
+}
+
+template <ffi::DataType T>
+ffi::Error CheckValues(const Slot& slot, ffi::Buffer<T>& values) {
     if (static_cast<int64_t>(values.element_count()) != slot.analysis->nnz_entries) {
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "SuperLU values operand has " + std::to_string(values.element_count()) +
@@ -598,7 +678,8 @@ ffi::Error CheckAnalysis(const Slot& slot, int64_t analysis_id) {
 // Every handler takes the factor's order word as its last buffer operand and never reads it:
 // the word makes the call a data dependency of the operation that produced it, and the call's
 // status result becomes the next order word.
-ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<ffi::F64> values,
+template <ffi::DataType T>
+ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<T> values,
                       ffi::Buffer<ffi::S32> key,
                       ffi::Buffer<ffi::S32> context_id, ffi::Buffer<ffi::S32> /*order*/,
                       ffi::Result<ffi::Token>,
@@ -626,7 +707,8 @@ ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<ff
     if (auto err = CheckValues(*slot, values); err.failure()) {
         return err;
     }
-    if (auto err = FactorInto(*slot, values.typed_data(), status->typed_data()); err.failure()) {
+    if (auto err = FactorInto<kComplex<T>>(*slot, Doubles(values), status->typed_data());
+        err.failure()) {
         return err;
     }
     handle_context->typed_data()[0] = context;
@@ -635,7 +717,8 @@ ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<ff
     return ffi::Error::Success();
 }
 
-ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values,
+template <ffi::DataType T>
+ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
                         ffi::Buffer<ffi::PRED> predicate, ffi::Buffer<ffi::S32> held_context,
                         ffi::Buffer<ffi::S32> held_slot, ffi::Buffer<ffi::S32> /*order*/,
                         ffi::Result<ffi::Token>,
@@ -659,7 +742,7 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values
     // A factor of shared storage makes the storage hold the values it keeps (the values operand
     // carries them): with a false predicate it is refactored only when the storage holds other
     // values, for instance at the entry of a replayed segment.
-    if (!refactor && (storage == 0 || SameValues(*held, values.typed_data()))) {
+    if (!refactor && (storage == 0 || SameValues(*held, Doubles(values), kComplex<T>))) {
         if (storage != 0) held->trusted_run = run.run_id;
         handle_slot->typed_data()[0] = held_id;
         status->typed_data()[0] = held->status;
@@ -678,7 +761,8 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values
     if (auto err = CheckValues(*slot, values); err.failure()) {
         return err;
     }
-    if (auto err = FactorInto(*slot, values.typed_data(), status->typed_data()); err.failure()) {
+    if (auto err = FactorInto<kComplex<T>>(*slot, Doubles(values), status->typed_data());
+        err.failure()) {
         return err;
     }
     if (storage != 0) slot->trusted_run = run.run_id;
@@ -686,11 +770,12 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values
     return ffi::Error::Success();
 }
 
-ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values,
+template <ffi::DataType T>
+ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
                      ffi::Buffer<ffi::S32> held_context,
-                     ffi::Buffer<ffi::S32> held_slot, ffi::Buffer<ffi::F64> b,
+                     ffi::Buffer<ffi::S32> held_slot, ffi::Buffer<T> b,
                      ffi::Buffer<ffi::S32> /*order*/,
-                     ffi::Result<ffi::Token>, ffi::ResultBuffer<ffi::F64> x,
+                     ffi::Result<ffi::Token>, ffi::ResultBuffer<T> x,
                      ffi::ResultBuffer<ffi::S32> status,
                      bool transpose, int64_t analysis_id, int64_t storage) {
     const int32_t context = held_context.typed_data()[0];
@@ -723,38 +808,54 @@ ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values,
     // values than the ones it carries. Such a refactor (a derivative solve of an older factor
     // runs after a later refactor of the storage) leaves the slot holding this solve's matrix,
     // so the slot stops being trusted: a later solve of this execution compares values again.
+    // A trusted shared-storage slot holds the matrix of the factor a refactor of this execution
+    // returned, of the kind of that refactor's values, which are this solve's.
+    constexpr bool complex = kComplex<T>;
     const bool trusted = storage != 0 && slot->trusted_run == run.run_id;
-    if (!trusted && !SameValues(*slot, values.typed_data())) {
+    if (!trusted && !SameValues(*slot, Doubles(values), complex)) {
         slot->trusted_run = -1;
         ++reg.stats.rebuilds;
-        if (FactorSlot(*slot, values.typed_data()) == kAllocationFailed) {
+        if (FactorSlot<complex>(*slot, Doubles(values)) == kAllocationFailed) {
             return AllocationError(*slot->analysis);
         }
     }
 
-    double* out = x->typed_data();
+    double* out = reinterpret_cast<double*>(x->typed_data());
+    constexpr int64_t width = complex ? 2 : 1;  // doubles per entry
     status->typed_data()[0] = slot->status;
     if (slot->status != kSuccess) {
-        std::fill(out, out + total, std::numeric_limits<double>::quiet_NaN());
+        std::fill(out, out + width * total, std::numeric_limits<double>::quiet_NaN());
         return ffi::Error::Success();
     }
-    std::memcpy(out, b.typed_data(), static_cast<size_t>(total) * sizeof(double));
+    std::memcpy(out, Doubles(b), static_cast<size_t>(width * total) * sizeof(double));
 
     SuperMatrix B{};
-    dCreate_Dense_Matrix(&B, n, nrhs, out, n, SLU_DN, SLU_D, SLU_GE);
+    if constexpr (complex) {
+        zCreate_Dense_Matrix(&B, n, nrhs, reinterpret_cast<doublecomplex*>(out), n, SLU_DN, SLU_Z,
+                             SLU_GE);
+    } else {
+        dCreate_Dense_Matrix(&B, n, nrhs, out, n, SLU_DN, SLU_D, SLU_GE);
+    }
     Gstat_t gstat{};
     const int_t nprocs = static_cast<int_t>(Nprocs());
     StatAlloc(n, nprocs, slot->analysis->panel_size, slot->analysis->relax, &gstat);
     StatInit(n, nprocs, &gstat);
     int_t info = 0;
-    dgstrs(transpose ? TRANS : NOTRANS, &slot->L, &slot->U, slot->perm_r.data(),
-           slot->perm_c.data(), &B, &gstat, &info);
+    // The plain transpose: zgstrs with TRANS solves A^T x = b, never the conjugate transpose.
+    if constexpr (complex) {
+        zgstrs(transpose ? TRANS : NOTRANS, &slot->L, &slot->U, slot->perm_r.data(),
+               slot->perm_c.data(), &B, &gstat, &info);
+    } else {
+        dgstrs(transpose ? TRANS : NOTRANS, &slot->L, &slot->U, slot->perm_r.data(),
+               slot->perm_c.data(), &B, &gstat, &info);
+    }
     StatFree(&gstat);
     Destroy_SuperMatrix_Store(&B);
     ++reg.stats.solves;
     if (info != 0) {
         return ffi::Error(ffi::ErrorCode::kInternal,
-                          "SuperLU dgstrs rejected argument " + std::to_string(-info) + ".");
+                          std::string("SuperLU ") + (complex ? "zgstrs" : "dgstrs") +
+                              " rejected argument " + std::to_string(-info) + ".");
     }
     return ffi::Error::Success();
 }
@@ -779,56 +880,60 @@ extern "C" int_t sp_ienv(int_t ispec) {
     }
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(kSuperluFactorF64, FactorImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::RunId>()              // the XLA execution
-                                  // the device that runs the call, which keys shared storage
-                                  .Ctx<ffi::DeviceOrdinal>()
-                                  .Arg<ffi::Token>()              // XLA token in (fresh per call)
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // values
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // slot key (call-site token)
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // context id
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // order word in (read by no one: it orders the call)
-                                  .Ret<ffi::Token>()              // XLA token out
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // handle: context id
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // handle: slot
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // status
-                                  .Attr<int64_t>("site")
-                                  .Attr<int64_t>("analysis_id")
-                                  .Attr<int64_t>("storage"));
+// One factor, refactor and apply handler per value type: NAME is F64 or C128 and TYPE the
+// matching ffi::DataType.
+#define DIFF_SOUP_SUPERLU_HANDLERS(NAME, TYPE)                                                    \
+    XLA_FFI_DEFINE_HANDLER_SYMBOL(kSuperluFactor##NAME, FactorImpl<TYPE>,                         \
+                                  ffi::Ffi::Bind()                                                \
+                                      .Ctx<ffi::RunId>()            /* the XLA execution */       \
+                                      /* the device that runs the call, which keys shared storage */ \
+                                      .Ctx<ffi::DeviceOrdinal>()                                  \
+                                      .Arg<ffi::Token>()            /* XLA token in */            \
+                                      .Arg<ffi::Buffer<TYPE>>()     /* values */                  \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* slot key (call-site token) */ \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* context id */              \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* order word in (unread) */  \
+                                      .Ret<ffi::Token>()            /* XLA token out */           \
+                                      .Ret<ffi::Buffer<ffi::S32>>() /* handle: context id */      \
+                                      .Ret<ffi::Buffer<ffi::S32>>() /* handle: slot */            \
+                                      .Ret<ffi::Buffer<ffi::S32>>() /* status */                  \
+                                      .Attr<int64_t>("site")                                      \
+                                      .Attr<int64_t>("analysis_id")                               \
+                                      .Attr<int64_t>("storage"));                                 \
+    XLA_FFI_DEFINE_HANDLER_SYMBOL(kSuperluRefactor##NAME, RefactorImpl<TYPE>,                     \
+                                  ffi::Ffi::Bind()                                                \
+                                      .Ctx<ffi::RunId>()            /* the XLA execution */       \
+                                      .Arg<ffi::Token>()            /* XLA token in */            \
+                                      .Arg<ffi::Buffer<TYPE>>()     /* values */                  \
+                                      .Arg<ffi::Buffer<ffi::PRED>>() /* predicate */              \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* held handle: context id */ \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* held handle: slot */       \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* order word in (unread) */  \
+                                      .Ret<ffi::Token>()            /* XLA token out */           \
+                                      .Ret<ffi::Buffer<ffi::S32>>() /* handle: context id */      \
+                                      .Ret<ffi::Buffer<ffi::S32>>() /* handle: slot */            \
+                                      .Ret<ffi::Buffer<ffi::S32>>() /* status */                  \
+                                      .Attr<int64_t>("site")                                      \
+                                      .Attr<int64_t>("analysis_id")                               \
+                                      .Attr<int64_t>("storage"));                                 \
+    XLA_FFI_DEFINE_HANDLER_SYMBOL(kSuperluApply##NAME, ApplyImpl<TYPE>,                           \
+                                  ffi::Ffi::Bind()                                                \
+                                      .Ctx<ffi::RunId>()            /* the XLA execution */       \
+                                      .Arg<ffi::Token>()            /* XLA token in */            \
+                                      .Arg<ffi::Buffer<TYPE>>()     /* values */                  \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* handle: context id */      \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* handle: slot */            \
+                                      .Arg<ffi::Buffer<TYPE>>()     /* right-hand sides */        \
+                                      .Arg<ffi::Buffer<ffi::S32>>() /* order word in (unread) */  \
+                                      .Ret<ffi::Token>()            /* XLA token out */           \
+                                      .Ret<ffi::Buffer<TYPE>>()     /* solution */                \
+                                      .Ret<ffi::Buffer<ffi::S32>>() /* status */                  \
+                                      .Attr<bool>("transpose")                                    \
+                                      .Attr<int64_t>("analysis_id")                               \
+                                      .Attr<int64_t>("storage"));
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(kSuperluRefactorF64, RefactorImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::RunId>()              // the XLA execution
-                                  .Arg<ffi::Token>()              // XLA token in (fresh per call)
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // values
-                                  .Arg<ffi::Buffer<ffi::PRED>>()  // predicate
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // held handle: context id
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // held handle: slot
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // order word in (read by no one: it orders the call)
-                                  .Ret<ffi::Token>()              // XLA token out
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // handle: context id
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // handle: slot
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // status
-                                  .Attr<int64_t>("site")
-                                  .Attr<int64_t>("analysis_id")
-                                  .Attr<int64_t>("storage"));
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(kSuperluApplyF64, ApplyImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::RunId>()              // the XLA execution
-                                  .Arg<ffi::Token>()              // XLA token in (fresh per call)
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // values
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // handle: context id
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // handle: slot
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // right-hand sides
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // order word in (read by no one: it orders the call)
-                                  .Ret<ffi::Token>()              // XLA token out
-                                  .Ret<ffi::Buffer<ffi::F64>>()   // solution
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // status
-                                  .Attr<bool>("transpose")
-                                  .Attr<int64_t>("analysis_id")
-                                  .Attr<int64_t>("storage"));
+DIFF_SOUP_SUPERLU_HANDLERS(F64, ffi::F64)
+DIFF_SOUP_SUPERLU_HANDLERS(C128, ffi::C128)
 
 // --------------------------------------------------------------------------
 // Python module
@@ -1070,6 +1175,12 @@ NB_MODULE(_native_superlu, m) {
                 nb::capsule(reinterpret_cast<void*>(kSuperluRefactorF64));
             d["diffsoup_superlu_apply_f64"] =
                 nb::capsule(reinterpret_cast<void*>(kSuperluApplyF64));
+            d["diffsoup_superlu_factor_c128"] =
+                nb::capsule(reinterpret_cast<void*>(kSuperluFactorC128));
+            d["diffsoup_superlu_refactor_c128"] =
+                nb::capsule(reinterpret_cast<void*>(kSuperluRefactorC128));
+            d["diffsoup_superlu_apply_c128"] =
+                nb::capsule(reinterpret_cast<void*>(kSuperluApplyC128));
             return d;
         },
         "XLA FFI handler capsules by target name, for jax.ffi.register_ffi_target on the CPU.");

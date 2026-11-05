@@ -3,11 +3,12 @@
 The native module ``_native_superlu`` is built per checkout from
 ``native/superlu_solver.cpp`` against a SuperLU_MT installation (see
 ``CMakeLists.txt``). [load][diff_soup._internal.superlu_ffi.load] imports it
-once and registers its three XLA FFI targets on the CPU platform:
+once and registers its XLA FFI targets on the CPU platform, one of each for
+``float64`` (``_f64``) and for ``complex128`` (``_c128``) values:
 
-- ``diffsoup_superlu_factor_f64``: factor values into a slot;
-- ``diffsoup_superlu_refactor_f64``: refactor into a slot where a predicate holds;
-- ``diffsoup_superlu_apply_f64``: solve with a slot's factors, in either orientation.
+- ``diffsoup_superlu_factor_*``: factor values into a slot;
+- ``diffsoup_superlu_refactor_*``: refactor into a slot where a predicate holds;
+- ``diffsoup_superlu_apply_*``: solve with a slot's factors, in either orientation.
 
 [available][diff_soup._internal.superlu_ffi.available] reports whether the
 module imports, without raising.
