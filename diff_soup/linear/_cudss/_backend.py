@@ -294,7 +294,7 @@ class CuDSS(LinearSolver):
             The MLIR values of ``(x, status, order)``.
 
         Raises:
-            FactorContractError: If ``b`` is complex.
+            FactorContractError: If the values or ``b`` are of a dtype cuDSS does not take.
         """
         if _model_axis.model_axis_record(params["analysis"]) is not None:
             return _LOWER_APPLY(ctx, *operands, **params)

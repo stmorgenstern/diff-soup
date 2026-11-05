@@ -6,9 +6,13 @@
 // the factorization reports it, as every backend's assembly does.
 
 #include "assembly_kernels.h"
+#include "complex_scalar.cuh"
 
 namespace diff_soup_assembly {
 namespace {
+
+using diff_soup_complex::Complex;
+using diff_soup_complex::IsComplex;
 
 constexpr int kThreads = 256;
 constexpr int64_t kMaxBlocks = 2147483647;
@@ -140,13 +144,24 @@ cudaError_t LaunchCompareOut(cudaStream_t stream, const AssemblyMap& map, const 
                              const int32_t* held_slot, Scalar out_type, void* out, int64_t lanes,
                              int32_t* fixed, int32_t* changed, int32_t tag, void* kept,
                              const ResultWords& words) {
-    if (out_type == Scalar::kFloat64) {
-        return LaunchCompare<In, double>(stream, map, in, held, predicate, held_slot, out, lanes,
-                                         fixed, changed, tag, kept, words);
-    }
-    if (out_type == Scalar::kFloat32) {
-        return LaunchCompare<In, float>(stream, map, in, held, predicate, held_slot, out, lanes,
-                                        fixed, changed, tag, kept, words);
+    if constexpr (IsComplex<In>::value) {
+        if (out_type == Scalar::kComplex128) {
+            return LaunchCompare<In, Complex<double>>(stream, map, in, held, predicate, held_slot,
+                                                      out, lanes, fixed, changed, tag, kept, words);
+        }
+        if (out_type == Scalar::kComplex64) {
+            return LaunchCompare<In, Complex<float>>(stream, map, in, held, predicate, held_slot,
+                                                     out, lanes, fixed, changed, tag, kept, words);
+        }
+    } else {
+        if (out_type == Scalar::kFloat64) {
+            return LaunchCompare<In, double>(stream, map, in, held, predicate, held_slot, out,
+                                             lanes, fixed, changed, tag, kept, words);
+        }
+        if (out_type == Scalar::kFloat32) {
+            return LaunchCompare<In, float>(stream, map, in, held, predicate, held_slot, out,
+                                            lanes, fixed, changed, tag, kept, words);
+        }
     }
     return cudaErrorInvalidValue;
 }
@@ -154,8 +169,17 @@ cudaError_t LaunchCompareOut(cudaStream_t stream, const AssemblyMap& map, const 
 template <typename In>
 cudaError_t LaunchOut(cudaStream_t stream, const AssemblyMap& map, const void* in,
                       Scalar out_type, void* out, int64_t lanes) {
-    if (out_type == Scalar::kFloat64) return Launch<In, double>(stream, map, in, out, lanes);
-    if (out_type == Scalar::kFloat32) return Launch<In, float>(stream, map, in, out, lanes);
+    if constexpr (IsComplex<In>::value) {
+        if (out_type == Scalar::kComplex128) {
+            return Launch<In, Complex<double>>(stream, map, in, out, lanes);
+        }
+        if (out_type == Scalar::kComplex64) {
+            return Launch<In, Complex<float>>(stream, map, in, out, lanes);
+        }
+    } else {
+        if (out_type == Scalar::kFloat64) return Launch<In, double>(stream, map, in, out, lanes);
+        if (out_type == Scalar::kFloat32) return Launch<In, float>(stream, map, in, out, lanes);
+    }
     return cudaErrorInvalidValue;
 }
 
@@ -171,6 +195,12 @@ cudaError_t QueueAssembly(cudaStream_t stream, const AssemblyMap& map, Scalar in
         return LaunchOut<double>(stream, map, in, out_type, out, lanes);
     }
     if (in_type == Scalar::kFloat32) return LaunchOut<float>(stream, map, in, out_type, out, lanes);
+    if (in_type == Scalar::kComplex128) {
+        return LaunchOut<Complex<double>>(stream, map, in, out_type, out, lanes);
+    }
+    if (in_type == Scalar::kComplex64) {
+        return LaunchOut<Complex<float>>(stream, map, in, out_type, out, lanes);
+    }
     return cudaErrorInvalidValue;
 }
 
@@ -195,6 +225,16 @@ cudaError_t QueueAssemblyCompare(cudaStream_t stream, const AssemblyMap& map, Sc
     if (in_type == Scalar::kFloat32) {
         return LaunchCompareOut<float>(stream, map, in, held, predicate, held_slot, out_type, out,
                                        lanes, fixed, changed, tag, kept, write);
+    }
+    if (in_type == Scalar::kComplex128) {
+        return LaunchCompareOut<Complex<double>>(stream, map, in, held, predicate, held_slot,
+                                                 out_type, out, lanes, fixed, changed, tag, kept,
+                                                 write);
+    }
+    if (in_type == Scalar::kComplex64) {
+        return LaunchCompareOut<Complex<float>>(stream, map, in, held, predicate, held_slot,
+                                                out_type, out, lanes, fixed, changed, tag, kept,
+                                                write);
     }
     return cudaErrorInvalidValue;
 }

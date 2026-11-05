@@ -2,7 +2,7 @@
   "budgets": {
     "test_files": 44,
     "test_functions": 396,
-    "collected_tests": 594,
+    "collected_tests": 603,
     "source_lines": 14392
   },
   "tier_budgets": {
@@ -15,7 +15,7 @@
     "contracts": {
       "files": 18,
       "functions": 166,
-      "collected": 247,
+      "collected": 256,
       "lines": 5664
     },
     "performance_contracts": {

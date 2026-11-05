@@ -64,6 +64,14 @@
 // it must factor before solving. The lowered programs carry no CSR assembly and no index
 // constant of the pattern.
 //
+// Complex values: the c128 and c64 handlers take complex128 or complex64 values and factor
+// them as CUDA_C_64F or CUDA_C_32F slots on the same analysis, with the same assembly (one is
+// added to the real part of a Dirichlet diagonal) and the same status rules: a complex entry
+// is non-finite when either part is, and a pivot's magnitude is its modulus. A complex factor
+// is never downcast, and refines and zero-fills as the real factor of its width does. A
+// transposed solve is cuDSS's transpose mode, the plain transpose. An invalidation carries no
+// values, so the handler of either kind invalidates a factor of either kind at its precision.
+//
 // A factor handle is three int32 scalars (context id, slot id, generation), or three vectors
 // for a batch slot. Every factorization request (factor, refactor) gives its slot a new
 // generation and writes it into the handle (in a batch slot, into the lanes it factors anew; a
@@ -782,6 +790,34 @@ struct Slot {
     bool OnModelGroup() const { return !mg_indices.empty(); }
 };
 
+// Whether a factor's scalar type is double precision: float64 or complex128 (the "fp64" rung).
+inline bool DoublePrecision(cudaDataType_t dtype) {
+    return dtype == CUDA_R_64F || dtype == CUDA_C_64F;
+}
+
+// Whether a factor's scalar type is complex: complex128 or complex64.
+inline bool ComplexType(cudaDataType_t dtype) {
+    return dtype == CUDA_C_64F || dtype == CUDA_C_32F;
+}
+
+// The type of the other kind at the same precision: complex128 for float64, float32 for
+// complex64, and so on. An invalidation, which carries no values, names a factor of either kind
+// at its rung.
+inline cudaDataType_t OtherKind(cudaDataType_t dtype) {
+    switch (dtype) {
+        case CUDA_R_64F: return CUDA_C_64F;
+        case CUDA_R_32F: return CUDA_C_32F;
+        case CUDA_C_64F: return CUDA_R_64F;
+        case CUDA_C_32F: return CUDA_R_32F;
+        default: return dtype;
+    }
+}
+
+// The real parts of one entry of a factor's scalar type: two for a complex type, one otherwise.
+// The kernels that only test entries for non-finite parts read a complex array as twice as
+// many real parts.
+inline int64_t Parts(cudaDataType_t dtype) { return ComplexType(dtype) ? 2 : 1; }
+
 // Whether the uniform batch of cuDSS would refuse the analysis's modes, so that a batch factors
 // and solves its lanes one at a time on single sides (see "Batch sides").
 bool RunsByLane(const Analysis& a) { return a.deterministic != 0 || a.hybrid_mode != 0; }
@@ -807,6 +843,9 @@ inline bool Downcast(const Analysis& a, const Slot& slot) {
     return slot.dtype == CUDA_R_64F && DowncastMode(a, slot) != 0;
 }
 
+// Complex factors are never downcast: the downcast and the emulated factorization below act on
+// float64 factors only (ConfigurePrecision).
+
 // The refinement steps a downcast factor's solves take by default. One step is the smallest
 // count under which every bound of the test suite holds, the closest using 2.6e-5 of its
 // tolerance (as without downcast). Measured with cuDSS 1.0.0.35 on an RTX 4070 Ti: relative
@@ -817,25 +856,27 @@ constexpr int kDowncastRefinementSteps = 1;
 
 // The cuDSS iterative-refinement steps of a solve of ``slot``: none in deterministic mode,
 // the analysis's count when it names one, else none for a float64 factor kept in float64,
-// kDowncastRefinementSteps for a downcast one and one for a float32 factor.
+// kDowncastRefinementSteps for a downcast one and one for a float32 factor (complex128 factors as
+// float64 ones, complex64 factors as float32 ones).
 // Measured with cuDSS 1.0.0 on an L40S: 10 warm solves of a 1,000,000-row float64 system without
 // refinement and without the fill returned no stale output (worst relative error 4.9e-15).
 inline int RefinementSteps(const Analysis& a, const Slot& slot) {
     if (a.deterministic != 0) return 0;
     if (a.ir_nsteps >= 0) return a.ir_nsteps;
     if (Downcast(a, slot)) return kDowncastRefinementSteps;
-    return slot.dtype == CUDA_R_64F ? 0 : 1;
+    return DoublePrecision(slot.dtype) ? 0 : 1;
 }
 
 // Whether a solve of ``slot`` zeroes its solution buffer first: the analysis's choice when it
-// makes one, else no for a float64 factor (downcast or not) and yes for a float32 one. Measured
+// makes one, else no for a float64 or complex128 factor (downcast or not) and yes for a float32 or
+// complex64 one. Measured
 // with cuDSS 1.0.0.35 on an RTX 4070 Ti: refined solves of downcast factors (1 to 3 steps; single
 // systems and uniform batches of up to 64 lanes, 961 to 1e5 rows) from a solution buffer of NaN
 // bits, or of finite garbage left there through a refactorization, were as accurate as from a
 // zeroed buffer.
 inline bool ZeroFills(const Analysis& a, const Slot& slot) {
     if (a.zero_fill >= 0) return a.zero_fill != 0;
-    return slot.dtype != CUDA_R_64F;
+    return !DoublePrecision(slot.dtype);
 }
 
 // The refinement steps of a status solve of ``slot`` (a batch tile's, or a symmetric indefinite
@@ -1940,10 +1981,18 @@ ffi::Error EnsurePattern(Registry& reg, Analysis& a, int device, cudaStream_t st
 // `data` + i * nnz entries. The handlers assemble them into CSR order on the device.
 struct RawValues {
     const void* data = nullptr;
-    bool f64 = true;
+    diff_soup_assembly::Scalar type = diff_soup_assembly::Scalar::kFloat64;
     int64_t nnz = 0;
 
-    size_t Size() const { return f64 ? sizeof(double) : sizeof(float); }
+    size_t Size() const {
+        using diff_soup_assembly::Scalar;
+        switch (type) {
+            case Scalar::kFloat32: return sizeof(float);
+            case Scalar::kComplex128: return 2 * sizeof(double);
+            case Scalar::kComplex64: return 2 * sizeof(float);
+            default: return sizeof(double);
+        }
+    }
     const void* Lane(int64_t lane) const {
         return static_cast<const char*>(data) +
                static_cast<size_t>(lane) * static_cast<size_t>(nnz) * Size();
@@ -1963,6 +2012,17 @@ ffi::Error CheckRaw(const Analysis& a, const RawValues& raw) {
     return ffi::Error::Success();
 }
 
+// The assembly's scalar type of a factor's cuDSS value type.
+diff_soup_assembly::Scalar AssemblyScalar(cudaDataType_t dtype) {
+    using diff_soup_assembly::Scalar;
+    switch (dtype) {
+        case CUDA_R_32F: return Scalar::kFloat32;
+        case CUDA_C_64F: return Scalar::kComplex128;
+        case CUDA_C_32F: return Scalar::kComplex64;
+        default: return Scalar::kFloat64;
+    }
+}
+
 // Assemble lanes [first, first + count) of `raw` into `out`: the CSR values of `slot`'s dtype,
 // lane `first` of the run at `out`, with one kernel over the analysis's device-resident assembly
 // map (uploaded with the pattern). Nothing is waited for.
@@ -1980,9 +2040,8 @@ ffi::Error AssembleLanes(Registry& reg, Slot& slot, const RawValues& raw, int64_
     map.nnz = a.nnz;
     map.nse = a.nse;
     CONTRACT_CUDA(diff_soup_assembly::QueueAssembly(
-                      stream, map, raw.f64 ? Scalar::kFloat64 : Scalar::kFloat32,
-                      raw.Lane(first), slot.dtype == CUDA_R_64F ? Scalar::kFloat64 : Scalar::kFloat32,
-                      out, count),
+                      stream, map, raw.type, raw.Lane(first), AssemblyScalar(slot.dtype), out,
+                      count),
                   "value assembly kernel");
     ++reg.stats.assemblies;
     reg.stats.assembled_lanes += count;
@@ -2084,11 +2143,11 @@ ffi::Error QueueValueCheck(Registry& reg, Slot& slot, const RawValues& raw,
     map.nnz = a.nnz;
     map.nse = a.nse;
     CONTRACT_CUDA(diff_soup_assembly::QueueAssemblyCompare(
-                      stream, map, raw.f64 ? Scalar::kFloat64 : Scalar::kFloat32, raw.Lane(first),
+                      stream, map, raw.type, raw.Lane(first),
                       held != nullptr ? held->Lane(first) : nullptr,
                       predicate != nullptr ? predicate + first : nullptr,
                       held_slot != nullptr ? held_slot + first : nullptr,
-                      slot.dtype == CUDA_R_64F ? Scalar::kFloat64 : Scalar::kFloat32, out, count,
+                      AssemblyScalar(slot.dtype), out, count,
                       check.Device() + word, check.Device() + check.lanes + word, check.tag, kept,
                       words),
                   "value check kernel");
@@ -2456,9 +2515,9 @@ ffi::Error ScanLanes(Registry& reg, int device, cudaStream_t stream, cudaDataTyp
     ScanScratch* scratch = nullptr;
     CONTRACT_TRY(ScanScratchFor(reg, device, bytes, bytes, &scratch));
     auto* words = static_cast<LaneStatusWords*>(scratch->device_words);
-    CONTRACT_CUDA(diff_soup_status::QueueLaneStatusScan(stream, dtype == CUDA_R_64F, values,
+    CONTRACT_CUDA(diff_soup_status::QueueLaneStatusScan(stream, DoublePrecision(dtype), values,
                                                         value_count, diagonal, diagonal_count,
-                                                        lanes, words),
+                                                        lanes, words, ComplexType(dtype)),
                   "status scan kernel");
     CONTRACT_CUDA(cudaMemcpyAsync(scratch->host_words, words, bytes, cudaMemcpyDeviceToHost,
                                   stream),
@@ -2478,9 +2537,10 @@ ffi::Error ScanLanes(Registry& reg, int device, cudaStream_t stream, cudaDataTyp
     return ffi::Error::Success();
 }
 
-// The unit roundoff of the factor's scalar type: 2^-53 for float64, 2^-24 for float32.
+// The unit roundoff of the factor's scalar type: 2^-53 for float64 and complex128, 2^-24 for
+// float32 and complex64.
 double UnitRoundoff(cudaDataType_t dtype) {
-    return std::ldexp(1.0, dtype == CUDA_R_64F ? -53 : -24);
+    return std::ldexp(1.0, DoublePrecision(dtype) ? -53 : -24);
 }
 
 // A matched side's smallest pivot at or below this many unit roundoffs of its largest marks
@@ -2540,15 +2600,21 @@ ffi::Error ReadDiagonalHost(const Slot& slot, Side& side, cudaStream_t stream, v
     *scan = LaneScan{};
     double smallest = std::numeric_limits<double>::infinity();
     double largest = 0.0;
-    const bool f64 = slot.dtype == CUDA_R_64F;
+    const bool f64 = DoublePrecision(slot.dtype);
+    const int64_t parts = Parts(slot.dtype);
+    // A complex entry's parts are adjacent; its magnitude is the modulus.
+    const auto part = [&](int64_t k) {
+        return f64 ? static_cast<const double*>(host)[k]
+                   : static_cast<double>(static_cast<const float*>(host)[k]);
+    };
     for (int64_t i = 0; i < n; ++i) {
-        const double entry = f64 ? static_cast<const double*>(host)[i]
-                                 : static_cast<double>(static_cast<const float*>(host)[i]);
-        if (!std::isfinite(entry)) {
+        const double entry = part(parts * i);
+        const double imag = parts == 2 ? part(parts * i + 1) : 0.0;
+        if (!std::isfinite(entry) || !std::isfinite(imag)) {
             scan->finite = false;
             return ffi::Error::Success();
         }
-        const double magnitude = std::fabs(entry);
+        const double magnitude = parts == 2 ? std::hypot(entry, imag) : std::fabs(entry);
         smallest = std::min(smallest, magnitude);
         largest = std::max(largest, magnitude);
     }
@@ -2587,12 +2653,12 @@ bool DiagonalSingular(const Slot& slot, const LaneScan& scan, double* ratio) {
     *ratio = scan.largest > 0.0 ? scan.smallest / scan.largest : 0.0;
     if (scan.probed) {
         return !scan.probe_finite ||
-               (slot.dtype == CUDA_R_64F &&
+               (DoublePrecision(slot.dtype) &&
                 scan.probe_error >
                     kSymmetricProbeError * diff_soup_status::kProbeSolutionLargest);
     }
     return scan.smallest == 0.0 ||
-           (slot.Matched() && slot.dtype == CUDA_R_64F &&
+           (slot.Matched() && DoublePrecision(slot.dtype) &&
             scan.smallest <= kSingularPivotRoundoffs * UnitRoundoff(slot.dtype) * scan.largest);
 }
 
@@ -2651,8 +2717,9 @@ ffi::Error NumericPhase(Registry& reg, Slot& slot, Side& side, cudaStream_t stre
         return FactorizationFailed(a, status, refactor, estimates[1]);
     }
     side.factored = true;
-    CONTRACT_CUDA(diff_soup_status::QueueValuesVerdict(stream, slot.dtype == CUDA_R_64F,
-                                                       side.values, a.nse, side.verdict, result),
+    CONTRACT_CUDA(diff_soup_status::QueueValuesVerdict(stream, DoublePrecision(slot.dtype),
+                                                       side.values, a.nse * Parts(slot.dtype),
+                                                       side.verdict, result),
                   "factor status kernel");
     side.pending = true;
     side.pending_refactorization = refactor;
@@ -2721,10 +2788,11 @@ ffi::Error SymmetricStatusSolve(Registry& reg, Slot& slot, Side& side, cudaStrea
                                 LaneScan* scan) {
     Analysis& a = *slot.analysis;
     const DevicePattern& pattern = a.On(slot.device);
-    const bool f64 = slot.dtype == CUDA_R_64F;
+    const bool f64 = DoublePrecision(slot.dtype);
+    const bool complex = ComplexType(slot.dtype);
     CONTRACT_CUDA(diff_soup_status::QueueProbeRightHandSides(stream, f64, pattern.offsets,
                                                              pattern.columns, side.values, a.n,
-                                                             a.nse, 1, side.scratch_b),
+                                                             a.nse, 1, side.scratch_b, complex),
                   "status solve right-hand-side kernel");
     CONTRACT_TRY(SetSolveMode(side, CUDSS_SOLVE_MODE_NORMAL));
     const int ir_steps = RefinementSteps(a, slot);
@@ -2743,7 +2811,7 @@ ffi::Error SymmetricStatusSolve(Registry& reg, Slot& slot, Side& side, cudaStrea
     }
     CONTRACT_CUDSS(solved, "cudssExecute status solve of a held factor");
     ++reg.stats.status_solves;
-    CONTRACT_CUDA(diff_soup_status::QueueProbeErrors(stream, f64, side.scratch_x, a.n, 1),
+    CONTRACT_CUDA(diff_soup_status::QueueProbeErrors(stream, f64, side.scratch_x, a.n, 1, complex),
                   "status solve error kernel");
     std::vector<LaneScan> errors;
     CONTRACT_TRY(ScanLanes(reg, slot.device, stream, slot.dtype, nullptr, 0, side.scratch_x, a.n,
@@ -3556,10 +3624,12 @@ ffi::Error StatusSolve(Registry& reg, Slot& slot, BatchSide& side, const std::ve
                        cudaStream_t stream, std::vector<LaneScan>* scan) {
     Analysis& a = *slot.analysis;
     const DevicePattern& pattern = a.On(slot.device);
-    const bool f64 = slot.dtype == CUDA_R_64F;
+    const bool f64 = DoublePrecision(slot.dtype);
+    const bool complex = ComplexType(slot.dtype);
     CONTRACT_CUDA(diff_soup_status::QueueProbeRightHandSides(stream, f64, pattern.offsets,
                                                              pattern.columns, side.values, a.n,
-                                                             a.nse, side.lanes, side.scratch_b),
+                                                             a.nse, side.lanes, side.scratch_b,
+                                                             complex),
                   "status solve right-hand-side kernel");
     for (auto& tile_holder : side.tiles) {
         BatchTile& tile = *tile_holder;
@@ -3583,7 +3653,8 @@ ffi::Error StatusSolve(Registry& reg, Slot& slot, BatchSide& side, const std::ve
         CONTRACT_CUDSS(solved, "cudssExecute status solve of a batched factor");
         ++reg.stats.status_solves;
     }
-    CONTRACT_CUDA(diff_soup_status::QueueProbeErrors(stream, f64, side.scratch_x, a.n, side.lanes),
+    CONTRACT_CUDA(diff_soup_status::QueueProbeErrors(stream, f64, side.scratch_x, a.n, side.lanes,
+                                                     complex),
                   "status solve error kernel");
     return ScanLanes(reg, slot.device, stream, slot.dtype, side.values, a.nse, side.scratch_x, a.n,
                      side.lanes, scan);
@@ -4213,8 +4284,9 @@ ffi::Error SolveSingle(Registry& reg, Slot& slot, int32_t generation, bool trans
             CONTRACT_TRY(SolveSide(reg, slot, *side, b, x, total, stream, transposed_mode));
             ++reg.stats.solves;
         }
-        CONTRACT_CUDA(diff_soup_status::QueueSolveVerdict(stream, slot.dtype == CUDA_R_64F, b, x,
-                                                          total, side->verdict, device_out),
+        CONTRACT_CUDA(diff_soup_status::QueueSolveVerdict(stream, DoublePrecision(slot.dtype), b,
+                                                          x, total * Parts(slot.dtype),
+                                                          side->verdict, device_out),
                       "solve status kernel");
         *status_source = device_out != nullptr ? device_out : &side->verdict->solve_status;
         *status_out = kSuccess;
@@ -4860,7 +4932,8 @@ SlotSpec SpecFor(bool transposed, bool symmetric, bool spd) {
     return spec;
 }
 
-// The values operand of a call: float32 or float64 entries in the caller's coordinate order,
+// The values operand of a call: float32, float64, complex64 or complex128 entries in the caller's
+// coordinate order,
 // (nnz,) for one lane or (lanes, nnz) for a batch. `lanes` and `batched` receive the lane count
 // and whether the operand carries a lane axis.
 ffi::Error RawOperand(const ffi::AnyBuffer& values, const char* what, RawValues* raw,
@@ -4871,14 +4944,20 @@ ffi::Error RawOperand(const ffi::AnyBuffer& values, const char* what, RawValues*
                            " must have shape (nnz,) or (lanes, nnz); got rank " +
                            std::to_string(dims.size()) + ".");
     }
+    using diff_soup_assembly::Scalar;
     const ffi::DataType type = values.element_type();
     if (type == ffi::F64) {
-        raw->f64 = true;
+        raw->type = Scalar::kFloat64;
     } else if (type == ffi::F32) {
-        raw->f64 = false;
+        raw->type = Scalar::kFloat32;
+    } else if (type == ffi::C128) {
+        raw->type = Scalar::kComplex128;
+    } else if (type == ffi::C64) {
+        raw->type = Scalar::kComplex64;
     } else {
         return InvalidCall(std::string("the values of ") + what +
-                           " must be float32 or float64; cast the values before the call.");
+                           " must be float32, float64, complex64 or complex128; cast the values "
+                           "before the call.");
     }
     *batched = dims.size() == 2;
     *lanes = *batched ? dims[0] : 1;
@@ -5611,10 +5690,14 @@ ffi::Error InvalidateImpl(cudaStream_t stream, ffi::RunId run, ffi::Token,
                 ++reg.stats.static_dispatches;
             }
             CONTRACT_TRY(CheckContext(reg, context));
-            Slot* found = FindStorageSlot(reg, context, device, at.analysis_id,
-                                          get_cuda_data_type<T>(), batched ? lanes : 0,
-                                          at.storage);
-            if (found != nullptr) named.push_back(found);
+            // The call carries no values, so it invalidates the storage's factor of either kind
+            // (real or complex) at the rung's precision.
+            for (const cudaDataType_t dtype :
+                 {get_cuda_data_type<T>(), OtherKind(get_cuda_data_type<T>())}) {
+                Slot* found = FindStorageSlot(reg, context, device, at.analysis_id, dtype,
+                                              batched ? lanes : 0, at.storage);
+                if (found != nullptr) named.push_back(found);
+            }
             resolved = true;
         } else if (const int32_t* words = RunLocalWords(reg, at, run.run_id, lanes)) {
             contexts = words;
@@ -5673,7 +5756,9 @@ ffi::Error InvalidateImpl(cudaStream_t stream, ffi::RunId run, ffi::Token,
     }
     for (Slot* slot : named) {
         CONTRACT_TRY(CheckAnalysis(*slot, at.analysis_id));
-        CONTRACT_TRY(CheckDtype(*slot, get_cuda_data_type<T>()));
+        if (slot->dtype != OtherKind(get_cuda_data_type<T>())) {
+            CONTRACT_TRY(CheckDtype(*slot, get_cuda_data_type<T>()));
+        }
         InvalidateSlot(*slot);
     }
     ++reg.stats.invalidations;
@@ -5749,6 +5834,8 @@ ffi::Error InvalidateImpl(cudaStream_t stream, ffi::RunId run, ffi::Token,
 
 DIFF_SOUP_CUDSS_CONTRACT_HANDLERS(F64, ffi::F64)
 DIFF_SOUP_CUDSS_CONTRACT_HANDLERS(F32, ffi::F32)
+DIFF_SOUP_CUDSS_CONTRACT_HANDLERS(C128, ffi::C128)
+DIFF_SOUP_CUDSS_CONTRACT_HANDLERS(C64, ffi::C64)
 
 // --------------------------------------------------------------------------
 // Python module functions
@@ -6437,6 +6524,22 @@ static void BindContract(nb::module_& m) {
                 nb::capsule(reinterpret_cast<void*>(kCudssContractInvalidateF64));
             d["diff_soup_cudss_contract_invalidate_f32"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractInvalidateF32));
+            d["diff_soup_cudss_contract_factor_coo_c128"] =
+                nb::capsule(reinterpret_cast<void*>(kCudssContractFactorC128));
+            d["diff_soup_cudss_contract_factor_coo_c64"] =
+                nb::capsule(reinterpret_cast<void*>(kCudssContractFactorC64));
+            d["diff_soup_cudss_contract_solve_coo_c128"] =
+                nb::capsule(reinterpret_cast<void*>(kCudssContractSolveC128));
+            d["diff_soup_cudss_contract_solve_coo_c64"] =
+                nb::capsule(reinterpret_cast<void*>(kCudssContractSolveC64));
+            d["diff_soup_cudss_contract_refactor_coo_c128"] =
+                nb::capsule(reinterpret_cast<void*>(kCudssContractRefactorC128));
+            d["diff_soup_cudss_contract_refactor_coo_c64"] =
+                nb::capsule(reinterpret_cast<void*>(kCudssContractRefactorC64));
+            d["diff_soup_cudss_contract_invalidate_c128"] =
+                nb::capsule(reinterpret_cast<void*>(kCudssContractInvalidateC128));
+            d["diff_soup_cudss_contract_invalidate_c64"] =
+                nb::capsule(reinterpret_cast<void*>(kCudssContractInvalidateC64));
             return d;
         },
         "XLA FFI handler capsules of the held-factor handlers by target name, for "
