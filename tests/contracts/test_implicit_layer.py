@@ -376,7 +376,7 @@ def _scaled_decay(scale):
 def test_the_solver_view_cache_is_keyed_on_content_and_bounded():
     """A rebuilt equal problem is served the same view and one with another captured constant
     is not; viewing many distinct problems evicts the oldest view, whose rebuild compares equal
-    to it, while the latest view stays cached."""
+    to it, while the latest view stays cached, and ``ds.solver_view`` serves it too."""
     rebuilt = get_or_build_solver_view(DecayODE().problem) is get_or_build_solver_view(
         DecayODE().problem
     )
@@ -388,4 +388,4 @@ def test_the_solver_view_cache_is_keyed_on_content_and_bounded():
     views = [get_or_build_solver_view(problem) for problem in problems]
     again = get_or_build_solver_view(problems[0])
     assert (rebuilt, changed, again is first, again == first) == (True, False, False, True)
-    assert get_or_build_solver_view(problems[-1]) is views[-1]
+    assert get_or_build_solver_view(problems[-1]) is views[-1] is ds.solver_view(problems[-1])

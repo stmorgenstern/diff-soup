@@ -57,6 +57,7 @@ __all__ = [
     "StructureSignature",
     "ThetaCodec",
     "get_or_build_solver_view",
+    "solver_view",
 ]
 
 
@@ -233,7 +234,7 @@ class SolverView:
     def full_topology(self) -> Optional[SparseTopology]:
         """The row-major full-system COO pattern of ``A(cj)``, or ``None``.
 
-        Sparse [iteration_matrix_values][] entries use this exact ordering.
+        Sparse ``iteration_matrix_values`` entries use this exact ordering.
         Dense problems return ``None`` and expose a full ``(n, n)`` matrix.
         """
         return self.plan.union_topology if self.plan.mode == "sparse" else None
@@ -1086,8 +1087,33 @@ def _build_solver_view(problem, source_key: Hashable) -> SolverView:
         )
 
 
+def solver_view(problem) -> SolverView:
+    """Return the view the solvers take of ``problem``.
+
+    The view is what ``pdesolve`` and the implicit-layer verbs read: the
+    residual ``F(t, y, ydot, theta, control)`` as ``residual``, the state size
+    ``n`` and its local block ``n_u``, the differential rows ``id_mask``, the
+    iteration matrix's sparse pattern ``full_topology`` and the linearization
+    ``plan`` its values follow. It is built once per model and cached, so a
+    rebuilt problem equal in content gets the same view.
+
+    Args:
+        problem: A lowered problem, a ``MassProblem`` or ``ImplicitProblem``,
+            or a view, which is returned unchanged.
+
+    Returns:
+        The problem's [SolverView][diff_soup.problem.SolverView].
+
+    Raises:
+        TypeError: If ``problem`` supplies no solver problem.
+    """
+    return get_or_build_solver_view(problem)
+
+
 def get_or_build_solver_view(problem) -> SolverView:
     """Return the cached engine-facing view of ``problem``, building it once.
+
+    [solver_view][diff_soup.problem.solver_view] is the public name.
 
     Accepts a solver problem ([MassProblem][] / [ImplicitProblem][]),
     a problem with a callable ``solver_problem()`` hook, or an already-built
