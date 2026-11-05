@@ -3,11 +3,12 @@
 The native module ``_native_klu`` is built per checkout from
 ``native/klu_ffi.cpp`` against the SuiteSparse KLU shared libraries (see
 ``CMakeLists.txt``). [load][diff_soup._internal.klu_ffi.load] imports it once
-and registers its three XLA FFI targets on the CPU platform:
+and registers its XLA FFI targets on the CPU platform, one of each for
+``float64`` (``_f64``) and for ``complex128`` (``_c128``) values:
 
-- ``diffsoup_klu_factor_f64``: factor values into a slot;
-- ``diffsoup_klu_refactor_f64``: refactor into a slot where a predicate holds;
-- ``diffsoup_klu_apply_f64``: solve with a slot's factors, in either orientation.
+- ``diffsoup_klu_factor_*``: factor values into a slot;
+- ``diffsoup_klu_refactor_*``: refactor into a slot where a predicate holds;
+- ``diffsoup_klu_apply_*``: solve with a slot's factors, in either orientation.
 
 [available][diff_soup._internal.klu_ffi.available] reports whether the module
 imports, without raising. The module's other functions (the analysis, site and

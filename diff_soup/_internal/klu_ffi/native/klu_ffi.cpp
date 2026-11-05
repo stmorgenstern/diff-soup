@@ -6,8 +6,8 @@
 //     Dirichlet rows, the KLU control parameters and the symbolic
 //     factorization from klu_analyze (block triangular form and fill-reducing
 //     ordering);
-//   * a slot per factor: the KLU numeric factorization and a copy of the
-//     values it was built from;
+//   * a slot per factor: the KLU numeric factorization, real or complex, and a
+//     copy of the values it was built from;
 //   * a site per lowered factor or refactor call: the slots that call writes
 //     are keyed at the site by the context id the call carries at run time.
 //     A factor call picks its slot by (context, slot token), so lanes
@@ -39,7 +39,15 @@
 // klu_factor and its partial pivoting.
 //
 // Solves use klu_solve or klu_tsolve on the same factorization, with every
-// right-hand side in one column-major block. A solve whose values operand
+// right-hand side in one column-major block.
+//
+// Complex values: every handler has a complex128 twin (the targets ending in _c128) that runs
+// the same steps with klu_z_factor, klu_z_refactor, klu_z_rcond, klu_z_condest, klu_z_solve and
+// klu_z_tsolve on interleaved (real, imaginary) values. The symbolic analysis is the real one,
+// since klu_analyze depends on the pattern alone. A transposed complex solve is the plain
+// transpose (klu_z_tsolve with conj_solve = 0), the transpose that reverse-mode differentiation
+// of a solve needs. A slot holds one kind of factorization; a call of the other kind factors it
+// afresh, as a call with other values does. A solve whose values operand
 // differs from the values its slot was last factored with refactors the slot
 // from the operand first, so a solve never reads a factor built from other
 // values.
@@ -151,9 +159,10 @@ struct Slot {
     std::shared_ptr<Analysis> analysis;
     klu_numeric* numeric = nullptr;
     bool has_values = false;  // `values` holds the operand of the last factor request
+    bool complex = false;     // `numeric`, `values` and `csc` hold complex entries
     int32_t status = kSingular;
-    std::vector<double> values;
-    std::vector<double> csc;
+    std::vector<double> values;  // nnz entries, or 2 nnz interleaved for a complex slot
+    std::vector<double> csc;     // the compressed matrix, interleaved for a complex slot
 
     Slot() = default;
     Slot(const Slot&) = delete;
@@ -162,7 +171,11 @@ struct Slot {
 
     void FreeNumeric() {
         if (numeric != nullptr) {
-            klu_free_numeric(&numeric, &analysis->common);
+            if (complex) {
+                klu_z_free_numeric(&numeric, &analysis->common);
+            } else {
+                klu_free_numeric(&numeric, &analysis->common);
+            }
             numeric = nullptr;
         }
     }
@@ -228,29 +241,41 @@ ffi::Error KluFailure(const char* routine, int status) {
 // below its inverse.
 bool RefactorAccurate(Slot& slot) {
     Analysis& a = *slot.analysis;
-    if (!klu_rcond(a.symbolic, slot.numeric, &a.common)) {
+    const int rcond_ok = slot.complex ? klu_z_rcond(a.symbolic, slot.numeric, &a.common)
+                                      : klu_rcond(a.symbolic, slot.numeric, &a.common);
+    if (!rcond_ok) {
         return false;
     }
     if (a.common.rcond >= kRcondFloor) {
         return true;
     }
-    if (!klu_condest(a.colptr.data(), slot.csc.data(), a.symbolic, slot.numeric, &a.common)) {
+    const int condest_ok =
+        slot.complex
+            ? klu_z_condest(a.colptr.data(), slot.csc.data(), a.symbolic, slot.numeric, &a.common)
+            : klu_condest(a.colptr.data(), slot.csc.data(), a.symbolic, slot.numeric, &a.common);
+    if (!condest_ok) {
         return false;
     }
     return a.common.condest <= 1.0 / kRcondFloor;
 }
 
-// Factor `values` (the caller's coordinate entries) into `slot` and set its
-// status. Caller holds the library mutex. Returns an error only for a KLU
+// Factor `values` (the caller's coordinate entries, interleaved real and imaginary parts when
+// `complex`) into `slot` and set its status. A slot that holds a factorization of the other
+// kind is factored afresh. Caller holds the library mutex. Returns an error only for a KLU
 // failure other than singularity (out of memory, integer overflow).
-ffi::Error FactorSlot(Slot& slot, const double* values) {
+ffi::Error FactorSlot(Slot& slot, const double* values, bool complex) {
     Registry& reg = Reg();
     Analysis& a = *slot.analysis;
-    const int64_t nnz = a.nnz_entries;
-    slot.values.assign(values, values + nnz);
+    const int64_t width = complex ? 2 : 1;
+    const int64_t count = width * a.nnz_entries;
+    if (slot.complex != complex) {
+        slot.FreeNumeric();
+        slot.complex = complex;
+    }
+    slot.values.assign(values, values + count);
     slot.has_values = true;
 
-    for (int64_t k = 0; k < nnz; ++k) {
+    for (int64_t k = 0; k < count; ++k) {
         if (!std::isfinite(values[k])) {
             slot.status = kNonfinite;
             ++reg.stats.nonfinite;
@@ -258,19 +283,24 @@ ffi::Error FactorSlot(Slot& slot, const double* values) {
         }
     }
 
-    slot.csc.assign(a.rowind.size(), 0.0);
-    for (int64_t k = 0; k < nnz; ++k) {
+    slot.csc.assign(static_cast<size_t>(width) * a.rowind.size(), 0.0);
+    for (int64_t k = 0; k < a.nnz_entries; ++k) {
         if (!a.zeroed[k]) {
-            slot.csc[a.entry_to_csc[k]] += values[k];
+            for (int64_t part = 0; part < width; ++part) {
+                slot.csc[width * a.entry_to_csc[k] + part] += values[width * k + part];
+            }
         }
     }
     for (int64_t p : a.unit_diagonal) {
-        slot.csc[p] += 1.0;
+        slot.csc[width * p] += 1.0;
     }
 
     if (slot.numeric != nullptr) {
-        const int ok = klu_refactor(a.colptr.data(), a.rowind.data(), slot.csc.data(),
-                                    a.symbolic, slot.numeric, &a.common);
+        const int ok =
+            complex ? klu_z_refactor(a.colptr.data(), a.rowind.data(), slot.csc.data(),
+                                     a.symbolic, slot.numeric, &a.common)
+                    : klu_refactor(a.colptr.data(), a.rowind.data(), slot.csc.data(), a.symbolic,
+                                   slot.numeric, &a.common);
         const int refactor_status = a.common.status;
         if (ok && refactor_status == KLU_OK && RefactorAccurate(slot)) {
             ++reg.stats.refactorizations;
@@ -287,7 +317,11 @@ ffi::Error FactorSlot(Slot& slot, const double* values) {
     }
 
     slot.numeric =
-        klu_factor(a.colptr.data(), a.rowind.data(), slot.csc.data(), a.symbolic, &a.common);
+        complex
+            ? klu_z_factor(a.colptr.data(), a.rowind.data(), slot.csc.data(), a.symbolic,
+                           &a.common)
+            : klu_factor(a.colptr.data(), a.rowind.data(), slot.csc.data(), a.symbolic,
+                         &a.common);
     ++reg.stats.factorizations;
     const int status = a.common.status;
     if (slot.numeric == nullptr) {
@@ -308,8 +342,9 @@ ffi::Error FactorSlot(Slot& slot, const double* values) {
     return ffi::Error::Success();
 }
 
-bool SameValues(const Slot& slot, const double* values) {
-    if (!slot.has_values) {
+// Whether `slot` was last asked to factor exactly `values`, of the kind `complex`.
+bool SameValues(const Slot& slot, const double* values, bool complex) {
+    if (!slot.has_values || slot.complex != complex) {
         return false;
     }
     const size_t bytes = slot.values.size() * sizeof(double);
@@ -472,23 +507,25 @@ ffi::Error FindHeld(int32_t context, int32_t id, Slot** held) {
 // Bytes held by a numeric factorization: the L and U blocks, the diagonal of
 // U, the row scaling, the permutations and column pointers, the off-diagonal
 // blocks and the solve workspace.
-int64_t NumericBytes(const klu_numeric* num) {
+int64_t NumericBytes(const klu_numeric* num, bool complex) {
     if (num == nullptr) {
         return 0;
     }
     const int64_t n = num->n;
+    // L, U, the diagonal of U and the off-diagonal blocks hold complex entries in a complex
+    // factorization; the row scaling is real either way.
+    const int64_t entry = static_cast<int64_t>(sizeof(double)) * (complex ? 2 : 1);
     int64_t bytes = 0;
     for (int32_t block = 0; block < num->nblocks; ++block) {
-        bytes += static_cast<int64_t>(num->LUsize[block]) * static_cast<int64_t>(sizeof(double));
+        bytes += static_cast<int64_t>(num->LUsize[block]) * entry;
     }
-    bytes += n * static_cast<int64_t>(sizeof(double));  // diagonal of U
+    bytes += n * entry;  // diagonal of U
     if (num->Rs != nullptr) {
         bytes += n * static_cast<int64_t>(sizeof(double));
     }
     bytes += 6 * n * static_cast<int64_t>(sizeof(int32_t));  // Pnum, Pinv, Lip, Uip, Llen, Ulen
     bytes += (n + 1) * static_cast<int64_t>(sizeof(int32_t));  // Offp
-    bytes += static_cast<int64_t>(num->nzoff) *
-             static_cast<int64_t>(sizeof(int32_t) + sizeof(double));
+    bytes += static_cast<int64_t>(num->nzoff) * (static_cast<int64_t>(sizeof(int32_t)) + entry);
     bytes += static_cast<int64_t>(num->worksize);
     return bytes;
 }
@@ -496,14 +533,25 @@ int64_t NumericBytes(const klu_numeric* num) {
 int64_t SlotBytes(const Slot& slot) {
     const int64_t copies = static_cast<int64_t>(slot.values.capacity() + slot.csc.capacity()) *
                            static_cast<int64_t>(sizeof(double));
-    return copies + NumericBytes(slot.numeric);
+    return copies + NumericBytes(slot.numeric, slot.complex);
 }
 
 // --------------------------------------------------------------------------
 // XLA FFI handlers
 // --------------------------------------------------------------------------
 
-ffi::Error CheckValues(const Slot& slot, ffi::Buffer<ffi::F64>& values) {
+// The element type of a handler's values and right-hand sides: F64 or C128.
+template <ffi::DataType T>
+constexpr bool kIsComplex = T == ffi::DataType::C128;
+
+// The values operand as interleaved doubles (one per entry, or two for a complex entry).
+template <ffi::DataType T>
+const double* ValueData(ffi::Buffer<T>& values) {
+    return reinterpret_cast<const double*>(values.typed_data());
+}
+
+template <ffi::DataType T>
+ffi::Error CheckValues(const Slot& slot, ffi::Buffer<T>& values) {
     if (static_cast<int64_t>(values.element_count()) != slot.analysis->nnz_entries) {
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                           "KLU values operand has " + std::to_string(values.element_count()) +
@@ -532,7 +580,8 @@ ffi::Error CheckAnalysis(const Slot& slot, int64_t analysis_id) {
 // Every handler takes the factor's order word as its last buffer operand and never reads it:
 // the word makes the call a data dependency of the operation that produced it, and the call's
 // status result becomes the next order word.
-ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<ffi::F64> values,
+template <ffi::DataType T>
+ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<T> values,
                       ffi::Buffer<ffi::S32> key,
                       ffi::Buffer<ffi::S32> context_id, ffi::Buffer<ffi::S32> /*order*/,
                       ffi::Result<ffi::Token>,
@@ -560,7 +609,7 @@ ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<ff
     if (auto err = CheckValues(*slot, values); err.failure()) {
         return err;
     }
-    if (auto err = FactorSlot(*slot, values.typed_data()); err.failure()) {
+    if (auto err = FactorSlot(*slot, ValueData(values), kIsComplex<T>); err.failure()) {
         return err;
     }
     status->typed_data()[0] = slot->status;
@@ -570,7 +619,8 @@ ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<ff
     return ffi::Error::Success();
 }
 
-ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values,
+template <ffi::DataType T>
+ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
                         ffi::Buffer<ffi::PRED> predicate, ffi::Buffer<ffi::S32> held_context,
                         ffi::Buffer<ffi::S32> held_slot, ffi::Buffer<ffi::S32> /*order*/,
                         ffi::Result<ffi::Token>,
@@ -594,7 +644,7 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values
     // A factor of shared storage makes the storage hold the values it keeps (the values operand
     // carries them): with a false predicate it is refactored only when the storage holds other
     // values, for instance at the entry of a replayed segment.
-    if (!refactor && (storage == 0 || SameValues(*held, values.typed_data()))) {
+    if (!refactor && (storage == 0 || SameValues(*held, ValueData(values), kIsComplex<T>))) {
         if (storage != 0) held->trusted_run = run.run_id;
         handle_slot->typed_data()[0] = held_id;
         status->typed_data()[0] = held->status;
@@ -613,7 +663,7 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values
     if (auto err = CheckValues(*slot, values); err.failure()) {
         return err;
     }
-    if (auto err = FactorSlot(*slot, values.typed_data()); err.failure()) {
+    if (auto err = FactorSlot(*slot, ValueData(values), kIsComplex<T>); err.failure()) {
         return err;
     }
     status->typed_data()[0] = slot->status;
@@ -622,11 +672,15 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values
     return ffi::Error::Success();
 }
 
-ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values,
+// A complex solve takes values, right-hand sides and solution in complex128; a real factor
+// with a complex right-hand side is solved by the lowering as one real block of the real and
+// imaginary parts, so no handler mixes the kinds.
+template <ffi::DataType T>
+ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
                      ffi::Buffer<ffi::S32> held_context,
-                     ffi::Buffer<ffi::S32> held_slot, ffi::Buffer<ffi::F64> b,
+                     ffi::Buffer<ffi::S32> held_slot, ffi::Buffer<T> b,
                      ffi::Buffer<ffi::S32> /*order*/,
-                     ffi::Result<ffi::Token>, ffi::ResultBuffer<ffi::F64> x,
+                     ffi::Result<ffi::Token>, ffi::ResultBuffer<T> x,
                      ffi::ResultBuffer<ffi::S32> status,
                      bool transpose, int64_t analysis_id, int64_t storage) {
     const int32_t context = held_context.typed_data()[0];
@@ -664,90 +718,112 @@ ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<ffi::F64> values,
     // values than the ones it carries. Such a refactor (a derivative solve of an older factor
     // runs after a later refactor of the storage) leaves the slot holding this solve's matrix,
     // so the slot stops being trusted: a later solve of this execution compares values again.
-    const bool trusted = storage != 0 && slot->trusted_run == run.run_id;
-    if (!trusted && !SameValues(*slot, values.typed_data())) {
+    constexpr bool complex = kIsComplex<T>;
+    // A slot of the other kind (a shared storage first filled by a factor of the other kind)
+    // never counts as holding these values, so it is factored afresh like a slot of other values.
+    const bool trusted = storage != 0 && slot->trusted_run == run.run_id && slot->complex == complex;
+    if (!trusted && !SameValues(*slot, ValueData(values), complex)) {
         slot->trusted_run = -1;
-        if (auto err = FactorSlot(*slot, values.typed_data()); err.failure()) {
+        if (auto err = FactorSlot(*slot, ValueData(values), complex); err.failure()) {
             return err;
         }
         ++reg.stats.rebuilds;
     }
 
-    double* out = x->typed_data();
+    // Interleaved doubles: one per entry, or the real and imaginary parts of a complex entry.
+    const int64_t width = complex ? 2 : 1;
+    double* out = reinterpret_cast<double*>(x->typed_data());
     status->typed_data()[0] = slot->status;
     if (slot->status != kSuccess) {
-        std::fill(out, out + total, std::numeric_limits<double>::quiet_NaN());
+        std::fill(out, out + width * total, std::numeric_limits<double>::quiet_NaN());
         return ffi::Error::Success();
     }
     if (total == 0) {
         return ffi::Error::Success();
     }
-    std::memcpy(out, b.typed_data(), static_cast<size_t>(total) * sizeof(double));
+    std::memcpy(out, b.typed_data(), static_cast<size_t>(width * total) * sizeof(double));
 
     Analysis& a = *slot->analysis;
-    const int ok = transpose ? klu_tsolve(a.symbolic, slot->numeric, static_cast<int32_t>(n),
-                                          static_cast<int32_t>(nrhs), out, &a.common)
-                             : klu_solve(a.symbolic, slot->numeric, static_cast<int32_t>(n),
-                                         static_cast<int32_t>(nrhs), out, &a.common);
+    const auto ldim = static_cast<int32_t>(n);
+    const auto cols = static_cast<int32_t>(nrhs);
+    int ok = 0;
+    if constexpr (complex) {
+        // conj_solve = 0: the plain transpose A^T, never the conjugate transpose.
+        ok = transpose ? klu_z_tsolve(a.symbolic, slot->numeric, ldim, cols, out, 0, &a.common)
+                       : klu_z_solve(a.symbolic, slot->numeric, ldim, cols, out, &a.common);
+    } else {
+        ok = transpose ? klu_tsolve(a.symbolic, slot->numeric, ldim, cols, out, &a.common)
+                       : klu_solve(a.symbolic, slot->numeric, ldim, cols, out, &a.common);
+    }
     ++reg.stats.solves;
     if (!ok) {
-        return KluFailure(transpose ? "klu_tsolve" : "klu_solve", a.common.status);
+        const char* routine = complex ? (transpose ? "klu_z_tsolve" : "klu_z_solve")
+                                      : (transpose ? "klu_tsolve" : "klu_solve");
+        return KluFailure(routine, a.common.status);
     }
     return ffi::Error::Success();
 }
 
 }  // namespace
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(kKluFactorF64, FactorImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::RunId>()              // the XLA execution
-                                  // the device that runs the call, which keys shared storage
-                                  .Ctx<ffi::DeviceOrdinal>()
-                                  .Arg<ffi::Token>()              // XLA token in (fresh per call)
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // values
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // slot key (call-site token)
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // context id
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // order word in (read by no one: it orders the call)
-                                  .Ret<ffi::Token>()              // XLA token out
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // handle: context id
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // handle: slot
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // status
-                                  .Attr<int64_t>("site")
-                                  .Attr<int64_t>("analysis_id")
-                                  .Attr<int64_t>("storage"));
+// One binding per element type: the values (and right-hand sides and solution) are F64 for the
+// real handlers and C128 for the complex ones; everything else is the same.
+#define DIFFSOUP_KLU_HANDLERS(SUFFIX, TYPE)                                                       \
+    XLA_FFI_DEFINE_HANDLER_SYMBOL(                                                                \
+        kKluFactor##SUFFIX, FactorImpl<TYPE>,                                                     \
+        ffi::Ffi::Bind()                                                                          \
+            .Ctx<ffi::RunId>()            /* the XLA execution */                                 \
+            .Ctx<ffi::DeviceOrdinal>()    /* the device that runs the call: keys shared storage */\
+            .Arg<ffi::Token>()            /* XLA token in (fresh per call) */                     \
+            .Arg<ffi::Buffer<TYPE>>()     /* values */                                            \
+            .Arg<ffi::Buffer<ffi::S32>>() /* slot key (call-site token) */                        \
+            .Arg<ffi::Buffer<ffi::S32>>() /* context id */                                        \
+            .Arg<ffi::Buffer<ffi::S32>>() /* order word in (read by no one: it orders the call) */\
+            .Ret<ffi::Token>()            /* XLA token out */                                     \
+            .Ret<ffi::Buffer<ffi::S32>>() /* handle: context id */                                \
+            .Ret<ffi::Buffer<ffi::S32>>() /* handle: slot */                                      \
+            .Ret<ffi::Buffer<ffi::S32>>() /* status */                                            \
+            .Attr<int64_t>("site")                                                                \
+            .Attr<int64_t>("analysis_id")                                                         \
+            .Attr<int64_t>("storage"));                                                           \
+    XLA_FFI_DEFINE_HANDLER_SYMBOL(                                                                \
+        kKluRefactor##SUFFIX, RefactorImpl<TYPE>,                                                 \
+        ffi::Ffi::Bind()                                                                          \
+            .Ctx<ffi::RunId>()             /* the XLA execution */                                \
+            .Arg<ffi::Token>()             /* XLA token in (fresh per call) */                    \
+            .Arg<ffi::Buffer<TYPE>>()      /* values */                                           \
+            .Arg<ffi::Buffer<ffi::PRED>>() /* predicate */                                        \
+            .Arg<ffi::Buffer<ffi::S32>>()  /* held handle: context id */                          \
+            .Arg<ffi::Buffer<ffi::S32>>()  /* held handle: slot */                                \
+            .Arg<ffi::Buffer<ffi::S32>>()  /* order word in (read by no one) */                   \
+            .Ret<ffi::Token>()             /* XLA token out */                                    \
+            .Ret<ffi::Buffer<ffi::S32>>()  /* handle: context id */                               \
+            .Ret<ffi::Buffer<ffi::S32>>()  /* handle: slot */                                     \
+            .Ret<ffi::Buffer<ffi::S32>>()  /* status */                                           \
+            .Attr<int64_t>("site")                                                                \
+            .Attr<int64_t>("analysis_id")                                                         \
+            .Attr<int64_t>("storage"));                                                           \
+    XLA_FFI_DEFINE_HANDLER_SYMBOL(                                                                \
+        kKluApply##SUFFIX, ApplyImpl<TYPE>,                                                       \
+        ffi::Ffi::Bind()                                                                          \
+            .Ctx<ffi::RunId>()            /* the XLA execution */                                 \
+            .Arg<ffi::Token>()            /* XLA token in (fresh per call) */                     \
+            .Arg<ffi::Buffer<TYPE>>()     /* values */                                            \
+            .Arg<ffi::Buffer<ffi::S32>>() /* handle: context id */                                \
+            .Arg<ffi::Buffer<ffi::S32>>() /* handle: slot */                                      \
+            .Arg<ffi::Buffer<TYPE>>()     /* right-hand sides */                                  \
+            .Arg<ffi::Buffer<ffi::S32>>() /* order word in (read by no one) */                    \
+            .Ret<ffi::Token>()            /* XLA token out */                                     \
+            .Ret<ffi::Buffer<TYPE>>()     /* solution */                                          \
+            .Ret<ffi::Buffer<ffi::S32>>() /* status */                                            \
+            .Attr<bool>("transpose")                                                              \
+            .Attr<int64_t>("analysis_id")                                                         \
+            .Attr<int64_t>("storage"))
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(kKluRefactorF64, RefactorImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::RunId>()              // the XLA execution
-                                  .Arg<ffi::Token>()              // XLA token in (fresh per call)
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // values
-                                  .Arg<ffi::Buffer<ffi::PRED>>()  // predicate
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // held handle: context id
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // held handle: slot
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // order word in (read by no one: it orders the call)
-                                  .Ret<ffi::Token>()              // XLA token out
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // handle: context id
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // handle: slot
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // status
-                                  .Attr<int64_t>("site")
-                                  .Attr<int64_t>("analysis_id")
-                                  .Attr<int64_t>("storage"));
+DIFFSOUP_KLU_HANDLERS(F64, ffi::F64);
+DIFFSOUP_KLU_HANDLERS(C128, ffi::C128);
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(kKluApplyF64, ApplyImpl,
-                              ffi::Ffi::Bind()
-                                  .Ctx<ffi::RunId>()              // the XLA execution
-                                  .Arg<ffi::Token>()              // XLA token in (fresh per call)
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // values
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // handle: context id
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // handle: slot
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // right-hand sides
-                                  .Arg<ffi::Buffer<ffi::S32>>()   // order word in (read by no one: it orders the call)
-                                  .Ret<ffi::Token>()              // XLA token out
-                                  .Ret<ffi::Buffer<ffi::F64>>()   // solution
-                                  .Ret<ffi::Buffer<ffi::S32>>()   // status
-                                  .Attr<bool>("transpose")
-                                  .Attr<int64_t>("analysis_id")
-                                  .Attr<int64_t>("storage"));
+#undef DIFFSOUP_KLU_HANDLERS
 
 // --------------------------------------------------------------------------
 // Python module
@@ -1001,6 +1077,10 @@ NB_MODULE(_native_klu, m) {
             d["diffsoup_klu_refactor_f64"] =
                 nb::capsule(reinterpret_cast<void*>(kKluRefactorF64));
             d["diffsoup_klu_apply_f64"] = nb::capsule(reinterpret_cast<void*>(kKluApplyF64));
+            d["diffsoup_klu_factor_c128"] = nb::capsule(reinterpret_cast<void*>(kKluFactorC128));
+            d["diffsoup_klu_refactor_c128"] =
+                nb::capsule(reinterpret_cast<void*>(kKluRefactorC128));
+            d["diffsoup_klu_apply_c128"] = nb::capsule(reinterpret_cast<void*>(kKluApplyC128));
             return d;
         },
         "XLA FFI handler capsules by target name, for jax.ffi.register_ffi_target on the CPU.");
