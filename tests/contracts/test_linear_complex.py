@@ -14,6 +14,7 @@ import pytest
 
 from diff_soup.linear import (
     KLU,
+    CuDSS,
     Dense,
     SolveContext,
     SolveStatus,
@@ -32,6 +33,7 @@ BACKENDS = [
     pytest.param(Dense, id="dense"),
     pytest.param(KLU, id="klu", marks=pytest.mark.requires_klu),
     pytest.param(SuperLU, id="superlu", marks=pytest.mark.requires_superlu),
+    pytest.param(CuDSS, id="cudss", marks=pytest.mark.requires_cudss),
 ]
 N, BC_ROW = 24, 3
 # measured at most 2.7e-16 relative against NumPy over every random-system solve below, CPU
@@ -126,7 +128,9 @@ def test_transpose_is_the_plain_transpose_that_linear_transpose_derives(make):
     ``A^T`` too."""
     topology, values, matrix = _random_system()
     ctx = _context(make)
-    analysis = analyze(topology, backend=make())
+    # cuDSS's default complex solve is not bit-reproducible run to run (1 ulp at one entry of 24
+    # over six transposed solves, RTX 4070 Ti, cuDSS 1.0.0.35, 2026-11-05); its deterministic mode is
+    analysis = analyze(topology, backend=make(deterministic=True) if make is CuDSS else make())
     f = factor(analysis, values, ctx=ctx)
     b = _rhs(N)
     (pulled,) = jax.linear_transpose(lambda rhs: solve(f, rhs)[0], b)(b)

@@ -93,6 +93,14 @@ host only once its result is ready, with or without a read of ours:
 ``host_reads == 0`` means that no read of ours synchronises, not that the
 solve overlaps with work queued after it.
 
+Complex values factor at either rung: ``complex128`` at ``"fp64"`` and
+``complex64`` at ``"fp32"``, through the ``c128`` and ``c64`` handlers, which
+share the native analysis, the assembly and the status rules of the real ones
+(a complex factor is never downcast). A transposed solve of a complex factor is
+the plain transpose ``A^T`` (cuDSS's transpose solve mode), never the conjugate
+transpose. A complex right-hand side on a real factor is solved by the real
+handler as one real block of its real and imaginary parts.
+
 The FFI targets are registered with JAX the first time this route is used,
 so importing the package with an extension that predates the contract
 handlers stays harmless until the contract route is asked for.
@@ -100,6 +108,7 @@ handlers stays harmless until the contract route is asked for.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import threading
 import weakref
@@ -123,6 +132,7 @@ from diff_soup.linear._primitive import (
     CALL_FENCE_ATTRIBUTE,
     empty_slot_handle,
     lower_ffi_call,
+    lower_jnp,
     lowered_site_key,
     storage_key,
 )
@@ -243,6 +253,12 @@ _RUNGS: dict[str, tuple[str, Any]] = {
     "fp64": ("f64", np.dtype(np.float64)),
     "fp32": ("f32", np.dtype(np.float32)),
 }
+#: Precision rung -> the same for complex values.
+_COMPLEX_RUNGS: dict[str, tuple[str, Any]] = {
+    "fp64": ("c128", np.dtype(np.complex128)),
+    "fp32": ("c64", np.dtype(np.complex64)),
+}
+_SUFFIXES = ("f64", "f32", "c128", "c64")
 
 _TARGET_PREFIX = "diff_soup_cudss_contract_"
 #: The factor, solve and refactor handlers take the operator values in the
@@ -252,10 +268,10 @@ _FACTOR_KIND, _SOLVE_KIND, _REFACTOR_KIND = "factor_coo", "solve_coo", "refactor
 _TARGET_NAMES = tuple(
     f"{_TARGET_PREFIX}{kind}_{suffix}"
     for kind in (_FACTOR_KIND, _SOLVE_KIND, _REFACTOR_KIND, "invalidate")
-    for suffix in ("f64", "f32")
+    for suffix in _SUFFIXES
 )
-_FACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_FACTOR_KIND}_{s}" for s in ("f64", "f32"))
-_REFACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_REFACTOR_KIND}_{s}" for s in ("f64", "f32"))
+_FACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_FACTOR_KIND}_{s}" for s in _SUFFIXES)
+_REFACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_REFACTOR_KIND}_{s}" for s in _SUFFIXES)
 #: The operand positions of a refactor call's held handle: after the ordering
 #: token, the values, the held values and the predicate.
 _REFACTOR_HANDLE_OPERANDS = (4, 5, 6)
@@ -1244,27 +1260,35 @@ def _record(analysis: Analysis) -> _CuDSSContractAnalysis:
     return record
 
 
-def _check_real(dtype: Any, precision: str, what: str = "values") -> None:
-    """Refuse values or right-hand sides that are not float32 or float64.
+_TAKEN = tuple(np.dtype(t) for t in (np.float32, np.float64, np.complex64, np.complex128))
 
-    The native handlers assemble float32 and float64 values at either rung
-    (casting to the rung's dtype); complex and half-precision arrays are not
-    taken.
+
+def _check_real(dtype: Any, precision: str, what: str = "values") -> bool:
+    """Refuse values or right-hand sides that are not float32, float64, complex64 or complex128.
+
+    The native handlers assemble real values as the rung's real dtype and
+    complex values as its complex dtype (casting to the rung's width);
+    half-precision and integer arrays are not taken.
+
+    Returns:
+        Whether the dtype is complex.
 
     Raises:
         FactorContractError: For any other dtype.
     """
-    if np.dtype(dtype) not in (np.dtype(np.float32), np.dtype(np.float64)):
+    if np.dtype(dtype) not in _TAKEN:
         raise FactorContractError(
-            f"cuDSS takes float32 or float64 {what} (the {precision} rung casts them to its "
-            f"dtype); got {np.dtype(dtype).name}. Cast the {what} before the call."
+            f"cuDSS takes float32, float64, complex64 or complex128 {what} (the {precision} "
+            f"rung casts them to its width); got {np.dtype(dtype).name}. Cast the {what} before "
+            "the call."
         )
+    return bool(np.issubdtype(np.dtype(dtype), np.complexfloating))
 
 
-def _rung(precision: str) -> tuple[str, np.dtype]:
-    """The FFI target suffix and the value dtype of a precision rung."""
+def _rung(precision: str, complex_: bool = False) -> tuple[str, np.dtype]:
+    """The FFI target suffix and the value dtype of a precision rung, real or complex."""
     try:
-        return _RUNGS[precision]
+        return (_COMPLEX_RUNGS if complex_ else _RUNGS)[precision]
     except KeyError:
         raise FactorContractError(
             f"cuDSS factors at the precision rungs {sorted(_RUNGS)}; got {precision!r}."
@@ -1341,10 +1365,9 @@ def lower_factor(
     """
     del tol
     record = _record(analysis)
-    suffix, _ = _rung(precision)
+    suffix, _ = _rung(precision, _check_real(ctx.avals_in[0].dtype, precision))
     _native()
     transposed = orientation == "AT"
-    _check_real(ctx.avals_in[0].dtype, precision)
     site = lowered_site_key(
         ctx, "cudss factor", record.native_id, orientation, precision, _call_shapes(ctx)
     )
@@ -1409,17 +1432,36 @@ def lower_apply(
     reading the handle; otherwise it follows the rule above. A transposed
     solve of such a factor follows the rule above.
 
+    Complex values solve with the complex handler, ``b`` and ``x`` in the
+    rung's complex dtype; a complex ``b`` on real values is solved by the
+    real handler as one real block of its real and imaginary parts
+    ([_lower_split_apply][]).
+
     Returns:
         The MLIR values of ``(x, status, order)``.
 
     Raises:
-        FactorContractError: If ``b`` is complex.
+        FactorContractError: If the values or ``b`` are of a dtype cuDSS does not take.
     """
     del n_handle, orientation, tol
-    _check_real(ctx.avals_in[0].dtype, precision)
-    _check_real(ctx.avals_in[-1].dtype, precision, "right-hand sides")
+    complex_values = _check_real(ctx.avals_in[0].dtype, precision)
+    complex_b = _check_real(ctx.avals_in[-1].dtype, precision, "right-hand sides")
+    if complex_b and not complex_values:
+        return _lower_split_apply(
+            ctx,
+            values,
+            held_context,
+            slot,
+            generation,
+            order,
+            b,
+            analysis=analysis,
+            transpose=transpose,
+            precision=precision,
+            storage=storage,
+        )
     record = _record(analysis)
-    suffix, _ = _rung(precision)
+    suffix, _ = _rung(precision, complex_values)
     _native()
     resolved = handle_path(held_context, slot, generation, analysis_id=record.native_id)
     avals = list(ctx.avals_in)
@@ -1436,6 +1478,74 @@ def lower_apply(
         **_storage_attributes(None if transpose else storage, held_context),
     )
     return [*results, order]
+
+
+def _lower_split_apply(
+    ctx: Any,
+    values: Any,
+    held_context: Any,
+    slot: Any,
+    generation: Any,
+    order: Any,
+    b: Any,
+    *,
+    analysis: Analysis,
+    transpose: bool,
+    precision: str,
+    storage: Optional[str],
+) -> list:
+    """Lower a solve of real values with a complex ``b`` as one real solve.
+
+    The real and imaginary parts of ``b`` are stacked along its right-hand
+    side axis into one real block of twice the columns (``(2 nrhs, n)``, or
+    ``(lanes, 2 nrhs, n)`` for a batched handle), the real handler solves the
+    block once, and the two halves are joined into the complex solution. A
+    failed factor gives ``nan`` in both parts.
+
+    Returns:
+        The MLIR values of ``(x, status, order)``.
+    """
+    avals = list(ctx.avals_in)
+    b_aval = avals[-1]
+    x_aval, status_aval, order_aval = ctx.avals_out
+    batched = len(avals[1].shape) > 0
+    axis = 1 if batched else 0
+    shape = tuple(b_aval.shape)
+    columns_shape = shape if len(shape) == axis + 2 else (*shape[:axis], 1, shape[-1])
+    columns = columns_shape[axis]
+    real = _rung(precision)[1]
+    block = ShapedArray((*shape[:axis], 2 * columns, shape[-1]), real)
+
+    def stack(v):
+        v = v.reshape(columns_shape)
+        return [jnp.concatenate([jnp.real(v), jnp.imag(v)], axis=axis).astype(real)]
+
+    def join(v):
+        parts = jnp.split(v, 2, axis=axis)
+        return [jax.lax.complex(parts[0], parts[1]).reshape(x_aval.shape).astype(x_aval.dtype)]
+
+    (stacked,) = lower_jnp(ctx, stack, [b], [b_aval], [block])
+    real_ctx = dataclasses.replace(
+        ctx, avals_in=[*avals[:-1], block], avals_out=[block, status_aval, order_aval]
+    )
+    x_block, status, order = lower_apply(
+        real_ctx,
+        values,
+        held_context,
+        slot,
+        generation,
+        order,
+        stacked,
+        n_handle=3,
+        analysis=analysis,
+        orientation="A",
+        transpose=transpose,
+        precision=precision,
+        tol=None,
+        storage=storage,
+    )
+    (x,) = lower_jnp(ctx, join, [x_block], [block], [x_aval])
+    return [x, status, order]
 
 
 def lower_refactor(
@@ -1499,10 +1609,9 @@ def lower_refactor(
     """
     del n_handle, tol
     record = _record(analysis)
-    suffix, _ = _rung(precision)
+    suffix, _ = _rung(precision, _check_real(ctx.avals_in[0].dtype, precision))
     _native()
     transposed = orientation == "AT"
-    _check_real(ctx.avals_in[0].dtype, precision)
     resolved = handle_path(held_context, held_slot, held_generation, analysis_id=record.native_id)
     site = lowered_site_key(
         ctx,
@@ -1549,6 +1658,9 @@ def lower_invalidate(
     storage: Optional[str] = None,
 ) -> list:
     """Lower an invalidation to one FFI call ordered by the order word.
+
+    The call carries no values, so it goes to the rung's real handler, which
+    invalidates the factor the handle names whether it is real or complex.
 
     At run time the slot the handle names (every lane of a batch slot for a
     batched handle) no longer stands for any factor: the next solve on it
