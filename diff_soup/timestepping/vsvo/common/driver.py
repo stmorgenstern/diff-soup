@@ -966,6 +966,10 @@ def _project_saved_samples(sol, engine, problem, cfg, theta, control):
     guarded = jnp.where(valid[:, None], y_rows, safe_row[None, :])
     t_guarded = jnp.where(valid, ts, sol.terminal.t)
     tol = ic_gate_tolerance(engine.atol, getattr(engine, "ic_tol", None))
+    # The gate of the solve's own initialization: with no relative part it leaves out
+    # the residual's round-off floor, and a tight atol then poisons a sample at that floor.
+    rtol = getattr(engine, "ic_rtol", None)
+    rtol = float(getattr(engine, "rtol", 0.0)) if rtol is None else float(rtol)
     ic_layout, ic_precision = initialization_policy(
         problem, getattr(engine, "precision", None), mode="forward"
     )
@@ -980,6 +984,7 @@ def _project_saved_samples(sol, engine, problem, cfg, theta, control):
             theta,
             control,
             tol=tol,
+            rtol=rtol,
             # Project through the engine's own linear backend so output
             # sampling shares the run's solver configuration (and its
             # cached initialization plan).
