@@ -1,9 +1,9 @@
 {
   "budgets": {
-    "test_files": 43,
-    "test_functions": 390,
-    "collected_tests": 567,
-    "source_lines": 14128
+    "test_files": 44,
+    "test_functions": 396,
+    "collected_tests": 585,
+    "source_lines": 14392
   },
   "tier_budgets": {
     "public_api": {
@@ -13,10 +13,10 @@
       "lines": 5620
     },
     "contracts": {
-      "files": 17,
-      "functions": 160,
-      "collected": 220,
-      "lines": 5400
+      "files": 18,
+      "functions": 166,
+      "collected": 238,
+      "lines": 5664
     },
     "performance_contracts": {
       "files": 2,
@@ -72,7 +72,9 @@
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
     "tests/contracts/test_lowered_study.py": "diff_soup.inference.hierarchical"
   },
-  "support_data": [],
+  "support_data": [
+    "tests/support/battery_jacobian.json"
+  ],
   "suite_files": [
     "tests/README.md",
     "tests/conftest.py",
@@ -83,6 +85,7 @@
     "tests/support/problems.py",
     "tests/support/inference.py",
     "tests/support/second_order.py",
+    "tests/support/battery_jacobian.json",
     "tests/public_api/test_recipe_build.py",
     "tests/public_api/test_recipe_observations.py",
     "tests/public_api/test_recipe_families.py",
@@ -111,6 +114,7 @@
     "tests/contracts/test_linear_primitive.py",
     "tests/contracts/test_linear_cudss.py",
     "tests/contracts/test_linear_ad.py",
+    "tests/contracts/test_linear_complex.py",
     "tests/contracts/test_second_order_ad.py",
     "tests/contracts/test_second_order_ad_precision.py",
     "tests/contracts/test_architecture.py",
@@ -156,6 +160,7 @@
     "tests/contracts/test_linear_primitive.py",
     "tests/contracts/test_linear_cudss.py",
     "tests/contracts/test_linear_ad.py",
+    "tests/contracts/test_linear_complex.py",
     "tests/contracts/test_second_order_ad.py",
     "tests/contracts/test_second_order_ad_precision.py",
     "tests/contracts/test_architecture.py",
@@ -284,6 +289,10 @@
     {
       "file": "tests/contracts/test_linear_ad.py",
       "feature": "Linear derivatives: refinement, route fallback, the options a route analyzes a backend with, root and initialization second derivatives, entry agreement, trace-once programs"
+    },
+    {
+      "file": "tests/contracts/test_linear_complex.py",
+      "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a battery impedance operator, the plain transpose, real factors with complex right-hand sides, value lanes, empty factors refactored in a loop, and jvp and vjp against central differences"
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",
