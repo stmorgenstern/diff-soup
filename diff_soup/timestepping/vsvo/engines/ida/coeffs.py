@@ -13,7 +13,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from .state import MAXORD
+from diff_soup.utils.lanes import lane_cond
+
+from .state import MAXORD, MXORDP1
 
 
 def ida_set_coeffs(
@@ -106,10 +108,17 @@ def ida_set_coeffs(
     # history is still current within kk + 1 steps.
     recompute = kk + 1 >= ns
 
-    beta = beta.at[0].set(jnp.where(recompute, one, beta[0]))
-    alpha = alpha.at[0].set(jnp.where(recompute, one, alpha[0]))
-    gamma = gamma.at[0].set(jnp.where(recompute, zero, gamma[0]))
-    sigma = sigma.at[0].set(jnp.where(recompute, one, sigma[0]))
+    # Each array is held as its scalar elements while the recurrence runs and
+    # stacked at the end, so its updates compile to one fused computation.
+    psi_i = [psi[i] for i in range(MXORDP1)]
+    beta_i = [beta[i] for i in range(MXORDP1)]
+    alpha_i = [alpha[i] for i in range(MXORDP1)]
+    sigma_i = [sigma[i] for i in range(MXORDP1)]
+    gamma_i = [gamma[i] for i in range(MXORDP1)]
+    beta_i[0] = jnp.where(recompute, one, beta_i[0])
+    alpha_i[0] = jnp.where(recompute, one, alpha_i[0])
+    gamma_i[0] = jnp.where(recompute, zero, gamma_i[0])
+    sigma_i[0] = jnp.where(recompute, one, sigma_i[0])
 
     # The 1..kk recurrence realized as a fixed 1..MAXORD Python unroll with a
     # per-i active mask, since kk is a traced int but every shape here is
@@ -118,16 +127,19 @@ def ida_set_coeffs(
     psi_kk = psi[kk]
     for i in range(1, MAXORD + 1):
         active_i = recompute & (i <= kk)
-        temp2 = psi[i - 1]
-        psi = psi.at[i - 1].set(jnp.where(active_i, temp1, psi[i - 1]))
+        temp2 = psi_i[i - 1]
+        psi_i[i - 1] = jnp.where(active_i, temp1, temp2)
         # Reads the just-shifted psi[i - 1] (load-bearing: after the write above).
-        beta = beta.at[i].set(jnp.where(active_i, beta[i - 1] * psi[i - 1] / temp2, beta[i]))
+        beta_i[i] = jnp.where(active_i, beta_i[i - 1] * psi_i[i - 1] / temp2, beta_i[i])
         temp1 = temp2 + hh
-        alpha = alpha.at[i].set(jnp.where(active_i, hh / temp1, alpha[i]))
-        sigma = sigma.at[i].set(jnp.where(active_i, i * sigma[i - 1] * alpha[i], sigma[i]))
-        gamma = gamma.at[i].set(jnp.where(active_i, gamma[i - 1] + alpha[i - 1] / hh, gamma[i]))
+        alpha_i[i] = jnp.where(active_i, hh / temp1, alpha_i[i])
+        sigma_i[i] = jnp.where(active_i, i * sigma_i[i - 1] * alpha_i[i], sigma_i[i])
+        gamma_i[i] = jnp.where(active_i, gamma_i[i - 1] + alpha_i[i - 1] / hh, gamma_i[i])
         psi_kk = jnp.where(i == kk, temp1, psi_kk)
+    psi = jnp.stack(psi_i)
     psi = psi.at[kk].set(jnp.where(recompute, psi_kk, psi[kk]))
+    alpha, beta = jnp.stack(alpha_i), jnp.stack(beta_i)
+    sigma, gamma = jnp.stack(sigma_i), jnp.stack(gamma_i)
 
     # alphas = -sum_{i=1..kk} 1/i ; alpha0 = -sum_{i=0..kk-1} alpha[i].
     # Always recomputed, independent of the recompute gate above.
@@ -147,10 +159,12 @@ def ida_set_coeffs(
     # phi -> phi*: scale only indices ns..kk; index 0 is never scaled. phi
     # itself is not stopped, so phi_star keeps phi's tangent through the
     # (already gradient-dead) beta scale factor.
-    for i in range(1, MAXORD + 1):
-        scale_i = (i >= ns) & (i <= kk)
-        beta_i = jax.lax.stop_gradient(beta[i])
-        phi = phi.at[i].set(jnp.where(scale_i, beta_i * phi[i], phi[i]))
+    # A step that keeps its size and order past kk + 1 steps scales nothing,
+    # so the history is left as it is.
+    rows = jnp.arange(MXORDP1)
+    scale = (rows >= ns) & (rows <= kk) & (rows > 0)
+    factors = jnp.where(scale, jax.lax.stop_gradient(beta), one)[:, None]
+    phi = lane_cond(ns <= kk, lambda p: factors * p, lambda p: p, phi, false_is_free=True)
 
     return phi, psi, alpha, beta, sigma, gamma, cjlast, cj, ck, ns, alphas, alpha0
 
