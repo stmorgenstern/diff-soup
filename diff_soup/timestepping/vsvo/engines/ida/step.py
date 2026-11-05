@@ -955,6 +955,7 @@ class IDAEngine(eqx.Module):
             # A forward loop never restores an older carry; a replay needs
             # the native comparison of the held values.
             held_current=carry.held_current if decision is None else None,
+            suppressalg=self.suppressalg,
         )
 
         # The leading-coefficient bookkeeping the setup gate would carry forward.
