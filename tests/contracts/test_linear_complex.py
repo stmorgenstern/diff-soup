@@ -206,6 +206,32 @@ def test_an_empty_complex_factor_refactors_in_a_loop_and_reports(make):
     assert _relative(refined, xs[-1]) <= _EXACT
 
 
+@pytest.mark.requires_klu
+@pytest.mark.parametrize("kind", ["real", "complex"])
+def test_klu_resident_bytes_count_the_factor_and_fall_to_zero_on_release(kind):
+    """A KLU factor of the battery operator holds at least its L and U entries at the element
+    size, and at most twice that plus its value copies, KLU's per-row arrays and workspace and
+    the off-diagonal entries; its context holds nothing once released."""
+    topology, jacobian, mass = _battery()
+    values = jnp.asarray((1j if kind == "complex" else 1.0) * 1e-3 * mass - jacobian)
+    element, n, nnz = values.dtype.itemsize, topology.n_dofs, topology.rows.size
+    before = KLU.native_stats()["live_lu_entries"]
+    ctx = SolveContext()
+    b = _rhs(n, seed=5) if kind == "complex" else jnp.ones(n)
+    jax.block_until_ready(solve(factor(analyze(topology, backend=KLU()), values, ctx=ctx), b))
+    entries = KLU.native_stats()["live_lu_entries"] - before
+    held = ctx.resident_bytes()
+    # An L or U entry and its int32 row index fit in 1.5 elements. The copies are the values and
+    # the compressed matrix; the row scaling, permutations, pointers and solve workspace take
+    # at most 4 elements and 40 bytes a row; an off-diagonal entry takes an element and an index.
+    extra = 2 * nnz * element + n * (4 * element + 40) + nnz * (element + 4)
+    assert entries > 0
+    assert entries * element <= held <= 2 * entries * element + extra
+    ctx.release()
+    assert ctx.resident_bytes() == 0
+    assert KLU.native_stats()["live_lu_entries"] == before
+
+
 def _unit(scale):
     """The Dirichlet row stays a unit row whatever the scale of the values."""
     unit = np.zeros((N, N), complex)

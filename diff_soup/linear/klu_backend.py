@@ -558,8 +558,9 @@ class KLUBackend(LinearSolver):
             ``klu_tsolve`` calls), ``nonfinite`` and ``singular`` (factor
             requests with non-finite values or a singular result),
             ``released_context_errors`` (calls refused because their context
-            was released), ``live_slots``, ``live_sites`` and
-            ``live_analyses``.
+            was released), ``live_slots``, ``live_sites``,
+            ``live_analyses`` and ``live_lu_entries`` (the entries of L and
+            U, diagonals included, over the live numeric factorizations).
 
         Raises:
             ConfigurationError: If the KLU extension is not built.
