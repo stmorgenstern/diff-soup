@@ -23,8 +23,8 @@ import numpy as np
 class TerminationStatus(enum.Enum):
     """How an optimizer run ended, at `result.status`.
 
-    `status.converged` is `True` for `SUCCESS`, `GRAD_TOL`, `STEP_TOL`, `COST_TOL` and
-    `DERIVATIVE_ACCURACY`.
+    `status.converged` is `True` for `SUCCESS`, `GRAD_TOL`, `STEP_TOL`, `COST_TOL`,
+    `DERIVATIVE_ACCURACY` and `KKT_TOL`.
 
     Attributes:
         SUCCESS: Convergence without a named test, which no built-in solver reports.
@@ -39,6 +39,9 @@ class TerminationStatus(enum.Enum):
         UNKNOWN: The status before any run.
         STALLED: The fit stopped without converging: `TrustRegion` after failed trials in a row or while its model still predicted a decrease, and `NewtonTrustRegion` or `LevenbergMarquardt` when a step or cost test passed on a step the trust radius or damping held short.
         DERIVATIVE_ACCURACY: `TrustRegion` converged to the accuracy of its derivatives, which a tighter solver `rtol` improves.
+        KKT_TOL: A constrained solver's scaled optimality error fell below its tolerance.
+        INFEASIBLE: A constrained solver's restoration phase ended at a point that still violates the constraints.
+        RESTORATION_FAILED: A constrained solver's restoration phase ran out of its budget.
     """
 
     SUCCESS = "success"
@@ -53,12 +56,16 @@ class TerminationStatus(enum.Enum):
     UNKNOWN = "unknown"
     STALLED = "stalled"
     DERIVATIVE_ACCURACY = "derivative_accuracy"
+    KKT_TOL = "kkt_tolerance"
+    INFEASIBLE = "infeasible"
+    RESTORATION_FAILED = "restoration_failed"
 
     @property
     def converged(self) -> bool:
         """True iff this status corresponds to a converged optimizer state."""
         return self in (
             TerminationStatus.SUCCESS,
+            TerminationStatus.KKT_TOL,
             TerminationStatus.GRAD_TOL,
             TerminationStatus.STEP_TOL,
             TerminationStatus.COST_TOL,

@@ -124,6 +124,7 @@ class OptimizationProblem(eqx.Module):
         n_equality: The number of equality rows `constraints` returns.
         n_inequality: The number of inequality rows `constraints` returns.
         constraint_scales: `(equality_scales, inequality_scales)`, one positive scale per row, or `None` for the solver's own scaling.
+        objective_scale: A positive scale of the objective, or `None` for the solver's own scaling.
     """
 
     x0: Any
@@ -133,6 +134,7 @@ class OptimizationProblem(eqx.Module):
     n_equality: int = eqx.field(static=True, default=0)
     n_inequality: int = eqx.field(static=True, default=0)
     constraint_scales: Any = None
+    objective_scale: Any = None
     # The fitted model's reconstruction and the regularization can hold arrays; they are
     # held by identity, so the problem's static data stays hashable and array-free.
     _unflatten: Any = eqx.field(static=True, default=None, converter=_hold)

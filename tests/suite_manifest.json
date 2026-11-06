@@ -3,14 +3,14 @@
     "test_files": 45,
     "test_functions": 420,
     "collected_tests": 634,
-    "source_lines": 15204
+    "source_lines": 15207
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
       "functions": 188,
       "collected": 296,
-      "lines": 6127
+      "lines": 6130
     },
     "contracts": {
       "files": 19,
