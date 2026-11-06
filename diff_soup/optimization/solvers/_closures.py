@@ -31,6 +31,9 @@ class Closures(NamedTuple):
         is_valid: `(x, args) -> bool`, or `None` when every point is valid.
         n_equality: The number of equality rows.
         n_inequality: The number of inequality rows.
+        evaluate: `(x, args) -> (f, eq, ineq)` from one evaluation, or `None`.
+        evaluate_with_derivatives: `(x, args) -> (f, g, eq, ineq, J_eq, J_ineq)` from one
+            evaluation, or `None`.
     """
 
     value: Callable
@@ -42,6 +45,8 @@ class Closures(NamedTuple):
     is_valid: Callable | None
     n_equality: int
     n_inequality: int
+    evaluate: Callable | None = None
+    evaluate_with_derivatives: Callable | None = None
 
 
 def closures_of(problem: Any) -> Closures:
@@ -65,7 +70,17 @@ def closures_of(problem: Any) -> Closures:
         is_valid=getattr(problem, "_is_valid", None),
         n_equality=int(problem.n_equality),
         n_inequality=int(problem.n_inequality),
+        evaluate=getattr(problem, "_evaluate", None),
+        evaluate_with_derivatives=getattr(problem, "_evaluate_with_derivatives", None),
     )
+
+
+def _first_derivatives(closures: Closures, x: Any, args: Any) -> tuple:
+    """`(f, g, eq, ineq, J_eq, J_ineq)`, from one call when the problem gives one."""
+    if closures.evaluate_with_derivatives is not None:
+        return closures.evaluate_with_derivatives(x, args)
+    value, gradient = closures.value_and_gradient(x, args)
+    return (value, gradient, *closures.constraints_and_jacobians(x, args))
 
 
 def bounds_of(problem: Any, x0: Any) -> tuple[Any, Any]:
@@ -109,8 +124,7 @@ def gradient_scales(closures: Closures, x: Any, args: Any) -> Scales:
     A factor is `min(1, G_MAX / ||gradient||_inf)`, at least `SCALE_MIN`, and 1 where the
     gradient is not finite.
     """
-    _, gradient = closures.value_and_gradient(x, args)
-    _, _, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, args)
+    _, gradient, _, _, jac_eq, jac_ineq = _first_derivatives(closures, x, args)
 
     def factor(norm):
         scale = jnp.clip(G_MAX / jnp.maximum(norm, jnp.finfo(x.dtype).tiny), SCALE_MIN, 1.0)
@@ -165,6 +179,23 @@ def scaled_closures(closures: Closures) -> Closures:
     def is_valid(x, packed):
         return closures.is_valid(x, packed[0])
 
+    def evaluate_once(x, packed):
+        args, scales = packed
+        f, equality, inequality = closures.evaluate(x, args)
+        return scales.objective * f, scales.equality * equality, scales.inequality * inequality
+
+    def evaluate_with_derivatives(x, packed):
+        args, scales = packed
+        f, g, equality, inequality, jac_eq, jac_ineq = closures.evaluate_with_derivatives(x, args)
+        return (
+            scales.objective * f,
+            scales.objective * g,
+            scales.equality * equality,
+            scales.inequality * inequality,
+            scales.equality[:, None] * jac_eq,
+            scales.inequality[:, None] * jac_ineq,
+        )
+
     return Closures(
         value=value,
         value_and_gradient=value_and_gradient,
@@ -175,6 +206,10 @@ def scaled_closures(closures: Closures) -> Closures:
         is_valid=None if closures.is_valid is None else is_valid,
         n_equality=closures.n_equality,
         n_inequality=closures.n_inequality,
+        evaluate=None if closures.evaluate is None else evaluate_once,
+        evaluate_with_derivatives=(
+            None if closures.evaluate_with_derivatives is None else evaluate_with_derivatives
+        ),
     )
 
 
@@ -222,10 +257,12 @@ def evaluate(closures: Closures, x: Any, args: Any, gauss_newton: bool = False) 
     if gauss_newton:
         value, gradient, matrix, failed = closures.gauss_newton(x, args)
         value = jnp.where(jnp.asarray(failed) > 0, jnp.nan, value)
+        equality, inequality, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, args)
     else:
-        value, gradient = closures.value_and_gradient(x, args)
+        value, gradient, equality, inequality, jac_eq, jac_ineq = _first_derivatives(
+            closures, x, args
+        )
         matrix = jnp.zeros((0, 0), dtype=x.dtype)
-    equality, inequality, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, args)
     return Evaluation(value, gradient, equality, inequality, jac_eq, jac_ineq, matrix)
 
 
@@ -235,8 +272,11 @@ def trial(closures: Closures, x: Any, args: Any) -> tuple[Any, Any, Any, Any]:
     `valid` is false where the problem's trial predicate refuses the point or any value is
     not finite: a failed evaluation the line search rejects.
     """
-    value = closures.value(x, args)
-    equality, inequality = closures.constraints(x, args)
+    if closures.evaluate is not None:
+        value, equality, inequality = closures.evaluate(x, args)
+    else:
+        value = closures.value(x, args)
+        equality, inequality = closures.constraints(x, args)
     valid = (
         jnp.isfinite(value) & jnp.all(jnp.isfinite(equality)) & jnp.all(jnp.isfinite(inequality))
     )
