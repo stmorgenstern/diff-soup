@@ -25,15 +25,17 @@ and its input tangents are zeroed first so a reverse pass gives it exact zero co
 from __future__ import annotations
 
 import functools
+from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.custom_derivatives import zero_from_primal
+from jaxtyping import Array, ArrayLike, Bool, Float, PyTree
 
 from diff_soup.optimization.inference.fitting.result import TerminationStatus
-from diff_soup.optimization.kkt import _cholesky
+from diff_soup.optimization.kkt import KKTSolve, cholesky
 from diff_soup.optimization.solvers._barrier import Bounds, distances
 from diff_soup.optimization.solvers._closures import Closures
 from diff_soup.optimization.solvers._protocol import SolveRecord
@@ -87,7 +89,7 @@ def active_set(
         free = (~(lower | upper)).astype(x.dtype)
         rows = jnp.concatenate([jac_eq, jac_ineq * inequality[:, None]]) * free[None, :]
         idle = jnp.concatenate([jnp.zeros(jac_eq.shape[0], bool), ~inequality])
-        _, independent = _cholesky(rows @ rows.T + jnp.diag(idle.astype(x.dtype)))
+        _, independent = cholesky(rows @ rows.T + jnp.diag(idle.astype(x.dtype)))
         degenerate = degenerate | ~independent
     return ActiveSet(inequality, lower, upper, degenerate)
 
@@ -106,16 +108,23 @@ def _hessian(closures: Closures, x, lam_e, lam_i, args):
 
 
 def kkt_tangent(
-    closures: Closures, bounds: Bounds, x: Any, record: SolveRecord, args: Any, dargs: Any
-) -> tuple[Any, SolveRecord]:
-    """The tangent of `(x*, record)` along `dargs`, linear in `dargs`.
+    closures: Closures,
+    bounds: Bounds,
+    kkt: KKTSolve,
+    x: Float[Array, "n"],
+    record: SolveRecord,
+    args: PyTree,
+    dargs: PyTree,
+) -> tuple[Float[Array, "n"], SolveRecord, Bool[Array, ""]]:
+    """The tangent of `(x*, record)` along `dargs`, linear in `dargs`, and whether its system solved.
 
     One forward derivative of one evaluation gives the derivatives of the objective, of the
-    Lagrangian gradient and of the rows in `args`, and its primal gives the Jacobians.
+    Lagrangian gradient and of the rows in `args`, and its primal gives the Jacobians. The
+    system goes through the solver's [KKTSolve][diff_soup.optimization.solvers.KKTSolve], with
+    the inactive rows' dual diagonal 1, and does not solve when its inertia is not `(n, m, 0)`.
     """
-    n = x.shape[0]
     lam_e, lam_i = record.multipliers_equality, record.multipliers_inequality
-    n_eq, n_ineq = lam_e.shape[0], lam_i.shape[0]
+    n_eq = lam_e.shape[0]
     dtype = x.dtype
 
     def residual(a):
@@ -154,19 +163,15 @@ def kkt_tangent(
     jac_eq_m = jac_eq * keep[None, :]
     jac_ineq_m = rows_i[:, None] * jac_ineq * keep[None, :]
     dual_i = jnp.where(degenerate, slack_ratio, jnp.where(active.inequality, 0.0, 1.0))
-    size = n + n_eq + n_ineq
-    matrix = jnp.zeros((size, size), dtype)
-    matrix = matrix.at[:n, :n].set(primal)
-    matrix = matrix.at[:n, n : n + n_eq].set(jac_eq_m.T)
-    matrix = matrix.at[n : n + n_eq, :n].set(jac_eq_m)
-    matrix = matrix.at[:n, n + n_eq :].set(jac_ineq_m.T)
-    matrix = matrix.at[n + n_eq :, :n].set(jac_ineq_m)
-    matrix = matrix.at[n + n_eq :, n + n_eq :].set(-jnp.diag(dual_i))
-    rhs = -jnp.concatenate([d_grad * keep, d_eq, rows_i * d_ineq])
-    solution = jnp.linalg.solve(matrix, rhs)
-    dx = solution[:n]
-    dlam_e = solution[n : n + n_eq]
-    dlam_i = solution[n + n_eq :]
+    dx, dlam, solved = kkt.solve(
+        primal,
+        jnp.concatenate([jac_eq_m, jac_ineq_m]),
+        0.0,
+        jnp.concatenate([jnp.zeros((n_eq,), dtype), dual_i]),
+        -d_grad * keep,
+        -jnp.concatenate([d_eq, rows_i * d_ineq]),
+    )
+    dlam_e, dlam_i = dlam[:n_eq], dlam[n_eq:]
 
     stationarity = hessian @ dx + jac_eq.T @ dlam_e + jac_ineq.T @ dlam_i + d_grad
     dz_lower = jnp.where(
@@ -195,7 +200,7 @@ def kkt_tangent(
         jax.tree.map(_zero, record),
         (dlam_e, dlam_i, ds, (dz_lower, dz_upper), d_f + gradient @ dx),
     )
-    return dx, tangent
+    return dx, tangent, solved
 
 
 def _zero(leaf: Any) -> Any:
@@ -225,35 +230,42 @@ def _zero_where_not(keep: Any, tree: Any) -> Any:
     return jax.tree.map(gate, tree)
 
 
-@functools.partial(jax.custom_jvp, nondiff_argnums=(0, 1, 2))
-def _entry(primal: Any, prepare: Any, static: Any, dynamic: Any, x0: Any, args: Any, warm: Any):
+@functools.partial(jax.custom_jvp, nondiff_argnums=(0, 1, 2, 3))
+def _entry(primal, prepare, kkt, static, dynamic, x0, args, warm):
     """`primal(problem, x0, args, warm) -> (x, record)` with the implicit derivative in `args`."""
-    del prepare
+    del prepare, kkt
     return primal(eqx.combine(dynamic, static), x0, args, warm)
 
 
 @_entry.defjvp
-def _entry_jvp(primal, prepare, static, primals, tangents):
+def _entry_jvp(primal, prepare, kkt, static, primals, tangents):
     """The KKT tangent at the solution; `x0`, `warm` and the problem's arrays are gradient-dead."""
     dynamic, x0, args, warm = primals
     _, _, dargs, _ = tangents
-    out = _entry(primal, prepare, static, dynamic, x0, args, warm)
+    out = _entry(primal, prepare, kkt, static, dynamic, x0, args, warm)
     x, record = out
     closures, bounds = prepare(eqx.combine(dynamic, static), x)
     valid = record.status == TerminationStatus.KKT_TOL
     dargs = _zero_where_not(valid, dargs)
-    dx, drecord = kkt_tangent(closures, bounds, x, record, args, dargs)
-    return out, _poison((dx, drecord), valid)
+    dx, drecord, solved = kkt_tangent(closures, bounds, kkt, x, record, args, dargs)
+    return out, _poison((dx, drecord), valid & solved)
 
 
 def implicit_run(
-    primal: Any, prepare: Any, problem: Any, x0: Any, args: Any, warm: Any
-) -> tuple[Any, SolveRecord]:
+    primal: Callable,
+    prepare: Callable,
+    kkt: KKTSolve,
+    problem: PyTree,
+    x0: Float[ArrayLike, "n"],
+    args: PyTree,
+    warm: SolveRecord | None,
+) -> tuple[Float[Array, "n"], SolveRecord]:
     """Run `primal` with the implicit derivative of its solution in `args`.
 
     Args:
         primal: `(problem, x0, args, warm) -> (x, record)`, the solver's loop; never differentiated.
         prepare: `(problem, x) -> (closures, bounds)`, the raw closures and bounds of `problem`.
+        kkt: The backend that solves the derivative's KKT system.
         problem: The numeric problem; its arrays (the bounds) are gradient-dead.
         x0: The start point, gradient-dead.
         args: What the derivative is taken in.
@@ -263,4 +275,4 @@ def implicit_run(
         `(x, record)`.
     """
     dynamic, static = eqx.partition(problem, eqx.is_array)
-    return _entry(primal, prepare, static, dynamic, x0, args, warm)
+    return _entry(primal, prepare, kkt, static, dynamic, x0, args, warm)

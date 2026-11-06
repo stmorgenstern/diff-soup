@@ -82,6 +82,11 @@ class InteriorPoint(ConstrainedSolver):
     kkt: KKTSolve = eqx.field(static=True, default_factory=DenseKKT)
 
     @property
+    def _kkt(self) -> KKTSolve:
+        """The backend of the implicit derivative's KKT system: `kkt`."""
+        return self.kkt
+
+    @property
     def _mu_floor(self) -> float:
         """The least barrier parameter: `mu_min`, or below `tol` when `tol` is tighter."""
         return min(self.mu_min, self.tol / (KAPPA_EPS + 1.0))
