@@ -57,7 +57,7 @@ class Constraints(eqx.Module):
         inequality: `inequality(params, args)` returning rows satisfied at or below 0, or `None`.
         n_equality: The number of rows `equality` returns.
         n_inequality: The number of rows `inequality` returns.
-        jacobian: `"auto"` takes forward mode when rows exceed columns and reverse mode otherwise; `"forward"` and `"reverse"` force one.
+        jacobian: `"auto"` takes forward mode when rows exceed columns or the problem's `hessian_composition` is `"forward-over-forward"`, and reverse mode otherwise; `"forward"` and `"reverse"` force one.
         scales: One positive scale per row, `(equality_scales, inequality_scales)` of shapes `(n_equality,)` and `(n_inequality,)`, either `None` for ones, or `None` for the solver's own scaling.
     """
 
@@ -104,7 +104,13 @@ class Constraints(eqx.Module):
         """The scales, one per row, or `None` for the solver's own scaling."""
         return self.scales
 
-    def lower(self, objective: Callable | None, unflatten: Callable) -> Lowered:
+    def lower(
+        self,
+        objective: Callable | None,
+        unflatten: Callable,
+        *,
+        composition: str = "forward-over-reverse",
+    ) -> Lowered:
         """Lower to closures on the flat vector, with Jacobians and Lagrangian Hessians by AD.
 
         Lowering the same `Constraints` again, with the same `objective` and `unflatten`, gives
@@ -113,19 +119,23 @@ class Constraints(eqx.Module):
         Args:
             objective: `objective(x, args)` on the flat vector, whose Hessian joins the Lagrangian's, or `None` for the Hessian of the constraint terms alone.
             unflatten: The map from the flat vector to the parameter view the functions take.
+            composition: `"forward-over-reverse"` takes the Lagrangian Hessians in forward mode over a reverse-mode gradient; `"forward-over-forward"` over a forward-mode one, with the Jacobians forward mode under `jacobian="auto"`.
 
         Returns:
             The closures `constraints`, `constraints_and_jacobians`, `lagrangian_hessian` and `lagrangian_hessian_vector` by name, each taking `args` last.
         """
-        spec = _Spec(
-            self.equality, self.inequality, self.n_equality, self.n_inequality, self.jacobian
-        )
+        forward = composition == "forward-over-forward"
+        jacobian = "forward" if forward and self.jacobian == "auto" else self.jacobian
+        spec = _Spec(self.equality, self.inequality, self.n_equality, self.n_inequality, jacobian)
+        gradient = jax.jacfwd if forward else jax.grad
         return {
             "constraints": Derived(_rows, spec, unflatten),
             "constraints_and_jacobians": Derived(_rows_and_jacobians, spec, unflatten),
-            "lagrangian_hessian": Derived(_lagrangian_hessian, spec, unflatten, objective),
+            "lagrangian_hessian": Derived(
+                _lagrangian_hessian, spec, unflatten, objective, gradient
+            ),
             "lagrangian_hessian_vector": Derived(
-                _lagrangian_hessian_vector, spec, unflatten, objective
+                _lagrangian_hessian_vector, spec, unflatten, objective, gradient
             ),
         }
 
@@ -186,22 +196,22 @@ def _lagrangian(spec, unflatten, objective, x, lam_eq, lam_ineq, args):
     return weighted if objective is None else objective(x, args) + weighted
 
 
-def _lagrangian_hessian(spec, unflatten, objective, x, lam_eq, lam_ineq, args):
-    """The Lagrangian's Hessian in `x`, forward over reverse."""
+def _lagrangian_hessian(spec, unflatten, objective, gradient, x, lam_eq, lam_ineq, args):
+    """The Lagrangian's Hessian in `x`, forward over `gradient` (`jax.grad` or `jax.jacfwd`)."""
 
     def lagrangian(y):
         return _lagrangian(spec, unflatten, objective, y, lam_eq, lam_ineq, args)
 
-    return jax.jacfwd(jax.grad(lagrangian))(x)
+    return jax.jacfwd(gradient(lagrangian))(x)
 
 
-def _lagrangian_hessian_vector(spec, unflatten, objective, x, lam_eq, lam_ineq, v, args):
-    """The Lagrangian's Hessian in `x` times `v`, forward over reverse."""
+def _lagrangian_hessian_vector(spec, unflatten, objective, gradient, x, lam_eq, lam_ineq, v, args):
+    """The Lagrangian's Hessian in `x` times `v`, forward over `gradient`."""
 
     def lagrangian(y):
         return _lagrangian(spec, unflatten, objective, y, lam_eq, lam_ineq, args)
 
-    return jax.jvp(jax.grad(lagrangian), (x,), (v,))[1]
+    return jax.jvp(gradient(lagrangian), (x,), (v,))[1]
 
 
 __all__ = ["Constraints"]
