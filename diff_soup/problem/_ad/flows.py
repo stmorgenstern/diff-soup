@@ -109,7 +109,7 @@ def gather_table(table, indices, dimension_numbers, slice_sizes, mode, fill: int
     values[~valid] = fill
     dropped = set(numbers.collapsed_slice_dims) | set(numbers.operand_batching_dims)
     kept = [axis for axis in range(rank) if axis not in dropped]
-    values = values.reshape(*batch_shape, *(int(sizes[axis]) for axis in kept))
+    values = values.reshape((*batch_shape, *(int(sizes[axis]) for axis in kept)))
     out_rank = len(batch_shape) + len(kept)
     offsets = list(numbers.offset_dims)
     batch_axes = iter(range(len(batch_shape)))
