@@ -8,6 +8,16 @@ from typing import Any
 import equinox as eqx
 
 
+class PlantEstimate(eqx.Module):
+    """The state of `FullState`: the plant state the next horizon starts from.
+
+    Attributes:
+        plant: The plant state estimate.
+    """
+
+    plant: Any
+
+
 class Estimator(eqx.Module):
     """The estimator's slot in the loop: from its state, the last control and a measurement to its next state."""
 
@@ -27,11 +37,11 @@ class FullState(Estimator):
 
     def init(self, args: Any) -> Any:
         """The initial state of the control problem."""
-        raise NotImplementedError
+        return PlantEstimate(plant=args[0])
 
     def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> Any:
         """Return the measured plant state."""
-        raise NotImplementedError
+        return PlantEstimate(plant=measurement)
 
 
 class ExtendedKalmanFilter(Estimator):
