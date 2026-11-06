@@ -64,6 +64,7 @@ import jax.numpy as jnp
 from diff_soup._layout import Layout
 from diff_soup.linear import (
     Factor,
+    SparseTopology,
     Tolerance,
     empty_factor,
     factor,
@@ -74,7 +75,6 @@ from diff_soup.linear import (
 from diff_soup.linear._context import DEFAULT_CONTEXT
 from diff_soup.linear._refine import refine, refine_fixed
 from diff_soup.nonlinear._kkt import LinearPlan, LinearRoute, linear_route
-from diff_soup.timestepping.consistent_ic.pin_differential import _full_dense_topology
 from diff_soup.timestepping.vsvo.common.backends import (
     adaptive_rung_precisions,
     linear_analyze_options,
@@ -224,7 +224,7 @@ def problem_linear(backend: Any, problem: Any, *, precision: Any, dtype: Any) ->
     """
     topology = problem.state_topology
     if topology is None:
-        topology = _full_dense_topology(int(problem.n_u))
+        topology = SparseTopology.full(int(problem.n_u))
     layout = getattr(problem, "layout", None)
     if layout is None:
         layout = Layout()
