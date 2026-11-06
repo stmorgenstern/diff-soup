@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+import dataclasses
 from typing import Any
 
 import equinox as eqx
@@ -124,15 +125,16 @@ def one_interval(control_problem: Any, state: Any, u: Any, theta: Any) -> Any:
     """
     controls = control_problem.controls
     model = control_problem.problem
-    interval = type(controls)(mode=controls.mode, intervals=1, duration=controls.duration)
+    duration = controls.interval
+    interval = dataclasses.replace(controls, intervals=1, duration=duration)
     solution, _ = solve_schedule(
         model,
         control_problem.solver,
         interval.segments(jnp.atleast_1d(u), tuple(model.operational_modes())),
         state,
         t0=0.0,
-        t_end=controls.duration,
-        times=jnp.asarray([controls.duration]),
+        t_end=duration,
+        times=jnp.asarray([duration]),
         theta=theta,
     )
     terminal = solution.terminal
@@ -149,30 +151,139 @@ def _matrix(covariance: Any, n: int) -> Any:
     return jnp.diag(jnp.broadcast_to(covariance, (n,)))
 
 
-class MovingHorizonEstimator(Estimator):
-    """Moving-horizon estimation: an `InferenceProblem` over the last `window` measurements, solved by the same solver.
+class MovingHorizonEstimate(eqx.Module):
+    """The state of `MovingHorizonEstimator`: the estimate, the window's prior, and the window.
 
-    The state at the window start is the parameter, the problem's constraints apply, and each
-    window warm-starts from the previous solution.
-
-    Args:
-        problem: The model the controller uses.
-        measured: `measured(state, theta) -> measurement` as a JAX function.
-        window: The number of intervals in the window.
-        solver: The [CompiledSolver][diff_soup.optimization.CompiledSolver] of the window fit.
-        arrival_covariance: The prior on the window's start state, or `None`.
+    Attributes:
+        plant: The state estimate at the window's end, which the next horizon starts from.
+        start: The prior of the state at the window's start, the arrival cost's centre.
+        correction: The last fit's correction of `start`, along the estimator's basis.
+        controls: The applied controls of the window, oldest first, `(window,)`.
+        measurements: The measurement after each of them, `(window, n_measured)`.
+        count: How many entries of the window are filled, at most `window`.
     """
 
-    problem: Any = eqx.field(static=True)
-    measured: Any = eqx.field(static=True)
+    plant: Any
+    start: Any
+    correction: Any
+    controls: Any
+    measurements: Any
+    count: Any
+
+
+class MovingHorizonEstimator(Estimator):
+    """Moving-horizon estimation: a least-squares fit of the window's start state to its measurements.
+
+    After each interval the window takes the applied control and the measurement, and the
+    start state `start + basis @ z` is fitted: the residual is every measurement in the window
+    against the model run from that state through the window's controls, whitened by the
+    measurement covariance, then the arrival cost `z` whitened by its covariance. The fit is a
+    `LeastSquaresProblem` whose `args` hold the window, solved by `solver` from the last
+    correction, so it runs inside the loop's `lax.scan`. Once the window is full it slides:
+    the next start's prior is the fitted start advanced one interval.
+
+    Args:
+        problem: The [ControlProblem][diff_soup.optimization.control.ControlProblem] whose model, solver and interval the plant follows.
+        measured: `measured(state, theta) -> measurement` as a JAX function.
+        window: The number of intervals in the window.
+        solver: The `CompiledSolver` of the window fit, as the horizon's.
+        arrival_covariance: The covariance of `z`, `(k, k)`, a diagonal or a scalar.
+        measurement_covariance: The covariance of one measurement, `(n_measured, n_measured)`, a diagonal or a scalar.
+        basis: The directions `(n_states, k)` the start state is corrected along; every state when `None`.
+    """
+
+    # The control problem holds the model's arrays, so it is a leaf, not static.
+    problem: Any = None
+    measured: Any = eqx.field(static=True, default=None)
     window: int = eqx.field(static=True, default=5)
     solver: Any = eqx.field(static=True, default=None)
     arrival_covariance: Any = None
+    measurement_covariance: Any = None
+    basis: Any = None
 
     def init(self, args: Any) -> Any:
-        """An empty window around the initial estimate."""
-        raise NotImplementedError
+        """An empty window whose start prior is the control problem's initial state."""
+        plant = jnp.asarray(args[0])
+        shape = jax.eval_shape(lambda y: jnp.atleast_1d(self.measured(y, args[1])), plant)
+        return MovingHorizonEstimate(
+            plant=plant,
+            start=plant,
+            correction=jnp.zeros((self._basis(plant).shape[1],), plant.dtype),
+            controls=jnp.zeros((self.window,), plant.dtype),
+            measurements=jnp.zeros((self.window, shape.shape[0]), plant.dtype),
+            count=jnp.zeros((), jnp.int32),
+        )
 
     def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> Any:
-        """Push the measurement into the window and refit the window's start state."""
-        raise NotImplementedError
+        """Push the interval into the window, refit the start state, and run it to the window's end."""
+        from diff_soup.optimization._abc import LeastSquaresProblem
+
+        theta = args[1]
+        controls = jnp.concatenate([state.controls[1:], jnp.reshape(u_prev, (1,))])
+        measured = jnp.atleast_1d(measurement)[None, :].astype(state.measurements.dtype)
+        measurements = jnp.concatenate([state.measurements[1:], measured])
+        count = jnp.minimum(state.count + 1, self.window)
+        basis = self._basis(state.plant)
+        k = basis.shape[1]
+        noise = jnp.linalg.cholesky(_matrix(self.measurement_covariance, measured.shape[1]))
+        arrival = jnp.linalg.cholesky(_matrix(self.arrival_covariance, k))
+        data = (state.start, controls, measurements, count, theta)
+
+        def residual(z, data):
+            return self._residual(z, data, basis, noise, arrival)[0]
+
+        def residual_and_jacobian(z, data):
+            jacobian, value = jax.jacfwd(lambda x: (residual(x, data),) * 2, has_aux=True)(z)
+            return value, jacobian
+
+        fit = LeastSquaresProblem(
+            x0=jnp.zeros((k,), state.plant.dtype),
+            structure=frozenset({"value_gradient", "residual_jacobian", "gauss_newton"}),
+            args=data,
+            ad="forward",
+            _residual=residual,
+            _residual_and_jacobian=residual_and_jacobian,
+        )
+        solver = self.solver
+        if solver is None:
+            from diff_soup.optimization.solvers.sqp import SQP
+
+            solver = SQP()
+        z, _ = solver.run(fit, state.correction, data)
+        _, (first, end) = self._residual(z, data, basis, noise, arrival)
+        # A full window slides at the next interval: its start's prior is the fitted start
+        # advanced one interval, about which the next correction starts from zero.
+        full = count == self.window
+        return MovingHorizonEstimate(
+            plant=end,
+            start=jnp.where(full, first, state.start),
+            correction=jnp.where(full, jnp.zeros_like(z), z),
+            controls=controls,
+            measurements=measurements,
+            count=count,
+        )
+
+    def _basis(self, plant: Any) -> Any:
+        """The correction directions, the identity when none are given."""
+        if self.basis is None:
+            return jnp.eye(plant.shape[0], dtype=plant.dtype)
+        return jnp.asarray(self.basis, plant.dtype)
+
+    def _residual(self, z, data, basis, noise, arrival):
+        """The whitened window residual, the state after the window's first filled interval, and its end."""
+        start, controls, measurements, count, theta = data
+        offset = self.window - count
+
+        def interval(carry, k):
+            x, first = carry
+            on = k >= offset
+            x = jnp.where(on, one_interval(self.problem, x, controls[k], theta), x)
+            first = jnp.where(k == offset, x, first)
+            error = jnp.atleast_1d(self.measured(x, theta)) - measurements[k]
+            row = jax.scipy.linalg.solve_triangular(noise, error, lower=True)
+            return (x, first), jnp.where(on, row, 0.0)
+
+        x0 = start + basis @ z
+        (end, first), rows = jax.lax.scan(interval, (x0, x0), jnp.arange(self.window))
+        prior = jax.scipy.linalg.solve_triangular(arrival, z, lower=True)
+        return jnp.concatenate([rows.ravel(), prior]), (first, end)
