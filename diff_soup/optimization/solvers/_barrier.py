@@ -3,14 +3,16 @@
 The decision vector `x` carries the barrier on its finite bounds directly; the inequality
 slacks `s` carry it on `s >= 0`. A variable with one finite bound gets Ipopt's linear damping
 term `kappa_d * mu * distance`, which keeps the barrier problem bounded.
+
+In the shapes, `n` is the size of `x` and `k` that of the slacks.
 """
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float
+from jaxtyping import Array, ArrayLike, Bool, Float
 
 #: Ipopt's `kappa_d`: the linear damping of a variable with one finite bound.
 KAPPA_D = 1e-5
@@ -34,7 +36,7 @@ class Bounds(NamedTuple):
     has_upper: Bool[Array, "n"]
 
 
-def bounds_from(lower: Any, upper: Any) -> Bounds:
+def bounds_from(lower: Float[Array, " n"], upper: Float[Array, " n"]) -> Bounds:
     """The `Bounds` of `(lower, upper)` arrays, infinite where absent."""
     has_lower = jnp.isfinite(lower)
     has_upper = jnp.isfinite(upper)
@@ -43,14 +45,18 @@ def bounds_from(lower: Any, upper: Any) -> Bounds:
     )
 
 
-def distances(x: Any, bounds: Bounds) -> tuple[Any, Any]:
+def distances(
+    x: Float[Array, " n"], bounds: Bounds
+) -> tuple[Float[Array, " n"], Float[Array, " n"]]:
     """`(x - lower, upper - x)`, 1 where the bound is absent."""
     below = jnp.where(bounds.has_lower, x - bounds.lower, 1.0)
     above = jnp.where(bounds.has_upper, bounds.upper - x, 1.0)
     return below, above
 
 
-def push_into_bounds(x0: Any, bounds: Bounds, push: float, frac: float) -> Any:
+def push_into_bounds(
+    x0: Float[Array, " n"], bounds: Bounds, push: float, frac: float
+) -> Float[Array, " n"]:
     """Ipopt's start point: `x0` moved strictly inside its bounds by `bound_push` and `bound_frac`."""
     width = bounds.upper - bounds.lower
     both = bounds.has_lower & bounds.has_upper
@@ -62,7 +68,9 @@ def push_into_bounds(x0: Any, bounds: Bounds, push: float, frac: float) -> Any:
     return jnp.where(bounds.has_upper, jnp.minimum(x, bounds.upper - push_upper), x)
 
 
-def barrier_value(x: Any, s: Any, mu: Any, bounds: Bounds) -> Any:
+def barrier_value(
+    x: Float[Array, " n"], s: Float[Array, " k"], mu: Float[ArrayLike, ""], bounds: Bounds
+) -> Float[Array, ""]:
     """The barrier and damping terms of `phi_mu`, without the objective."""
     below, above = distances(x, bounds)
     only_lower = bounds.has_lower & ~bounds.has_upper
@@ -80,7 +88,9 @@ def barrier_value(x: Any, s: Any, mu: Any, bounds: Bounds) -> Any:
     return -mu * logs + KAPPA_D * mu * damping
 
 
-def barrier_gradient(x: Any, s: Any, mu: Any, bounds: Bounds) -> tuple[Any, Any]:
+def barrier_gradient(
+    x: Float[Array, " n"], s: Float[Array, " k"], mu: Float[ArrayLike, ""], bounds: Bounds
+) -> tuple[Float[Array, " n"], Float[Array, " k"]]:
     """The gradient of `barrier_value` in `x` and in `s`."""
     below, above = distances(x, bounds)
     only_lower = bounds.has_lower & ~bounds.has_upper
@@ -94,7 +104,9 @@ def barrier_gradient(x: Any, s: Any, mu: Any, bounds: Bounds) -> tuple[Any, Any]
     return grad_x, grad_s
 
 
-def primal_sigma(x: Any, z_lower: Any, z_upper: Any, bounds: Bounds) -> Any:
+def primal_sigma(
+    x: Float[Array, " n"], z_lower: Float[Array, " n"], z_upper: Float[Array, " n"], bounds: Bounds
+) -> Float[Array, " n"]:
     """The primal-dual barrier diagonal `Z_L / (x - lower) + Z_U / (upper - x)`."""
     below, above = distances(x, bounds)
     return jnp.where(bounds.has_lower, z_lower / below, 0.0) + jnp.where(
@@ -103,8 +115,16 @@ def primal_sigma(x: Any, z_lower: Any, z_upper: Any, bounds: Bounds) -> Any:
 
 
 def bound_multiplier_steps(
-    x: Any, dx: Any, s: Any, ds: Any, z_lower: Any, z_upper: Any, v: Any, mu: Any, bounds: Bounds
-) -> tuple[Any, Any, Any]:
+    x: Float[Array, " n"],
+    dx: Float[Array, " n"],
+    s: Float[Array, " k"],
+    ds: Float[Array, " k"],
+    z_lower: Float[Array, " n"],
+    z_upper: Float[Array, " n"],
+    v: Float[Array, " k"],
+    mu: Float[ArrayLike, ""],
+    bounds: Bounds,
+) -> tuple[Float[Array, " n"], Float[Array, " n"], Float[Array, " k"]]:
     """The steps of the bound multipliers from the primal step: `dz = mu / d - z - Sigma dd`."""
     below, above = distances(x, bounds)
     dz_lower = jnp.where(bounds.has_lower, (mu - z_lower * below - z_lower * dx) / below, 0.0)
@@ -113,14 +133,26 @@ def bound_multiplier_steps(
     return dz_lower, dz_upper, dv
 
 
-def _largest_step(value: Any, step: Any, tau: Any, mask: Any) -> Any:
+def _largest_step(
+    value: Float[Array, " k"],
+    step: Float[Array, " k"],
+    tau: Float[ArrayLike, ""],
+    mask: Bool[Array, " k"],
+) -> Float[Array, ""]:
     """The largest `alpha` in (0, 1] keeping `value + alpha * step >= (1 - tau) * value` where `mask`."""
     shrinking = mask & (step < 0.0)
     safe = jnp.where(shrinking, step, -1.0)
     return jnp.min(jnp.where(shrinking, -tau * value / safe, 1.0), initial=1.0)
 
 
-def fraction_to_boundary(x: Any, dx: Any, s: Any, ds: Any, tau: Any, bounds: Bounds) -> Any:
+def fraction_to_boundary(
+    x: Float[Array, " n"],
+    dx: Float[Array, " n"],
+    s: Float[Array, " k"],
+    ds: Float[Array, " k"],
+    tau: Float[ArrayLike, ""],
+    bounds: Bounds,
+) -> Float[Array, ""]:
     """The largest primal step length keeping `x` and `s` a fraction `tau` inside their bounds."""
     below, above = distances(x, bounds)
     return jnp.minimum(
@@ -133,15 +165,15 @@ def fraction_to_boundary(x: Any, dx: Any, s: Any, ds: Any, tau: Any, bounds: Bou
 
 
 def dual_fraction_to_boundary(
-    z_lower: Any,
-    dz_lower: Any,
-    z_upper: Any,
-    dz_upper: Any,
-    v: Any,
-    dv: Any,
-    tau: Any,
+    z_lower: Float[Array, " n"],
+    dz_lower: Float[Array, " n"],
+    z_upper: Float[Array, " n"],
+    dz_upper: Float[Array, " n"],
+    v: Float[Array, " k"],
+    dv: Float[Array, " k"],
+    tau: Float[ArrayLike, ""],
     bounds: Bounds,
-) -> Any:
+) -> Float[Array, ""]:
     """The largest dual step length keeping the bound multipliers a fraction `tau` above 0."""
     return jnp.minimum(
         jnp.minimum(
@@ -153,8 +185,14 @@ def dual_fraction_to_boundary(
 
 
 def safeguard_multipliers(
-    x: Any, s: Any, z_lower: Any, z_upper: Any, v: Any, mu: Any, bounds: Bounds
-) -> tuple[Any, Any, Any]:
+    x: Float[Array, " n"],
+    s: Float[Array, " k"],
+    z_lower: Float[Array, " n"],
+    z_upper: Float[Array, " n"],
+    v: Float[Array, " k"],
+    mu: Float[ArrayLike, ""],
+    bounds: Bounds,
+) -> tuple[Float[Array, " n"], Float[Array, " n"], Float[Array, " k"]]:
     """Ipopt's `kappa_sigma` safeguard: each bound multiplier within a factor of `mu / distance`."""
     below, above = distances(x, bounds)
 
