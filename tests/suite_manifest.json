@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 44,
-    "test_functions": 405,
-    "collected_tests": 613,
-    "source_lines": 14704
+    "test_functions": 407,
+    "collected_tests": 616,
+    "source_lines": 14778
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
-      "functions": 182,
-      "collected": 286,
-      "lines": 5877
+      "functions": 184,
+      "collected": 289,
+      "lines": 5951
     },
     "contracts": {
       "files": 18,
@@ -180,7 +180,7 @@
   "feature_contracts": [
     {
       "file": "tests/public_api/test_recipe_build.py",
-      "feature": "Recipe API: domains and the grid factory, fields, equations, operators, boundary conditions, couplings and read-through aliases, build identity and transformability, the topology report's attribution and coloring, the public sparse-Jacobian coloring"
+      "feature": "Recipe API: domains and the grid factory, fields, equations, operators, boundary conditions, couplings and read-through aliases, build identity and transformability, exact-sparsity builds and their solves, the topology report's attribution and coloring, the public sparse-Jacobian coloring"
     },
     {
       "file": "tests/public_api/test_recipe_observations.py",
