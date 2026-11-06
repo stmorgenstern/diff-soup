@@ -6,6 +6,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Breaking changes
 
+- Removed `ds.inference.constrained_optsolve` and `ds.inference.InequalityConstraints`. Declare the constraints as `ds.optimization.Constraints` on an `InferenceProblem` and solve it with `ds.optimization.InteriorPoint` or `ds.optimization.AugmentedLagrangian`.
 - JIDA with algebraic rows out of the error test, its stock setting, now takes a second Newton iteration when a step's first correction exceeds weighted norm 1. Previously a stale convergence rate could accept it, leaving an algebraic state far off its constraint and its gradients wrong. Results on DAEs change at the level of the solver tolerance.
 - Consistent initialization now accepts a final residual within `ic_atol + ic_rtol` times the starting residual, plus a componentwise round-off term, after Newton has tried the absolute target. Previously a start at the rounding floor of large states failed with `INCONSISTENT_IC`. `ToleranceSpec(ic_rtol=0.0)` keeps the absolute gate, as does `ic_atol=` without `ic_rtol=`.
 
@@ -33,6 +34,10 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - A vmapped solve no longer keeps extra copies of its saved output, and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
 - JIDA does its whole-array work only on the path an attempt takes, with identical results.
 - Member rows that read every site of their member are recovered by shared pullbacks instead of one color per site: an LFP half cell with 50 volumes of 10 particles needs 8 colors instead of 108.
+
+### Other
+
+- `diff_soup.inference` is now `diff_soup.optimization.inference`, and `optsolve`, `OptResult`, the optimization problems and the solvers are also at the top of `ds.optimization`. `ds.inference` and every `diff_soup.inference` import path still work for this release and return the same objects; they will be removed in the next one.
 
 **Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.2.0
 

@@ -20,10 +20,6 @@ from diff_soup.optimization.inference.fitting.callbacks import (
     LogCallback,
     StopFit,
 )
-from diff_soup.optimization.inference.fitting.constrained import (
-    InequalityConstraints,
-    constrained_optsolve,
-)
 from diff_soup.optimization.inference.fitting.diagnostics import OptDiagnostics
 from diff_soup.optimization.inference.fitting.inference_problem import (
     FixedInitialState,
@@ -156,9 +152,6 @@ __all__ = [
     # Optimization problems
     "OptimizationProblem",
     "LeastSquaresProblem",
-    # Constrained fitting
-    "constrained_optsolve",
-    "InequalityConstraints",
     # Statistics: measurements, studies, estimation problems
     "Measurement",
     "Experiment",

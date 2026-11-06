@@ -53,13 +53,7 @@ The `x_scale=` setting of a solver takes one of these.
 
 ---
 
-### Constrained fits
-
-::: diff_soup.optimization.inference.constrained_optsolve
-
-::: diff_soup.optimization.inference.InequalityConstraints
-    options:
-      members: false
+### Gauges
 
 ::: diff_soup.optimization.inference.Gauge
     options:
