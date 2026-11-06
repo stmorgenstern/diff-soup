@@ -344,16 +344,19 @@ def test_a_scheduled_sample_differentiates_through_a_segment_duration(held_sampl
     np.testing.assert_allclose([tangent, central], expected, rtol=_DURATION_BOUND)
 
 
-def test_a_second_tangent_through_a_segment_duration_is_refused(held_sample):
-    """jax.jvp of a scheduled sample's tangent in the segment durations raises: the tangent
-    rule moves a segment boundary to first order only."""
+def test_a_third_tangent_through_a_segment_duration_is_refused(held_sample):
+    """A third jax.jvp in the segment durations raises: a moving segment end enters the
+    tangent rule as a second-order Taylor shift along the flow."""
     direction = jnp.asarray([1.0, -0.5])
 
     def tangent(durations):
         return jax.jvp(lambda d: held_sample(d, _HOLDS), (durations,), (direction,))[1]
 
-    with pytest.raises(NotImplementedError, match="no second derivative"):
-        jax.jvp(tangent, (_HELD_FOR,), (direction,))
+    def second(durations):
+        return jax.jvp(tangent, (durations,), (direction,))[1]
+
+    with pytest.raises(NotImplementedError, match="no third derivative"):
+        jax.jvp(second, (_HELD_FOR,), (direction,))
 
 
 # measured 7.0e-9 relative, workstation 2026-11-06,
