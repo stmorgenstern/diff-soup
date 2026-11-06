@@ -83,6 +83,19 @@ def ic_gate_tolerance(atol: Any, ic_tol: Optional[float]) -> float:
     )
 
 
+def ic_gate_rtol(rtol: float, ic_rtol: Optional[float], ic_tol: Optional[float]) -> float:
+    """The relative part of the consistent-initialization gate.
+
+    ``ic_rtol`` wins when set. Otherwise an explicit absolute ``ic_tol`` keeps
+    the gate absolute, and without one the step's ``rtol`` serves: the rule
+    [ToleranceSpec][diff_soup.timestepping.tolerances.ToleranceSpec] resolves
+    ``ic_rtol`` by.
+    """
+    if ic_rtol is not None:
+        return float(ic_rtol)
+    return 0.0 if ic_tol is not None else float(rtol)
+
+
 def closure_moved(
     problem: Any,
     t: Any,

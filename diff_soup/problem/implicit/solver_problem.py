@@ -40,7 +40,7 @@ from diff_soup.problem._ir.content_hash import _graph_callable_config_id
 from diff_soup.problem.implicit.consistent_init import (
     ConsistentInitPlan,
     consistent_initial_state,
-    reduced_route_eligible,
+    initialization_route,
     resolve_backend_route,
 )
 from diff_soup.problem.implicit.linearize import build_linearization_plan
@@ -677,9 +677,11 @@ class SolverView:
             control: Control values read by the residual, or ``None``.
             ydot0: Optional initial slope guess.
             tol: Absolute residual 2-norm target for Newton iterations.
-            rtol: Relative final gate scaled by the initial residual 2-norm,
-                applied after attempting the absolute target. Positive values
-                also enable the componentwise state/slopes round-off allowance.
+            rtol: Relative part of the final gate: a positive value also accepts a
+                residual 2-norm up to ``tol + (rtol + γ) S``, with
+                ``S = ‖|F_y| |y| + |F_ydot| |ydot|‖₂`` at the final iterate and ``γ``
+                the rounding bound of the longest residual row. Zero keeps the
+                absolute gate only.
             max_iters: Newton iteration budget.
             backend: Linear-backend selection for the initialization system.
             route: ``"auto"``, ``"joint"``, or ``"reduced"`` solve route.
@@ -689,11 +691,7 @@ class SolverView:
                 solve of a reverse sweep.
         """
         theta = self.default_theta() if theta is None else theta
-        if route == "auto":
-            ic_route = "reduced" if reduced_route_eligible(self.problem) else "joint"
-        else:
-            ic_route = route
-        block = int(self.structure.algebraic_indices.size) if ic_route == "reduced" else self.n
+        ic_route, block = initialization_route(self.problem, route)
         route_name, _ = resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
         key = (
             float(tol),
@@ -742,16 +740,12 @@ class SolverView:
         platform's route from the system size; a concrete name or a
         [LinearSolver][diff_soup.linear.LinearSolver] instance is honored unless
         its bound ``layout.n_dofs`` differs from the initialization system size,
-        in which case initialization uses Dense without changing the step backend. The
-        instance is ``None`` on the dense route. Callers that batch
+        in which case it resolves as ``"auto"`` does, without changing the step
+        backend. The instance is ``None`` on the dense route. Callers that batch
         initialization solves (for example projected output sampling) read the
         resolved backend's capabilities from the returned instance.
         """
-        block = (
-            int(self.structure.algebraic_indices.size)
-            if reduced_route_eligible(self.problem)
-            else self.n
-        )
+        _, block = initialization_route(self.problem)
         return resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
 
     def startup_slope(

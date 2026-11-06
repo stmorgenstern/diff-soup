@@ -97,6 +97,7 @@ from .contract import (
     EngineCapabilities,
     coerce_problem,
     consume_consistent_init,
+    ic_gate_rtol,
     ic_gate_tolerance,
     pack_state,
     unpack_state,
@@ -994,10 +995,13 @@ def _project_saved_samples(sol, engine, problem, cfg, theta, control):
     guarded = jnp.where(valid[:, None], y_rows, safe_row[None, :])
     t_guarded = jnp.where(valid, ts, sol.terminal.t)
     tol = ic_gate_tolerance(engine.atol, getattr(engine, "ic_tol", None))
-    # The gate of the solve's own initialization: with no relative part it leaves out
-    # the residual's round-off floor, and a tight atol then poisons a sample at that floor.
-    rtol = getattr(engine, "ic_rtol", None)
-    rtol = float(getattr(engine, "rtol", 0.0)) if rtol is None else float(rtol)
+    # The gate of the solve's own initialization, so a sample at the residual's
+    # round-off floor passes exactly when the start did.
+    rtol = ic_gate_rtol(
+        getattr(engine, "rtol", 0.0),
+        getattr(engine, "ic_rtol", None),
+        getattr(engine, "ic_tol", None),
+    )
     ic_layout, ic_precision = initialization_policy(
         problem, getattr(engine, "precision", None), mode="forward"
     )
