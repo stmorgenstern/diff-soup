@@ -32,6 +32,7 @@ import jax
 import jax.numpy as jnp
 from jax.custom_derivatives import zero_from_primal
 
+from diff_soup.optimization.kkt import _cholesky
 from diff_soup.optimization.solvers._barrier import Bounds, distances
 from diff_soup.optimization.solvers._closures import Closures
 from diff_soup.optimization.solvers._protocol import SolveRecord, SolveStatus
@@ -58,8 +59,15 @@ class ActiveSet(eqx.Module):
     degenerate: Any
 
 
-def active_set(x: Any, record: SolveRecord, bounds: Bounds) -> ActiveSet:
-    """Read the active set from the record's multipliers and slacks."""
+def active_set(
+    x: Any, record: SolveRecord, bounds: Bounds, jac_eq: Any = None, jac_ineq: Any = None
+) -> ActiveSet:
+    """Read the active set from the record's multipliers and slacks.
+
+    With the constraint Jacobians, an active set whose rows are linearly dependent on the free
+    coordinates (two identical active rows, say) counts as degenerate too: its KKT system is
+    singular, and the barrier system at `mu` is not.
+    """
     threshold = DEGENERATE * jnp.sqrt(record.mu)
     below, above = distances(x, bounds)
     z_lower, z_upper = record.bound_multipliers
@@ -73,7 +81,14 @@ def active_set(x: Any, record: SolveRecord, bounds: Bounds) -> ActiveSet:
     inequality, deg_i = side(lam, slack, jnp.ones_like(lam, dtype=bool))
     lower, deg_l = side(z_lower, below, bounds.has_lower)
     upper, deg_u = side(z_upper, above, bounds.has_upper)
-    return ActiveSet(inequality, lower, upper, deg_i | deg_l | deg_u)
+    degenerate = deg_i | deg_l | deg_u
+    if jac_eq is not None:
+        free = (~(lower | upper)).astype(x.dtype)
+        rows = jnp.concatenate([jac_eq, jac_ineq * inequality[:, None]]) * free[None, :]
+        idle = jnp.concatenate([jnp.zeros(jac_eq.shape[0], bool), ~inequality])
+        _, independent = _cholesky(rows @ rows.T + jnp.diag(idle.astype(x.dtype)))
+        degenerate = degenerate | ~independent
+    return ActiveSet(inequality, lower, upper, degenerate)
 
 
 def _lagrangian_gradient(closures: Closures, x, lam_e, lam_i, args):
@@ -98,7 +113,8 @@ def kkt_tangent(
     lam_e, lam_i = record.multipliers_equality, record.multipliers_inequality
     n_eq, n_ineq = lam_e.shape[0], lam_i.shape[0]
     dtype = x.dtype
-    active = active_set(x, record, bounds)
+    jac_eq0, jac_ineq0 = closures.constraints_and_jacobians(x, args)[2:]
+    active = active_set(x, record, bounds, jac_eq0, jac_ineq0)
     degenerate = active.degenerate
 
     def residual(a):
