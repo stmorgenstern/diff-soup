@@ -133,6 +133,8 @@ class World(NamedTuple):
 
 # This process's world and its MPI communicator (None for a world of one process), once found.
 _WORLD: list = []
+# One entry once a transport was made over this process's world.
+_TRANSPORT_MADE: list = []
 
 
 def _launched_size() -> int:
@@ -224,10 +226,25 @@ class Transport:
     """
 
     def __init__(self, world: World):
-        """Wrap the communicator of ``world``, this process's world of more than one process."""
+        """Wrap the communicator of ``world``, this process's world of more than one process.
+
+        A world carries one transport, so a run of several processes lowers one study: the
+        processes above 0 serve the first study until it is closed and then exit.
+
+        Raises:
+            ValueError: If ``world`` is not this process's world of more than one process.
+            RuntimeError: If a transport was already made over this process's world.
+        """
         comm = _communicator()
         if comm is None or tuple(world) != tuple(_WORLD[0][0]):
             raise ValueError("a transport needs this process's world of more than one process.")
+        if _TRANSPORT_MADE:
+            raise RuntimeError(
+                "a run of several processes lowers one study: the processes above 0 serve the "
+                "first lowered study until it is closed and the run ends; declare every "
+                "experiment in one Study and lower it once, or run one process."
+            )
+        _TRANSPORT_MADE.append(True)
         self.world = world
         self.comm = comm
         self.rank = int(world.rank)

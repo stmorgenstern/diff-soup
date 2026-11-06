@@ -12,7 +12,7 @@ then runs a [Request][diff_soup.optimization.inference.engine._request.Request] 
 compiled programs only.
 
 A program is known by its key: the bucket's identity, the mode and the chunk
-width ``W``. The process-wide registry ``REGISTRY`` maps a key to its compiled
+width ``W``. The process-wide registry ``_PROGRAMS`` maps a key to its compiled
 program, so equal keys compile once per process, across buckets, studies and
 repeated lowering; lanes of a study that reuses a program run on the problem of
 the study that compiled it, which the identity makes equivalent. The registry
@@ -130,8 +130,8 @@ class CompiledProgram:
     record: Any
 
 
-REGISTRY: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
-"""Every compiled program of the process, by [ProgramKey][diff_soup.optimization.inference.engine._batched.ProgramKey]."""
+# Every compiled program of the process that a study's lanes hold, by its ProgramKey.
+_PROGRAMS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 
 
 class PreparedProgram(NamedTuple):
@@ -575,11 +575,11 @@ def prepare(
             key = ProgramKey(
                 bucket.full_identity, mode, int(bucket.chunk[mode].width), lanes.plan.mesh
             )
-            program = REGISTRY.get(key)
+            program = _PROGRAMS.get(key)
             reused = program is not None
             if program is None:
                 program = compile_program(lanes, entry, key)
-                REGISTRY[key] = program
+                _PROGRAMS[key] = program
             elif program.lane_leaves != _lane_leaves(entry):
                 raise ValueError(
                     f"bucket {bucket.index} has the identity {bucket.identity} of a compiled "
@@ -1079,7 +1079,6 @@ def evaluate(
 
 
 __all__ = [
-    "REGISTRY",
     "BatchedLanes",
     "BucketLanes",
     "CompiledProgram",
