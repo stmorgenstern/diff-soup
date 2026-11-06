@@ -66,6 +66,7 @@ LAYERS: tuple[str, ...] = (
     "_compile",  # ds.compile: compiles one pdesolve call ahead of time
     "_schedule",  # multi-phase schedules over pdesolve; used by inference
     "inference",  # fitting and sensitivities over the whole solve stack
+    "optimization",  # problems, constraints, solvers and control; imports inference until inference moves under it
     # Top level: wires the packages together for the public namespace.
     "projection",  # consistent-initialization projection over the solver stack
     TOP,  # diff_soup/__init__.py, the public namespace
