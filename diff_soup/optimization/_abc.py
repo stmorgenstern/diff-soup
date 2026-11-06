@@ -24,6 +24,7 @@ the package without creating import cycles.
 from __future__ import annotations
 
 import dataclasses
+import functools
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
@@ -97,6 +98,22 @@ class _Held:
 
     def __repr__(self) -> str:
         return repr(self.value)
+
+    def __eq__(self, other: Any) -> bool:
+        """Equal when both hold the same object, so two lowerings of one problem share a compile."""
+        return isinstance(other, _Held) and other.value is self.value
+
+    def __hash__(self) -> int:
+        """The held object's identity."""
+        return id(self.value)
+
+
+def _derived(build: Callable) -> Callable:
+    """Memoize a closure deriver by its input closures, so a problem lowered twice derives one closure.
+
+    The closures are static fields; equal ones let `filter_jit` reuse a compile across lowerings.
+    """
+    return functools.lru_cache(maxsize=256)(build)
 
 
 def _hold(value: Any) -> _Held:
@@ -517,6 +534,7 @@ def _identity(x: Any) -> Any:
     return x
 
 
+@_derived
 def _objective_hessian(value_gradient_hessian: Callable) -> Callable:
     """The Lagrangian Hessian of a problem without constraints: the objective's."""
 
@@ -574,6 +592,7 @@ def _no_constraint_jacobians(x: Any, args: Any) -> tuple:
     return empty, empty, jacobian, jacobian
 
 
+@_derived
 def _evaluate_of(value: Callable, constraints: Callable) -> Callable:
     """``(x, args) -> (f, eq, ineq)`` from the objective and the constraint rows."""
 
@@ -583,6 +602,7 @@ def _evaluate_of(value: Callable, constraints: Callable) -> Callable:
     return evaluate
 
 
+@_derived
 def _evaluate_with_derivatives_of(
     value_and_gradient: Callable, constraints_and_jacobians: Callable
 ) -> Callable:
@@ -594,6 +614,7 @@ def _evaluate_with_derivatives_of(
     return evaluate_with_derivatives
 
 
+@_derived
 def _rows_of(constraints_and_jacobians: Callable) -> Callable:
     """The constraint rows derived from a rows-and-Jacobians closure."""
 
@@ -604,6 +625,7 @@ def _rows_of(constraints_and_jacobians: Callable) -> Callable:
     return constraints
 
 
+@_derived
 def _first_of(value_and_gradient: Callable) -> Callable:
     """The value function derived from a value-and-gradient closure."""
 
@@ -613,6 +635,7 @@ def _first_of(value_and_gradient: Callable) -> Callable:
     return value
 
 
+@_derived
 def _hessian_times(value_gradient_hessian: Callable) -> Callable:
     """The Hessian-vector product derived from a value-gradient-Hessian closure."""
 
@@ -622,6 +645,7 @@ def _hessian_times(value_gradient_hessian: Callable) -> Callable:
     return hessian_vector
 
 
+@_derived
 def _lagrangian_times(lagrangian_hessian: Callable) -> Callable:
     """The Lagrangian Hessian-vector product derived from the Lagrangian Hessian."""
 
@@ -659,6 +683,7 @@ def _as_bounds(bounds: Any, x0: Any) -> Any:
     return lower, upper
 
 
+@_derived
 def _half_squared(residual: Callable) -> Callable:
     """The least-squares value ``0.5 * sum(r**2)`` derived from a residual closure."""
 
@@ -669,6 +694,7 @@ def _half_squared(residual: Callable) -> Callable:
     return value
 
 
+@_derived
 def _gradient_of(residual_and_jacobian: Callable) -> Callable:
     """The value and gradient ``J^T r`` derived from a residual-and-Jacobian closure."""
 
@@ -679,6 +705,7 @@ def _gradient_of(residual_and_jacobian: Callable) -> Callable:
     return value_and_gradient
 
 
+@_derived
 def _gauss_newton_of(residual_and_jacobian: Callable) -> Callable:
     """The Gauss-Newton statistics ``(value, J^T r, J^T J, 0)`` derived from a residual-and-Jacobian closure."""
 
