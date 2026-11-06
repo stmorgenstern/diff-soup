@@ -12,8 +12,8 @@ solves run one by one.
 
 [lane_cond][diff_soup.utils.lanes.lane_cond] keeps the branch. Unbatched it
 takes the branch ``lax.cond`` takes and runs no other (the compiled program
-carries the batched form's outer conditional, with the same executed work).
-Batched, it runs ``true_fun`` only when at least one lane
+carries the batched form's conditionals, with the same executed work and one
+copy of each branch). Batched, it runs ``true_fun`` only when at least one lane
 takes it, and ``false_fun`` only when at least one lane does not; each lane
 keeps its own branch's result.
 
@@ -182,10 +182,15 @@ def _dispatch(pred, true_fun, false_fun, operands, false_is_free, any_lane, all_
     if false_is_free:
         return jax.lax.cond(any_lane(), either, false_fun, *operands)
 
-    def mixed_or_false(*ops):
-        return jax.lax.cond(any_lane(), either, false_fun, *ops)
-
-    return jax.lax.cond(all_lanes(), true_fun, mixed_or_false, *operands)
+    # One conditional per branch, so the program holds one copy of each: true_fun
+    # runs where some lane takes it, false_fun where some lane does not, and the
+    # branch that does not run returns zeros its lanes never keep.
+    skipped = jax.tree_util.tree_map(
+        lambda leaf: jnp.zeros(leaf.shape, leaf.dtype), jax.eval_shape(true_fun, *operands)
+    )
+    taken = jax.lax.cond(any_lane(), true_fun, lambda *_: skipped, *operands)
+    kept = jax.lax.cond(all_lanes(), lambda *_: skipped, false_fun, *operands)
+    return jax.tree_util.tree_map(lambda t, f: jnp.where(pred, t, f), taken, kept)
 
 
 def lane_cond(
@@ -211,8 +216,8 @@ def lane_cond(
         *operands: Arguments passed to the branch.
         false_is_free: Declares that ``false_fun`` computes nothing (it returns
             its operands or values computed outside the branch). ``false_fun``
-            then also runs wherever ``true_fun`` runs, and ``true_fun`` is
-            traced once instead of twice.
+            then also runs wherever ``true_fun`` runs, which spares the second
+            conditional and the select of a branch that computes.
     """
     pred = jnp.asarray(pred, dtype=jnp.bool_)
     lanes = (lambda: _any_lane_p.bind(pred), lambda: _all_lanes_p.bind(pred))
