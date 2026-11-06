@@ -48,7 +48,22 @@ class ConstraintClosures(NamedTuple):
 
 
 class Constraints(eqx.Module):
-    """Equality and inequality constraints on the unflattened parameter view.
+    """Equality and inequality constraints on a problem's decision variables.
+
+    Each function takes the decision variables in the problem's own terms and `args`. On an
+    `InferenceProblem` that is the fitted values by parameter, `values[handle]`; on an
+    `OptimizationProblem` it is the flat vector.
+
+    !!! example
+
+        ```python
+        constraints = ds.optimization.Constraints(
+            inequality=lambda values, args: values[rate] - args["rate_max"], n_inequality=1
+        )
+        problem = ds.optimization.inference.InferenceProblem(
+            experiment, parameters=rate, constraints=constraints, args={"rate_max": 0.3}
+        )
+        ```
 
     Args:
         equality: `equality(params, args)` returning rows satisfied at 0, or `None`.
