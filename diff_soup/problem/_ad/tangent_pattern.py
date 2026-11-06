@@ -11,7 +11,8 @@ whatever the state and parameters are, literals and integer indices, may rule an
 out: a concrete zero coefficient, a concrete branch condition, a concrete index.
 
 Each tangent operation is linear, which is why so few rules are needed. A primitive
-with no rule takes the sound answer, every output on every input, with a warning.
+with no rule, and an index not known at build time, take the sound answer, every
+output on every input, with a warning at the first such operation.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from jax.extend.core import Literal
 from scipy import sparse
 
 from diff_soup._warnings import warn_user
+from diff_soup.problem._ad.pattern import dedup_coo
 
 
 def _select(flow, table):
@@ -127,6 +129,23 @@ class _Scope:
         return tables, blocks[0] if len(blocks) == 1 else sparse.vstack(blocks, format="csr")
 
 
+class _Fallbacks:
+    """The operations a walk answered with every output on every input."""
+
+    def __init__(self):
+        """Start with none."""
+        self.seen = set()
+
+    def add(self, name: str, reason: str):
+        """Record one, warning the first time ``name`` falls back for ``reason``."""
+        if (name, reason) not in self.seen:
+            self.seen.add((name, reason))
+            warn_user(
+                f"tangent_pattern: {name} {reason}, so each of its outputs is declared to "
+                "read each of its inputs."
+            )
+
+
 def _anywhere(scope, eqn):
     """Every output on every input, which is exact for an index that may take any value."""
     flows = [scope.flow(atom) for atom in eqn.invars if scope.flow(atom) is not None]
@@ -143,7 +162,13 @@ def _anywhere(scope, eqn):
 
 def _conservative(scope, eqn):
     """A primitive with no rule: sound, but it declares more than it may need, so it warns."""
-    scope.fallbacks.add(eqn.primitive.name)
+    scope.fallbacks.add(eqn.primitive.name, "has no pattern rule")
+    return _anywhere(scope, eqn)
+
+
+def _unknown_index(scope, eqn):
+    """An index not known at build time may take any value: sound, with a warning."""
+    scope.fallbacks.add(eqn.primitive.name, "reads an index not known at build time")
     return _anywhere(scope, eqn)
 
 
@@ -251,7 +276,7 @@ def _indexed(scope, eqn):
         if position not in inputs:
             inputs[position] = scope.value(atom)
             if inputs[position] is None or scope.flow(atom) is not None:
-                return _anywhere(scope, eqn)
+                return _unknown_index(scope, eqn)
     params = dict(eqn.params)
     if "fill_value" in params:
         params["fill_value"] = -1
@@ -265,7 +290,7 @@ def _scatter(scope, eqn):
     operand, indices, updates = eqn.invars
     where = scope.value(indices)
     if where is None or scope.flow(indices) is not None:
-        return _anywhere(scope, eqn)
+        return _unknown_index(scope, eqn)
     dims, mode = eqn.params["dimension_numbers"], eqn.params["mode"]
     shape = operand.aval.shape
     window = iter(updates.aval.shape[axis] for axis in dims.update_window_dims)
@@ -440,15 +465,8 @@ def tangent_pattern(fn, y, *args):
         closed = jax.make_jaxpr(tangent)(y, y, args)
         count = len(closed.jaxpr.invars)
         flows = [sparse.eye(size, dtype=bool, format="csr")] + [None] * (count - 1)
-        fallbacks = set()
-        output = _Scope(closed, flows, [None] * count, fallbacks).outputs[0]
-    if fallbacks:
-        warn_user(
-            f"tangent_pattern: primitive(s) {sorted(fallbacks)} have no pattern rule, so each "
-            "of their outputs is declared to read each of their inputs."
-        )
+        output = _Scope(closed, flows, [None] * count, _Fallbacks()).outputs[0]
     if output is None:
         return np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32)
     coo = output.tocoo()
-    keys = np.unique(coo.row.astype(np.int64) * coo.shape[1] + coo.col)
-    return (keys // coo.shape[1]).astype(np.int32), (keys % coo.shape[1]).astype(np.int32)
+    return dedup_coo(coo.row, coo.col, coo.shape[1])[:2]

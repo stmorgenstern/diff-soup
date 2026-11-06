@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup.linear import SparseTopology
+from diff_soup.problem._ad.pattern import outside_compile_time_eval
 from diff_soup.problem._ad.tangent_pattern import tangent_pattern
 from diff_soup.problem._cache import BoundedContentCache
 from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
@@ -532,8 +533,6 @@ def _build_solver_problem(problem, source_static):
             mask[np.asarray(bc_indices, dtype=np.int32)] = False
         partitions = (("state", 0, n_u), ("global", n_u, n)) if n_lam else ()
         structure = DAEStructure(differential_vars=mask, partitions=partitions)
-        topology = problem._topo
-        rhs_sparsity = augmented_rhs_sparsity(topology, n_u, n_lam)
         forms = tuple(problem.derivative_forms() or ())
         field_offsets = {
             entry[0][1]: (int(entry[1]), int(entry[2]))
@@ -650,14 +649,20 @@ def _build_solver_problem(problem, source_static):
                     values = values.at[jnp.asarray(bc_indices, dtype=jnp.int32)].set(0)
                 return jnp.concatenate([values, jnp.zeros((n_lam,), values.dtype)])
 
-        if problem._exact_sparsity:
-            if forms:
-                raise ValueError(
-                    "exact_sparsity reads the pattern from a residual with an explicit "
-                    "mass; this problem has q.dt terms. Divide by the mass instead, or "
-                    "build without exact_sparsity."
-                )
-            rhs_sparsity = _exact_rhs_sparsity(problem, rhs, n, _has_operational)
+        if problem._exact_sparsity and forms:
+            raise ValueError(
+                "exact_sparsity reads the pattern from a residual with an explicit "
+                "mass; this problem has q.dt terms. Divide by the mass instead, or "
+                "build without exact_sparsity."
+            )
+
+    if problem._exact_sparsity:
+        rhs_sparsity = outside_compile_time_eval(
+            lambda: _exact_rhs_sparsity(problem, rhs, n, _has_operational)
+        )
+    else:
+        rhs_sparsity = augmented_rhs_sparsity(problem._topo, n_u, n_lam)
+    with jax.ensure_compile_time_eval():
         lowered = lower_mass_form(
             structure=structure,
             n_u=n_u,

@@ -23,14 +23,14 @@ they never leak into these values.
 
 from __future__ import annotations
 
-import dataclasses
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from diff_soup.linear import SparseTopology
+from diff_soup.problem._ad.pattern import dedup_coo
 from diff_soup.problem._ad.sparse_jac import SparseJacobian
 from diff_soup.problem.implicit.problems import ImplicitProblem, MassProblem
 
@@ -66,26 +66,63 @@ __all__ = [
 # no column except the globals and host fields, whose entries the coloring keeps.
 # One pullback then recovers all of them, so the coloring falls to the stencils.
 # --------------------------------------------------------------------------- #
-_DENSE_ROW_FRACTION = 0.25  # a row reaching this share of the columns is dense
-_MAX_HELD_OUT_ROWS = 256  # absolute cap on pullbacks (and their seed batch) per assembly
-_MAX_HELD_OUT_FRACTION = 0.5  # past half the rows there is no compression left to save
-_WIDE_ROW_FACTOR = 2  # a row this many times wider than the median sets the color count
-_PULLBACK_COLORS = 4  # the colors one residual pullback costs about as much as
-_SHARED_COLUMN_READERS = (2, 4, 8, 16)  # wide rows a column may have before the coloring takes it
-_RECOLOR_PASSES = 4  # times the rows that color a colliding column may go to pullbacks
+# Ours, each: a row reaching this share of the columns is dense.
+_DENSE_ROW_FRACTION = 0.25
+# Ours: the cap on pullbacks per assembly, which bounds their seed batch at 256 rows of n.
+_MAX_HELD_OUT_ROWS = 256
+# Past half the rows held out, the coloring has nothing left to compress.
+_MAX_HELD_OUT_FRACTION = 0.5
+# Ours: a row this many times wider than the median sets the color count.
+_WIDE_ROW_FACTOR = 2
+# The colors one pullback is worth: a reverse sweep costs at most four residual
+# evaluations (Griewank and Walther, Evaluating Derivatives, 2nd ed., 2008, ch. 4),
+# and one color costs about one.
+_PULLBACK_COLORS = 4
+# Ours: the reader counts tried for a column the coloring takes off the wide rows.
+_SHARED_COLUMN_READERS = (2, 4, 8, 16)
+# Ours: the passes in which the rows that color a colliding column go to pullbacks.
+_RECOLOR_PASSES = 4
+_NONE = np.empty((0,), dtype=np.int64)
 
 
-def _colliding_columns(rows, cols, split, coloring, n: int) -> np.ndarray:
+class _WideRows(NamedTuple):
+    """Wide rows that share pullbacks.
+
+    Attributes:
+        wide: The rows, sorted.
+        groups: Each row's pullback group.
+        shared: Columns whose entries on the wide rows stay with the coloring.
+    """
+
+    wide: np.ndarray
+    groups: np.ndarray
+    shared: np.ndarray
+
+
+class _HeldOut(NamedTuple):
+    """Rows kept out of the coloring.
+
+    Attributes:
+        held: The rows, sorted.
+        seeds: Each row's pullback.
+        wide: The held rows that share a pullback.
+        shared: Columns whose entries on ``wide`` stay with the coloring.
+    """
+
+    held: np.ndarray
+    seeds: np.ndarray
+    wide: np.ndarray
+    shared: np.ndarray
+
+
+def _colliding_columns(rows, cols, split, coloring) -> np.ndarray:
     """Columns a wide row's pullback recovers that share a color with a colored entry of that row.
 
     A pullback recovers most of a wide row, so the coloring does not see those
     columns; one in the color of a colored entry of the row would add to that
     entry in the tangent it reads.
     """
-    color_of = np.full(n, -1, dtype=np.int64)
-    col_idx, col_mask = np.asarray(coloring._col_idx), np.asarray(coloring._col_mask)
-    for color in range(col_idx.shape[0]):
-        color_of[col_idx[color][col_mask[color]]] = color
+    color_of = coloring.column_colors()
     rows = np.asarray(rows, dtype=np.int64)
     cols = np.asarray(cols, dtype=np.int64)
     colors = color_of[cols]
@@ -124,7 +161,7 @@ def _disjoint_groups(rows: np.ndarray, cols: np.ndarray, held: np.ndarray, n: in
     return groups
 
 
-def _wide_rows(rows: np.ndarray, cols: np.ndarray, rest: np.ndarray, n: int) -> tuple:
+def _wide_rows(rows: np.ndarray, cols: np.ndarray, rest: np.ndarray, n: int) -> _WideRows:
     """Rows worth a shared pullback, their pullback groups, and the columns left to the coloring.
 
     A column many wide rows read (a global, a host field a volume's members
@@ -139,13 +176,9 @@ def _wide_rows(rows: np.ndarray, cols: np.ndarray, rest: np.ndarray, n: int) -> 
         n: The number of rows and columns.
 
     Returns:
-        ``(wide, groups, shared)``, empty when no split lowers the cost of an assembly.
+        The split, empty when none lowers the cost of an assembly.
     """
-    nothing = (
-        np.empty((0,), dtype=np.int64),
-        np.empty((0,), dtype=np.int32),
-        np.empty((0,), dtype=np.int64),
-    )
+    nothing = _WideRows(_NONE, np.empty((0,), dtype=np.int32), _NONE)
     if not rest.any():
         return nothing
     limit = _WIDE_ROW_FACTOR * np.median(rest[rest > 0])
@@ -163,13 +196,13 @@ def _wide_rows(rows: np.ndarray, cols: np.ndarray, rest: np.ndarray, n: int) -> 
         left = np.bincount(rows[on_wide & ~kept], minlength=n).max(initial=0)
         cost = max(narrow, int(left)) + _PULLBACK_COLORS * (int(groups.max()) + 1)
         if cost < best_cost:
-            best_cost, best = cost, (wide, groups, shared)
+            best_cost, best = cost, _WideRows(wide, groups, shared)
     return best
 
 
 def _held_out_rows(
     problem, rows: np.ndarray, cols: np.ndarray, n: int, wide_rows: bool = True
-) -> tuple:
+) -> _HeldOut:
     """Rows to keep out of the coloring, with the pullback each one takes.
 
     Declared globals and dense stragglers as described above, plus rows far wider
@@ -179,15 +212,13 @@ def _held_out_rows(
     share no column, so one pullback recovers them all.
 
     Returns:
-        ``(held, seeds, wide, shared)``: sorted unique row indices, empty when
-        nothing is worth holding out; each row's pullback in
-        ``range(seeds.max() + 1)``; the held rows that share a pullback; and the
-        columns whose entries on those rows stay with the coloring.
+        The rows, empty when nothing is worth holding out; each row's pullback is in
+        ``range(seeds.max() + 1)``.
     """
     rows = np.asarray(rows, dtype=np.int64)
     cols = np.asarray(cols, dtype=np.int64)
-    none = np.empty((0,), dtype=np.int64)
-    nothing = (none, np.empty((0,), dtype=np.int32), none, none)
+    none = _NONE
+    nothing = _HeldOut(none, np.empty((0,), dtype=np.int32), none, none)
     declared: np.ndarray = none
     structure = getattr(problem, "structure", None)
     for name, lo, hi in getattr(structure, "partitions", ()) or ():
@@ -214,7 +245,7 @@ def _held_out_rows(
     )
     if held.size == 0 and wide.size == 0:
         return nothing
-    return (*_seeded(held, wide, groups), wide, shared)
+    return _HeldOut(*_seeded(held, wide, groups), wide, shared)
 
 
 def _seeded(held: np.ndarray, wide: np.ndarray, groups: np.ndarray) -> tuple:
@@ -255,8 +286,8 @@ class _RowSplit:
         held_rows: np.ndarray,
         row_seeds: np.ndarray,
         n: int,
-        wide: Any = (),
-        shared: Any = (),
+        wide: np.ndarray = _NONE,
+        shared: np.ndarray = _NONE,
     ):
         rows = np.asarray(rows, dtype=np.int64)
         is_border = np.isin(rows, held_rows) & ~(np.isin(rows, wide) & np.isin(cols, shared))
@@ -267,7 +298,7 @@ class _RowSplit:
         self.border_take = np.flatnonzero(is_border).astype(np.int32)
         # The pullback of each held-out entry's row.
         self.border_seed = self.row_seeds[np.searchsorted(held_rows, rows[is_border])]
-        self.wide = wide
+        self.wide = np.asarray(wide, dtype=np.int64)
         self.border_cols = np.asarray(cols, dtype=np.int32)[is_border]
 
     @property
@@ -298,16 +329,6 @@ class _RowSplit:
         )
         out = out.at[jnp.asarray(self.interior_take)].set(interior_values)
         return out.at[jnp.asarray(self.border_take)].set(border_values)
-
-
-def _dedup(topology: SparseTopology) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Deduplicate a pattern; return (rows, cols, map_from_declared_entry)."""
-    rows = np.asarray(topology.rows, dtype=np.int32)
-    cols = np.asarray(topology.cols, dtype=np.int32)
-    keys = _pattern_keys(rows, cols, int(topology.n_dofs))
-    uniq, inverse = np.unique(keys, return_inverse=True)
-    n = int(topology.n_dofs)
-    return (uniq // n).astype(np.int32), (uniq % n).astype(np.int32), inverse.astype(np.int32)
 
 
 class LinearizationPlan:
@@ -374,8 +395,10 @@ class LinearizationPlan:
         self.union_topology: Optional[SparseTopology] = None
         self.held_out_rows: np.ndarray = np.empty((0,), dtype=np.int64)
         if self.mode == "sparse":
-            fy_rows, fy_cols, self._fy_declared_map = _dedup(dy_decl)
-            fyd_rows, fyd_cols, self._fydot_declared_map = _dedup(dydot_decl)
+            fy_rows, fy_cols, self._fy_declared_map = dedup_coo(dy_decl.rows, dy_decl.cols, n)
+            fyd_rows, fyd_cols, self._fydot_declared_map = dedup_coo(
+                dydot_decl.rows, dydot_decl.cols, n
+            )
             self.fy_topology = SparseTopology(rows=fy_rows, cols=fy_cols, n_dofs=n)
             self.fydot_topology = SparseTopology(rows=fyd_rows, cols=fyd_cols, n_dofs=n)
 
@@ -407,7 +430,7 @@ class LinearizationPlan:
                 for _ in range(_RECOLOR_PASSES):
                     colliding = np.concatenate(
                         [
-                            _colliding_columns(r, c, split, coloring, n)
+                            _colliding_columns(r, c, split, coloring)
                             for (r, c), split, coloring in zip(patterns, splits, colorings)
                         ]
                     )
@@ -434,6 +457,18 @@ class LinearizationPlan:
             self._fy_split, self._fydot_split, self._union_split = splits
             self._fy_coloring, self._fydot_coloring, self._union_coloring = colorings
 
+    @property
+    def color_count(self) -> Optional[int]:
+        """Colored tangents per assembly of ``A(cj)``, or ``None`` for a dense plan."""
+        return None if self.mode == "dense" else int(self._union_coloring.n_colors)
+
+    @property
+    def pullback_count(self) -> int:
+        """Residual pullbacks per assembly of ``A(cj)``, one per group of held-out rows."""
+        if self.mode == "dense" or not self._union_split.active:
+            return 0
+        return int(self._union_split.row_seeds.max()) + 1
+
     @staticmethod
     def _coloring(rows, cols, split: "_RowSplit", n: int) -> SparseJacobian:
         """Color a pattern's non-held-out rows (the whole pattern when none is)."""
@@ -444,9 +479,7 @@ class LinearizationPlan:
         if np.size(split.wide) == 0:
             return coloring
         # A column with no colored entry is left unseeded, so no wide row's colored entry sees it.
-        col_idx, col_mask = np.asarray(coloring._col_idx), np.asarray(coloring._col_mask)
-        seeded = col_mask & np.isin(col_idx, np.asarray(cols)[keep])
-        return dataclasses.replace(coloring, _col_mask=jnp.asarray(seeded))
+        return coloring.seeding_only(np.asarray(cols)[keep])
 
     def _split_values(self, split: "_RowSplit", coloring, fn, primal):
         """Colored values for the kept rows, pullback values for the held-out ones."""

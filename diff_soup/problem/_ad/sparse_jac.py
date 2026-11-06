@@ -12,6 +12,7 @@ for problems where element-level decomposition is not available.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -63,13 +64,20 @@ class SparseJacobian:
     _entry_mask: jnp.ndarray = field(repr=False)
 
     def __hash__(self) -> int:
-        """Hash by shape + color count + sparsity pattern bytes."""
+        """Hash by shape, color count, pattern and seeded columns."""
         return hash(
-            (self.n_dofs, self.nnz, self.n_colors, self.rows.tobytes(), self.cols.tobytes())
+            (
+                self.n_dofs,
+                self.nnz,
+                self.n_colors,
+                self.rows.tobytes(),
+                self.cols.tobytes(),
+                np.asarray(self._col_mask).tobytes(),
+            )
         )
 
     def __eq__(self, other) -> bool:
-        """Structural equality on shape, color count, and sparsity pattern."""
+        """Equal shape, color count, pattern and seeded columns."""
         if not isinstance(other, SparseJacobian):
             return NotImplemented
         return (
@@ -78,7 +86,25 @@ class SparseJacobian:
             and self.n_colors == other.n_colors
             and np.array_equal(self.rows, other.rows)
             and np.array_equal(self.cols, other.cols)
+            and np.array_equal(np.asarray(self._col_mask), np.asarray(other._col_mask))
         )
+
+    def column_colors(self) -> np.ndarray:
+        """Return each column's color, or -1 for a column no color seeds."""
+        colors = np.full(self.n_dofs, -1, dtype=np.int64)
+        col_idx, col_mask = np.asarray(self._col_idx), np.asarray(self._col_mask)
+        for color in range(col_idx.shape[0]):
+            colors[col_idx[color][col_mask[color]]] = color
+        return colors
+
+    def seeding_only(self, cols) -> SparseJacobian:
+        """Return this coloring with only the columns in ``cols`` seeded.
+
+        A column outside ``cols`` then adds nothing to the tangent of its color.
+        """
+        col_idx, col_mask = np.asarray(self._col_idx), np.asarray(self._col_mask)
+        seeded = col_mask & np.isin(col_idx, np.asarray(cols))
+        return dataclasses.replace(self, _col_mask=jnp.asarray(seeded))
 
     @classmethod
     def from_coo(
@@ -182,93 +208,6 @@ class SparseJacobian:
             np.asarray(topology.cols, dtype=np.int32),
             int(topology.n_dofs),
         )
-
-    @classmethod
-    def from_tiled_coo(
-        cls,
-        tile_rows: np.ndarray,
-        tile_cols: np.ndarray,
-        tile_size: int,
-        tile_count: int,
-        tile_offsets: np.ndarray,
-        border_rows: np.ndarray | None = None,
-        border_cols: np.ndarray | None = None,
-        *,
-        n_dofs: int,
-    ) -> SparseJacobian:
-        """Build from a stamped tile pattern plus an optional border block.
-
-        Used by the IR multi-component lowering path when a structural
-        group contains more than one repeated component (e.g. an ensemble
-        of identical particles): the single-tile sparsity pattern is
-        stamped ``tile_count`` times at the supplied offsets, then
-        unioned with any border entries (cell block, transfer
-        off-diagonals, etc.) before handing off to [from_coo][].
-
-        The greedy CPR coloring implemented in
-        [build_sparse_jvp_groups][diff_soup.utils.sparse.build_sparse_jvp_groups] already
-        reuses colors across non-overlapping tile stamps, so the
-        resulting ``n_colors`` is independent of ``tile_count`` in the
-        limit of non-interacting particles (plus a small additive term
-        for the border when present).  This classmethod exists so
-        callers do not have to manually build the stamped pattern and so
-        future performance work (e.g. a specialized tile-aware coloring)
-        has a single hook to target.
-
-        Args:
-            tile_rows: Row indices of the single-tile COO pattern, with
-                indices in ``[0, tile_size)``.
-            tile_cols: Column indices of the single-tile COO pattern, with
-                indices in ``[0, tile_size)``.
-            tile_size: DOFs per tile.
-            tile_count: Number of tiles to stamp.
-            tile_offsets: Int array of shape ``(tile_count,)`` giving the
-                starting DOF offset of each tile in the full state vector.
-            border_rows: Optional row indices for the non-tile portion of
-                the pattern (already in global indexing).
-            border_cols: Optional column indices for the non-tile portion of
-                the pattern (already in global indexing).
-            n_dofs: Total DOF count of the full coupled state.
-        """
-        tile_rows = np.asarray(tile_rows, dtype=np.int32)
-        tile_cols = np.asarray(tile_cols, dtype=np.int32)
-        tile_offsets = np.asarray(tile_offsets, dtype=np.int64)
-        if tile_offsets.shape != (tile_count,):
-            raise ValueError(f"tile_offsets shape {tile_offsets.shape} != ({tile_count},)")
-        tile_nnz = tile_rows.size
-        if tile_nnz != tile_cols.size:
-            raise ValueError("tile_rows and tile_cols must have the same size")
-
-        # Stamp: rows[k] = tile_rows + tile_offsets[k]
-        # Broadcast-free expansion via flatten.
-        if tile_nnz > 0 and tile_count > 0:
-            stamped_rows = (tile_rows[None, :] + tile_offsets[:, None]).reshape(-1).astype(np.int32)
-            stamped_cols = (tile_cols[None, :] + tile_offsets[:, None]).reshape(-1).astype(np.int32)
-        else:
-            stamped_rows = np.empty((0,), dtype=np.int32)
-            stamped_cols = np.empty((0,), dtype=np.int32)
-
-        if border_rows is not None:
-            border_rows = np.asarray(border_rows, dtype=np.int32)
-            border_cols = np.asarray(border_cols, dtype=np.int32)
-            if border_rows.size != border_cols.size:
-                raise ValueError("border_rows / border_cols size mismatch")
-            all_rows = np.concatenate([stamped_rows, border_rows])
-            all_cols = np.concatenate([stamped_cols, border_cols])
-        else:
-            all_rows = stamped_rows
-            all_cols = stamped_cols
-
-        # Dedup in row-major order to match the COO canonicalization done
-        # by ``from_coo`` and by the IR ``_sparsity`` pass.
-        if all_rows.size > 0:
-            pair_key = all_rows.astype(np.int64) * np.int64(n_dofs) + all_cols.astype(np.int64)
-            _uniq, uniq_idx = np.unique(pair_key, return_index=True)
-            order = np.sort(uniq_idx)
-            all_rows = all_rows[order]
-            all_cols = all_cols[order]
-
-        return cls.from_coo(all_rows, all_cols, int(n_dofs))
 
     def evaluate(
         self,

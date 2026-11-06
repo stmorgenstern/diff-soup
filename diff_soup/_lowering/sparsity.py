@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from diff_soup.problem._ad.pattern import dedup_coo
 from diff_soup.problem._ir.bc import FluxBC
 from diff_soup.problem._ir.equation import MultiEquation
 from diff_soup.problem._ir.equation_set import EquationSet
@@ -387,23 +388,16 @@ def _sparsity(
             np.concatenate(all_cols).astype(np.int32) if all_cols else np.zeros(0, dtype=np.int32)
         )
         # One union of every family's stamped self-block with the border, each
-        # entry kept where it first appears: the last family's tiles first, the
-        # border last. That is the entry order the topology has always had, and
-        # building it once keeps the work and memory proportional to the states.
+        # entry kept where it first appears: the last family's tiles first, then
+        # the border. Built once, so the work and memory scale with the states.
         stamped = [_family_self_block_sparsity(fam, layout) for fam in reversed(families)]
-        rows = np.concatenate([*(r for r, _ in stamped), border_rows]).astype(np.int64)
-        cols = np.concatenate([*(c for _, c in stamped), border_cols]).astype(np.int64)
-        _unique, first = np.unique(rows * np.int64(n_state) + cols, return_index=True)
-        keep = np.sort(first)
-        return rows[keep].astype(np.int32), cols[keep].astype(np.int32)
+        rows = np.concatenate([*(r for r, _ in stamped), border_rows])
+        cols = np.concatenate([*(c for _, c in stamped), border_cols])
+        return dedup_coo(rows, cols, n_state, first_seen=True)[:2]
 
     if not all_rows:
         return np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32)
-    rows = np.concatenate(all_rows).astype(np.int64)
-    cols = np.concatenate(all_cols).astype(np.int64)
-    pair = rows * np.int64(layout.total_size) + cols
-    _unique, unique_idx = np.unique(pair, return_index=True)
-    return rows[unique_idx].astype(np.int32), cols[unique_idx].astype(np.int32)
+    return dedup_coo(np.concatenate(all_rows), np.concatenate(all_cols), layout.total_size)[:2]
 
 
 def _declared_member_stencil_offsets(fam) -> np.ndarray | None:
