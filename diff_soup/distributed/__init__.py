@@ -14,7 +14,6 @@ from diff_soup._distributed import (
     any_process,
     assert_decision,
     assert_decision_value,
-    configure,
     from_local_data,
     global_mesh,
     initialize,
@@ -25,6 +24,7 @@ from diff_soup._distributed import (
     owns,
     run,
 )
+from diff_soup._environment import add_xla_flags as configure
 
 __all__ = [
     "any_process",

@@ -28,15 +28,10 @@ Design principles:
 import sys as _sys
 import types as _types
 
-# First import of the package: turns on JAX's constant hoisting before ``jax``
-# loads, so compiled programs take the arrays they close over (mesh coordinates,
-# connectivity, quadrature tables) as arguments instead of program text.
-import diff_soup._jax_constants  # noqa: F401
-
-# Second: write typed-FFI custom-call configuration onto the StableHLO op
-# itself instead of a discardable attribute, so every LAPACK, cuSOLVER, and
-# cuDSS call reaches XLA as the typed FFI call it is (``diff_soup._jax_typed_ffi``).
-import diff_soup._jax_typed_ffi  # noqa: F401
+# First import of the package: makes the changes to the process that
+# ``diff_soup._environment`` lists (the XLA flags, JAX's constant hoisting, the
+# typed-FFI custom-call builder) before anything else imports ``jax``.
+import diff_soup._environment  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Root-private modules: the lowering provider, errors, layout, schedules

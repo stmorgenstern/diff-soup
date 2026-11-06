@@ -54,9 +54,6 @@ from diff_soup.optimization.inference.statistics.measurement import Experiment
 from diff_soup.optimization.inference.statistics.study import Study
 from diff_soup.problem.parameters import ParameterSet
 
-_RUNS: list = []
-"""One entry once this process lowered a study in a run of several processes."""
-
 
 class InferenceProblem(EstimationProblem):
     """An experiment or a study paired with the objective a fit minimizes.
@@ -609,20 +606,13 @@ class LoweredStudy(InferenceProblem):
         """
         from diff_soup.optimization.inference.engine import _executor, _placement
 
-        if _RUNS:
-            raise RuntimeError(
-                "a run of several processes lowers one study: the processes above 0 serve the "
-                "first lowered study until it is closed and the run ends; declare every "
-                "experiment in one Study and lower it once, or run one process."
-            )
-        _RUNS.append(True)
+        transport = _transport.Transport(world)
         if device is not None:
             warn_user(
                 f"device={device!r} is ignored in a run of {world.size} processes: each process "
                 "evaluates its lanes on its one visible device, jax.devices()[0].",
                 UserWarning,
             )
-        transport = _transport.Transport(world)
         plan = build_plan(self.study, joint, chunk=chunk, device=None)
         planned_at = time.perf_counter()
         metadata = _batched.lane_metadata(plan, joint)

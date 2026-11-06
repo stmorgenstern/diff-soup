@@ -94,13 +94,3 @@ __all__ = [
     "CubicHermite",
     "Fourier",
 ]
-
-
-def __getattr__(name: str):
-    """Direct callers of the removed neural wrapper to Equinox's MLP."""
-    if name == "FluxNet":
-        raise TypeError(
-            "FluxNet has been removed; use eqx.nn.MLP with callable activations "
-            "and spec.function(..., learnable=True, pointwise=True) for nodal inputs"
-        )
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
