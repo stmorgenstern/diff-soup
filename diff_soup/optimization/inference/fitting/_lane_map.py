@@ -22,10 +22,16 @@ Under ``jax.linearize`` it splits: the primal map runs on the known inputs and
 the staged tangent map recomputes the primal it differentiates, as a staged
 ``while_loop`` does.
 
-Reverse-mode differentiation is not defined for the fold, so it is used only on
-forward-only solve seams, which reverse mode cannot differentiate in any case;
+Reverse mode composes too. The fold is ``vmap`` semantically, so the transpose of
+the folded linear map is the folded transpose: the staged directional derivative
+transposes to one lane map of each lane's ``jax.vjp``, which folds an enclosing
+batch into its lanes as the forward map does, and an argument every lane shares
+takes the sum of its lanes' cotangents. A lane's ``jax.vjp`` differentiates the
+kernel in reverse mode, so ``jax.grad`` of a fold whose kernel solves under
+``CheckpointAdjoint`` is defined; the forward derivative of that transpose (second
+order through a reverse sweep) is not yet, which
 [folds_enclosing_batches][diff_soup.optimization.inference.fitting._lane_map.folds_enclosing_batches]
-states that condition for a solver.
+accounts for.
 """
 
 from __future__ import annotations
@@ -44,10 +50,11 @@ from diff_soup._jax_compat import partial_eval as pe
 def folds_enclosing_batches(solver: Any) -> bool:
     """Whether a solve seam run by ``solver`` may fold enclosing batches into its lanes.
 
-    The fold carries forward-mode derivatives only, so it is used where the
-    solver's adjoint is forward-only: ``None`` (the solver default, a forward
-    solve) or a non-composable forward strategy. A strategy that also supports
-    reverse mode keeps the plain ``vmap``.
+    The fold carries forward-mode derivatives and, by its transpose rule, first-order
+    reverse mode. A seam differentiated to second order through a reverse sweep (a
+    Laplace approximation under ``CheckpointAdjoint``) needs the forward derivative of
+    that transpose, which the fold does not define yet, so a strategy that supports
+    reverse mode keeps the plain ``vmap``; forward-only seams fold.
     """
     adjoint = getattr(solver, "adjoint", None)
     if adjoint is None:
@@ -314,10 +321,31 @@ batching.primitive_batchers[_lane_map_p] = _lane_map_batching
 # The directional-derivative primitive
 # ---------------------------------------------------------------------------
 
+
+def _jvp_abstract(*avals, kernel, axes, differentiable):
+    """Output shapes of the directional derivative, read from the primal map alone.
+
+    Tracing the kernel's ``jax.jvp`` here would refuse a kernel that is a
+    ``custom_vjp`` (a solve under ``CheckpointAdjoint``) even where the staged
+    derivative is only ever transposed, as under ``jax.grad``.
+    """
+    n = len(axes)
+    shapes = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in avals[:n]]
+    traced = jax.make_jaxpr(lambda *a: _map_plain(*a, kernel=kernel, axes=axes))(*shapes)
+    outs = [jax.core.ShapedArray(o.shape, o.dtype) for o in traced.out_avals]
+    directions = int(avals[n].shape[0])
+    tangents = [
+        jax.core.ShapedArray((directions,) + o.shape, o.dtype)
+        for o in outs
+        if _is_differentiable(o)
+    ]
+    return outs + tangents, traced.effects
+
+
 _lane_jvp_p = Primitive("diffsoup_lane_map_jvp")
 _lane_jvp_p.multiple_results = True
 _lane_jvp_p.def_impl(_jvp_plain)
-_lane_jvp_p.def_effectful_abstract_eval(_abstract(_jvp_plain))
+_lane_jvp_p.def_effectful_abstract_eval(_jvp_abstract)
 mlir.register_lowering(_lane_jvp_p, mlir.lower_fun(_jvp_plain, multiple_results=True))
 
 
@@ -398,7 +426,52 @@ def _lane_jvp_jvp(primals, tangents, *, kernel, axes, differentiable):
     return list(out), list(d_out)
 
 
+def _lane_jvp_transpose(cts, *args, kernel, axes, differentiable):
+    """Reverse rule: the folded transpose, a lane map of each lane's ``jax.vjp``.
+
+    The primals are known; the directions are the linear inputs. The cotangent of
+    each tangent output carries the direction axis in front, which the transpose
+    maps over (an enclosing ``vmap`` there folds into the lanes). A direction of
+    an argument every lane shares takes the sum of the lanes' cotangents.
+    """
+    n_p = len(axes)
+    primals = args[:n_p]
+    if any(ad.is_undefined_primal(p) for p in primals):
+        raise NotImplementedError("lane_map transposes only in its directions.")
+    index = [i for i, d in enumerate(differentiable) if d]
+    out_avals = jax.eval_shape(lambda *a: _map_plain(*a, kernel=kernel, axes=axes), *primals)
+    n_out = len(out_avals)
+    inexact = [i for i, o in enumerate(out_avals) if _is_differentiable(o)]
+    ct_tangents = [ad.instantiate_zeros(ct) for ct in cts[n_out:]]
+
+    def lane_vjp(*leaves):
+        lane_primals, lane_cts = leaves[:n_p], leaves[n_p:]
+
+        def outputs(*diff):
+            full = list(lane_primals)
+            for i, value in zip(index, diff):
+                full[i] = value
+            out = kernel(*full)
+            return [out[i] for i in inexact]
+
+        _, pullback = jax.vjp(outputs, *[lane_primals[i] for i in index])
+        return list(pullback(list(lane_cts)))
+
+    def one_direction(*lane_cts):
+        mapped = _lane_map_p.bind(
+            *primals,
+            *lane_cts,
+            kernel=_Kernel(lane_vjp),
+            axes=tuple(axes) + (0,) * len(lane_cts),
+        )
+        return [m if axes[i] == 0 else jnp.sum(m, axis=0) for m, i in zip(mapped, index)]
+
+    per_direction = jax.vmap(one_direction)(*ct_tangents)
+    return [None] * n_p + list(per_direction)
+
+
 ad.primitive_jvps[_lane_jvp_p] = _lane_jvp_jvp
+ad.primitive_transposes[_lane_jvp_p] = _lane_jvp_transpose
 batching.primitive_batchers[_lane_jvp_p] = _lane_jvp_batching
 pe.custom_partial_eval_rules[_lane_jvp_p] = _lane_jvp_partial_eval
 

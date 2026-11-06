@@ -704,5 +704,8 @@ def _record(state: InteriorPointState, bounds: Any) -> SolveRecord:
         status=state.status,
         degenerate=jnp.asarray(False),
     )
-    degenerate = active_set(state.x, record, bounds).degenerate
+    ev = state.evaluation
+    degenerate = active_set(
+        state.x, record, bounds, ev.jacobian_equality, ev.jacobian_inequality
+    ).degenerate
     return eqx.tree_at(lambda r: r.degenerate, record, degenerate)
