@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 
 from diff_soup.linear import LinearSolver, SparseTopology
-from diff_soup.linear._resolver import BackendResolver
+from diff_soup.linear._resolver import BackendResolver, resolve_backend
 from diff_soup.nonlinear._kkt import LinearPlan
 from diff_soup.problem.implicit.linearize import build_linearization_plan
 from diff_soup.utils.placement import default_platform
@@ -82,45 +82,6 @@ def initialization_route(problem, route: str = "auto") -> tuple[str, int]:
     return route, block
 
 
-#: Process-global backend singletons for name-based selection (one KLU / SuperLU /
-#: cuDSS instance per process, mirroring the engines' resolution semantics).
-_BACKEND_SINGLETONS: dict = {}
-
-
-def _backend_instance(name: str) -> LinearSolver:
-    """Return the process-global backend instance for a concrete sparse name."""
-    instance = _BACKEND_SINGLETONS.get(name)
-    if instance is not None:
-        return instance
-    if name == "klu":
-        from diff_soup.linear import KLU
-
-        instance = KLU()
-    elif name == "superlu":
-        from diff_soup.linear import SuperLU
-        from diff_soup.linear.superlu_backend import require_superlu
-
-        require_superlu("backend='superlu'")
-        instance = SuperLU()
-    elif name == "cudss":
-        from diff_soup.linear import CuDSS
-
-        if CuDSS is None:
-            raise RuntimeError(
-                "the cuDSS backend was requested for consistent initialization "
-                "but its native extension is not available on this host; "
-                "install the cuDSS build, or select backend='klu' (CPU) or "
-                "backend='dense'."
-            )
-        instance = CuDSS()
-    else:
-        raise ValueError(
-            f"no sparse linear backend is named {name!r}; expected 'klu', 'superlu' or 'cudss'."
-        )
-    _BACKEND_SINGLETONS[name] = instance
-    return instance
-
-
 def resolve_backend_route(backend, *, plan_mode: str, n_dofs: int):
     """Resolve a backend request to its concrete route ``(name, instance)``.
 
@@ -129,8 +90,10 @@ def resolve_backend_route(backend, *, plan_mode: str, n_dofs: int):
     [LinearSolver][diff_soup.linear.LinearSolver] instance.
     ``"auto"`` stays dense for a dense-mode linearization plan (the joint
     matrix is assembled densely regardless) and otherwise picks the
-    platform's route from the system size. The returned ``instance`` is
-    ``None`` on the dense route. Two requests that resolve to the same name
+    platform's route from the system size. A concrete name resolves to the
+    per-process instance the engines share
+    ([resolve_backend][diff_soup.linear._resolver.resolve_backend]); the
+    returned ``instance`` is ``None`` on the dense route. Two requests that resolve to the same name
     are interchangeable for the joint initialization solve: the backend
     instances hold no per-solve state, and their symbolic analyses are
     memoised process-globally on topology content. An iterative backend
@@ -154,7 +117,7 @@ def resolve_backend_route(backend, *, plan_mode: str, n_dofs: int):
             return "dense", None
         platform = default_platform()
         name = BackendResolver(backend=backend).choose(block_size=n_dofs, platform=platform)
-        return name, (None if name == "dense" else _backend_instance(name))
+        return name, (None if name == "dense" else resolve_backend(name))
     raise ValueError(
         f"backend must be 'auto', 'dense', 'klu', 'superlu', 'cudss', or a "
         f"LinearSolver instance; got {backend!r}."
