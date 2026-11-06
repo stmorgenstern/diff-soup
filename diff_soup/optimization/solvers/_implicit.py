@@ -40,9 +40,10 @@ from diff_soup.optimization.solvers._barrier import Bounds, distances
 from diff_soup.optimization.solvers._closures import Closures
 from diff_soup.optimization.solvers._protocol import SolveRecord
 
+#: Ours: a multiplier and its slack both below `DEGENERATE * sqrt(mu)` make the active set degenerate.
 DEGENERATE = 1e2
-# The barrier diagonals of the degenerate system are capped, so the branch that is not
-# selected stays finite and its zero cotangent never meets an infinity.
+#: Ours: the cap on the degenerate system's barrier diagonals, so the branch that is not
+#: selected stays finite and its zero cotangent never meets an infinity.
 _CAP = 1e200
 
 
@@ -56,10 +57,10 @@ class ActiveSet(eqx.Module):
         degenerate: Whether a multiplier and its slack (or bound distance) are both near zero.
     """
 
-    inequality: Any
-    lower: Any
-    upper: Any
-    degenerate: Any
+    inequality: Bool[Array, "n_ineq"]
+    lower: Bool[Array, "n"]
+    upper: Bool[Array, "n"]
+    degenerate: Bool[Array, ""]
 
 
 def active_set(

@@ -6,8 +6,8 @@ The interior point and SQP steps solve
     [ A                        -delta_c I] [dlam] = [r_dual  ]
 
 The dense backend takes the condensed route: a Cholesky factorization of the primal block,
-`delta_w` raised until it succeeds, then the Schur complement on the constraint rows. A banded
-backend on cuDSS replaces only this class when multiple shooting or transcription needs it.
+`delta_w` raised until it succeeds, then the Schur complement on the constraint rows. Another
+backend (a banded one, say) replaces only this class.
 
 The primal block alone factors only when `W + Sigma` is positive definite, which is more than
 the correct inertia asks: a nonconvex `W` whose reduced Hessian is positive definite needs no
@@ -33,16 +33,17 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import lax
+from jaxtyping import Array, Bool, Float
 
 # Ipopt's inertia-correction constants (Wächter and Biegler 2006, Algorithm IC).
 _FIRST_GROWTH = 100.0
 _SHRINK = 1.0 / 3.0
 _DELTA_W_MIN = 1e-20
-# A Cholesky pivot below this fraction of its diagonal entry is a zero pivot: the matrix is
-# singular to working precision and the factorization does not certify the inertia.
+# Ours: a Cholesky pivot below this fraction of its diagonal entry is a zero pivot: the matrix
+# is singular to working precision and the factorization does not certify the inertia.
 _PIVOT_RTOL = 1e-13
-# The augmented route weights each constraint row so that its term in the primal block is
-# this many times the curvature of the primal block along the row.
+# Ours: the augmented route weights each constraint row so that its term in the primal block
+# is this many times the curvature of the primal block along the row.
 _RHO_REL = 1e3
 
 # The attempts of one inertia correction, in order.
@@ -70,16 +71,16 @@ class KKTFactor(eqx.Module):
         schur_ok: Whether the Schur complement factored.
     """
 
-    primal: Any
-    jacobian: Any
-    dual: Any
-    weight: Any
-    scale: Any
-    lower_primal: Any
-    half_jacobian: Any
-    lower_schur: Any
-    primal_ok: Any
-    schur_ok: Any
+    primal: Float[Array, "n n"]
+    jacobian: Float[Array, "m n"]
+    dual: Float[Array, "m"]
+    weight: Float[Array, "m"]
+    scale: Float[Array, "m"]
+    lower_primal: Float[Array, "n n"]
+    half_jacobian: Float[Array, "n m"]
+    lower_schur: Float[Array, "m m"]
+    primal_ok: Bool[Array, ""]
+    schur_ok: Bool[Array, ""]
 
     @property
     def ok(self) -> Any:

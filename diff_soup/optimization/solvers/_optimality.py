@@ -15,6 +15,7 @@ import jax.numpy as jnp
 
 from diff_soup.optimization.solvers._barrier import Bounds, distances
 
+#: Ipopt's `s_max`: the multiplier size past which the dual and complementarity errors shrink.
 S_MAX = 100.0
 
 

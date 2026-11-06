@@ -10,8 +10,11 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 import jax.numpy as jnp
+from jaxtyping import Array, Bool, Float
 
+#: Ipopt's `kappa_d`: the linear damping of a variable with one finite bound.
 KAPPA_D = 1e-5
+#: Ipopt's `kappa_sigma`: how far a bound multiplier may stray from `mu / distance`.
 KAPPA_SIGMA = 1e10
 
 
@@ -25,10 +28,10 @@ class Bounds(NamedTuple):
         has_upper: Where an upper bound is finite.
     """
 
-    lower: Any
-    upper: Any
-    has_lower: Any
-    has_upper: Any
+    lower: Float[Array, "n"]
+    upper: Float[Array, "n"]
+    has_lower: Bool[Array, "n"]
+    has_upper: Bool[Array, "n"]
 
 
 def bounds_from(lower: Any, upper: Any) -> Bounds:
