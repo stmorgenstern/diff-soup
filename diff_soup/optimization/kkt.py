@@ -88,11 +88,10 @@ class KKTFactor(eqx.Module):
 
 
 class KKTSolve(eqx.Module):
-    """One KKT solve, returning the step and whether the inertia came out right.
+    """A KKT backend, which solves one regularized system and reports whether the inertia came out right.
 
-    A backend implements `factor` and `solve_factored`; `solve` and the inertia correction
-    `factor_regularized` are built on them. The regularization constants `delta_w_init`,
-    `delta_w_max` and `delta_w_factor` are the backend's fields.
+    A backend implements `factor` and `solve_factored`, and `solve` and the inertia correction
+    are built on them.
     """
 
     @abc.abstractmethod
@@ -144,8 +143,8 @@ class KKTSolve(eqx.Module):
             rhs_dual: The dual right-hand side, `(m,)`.
 
         Returns:
-            `(dx, dlam, inertia_ok)`: the primal and dual steps, and whether the factorization
-            certified the inertia `(n, m, 0)` at this `delta_w`.
+            `(dx, dlam, inertia_ok)`: the primal and dual steps, and whether the
+                factorization certified the inertia `(n, m, 0)` at this `delta_w`.
         """
         plain = self.factor(primal_block, constraint_jacobian, delta_w, delta_c)
         augmented = self.factor(primal_block, constraint_jacobian, delta_w, delta_c, True)
@@ -243,12 +242,15 @@ def _row_weights(primal: Any, jacobian: Any, dual: Any) -> tuple[Any, Any]:
 
 
 class DenseKKT(KKTSolve):
-    """The condensed dense route: Cholesky of the primal block and the Schur complement.
+    """The dense KKT solve, by Cholesky of the primal block and the Schur complement on the constraint rows.
+
+    When the primal block does not factor, its diagonal is raised until it does, as in Ipopt's
+    inertia correction.
 
     Args:
-        delta_w_init: The first primal regularization tried when the factorization fails.
-        delta_w_max: The largest primal regularization before the step is declared failed.
-        delta_w_factor: The factor the regularization grows by.
+        delta_w_init: The first primal regularization tried, `1e-4` by default.
+        delta_w_max: The largest primal regularization before the step fails, `1e40` by default.
+        delta_w_factor: The factor the regularization grows by, `8.0` by default.
     """
 
     delta_w_init: float = eqx.field(static=True, default=1e-4)
@@ -319,7 +321,7 @@ class DenseKKT(KKTSolve):
         rhs_primal: Any,
         rhs_dual: Any,
     ) -> tuple[Any, Any, Any]:
-        """Solve by the condensed route; see [KKTSolve.solve][diff_soup.optimization.KKTSolve.solve]."""
+        """Solve by the condensed route, as [KKTSolve.solve][diff_soup.optimization.KKTSolve.solve] describes."""
         return super().solve(
             primal_block, constraint_jacobian, delta_w, delta_c, rhs_primal, rhs_dual
         )

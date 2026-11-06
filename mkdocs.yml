@@ -180,3 +180,6 @@ nav:
           - Statistics: reference/inference/statistics.md
           - Posterior sampling: reference/inference/sampling.md
           - Cohorts: reference/inference/cohorts.md
+      - Optimization:
+          - Constrained solvers: reference/optimization/solvers.md
+          - KKT solves: reference/optimization/kkt.md

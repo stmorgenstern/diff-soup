@@ -123,18 +123,20 @@ def _qp_closures(n: int, n_eq: int, n_ineq: int) -> Closures:
 
 
 class SQP(CompiledSolver):
-    """SQP: each step solves the QP of the quasi-Newton model and the linearized constraints, then a filter line search.
+    """Sequential quadratic programming with a filter line search.
 
-    It warm-starts from `(x, lam)` natively, which makes it the receding-horizon workhorse.
+    Each step solves the QP of the model Hessian and the linearized constraints by the interior
+    point. A warm start takes an earlier record's multipliers, so it suits a sequence of nearby
+    problems.
 
     Args:
-        tol: The scaled optimality error at which the run ends.
-        max_steps: The step budget.
-        hessian: `"auto"`, `"bfgs"`, `"exact"` or `"gauss-newton"`.
-        qp_tol: The tolerance of the interior point solve of each QP.
-        qp_max_steps: The step budget of each QP solve.
-        max_failed_evaluations: Consecutive failed trial evaluations before the run ends with `SOLVER_FAILED`.
-        kkt: The [KKTSolve][diff_soup.optimization.KKTSolve] backend.
+        tol: The scaled optimality error at which the run ends, `1e-8` by default.
+        max_steps: The step budget, `100` by default.
+        hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`, as for `InteriorPoint`.
+        qp_tol: The scaled optimality error at which each QP solve ends, `1e-10` by default.
+        qp_max_steps: The step budget of each QP solve, `50` by default.
+        max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
+        kkt: The [KKTSolve][diff_soup.optimization.KKTSolve] backend, `DenseKKT()` by default.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
@@ -434,7 +436,7 @@ class SQP(CompiledSolver):
         max_steps: int | None = None,
         warm_start: Any = None,
     ) -> tuple[Any, SolveRecord]:
-        """The compiled loop; see [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run]."""
+        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run] describes."""
         if self.hessian not in _hessian.MODES:
             raise ConfigurationError(f"hessian must be one of {_hessian.MODES}.")
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
