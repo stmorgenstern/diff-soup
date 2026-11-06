@@ -44,7 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._logging import log as logger
-from diff_soup.inference.fitting._lane_map import folds_enclosing_batches, lane_map
+from diff_soup.inference.fitting._lane_map import lane_map
 from diff_soup.problem._registry import theta_leaf_keys, theta_mask, theta_table
 
 # Residual value stamped on any failed or non-finite PDE solve. Large enough
@@ -1254,9 +1254,8 @@ def batched_transition_residual_factory(
         failed = _solution_failed(sol)
         return jnp.where(failed, jnp.full_like(r, _FAILED_SENTINEL), r)
 
-    # An enclosing vmap over parameter points folds into the window axis on a
-    # forward-only seam, so the windows' solves keep one matrix-batch axis.
-    fold = folds_enclosing_batches(solver)
+    # An enclosing vmap over parameter points folds into the window axis, so the
+    # windows' solves keep one matrix-batch axis.
 
     def batched_r(x_flat: jax.Array) -> jax.Array:
         def one_window(x, t0, t1, y, target_i, w, likelihood_i):
@@ -1273,7 +1272,6 @@ def batched_transition_residual_factory(
             obs_targets,
             w_targets,
             stacked_likelihood,
-            fold=fold,
         )
         return jnp.reshape(rs, (-1,))
 

@@ -52,23 +52,6 @@ from diff_soup._jax_compat import Primitive, ad, batching, mlir
 from diff_soup._jax_compat import partial_eval as pe
 
 
-def folds_enclosing_batches(solver: Any) -> bool:
-    """Whether a solve seam run by ``solver`` may fold enclosing batches into its lanes.
-
-    The fold carries forward-mode derivatives and, by its transpose rule, first-order
-    reverse mode. A seam differentiated to second order through a reverse sweep (a
-    Laplace approximation under ``CheckpointAdjoint``) needs the forward derivative of
-    that transpose, which the fold does not define yet, so a strategy that supports
-    reverse mode keeps the plain ``vmap``; forward-only seams fold.
-    """
-    adjoint = getattr(solver, "adjoint", None)
-    if adjoint is None:
-        return True
-    return bool(getattr(adjoint, "is_forward_only", False)) and not bool(
-        getattr(adjoint, "composable", False)
-    )
-
-
 def lane_map(
     kernel: Callable,
     in_axes: Sequence[Optional[int]],
@@ -519,4 +502,4 @@ batching.primitive_batchers[_lane_jvp_p] = _lane_jvp_batching
 pe.custom_partial_eval_rules[_lane_jvp_p] = _lane_jvp_partial_eval
 
 
-__all__ = ["folds_enclosing_batches", "lane_map"]
+__all__ = ["lane_map"]
