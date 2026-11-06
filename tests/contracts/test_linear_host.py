@@ -374,6 +374,65 @@ def test_a_native_factor_over_two_devices_of_the_process_is_refused():
     assert [("over 2 devices of this process" in (text or "")) for text in refusals] == [True] * 2
 
 
+# Forty SuperLU factors of a 24-unknown sparse system, each solved plain and transposed: the
+# threads the extension used and a digest of every solution's bytes. The thread count is fixed
+# per process (OMP_NUM_THREADS), so each count runs in its own process.
+_THREADS_WORKER = """
+import hashlib
+import jax.numpy as jnp
+import numpy as np
+from diff_soup.linear import SolveContext, SparseTopology, SuperLU, analyze, factor, solve
+
+rng = np.random.default_rng(0)
+mask = rng.random((24, 24)) < 0.15
+np.fill_diagonal(mask, True)
+rows, cols = (axis.astype(np.int32) for axis in np.nonzero(mask))
+values = rng.normal(size=rows.size) + 6.0 * (rows == cols)
+b = jnp.asarray(rng.normal(size=(4, 24)))
+analysis = analyze(SparseTopology(rows, cols, 24), backend=SuperLU())
+digest = hashlib.sha256()
+for k in range(40):
+    with SolveContext() as ctx:
+        f = factor(analysis, jnp.asarray(values * (1.0 + 1e-3 * k)), ctx=ctx)
+        for transpose in (False, True):
+            digest.update(np.asarray(solve(f, b, transpose=transpose)[0]).tobytes())
+print("REPORT", SuperLU.threads(), digest.hexdigest())
+"""
+
+
+def _superlu_rounds(threads):
+    """``(threads used, digest)`` of the SuperLU worker run with ``OMP_NUM_THREADS=threads``."""
+    env = {key: value for key, value in os.environ.items() if "proxy" not in key.lower()}
+    env.update(
+        JAX_PLATFORMS="cpu",
+        OMP_NUM_THREADS=str(threads),
+        CUDA_VISIBLE_DEVICES="",
+        JAX_ENABLE_X64="1",
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", _THREADS_WORKER],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=110,
+    )
+    assert run.returncode == 0, run.stderr[-4000:]
+    line = next(item for item in run.stdout.splitlines() if item.startswith("REPORT "))
+    used, digest = line.split()[1:]
+    return int(used), digest
+
+
+@pytest.mark.requires_superlu
+def test_superlu_solves_on_five_threads_equal_one_threads_bit_for_bit():
+    """SuperLU's factors and solves on five threads are the bits of one thread's: the patched
+    SuperLU_MT (``superlu_ffi/patches``) neither races nor reorders its updates by schedule."""
+    (_, single), (used, several) = _superlu_rounds(1), _superlu_rounds(5)
+    if used < 2:
+        pytest.skip("this host gives the process fewer than two CPUs")
+    assert several == single
+
+
 _DIFFUSION = reaction_diffusion_recipe(n=12)
 _LANE_SCALES = jnp.asarray([0.5, 1.0, 1.5])
 # measured 0.0 between the KLU lanes and the dense batch, CPU VM 2026-10-22, and between the

@@ -35,6 +35,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Fixed a MAP fit of a joint problem, which read every shared parameter's prior from one handle. Each occurrence now takes its prior from the declarations of the experiments behind it, and a MAP refuses an occurrence whose schema records none.
 - A `KLU`, `SuperLU` or `CuDSS` factor lowered into a program over several devices of one process now raises `FactorContractError`. Previously XLA failed with an internal error, or, in a `shard_map` body, the devices shared one native factor.
 - Complex values on an analysis declared `spd=True`, and on a `CuDSS` analysis with `downcast_factors` or `emulation_mantissa_bits`, now raise `FactorContractError`. Previously cuDSS factored them as a real symmetric positive definite matrix, or ignored the option.
+- Fixed `SuperLU` on more than one thread, which returned a wrong solution for a few factors in a hundred with a success status. Its factors on any number of threads now equal one thread's, bit for bit; the build patches SuperLU_MT 4.0.2 (`diff_soup/_internal/superlu_ffi/patches/`).
 
 ### Performance
 
