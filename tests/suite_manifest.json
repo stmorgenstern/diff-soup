@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 45,
-    "test_functions": 416,
-    "collected_tests": 628,
-    "source_lines": 15123
+    "test_functions": 419,
+    "collected_tests": 633,
+    "source_lines": 15182
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 19,
-      "functions": 172,
-      "collected": 263,
-      "lines": 5830
+      "functions": 175,
+      "collected": 268,
+      "lines": 5889
     },
     "performance_contracts": {
       "files": 2,
@@ -325,7 +325,7 @@
     },
     {
       "file": "tests/contracts/test_structural_fitting.py",
-      "feature": "Structural fitting: analytical optima, a rejected trial costing no residual evaluation, jit, vmap and dtype safety of value_and_jacfwd, tiled forward Jacobians and one solve loop per forward Jacobian, byte-stable KL bases, stop rules relative to the cost scale"
+      "feature": "Structural fitting: analytical optima, closures taking args last with a batch of args as one vmap, exact constraint Jacobians and Lagrangian Hessians, a rejected trial costing no residual evaluation, jit, vmap and dtype safety of value_and_jacfwd, tiled forward Jacobians and one solve loop per forward Jacobian, byte-stable KL bases, stop rules relative to the cost scale"
     },
     {
       "file": "tests/contracts/test_study_fingerprint.py",
