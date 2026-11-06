@@ -445,8 +445,8 @@ def test_resistance_control_seeds_and_solves_the_known_load(current_seed):
     )
     assert bool(solution.ok)
     expected_u = 2.0 * np.exp(-0.8 * np.asarray(times))
-    # Measured relative error 1.263e-10 for both seeds, workstation 2026-11-05,
-    # .ports/control_seed_check.py against the closed form in this test's docstring.
+    # Measured relative error 1.263e-10 for both seeds, workstation 2026-11-06, pytest
+    # tests/public_api/test_solve_outputs.py::test_resistance_control_seeds_and_solves_the_known_load
     np.testing.assert_allclose(solution.ys, np.repeat(expected_u[:, None], 4, axis=1), rtol=1e-8)
     np.testing.assert_allclose(solution.lambdas[:, 0], expected_u / 5.0, rtol=1e-8)
     schedule = ds.Schedule([ds.Segment(resistance=3.0, duration=0.5)])
