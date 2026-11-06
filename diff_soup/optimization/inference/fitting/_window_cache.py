@@ -25,6 +25,7 @@ from typing import Any
 import jax
 import numpy as np
 
+from diff_soup._environment import CACHE_DIR
 from diff_soup.optimization.inference.fitting.windows import WindowInitialization
 from diff_soup.problem.implicit.solver_problem import solver_view
 
@@ -39,7 +40,7 @@ def cache_directory() -> Path:
     ``DIFFSOUP_CACHE_DIR`` nor a persistent compilation cache configured, the
     per-user default is refused.
     """
-    override = os.environ.get("DIFFSOUP_CACHE_DIR")
+    override = CACHE_DIR.get()
     if override:
         return Path(override).expanduser()
     jax_cache = jax.config.jax_compilation_cache_dir
