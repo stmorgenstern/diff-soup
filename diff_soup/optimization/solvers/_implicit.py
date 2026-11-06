@@ -135,7 +135,9 @@ def kkt_tangent(
         bounds.has_upper, jnp.minimum(z_upper / jnp.maximum(above, tiny), _CAP), 0.0
     )
     sigma = sigma_lower + sigma_upper
-    slack_ratio = jnp.minimum(record.slacks / jnp.maximum(lam_i, tiny), _CAP)
+    # At `mu = 0` (SQP, the augmented Lagrangian) an active slack can be exactly 0, and two
+    # identical active rows would then give an exact zero pivot; the floor keeps it finite.
+    slack_ratio = jnp.clip(record.slacks / jnp.maximum(lam_i, tiny), jnp.finfo(dtype).eps, _CAP)
 
     fixed = (active.lower | active.upper) & ~degenerate
     keep = (~fixed).astype(dtype)
