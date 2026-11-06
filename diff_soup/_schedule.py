@@ -849,7 +849,12 @@ def _vanishing_jvp(primals, tangents):
     out = _vanishing(term, like, scale, args)
     tangent = None
     if dscale is not None:
-        tangent = dscale * term(*args)
+        # A term that cannot be evaluated (a boundary whose initialization fails) has no
+        # derivative: its tangent is NaN, and a reverse sweep gives its input a zero
+        # cotangent rather than zero times NaN.
+        value = term(*args)
+        finite = jnp.isfinite(value)
+        tangent = jnp.where(finite, dscale * jnp.where(finite, value, 0.0), jnp.nan)
     if jax.tree_util.tree_leaves(dargs):
         deeper = _vanishing(functools.partial(_term_tangent, term), like, scale, (args, dargs))
         tangent = deeper if tangent is None else tangent + deeper
