@@ -181,18 +181,11 @@ class CompiledSolver(OptSolver):
         return result
 
 
-# Until `TerminationStatus` gains the compiled solvers' statuses, the nearest existing one.
-_INTERIM = {"KKT_TOL": "SUCCESS", "INFEASIBLE": "STALLED", "RESTORATION_FAILED": "STALLED"}
-
-
 def _termination_status(code: int) -> Any:
     """The `TerminationStatus` of a `SolveStatus` code, by name."""
     from diff_soup.optimization.inference.fitting.result import TerminationStatus
 
-    name = SolveStatus(code).name
-    if name not in TerminationStatus.__members__:
-        name = _INTERIM[name]
-    return TerminationStatus[name]
+    return TerminationStatus[SolveStatus(code).name]
 
 
 def _problem_value(problem: Any) -> Any:

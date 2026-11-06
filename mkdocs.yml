@@ -184,3 +184,6 @@ nav:
           - Problems and constraints: reference/optimization/problems.md
           - Constrained solvers: reference/optimization/solvers.md
           - KKT solves: reference/optimization/kkt.md
+          - Control problems: reference/optimization/control/problem.md
+          - Receding horizon: reference/optimization/control/receding-horizon.md
+          - Estimators: reference/optimization/control/estimators.md

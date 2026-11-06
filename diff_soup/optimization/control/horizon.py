@@ -63,7 +63,7 @@ def mpc_step(
         carry: `(estimator_state, previous_solution, previous_record, plant_state)`; a `previous_record` of `None` solves the horizon cold.
         inputs: The interval's index.
         control_problem: The [ControlProblem][diff_soup.optimization.control.ControlProblem].
-        solver: A [CompiledSolver][diff_soup.optimization.CompiledSolver], `SQP` by default.
+        solver: A `CompiledSolver`, `SQP` by default.
         plant: `plant(state, u, interval) -> (state, measurement)` as a JAX function.
         estimator: An [Estimator][diff_soup.optimization.control.Estimator].
         warm_start: `"shift"`, `"previous"` or `"cold"`, as for `receding_horizon`.
@@ -163,19 +163,42 @@ def _start(control_problem: Any, solver: Any) -> Any:
     return jnp.asarray(control_problem.numeric_problem(solver).x0)
 
 
-def _solve_horizon(control_problem, solver, estimate, previous, record, *, warm_start):
-    """Solve the horizon from the estimate, warm-started from the previous one unless cold."""
+def _solve_horizon(control_problem, solver, estimate, previous, record, *, warm_start, cold=None):
+    """Solve the horizon from the estimate, warm-started from the previous one unless cold.
+
+    With `cold` a traced boolean, both starts are one program and `cold` picks the branch, so a
+    host loop compiles once for its cold first horizon and its warm later ones.
+    """
     numeric = control_problem.numeric_problem(solver)
     _, theta, limits = control_problem.args()
     args = (estimate.plant, theta, limits)
-    if record is None or warm_start == "cold":
+
+    def cold_run():
         return solver.run(numeric, jnp.asarray(numeric.x0), args)
+
+    if record is None or warm_start == "cold":
+        return cold_run()
     if warm_start == "shift":
         moves = _shift_map(control_problem.controls.intervals)
         rows = _row_shift_map(control_problem)
         previous = previous[moves]
         record = _shifted_record(record, moves, rows)
-    return solver.run(numeric, previous, args, warm_start=record)
+
+    def warm_run():
+        return solver.run(numeric, previous, args, warm_start=record)
+
+    if cold is None:
+        return warm_run()
+    return jax.lax.cond(cold, cold_run, warm_run)
+
+
+def _record_template(control_problem: Any, solver: Any, estimate: Any) -> Any:
+    """A record of zeros shaped as the horizon solve's, which a cold first horizon is handed."""
+    shapes = jax.eval_shape(
+        lambda e: _solve_horizon(control_problem, solver, e, None, None, warm_start="cold")[1],
+        estimate,
+    )
+    return jax.tree_util.tree_map(lambda leaf: jnp.zeros(leaf.shape, leaf.dtype), shapes)
 
 
 @functools.lru_cache(maxsize=64)
@@ -191,7 +214,7 @@ def _row_shift_map(control_problem: Any) -> np.ndarray:
     keeps its own otherwise; rows of `Constraints` on `u` keep theirs.
     """
     times = np.asarray(control_problem.save_times, dtype=np.float64).ravel()
-    duration = control_problem.controls.duration
+    duration = control_problem.controls.interval
     later = np.searchsorted(times, times + duration)
     found = (later < times.size) & np.isclose(
         times[np.minimum(later, times.size - 1)], times + duration, rtol=0.0, atol=1e-9 * duration
@@ -216,25 +239,33 @@ def _shifted_record(record: Any, moves: np.ndarray, rows: np.ndarray) -> Any:
 
 
 def _host_loop(control_problem, plant, estimator, n_intervals, solver, warm_start) -> ClosedLoop:
-    """Step the loop from Python: the horizon solve and the estimate compiled, the plant on the host."""
+    """Step the loop from Python: the horizon solve and the estimate compiled, the plant on the host.
+
+    Every horizon is one compiled program: a cold loop never hands a record on, and a warm one
+    hands the first horizon a record of zeros with the flag that runs it cold.
+    """
     solve = eqx.filter_jit(
-        lambda estimate, previous, record: _solve_horizon(
-            control_problem, solver, estimate, previous, record, warm_start=warm_start
+        lambda estimate, previous, record, cold: _solve_horizon(
+            control_problem, solver, estimate, previous, record, warm_start=warm_start, cold=cold
         )
     )
-    update = eqx.filter_jit(estimator.estimate)
+    # The estimator is closed over, not traced: a model it holds keeps its concrete arrays.
+    update = eqx.filter_jit(
+        lambda state, move, measurement, args: estimator.estimate(state, move, measurement, args)
+    )
     args = control_problem.args()
     estimate = estimator.init(args)
     previous = _start(control_problem, solver)
-    record = None
+    warm = warm_start != "cold"
+    handed = _record_template(control_problem, solver, estimate) if warm else None
     plant_state = args[0]
     outputs, seconds = [], []
     for interval in range(n_intervals):
         tick = time.perf_counter()
-        # A cold loop never hands a record on, so every horizon is the same compiled program.
-        warm = None if warm_start == "cold" else record
-        previous, record = jax.block_until_ready(solve(estimate, previous, warm))
+        cold = jnp.asarray(interval == 0) if warm else None
+        previous, record = jax.block_until_ready(solve(estimate, previous, handed, cold))
         seconds.append(time.perf_counter() - tick)
+        handed = record if warm else None
         move = previous[0]
         plant_state, measurement = plant(plant_state, np.asarray(move), interval)
         outputs.append(
