@@ -70,12 +70,15 @@ from diff_soup.timestepping.vsvo.common.backends import (
     resolve_backend,
 )
 from diff_soup.timestepping.vsvo.common.contract import (
+    ENGINE_CAPABILITIES,
     EngineCapabilities,
     closure_moved,
-    consume_consistent_init,
-    ic_gate_rtol,
+    consistent_start,
     ic_gate_tolerance,
+    initialization_policies,
     pack_state,
+    project_start,
+    where_state,
 )
 from diff_soup.timestepping.vsvo.common.decisions import replay_decisions
 from diff_soup.timestepping.vsvo.common.driver import StepReport
@@ -149,29 +152,6 @@ _ROW_IDX = np.arange(D_ROWS)
 
 # GAMMA padded to the table rows so the history term is one masked matvec.
 _GAMMA_ROWS = np.concatenate([GAMMA, np.zeros(D_ROWS - GAMMA.shape[0])])
-
-
-def _capabilities() -> EngineCapabilities:
-    """The NDF engine's capability flags (every flag stated)."""
-    return EngineCapabilities(
-        # The factored iteration matrix persists across attempts and is
-        # refactored only where a setup replaces it.
-        supports_factor_reuse=True,
-        supports_events=True,
-        # This engine integrates the mass-matrix ODE/DAE form, not a
-        # user-supplied truly-implicit residual F(t, y, ydot).
-        supports_fully_implicit=False,
-        supports_global_constraints=True,
-        # The diagonal mass is re-evaluated at the current iterate inside the
-        # residual; state-dependent mass is handled in weak (chord) form.
-        supports_state_dependent_mass=True,
-        supports_dense_output=True,
-    )
-
-
-def _where_state(cond: jax.Array, a: NDFState, b: NDFState) -> NDFState:
-    """Select between two carried states leaf-by-leaf on a scalar predicate."""
-    return jax.tree_util.tree_map(lambda x, y: jnp.where(cond, x, y), a, b)
 
 
 class NDFEngineCarry(eqx.Module):
@@ -479,42 +459,22 @@ class NDFEngine(eqx.Module):
                 "consistent_ic=False is not supported for it. Enable "
                 "consistent initialization."
             )
-        # The projection factors this problem exactly as the corrector does,
-        # so it is analyzed with the lowered problem's placement and the
-        # accepted-root sensitivity precision this solve declared for each
-        # derivative direction — never the backend's defaults.
-        ic_layout, ic_precision = initialization_policy(problem, self.precision, mode="forward")
-        _, ic_reverse_precision = initialization_policy(problem, self.precision, mode="reverse")
-        ic = problem.consistent_initial_state(
+        policies = initialization_policies(problem, self.precision)
+        _, _, ic_reverse_precision = policies
+        ic = project_start(
+            self,
+            problem,
             t0,
-            pack_state(u0, lam0),
+            u0,
+            lam0,
+            ydot0,
             theta,
             control,
-            ydot0=jnp.concatenate([ydot0, jnp.zeros((n_lam,), dtype=dtype)]),
-            tol=ic_gate_tolerance(self.atol, self.ic_tol),
-            rtol=ic_gate_rtol(self.rtol, self.ic_rtol, self.ic_tol),
+            policies,
             max_iters=self.ic_max_newton_iters,
-            backend=self.backend,
-            layout=ic_layout,
-            precision=ic_precision,
-            reverse_precision=ic_reverse_precision,
         )
-        ic_y, ic_ydot = consume_consistent_init(ic)
-        u_c = jnp.asarray(ic_y[:n_u], dtype=dtype)
-        lam_c = jnp.asarray(ic_y[n_u:], dtype=dtype)
-        alg_norm = jnp.asarray(ic.residual_norm, dtype=dtype)
-
-        y_aug0 = pack_state(u_c, lam_c)
-        # The consistent initialization computes derivatives for every
-        # differential row, including differential globals in the bordered
-        # partition; algebraic rows arrive as zeros. Consume it whole.
-        ydot_aug0 = jnp.asarray(ic_ydot, dtype=dtype)
-
-        # A per-row absolute tolerance arrives as a vector on the driver
-        # configuration; it rides the carry so accepted-step weight refreshes
-        # keep consuming it.
-        atol_rows = cfg.atol if getattr(cfg.atol, "ndim", 0) == 1 else None
-        ewt0 = error_weight(y_aug0, self.rtol, self.atol if atol_rows is None else atol_rows)
+        start = consistent_start(self, cfg, ic, n_u, dtype)
+        u_c, lam_c, y_aug0, ydot_aug0, alg_norm, atol_rows, ewt0 = start
 
         hmax = float(cfg.hmax)
         hmax_inv = jnp.asarray(1.0 / hmax if hmax > 0.0 else 0.0, dtype=dtype)
@@ -958,8 +918,8 @@ class NDFEngine(eqx.Module):
         )
 
         # --- select the branch ---
-        fail_state = _where_state(did_converge, reject_state, newton_fail_state)
-        new_state = _where_state(accept, accept_state, fail_state)
+        fail_state = where_state(did_converge, reject_state, newton_fail_state)
+        new_state = where_state(accept, accept_state, fail_state)
 
         new_ewt = error_weight(
             y_new_full, self.rtol, self.atol if carry.atol_rows is None else carry.atol_rows
@@ -1224,7 +1184,7 @@ def ndf_engine(
         atol=float(atol),
         loop_form=profile.nonlinear_mode,
         jacobian_policy=profile.jacobian_policy,
-        capabilities=_capabilities(),
+        capabilities=ENGINE_CAPABILITIES["ndf"],
         controller_mode=profile.controller_mode,
         controller_law=profile.controller_law,
         newton_tol_factor=float(newton_tol_factor),
