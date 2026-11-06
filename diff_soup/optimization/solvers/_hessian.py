@@ -14,18 +14,19 @@ Powell's damping keeps every BFGS matrix positive semidefinite (Nocedal and Wrig
 
 from __future__ import annotations
 
-from typing import Any
-
 import jax.numpy as jnp
+from jax.typing import DTypeLike
+from jaxtyping import Array, Float, Int, PyTree
 
 from diff_soup._errors import ConfigurationError
+from diff_soup.optimization.solvers._closures import Closures, Evaluation
 
 MODES = ("auto", "bfgs", "exact", "gauss-newton")
 #: Powell's damping threshold (Nocedal and Wright, Procedure 18.2).
 _DAMPING = 0.2
 
 
-def check_mode(mode: str, closures: Any) -> None:
+def check_mode(mode: str, closures: Closures) -> None:
     """Refuse a mode the problem cannot serve, before anything is traced."""
     if mode not in MODES:
         raise ConfigurationError(f"hessian must be one of {MODES}; got {mode!r}.")
@@ -41,7 +42,7 @@ def check_mode(mode: str, closures: Any) -> None:
         )
 
 
-def uses_gauss_newton(mode: str, closures: Any) -> bool:
+def uses_gauss_newton(mode: str, closures: Closures) -> bool:
     """Whether the step adds the Gauss-Newton matrix of the objective."""
     return mode == "gauss-newton" or (mode == "auto" and closures.gauss_newton is not None)
 
@@ -51,7 +52,7 @@ def uses_quasi_newton(mode: str) -> bool:
     return mode in ("auto", "bfgs")
 
 
-def initial_matrix(mode: str, closures: Any, n: int, dtype: Any) -> Any:
+def initial_matrix(mode: str, closures: Closures, n: int, dtype: DTypeLike) -> Float[Array, "k k"]:
     """The BFGS matrix before the first update: the identity, zero when it adds to Gauss-Newton."""
     if not uses_quasi_newton(mode):
         return jnp.zeros((0, 0), dtype)
@@ -62,14 +63,14 @@ def initial_matrix(mode: str, closures: Any, n: int, dtype: Any) -> Any:
 
 def lagrangian_hessian(
     mode: str,
-    closures: Any,
-    x: Any,
-    lam_e: Any,
-    lam_i: Any,
-    args: Any,
-    evaluation: Any,
-    matrix: Any,
-) -> Any:
+    closures: Closures,
+    x: Float[Array, " n"],
+    lam_e: Float[Array, " n_eq"],
+    lam_i: Float[Array, " n_ineq"],
+    args: PyTree,
+    evaluation: Evaluation,
+    matrix: Float[Array, "k k"],
+) -> Float[Array, "n n"]:
     """The Lagrangian Hessian, or its approximation, at the current point."""
     if mode == "exact":
         return closures.lagrangian_hessian(x, lam_e, lam_i, args)
@@ -81,13 +82,13 @@ def lagrangian_hessian(
 
 def update(
     mode: str,
-    closures: Any,
-    matrix: Any,
-    updates: Any,
-    step: Any,
-    gradient_change: Any,
-    evaluation: Any,
-) -> tuple[Any, Any]:
+    closures: Closures,
+    matrix: Float[Array, "k k"],
+    updates: Int[Array, ""],
+    step: Float[Array, " n"],
+    gradient_change: Float[Array, " n"],
+    evaluation: Evaluation,
+) -> tuple[Float[Array, "k k"], Int[Array, ""]]:
     """The damped BFGS update after a step.
 
     Args:
@@ -116,7 +117,12 @@ def update(
     return damped_update(matrix, updates, step, secant)
 
 
-def damped_update(matrix, updates, step, secant):
+def damped_update(
+    matrix: Float[Array, "n n"],
+    updates: Int[Array, ""],
+    step: Float[Array, " n"],
+    secant: Float[Array, " n"],
+) -> tuple[Float[Array, "n n"], Int[Array, ""]]:
     """Powell's damped BFGS update of `matrix` on the pair `(step, secant)`, from where it stands.
 
     Returns:

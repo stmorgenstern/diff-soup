@@ -36,7 +36,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.timestepping.consistent_ic.pin_differential import _structure
+from diff_soup.problem.implicit.consistent_init.pinned import _structure
 
 _ROLE_KEYS = ("differential", "algebraic")
 _PARTITION_KEYS = ("state", "global")

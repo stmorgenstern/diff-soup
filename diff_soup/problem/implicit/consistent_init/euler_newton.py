@@ -16,7 +16,7 @@ weighted-RMS norm of the Newton step ``J^{-1} F`` falling to or below
 ``ic_newton_tol``. Line search, fresh-Jacobian retry, step retry, two-pass weight
 refresh, and constraint scaling are not part of this subset. The solve is
 differentiable through the converged root by the implicit-function rule (see
-[diff_soup.timestepping.consistent_ic.ift][]).
+[diff_soup.problem.implicit.consistent_init.pinned_root][]).
 """
 
 from __future__ import annotations
@@ -29,11 +29,7 @@ import numpy as np
 
 from diff_soup.nonlinear._kkt import _cast_like
 from diff_soup.nonlinear.solver import _factor_state_block, _stable_small_solve
-from diff_soup.timestepping._shared.robustness.derivative_ic import (
-    recover_algebraic_derivative,
-)
-from diff_soup.timestepping.consistent_ic.ift import consistent_project
-from diff_soup.timestepping.consistent_ic.pin_differential import (
+from diff_soup.problem.implicit.consistent_init.pinned import (
     ContractOperator,
     ICConfig,
     ICMode,
@@ -49,8 +45,9 @@ from diff_soup.timestepping.consistent_ic.pin_differential import (
     _seed_ydot_diff,
     _structure,
 )
-from diff_soup.timestepping.vsvo.common.weights import error_weight, wrms_norm
+from diff_soup.problem.implicit.consistent_init.pinned_root import consistent_project
 from diff_soup.utils import safe_div
+from diff_soup.utils.weights import error_weight, wrms_norm
 
 __all__ = ["euler_newton_ic", "euler_newton_setup", "ICConfig", "ICMode", "ICResult"]
 
@@ -276,6 +273,66 @@ def _reproject_at(
     return reproject
 
 
+def _recover_algebraic_derivative(
+    *,
+    u_proj,
+    lam_proj,
+    udot_diff_full,
+    alg_mask,
+    reproject,
+    eps_du,
+):
+    """Return ``(ydot, lamdot)`` recovered by an Euler probe and a finite difference.
+
+    An index-1 DAE's algebraic rows have no direct slope: they move as the
+    differential state evolves. The probe takes a step of ``eps_du`` on the
+    differential rows from the projected state, re-projects the algebraic rows
+    there, and finite-differences them across the probe.
+
+    Args:
+        u_proj: The state projected onto the algebraic manifold at ``t0``.
+        lam_proj: The algebraic bordered-global values at that projection.
+        udot_diff_full: The differential-row derivative ``M^{-1} f`` over the full
+            state vector, zero on the algebraic rows. Its differential rows drive
+            the Euler probe; its values are returned unchanged on the differential
+            rows of the result.
+        alg_mask: Boolean mask, ``True`` on the algebraic (zero-mass) rows whose
+            derivative is recovered by finite difference.
+        reproject: Callback ``(u_eps_seed, lam_seed) -> (u_eps, lam_eps)`` that
+            re-projects onto the algebraic manifold at ``t0 + eps_du`` holding the
+            Euler-stepped differential rows of ``u_eps_seed`` fixed. The caller
+            bakes ``t0 + eps_du`` and its projection machinery into the closure.
+        eps_du: The Euler / finite-difference step. ``1e-8`` is the float64 sweet
+            spot: smaller is more accurate but more sensitive to roundoff.
+
+    Returns:
+        ``(ydot, lamdot)`` -- the full consistent derivative (differential rows
+        from ``udot_diff_full``, algebraic rows from the finite difference) and
+        the algebraic-global derivative (empty when there are no algebraic
+        globals).
+    """
+    # Euler step on the differential rows only: udot_diff_full is zero on the
+    # algebraic rows, so adding it moves the differential rows and leaves the
+    # algebraic rows at their projected (seed) values.
+    u_eps_seed = u_proj + eps_du * udot_diff_full
+    u_eps, lam_eps = reproject(u_eps_seed, lam_proj)
+
+    # The recovered rows are a startup heuristic and stay gradient-dead.
+    # Differentiating the quotient scales every cotangent by ``1/eps_du``
+    # across two independently-iterated projections whose sensitivities only
+    # cancel in exact arithmetic; a baseline already at its root takes a
+    # zero-update early exit whose unrolled derivative is the seed's, not the
+    # root's, so the mismatch is order one and the channel explodes. The
+    # trajectory's parameter gradient is owned by the per-step corrector
+    # roots, not the history seed.
+    ydot_alg = jax.lax.stop_gradient((u_eps - u_proj) / eps_du)
+    ydot = jnp.where(alg_mask, ydot_alg, udot_diff_full)
+    # Empty (shape (0,)) when there are no algebraic globals; the subtraction
+    # is well defined either way.
+    lamdot = jax.lax.stop_gradient((lam_eps - lam_proj) / eps_du)
+    return ydot, lamdot
+
+
 def _euler_ydot(
     problem,
     u,
@@ -363,7 +420,7 @@ def _euler_ydot(
         layout=layout,
         precision=precision,
     )
-    ydot, lamdot = recover_algebraic_derivative(
+    ydot, lamdot = _recover_algebraic_derivative(
         u_proj=u_proj,
         lam_proj=lam_proj,
         udot_diff_full=udot_diff_full,

@@ -74,28 +74,20 @@ def ida_restore(
     # own tangent.
     hh = jax.lax.stop_gradient(jnp.asarray(hh))
 
-    psi_restored = psi
-    for j in range(1, MAXORD + 1):
-        active = j <= kk
-        psi_restored = psi_restored.at[j - 1].set(
-            jnp.where(active, psi_restored[j] - hh, psi_restored[j - 1])
-        )
+    # psi_{j-1} <- psi_j - hh for j = 1..kk; the last slot never moves.
+    slots = jnp.arange(psi.shape[0])
+    shifted = jnp.concatenate([psi[1:], psi[-1:]])
+    psi_restored = jnp.where((slots < MAXORD) & (slots + 1 <= kk), shifted - hh, psi)
 
-    phi_restored = phi
-    for j in range(1, MAXORD + 1):
-        scale_j = (j >= ns) & (j <= kk)
-        # beta is a gradient-dead scale factor; stop it at the point of use so
-        # phi keeps its tangent through the (1/beta) rescale. Inactive lanes
-        # (masked out below) carry beta == 0 before the history warms up:
-        # guard the denominator so their masked division is 0-free — the
-        # selected value is unchanged (active lanes always have beta != 0),
-        # and reverse-mode cotangents through the mask stay finite instead of
-        # producing 0/0 in the dead lanes.
-        beta_j = jax.lax.stop_gradient(beta[j])
-        beta_safe = jnp.where(beta_j == 0, jnp.ones_like(beta_j), beta_j)
-        phi_restored = phi_restored.at[j].set(
-            jnp.where(scale_j, phi_restored[j] / beta_safe, phi_restored[j])
-        )
+    # phi_j <- phi_j / beta_j for j = max(ns, 1)..kk. beta is a gradient-dead
+    # scale factor, stopped at the point of use so phi keeps its tangent. Rows
+    # outside that range may carry beta == 0 before the history warms up: their
+    # division is guarded so the discarded value, and its cotangent, stay finite.
+    rows = jnp.arange(phi.shape[0])
+    scale = (rows >= 1) & (rows >= ns) & (rows <= kk)
+    beta_rows = jax.lax.stop_gradient(beta)
+    beta_safe = jnp.where(beta_rows == 0, jnp.ones_like(beta_rows), beta_rows)
+    phi_restored = jnp.where(scale[:, None], phi / beta_safe[:, None], phi)
 
     return phi_restored, psi_restored
 

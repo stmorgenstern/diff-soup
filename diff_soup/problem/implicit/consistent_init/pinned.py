@@ -1,26 +1,22 @@
-"""Shared consistent-initialization records and solver-view operators.
+"""The Euler-Newton initialization's records and its pinned solver-view operators.
 
-Defines the records both Euler-Newton consistent-IC modes use
-([ICMode][diff_soup.timestepping.consistent_ic.pin_differential.ICMode], [ICResult][diff_soup.timestepping.consistent_ic.pin_differential.ICResult], [ICConfig][diff_soup.timestepping.consistent_ic.pin_differential.ICConfig], the step context)
-and the operator adapters that present a solver view to the
-nonlinear corrector as a KKT residual with its Schur blocks — including the
-pinned operator, where selected state rows are held by identity and only
-the remaining unknowns move. The projected root's sensitivities flow
-through the corrector's standard implicit-function boundary, never through
-the Newton iteration.
-
-The default startup projection (pin the differential rows, solve the local
-and global algebraic values) runs the capability-routed initialization
-solve on the solver problem
-([SolverView.consistent_initial_state][diff_soup.problem.implicit.solver_problem.SolverView.consistent_initial_state]),
-not through this module.
+Defines the records of the Euler-Newton initialization
+([ICMode][diff_soup.problem.implicit.consistent_init.pinned.ICMode],
+[ICResult][diff_soup.problem.implicit.consistent_init.pinned.ICResult],
+[ICConfig][diff_soup.problem.implicit.consistent_init.pinned.ICConfig], the step context),
+the problem surface it reads
+([ConsistentInitProblem][diff_soup.problem.implicit.consistent_init.pinned.ConsistentInitProblem]),
+and the operators that present a solver view to the nonlinear corrector as a KKT residual
+with its Schur blocks, including the pinned operator, where selected state rows are held
+by identity and only the remaining unknowns move. The projected root's sensitivities flow
+through the corrector's implicit-function boundary, never through the Newton iteration.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import enum
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import equinox as eqx
 import jax
@@ -32,6 +28,42 @@ from diff_soup.linear._api import SparseTopology
 from diff_soup.nonlinear._kkt import LinearPlan
 from diff_soup.nonlinear.solver import NonlinearConfig, nonlinear_solve_primal
 from diff_soup.utils import safe_sqrt
+
+
+@runtime_checkable
+class ConsistentInitProblem(Protocol):
+    """The members every Euler-Newton initialization and projection solve reads.
+
+    The state topology is the shared plan's state block; ``None`` selects a
+    dense block. Numerical operations never fall back to authored ``mass`` /
+    ``f`` or a raw RHS pencil.
+
+    Attributes:
+        n_u: The state length (the differential plus local-algebraic rows).
+        n_lam: The bordered-global length (``0`` with no global unknowns).
+        id_mask: The differential/algebraic indicator over the augmented state; a
+            positive entry marks a differential row, a zero entry an algebraic
+            row.
+    """
+
+    n_u: int
+    n_lam: int
+    id_mask: Any
+    state_topology: Any
+
+    def residual(self, t: Any, y: Any, ydot: Any, theta: Any, control: Any = None) -> Any:
+        """Return the residual over the augmented state."""
+        ...
+
+    def state_jacobian_blocks(
+        self, t: Any, y: Any, ydot: Any, theta: Any, cj: Any, **kwargs: Any
+    ) -> Any:
+        """Return the ``F_y + cj F_ydot`` Schur blocks."""
+        ...
+
+    def startup_slope(self, t: Any, y: Any, theta: Any, **kwargs: Any) -> Any:
+        """Return the flow slope at ``(t, y)``."""
+        ...
 
 
 class ICMode(enum.Enum):
@@ -59,7 +91,7 @@ class ICResult(eqx.Module):
             from the input unchanged; in ``ALL_Y_GIVEN_YDOT`` mode the input
             ``ydot`` is returned unchanged. Filling the algebraic rows with
             the finite-difference recovery is opt-in via
-            [ICConfig.recover_algebraic_ydot][diff_soup.timestepping.consistent_ic.pin_differential.ICConfig.recover_algebraic_ydot].
+            [ICConfig.recover_algebraic_ydot][diff_soup.problem.implicit.consistent_init.pinned.ICConfig.recover_algebraic_ydot].
         alg_residual_norm: The achieved RMS norm over the local-algebraic and
             bordered-global residual rows at the root (a scalar array),
             reported for the solve statistics.
@@ -122,7 +154,7 @@ class ICStepContext(NamedTuple):
 
     Every field is always an array, so the context has one fixed pytree
     structure under jit/vmap and across the autodiff boundary. Build it with
-    [make][diff_soup.timestepping.consistent_ic.pin_differential.ICStepContext.make]
+    [make][diff_soup.problem.implicit.consistent_init.pinned.ICStepContext.make]
     (which fills the unused slots with array sentinels) rather than
     the raw constructor, so no call site materializes a ``None`` leaf whose
     absence would change the tree structure and let a tangent tree mismatch its
@@ -169,14 +201,6 @@ class ICStepContext(NamedTuple):
         return self._replace(u_pin=jnp.asarray(u_pin))
 
 
-def _full_dense_topology(n: int) -> SparseTopology:
-    """A dense ``n x n`` COO pattern (row-major) for the small IC Jacobian block."""
-    idx = np.arange(n, dtype=np.int32)
-    rows = np.repeat(idx, n)
-    cols = np.tile(idx, n)
-    return SparseTopology(rows=rows, cols=cols, n_dofs=n)
-
-
 def _ic_topology(problem, n_u):
     """The state-block pattern for the consistent-init KKT solve.
 
@@ -186,7 +210,7 @@ def _ic_topology(problem, n_u):
     Jacobian is a dense matrix) falls back to the full dense pattern.
     """
     topology = problem.state_topology
-    return topology if topology is not None else _full_dense_topology(n_u)
+    return topology if topology is not None else SparseTopology.full(n_u)
 
 
 def _ic_backend(backend):
@@ -268,7 +292,7 @@ class PinnedOperator(eqx.Module):
     """Wrap a contract operator to hold the pinned rows at their targets.
 
     See
-    [ContractOperator][diff_soup.timestepping.consistent_ic.pin_differential.ContractOperator].
+    [ContractOperator][diff_soup.problem.implicit.consistent_init.pinned.ContractOperator].
     The pinned state rows get an identity Jacobian row and a ``u - ctx.u_pin``
     residual, so the Newton solve leaves them at the user's initial condition and
     drives only the remaining unknowns onto the manifold. When the bordered
@@ -407,7 +431,7 @@ def _pin_operator(problem, n_u, n_lam, diff_mask, backend=None, *, layout=None, 
     """Build the pinned pencil operator and its analysis for the state solve.
 
     The pin target is supplied through the step context at solve time (see
-    [ICStepContext][diff_soup.timestepping.consistent_ic.pin_differential.ICStepContext]),
+    [ICStepContext][diff_soup.problem.implicit.consistent_init.pinned.ICStepContext]),
     so the operator carries only the static structural
     mask. The state pattern is the problem's declared sparse pattern (a dense
     fallback when it declares none); ``backend`` is the caller's linear solver,

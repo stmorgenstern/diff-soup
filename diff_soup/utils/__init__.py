@@ -15,6 +15,8 @@ import them without an import cycle:
 - ``_safe_math``: ``sqrt``, ``div`` and ``power`` with finite derivatives at
   their singular points.
 - ``interpolation``: JIT-safe monotone cubic (PCHIP) interpolation.
+- ``weights``: the error-weight law ``1/(rtol |y| + atol)`` and the weighted-RMS
+  norm the integrators and consistent initialization compare to one.
 
 The package logger is ``diff_soup._logging.log``; traced code uses
 ``jax.debug.print`` and ``jax.debug.callback`` directly.
