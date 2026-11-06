@@ -232,13 +232,13 @@ def lower(
     lowered problem.
 
     Args:
-        eqset: An [`EquationSet`][diff_soup.problem.EquationSet] or a [`Study`][diff_soup.inference.Study].
+        eqset: An [`EquationSet`][diff_soup.problem.EquationSet] or a [`Study`][diff_soup.optimization.inference.Study].
         layout: Device placement, a [`Layout`][diff_soup.Layout], or `None` for the default.
         precision: [`Precision`][diff_soup.Precision] of an equation set, or `None` for the default, refused for a study.
         **options: Keywords for a study, such as `chunk`, refused for an equation set.
 
     Returns:
-        A [`LoweredProblem`][diff_soup.problem.LoweredProblem], or a [`LoweredStudy`][diff_soup.inference.LoweredStudy] for a study.
+        A [`LoweredProblem`][diff_soup.problem.LoweredProblem], or a [`LoweredStudy`][diff_soup.optimization.inference.LoweredStudy] for a study.
 
     Raises:
         LoweringError: If `eqset` is neither an equation set nor a study.
@@ -250,7 +250,7 @@ def lower(
                 f"lower() takes an EquationSet or a Study; got {type(eqset).__name__}. "
                 "Build a spec via ds.problem(...) and call .to_equation_set(), construct an "
                 "EquationSet directly, or declare the experiments to fit in a "
-                "diff_soup.inference.Study."
+                "diff_soup.optimization.inference.Study."
             )
         if precision is not None:
             raise TypeError(

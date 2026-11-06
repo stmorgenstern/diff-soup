@@ -18,6 +18,10 @@ from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import equinox as eqx
+import jax
+import jax.numpy as jnp
+
+from diff_soup._errors import ConfigurationError
 
 CONSTRAINT_JACOBIAN = "constraint_jacobian"
 LAGRANGIAN_HESSIAN = "lagrangian_hessian"
@@ -44,7 +48,22 @@ class ConstraintClosures(NamedTuple):
 
 
 class Constraints(eqx.Module):
-    """Equality and inequality constraints on the unflattened parameter view.
+    """Equality and inequality constraints on a problem's decision variables.
+
+    Each function takes the decision variables in the problem's own terms and `args`. On an
+    `InferenceProblem` that is the fitted values by parameter, `values[handle]`; on an
+    `OptimizationProblem` it is the flat vector.
+
+    !!! example
+
+        ```python
+        constraints = ds.optimization.Constraints(
+            inequality=lambda values, args: values[rate] - args["rate_max"], n_inequality=1
+        )
+        problem = ds.optimization.inference.InferenceProblem(
+            experiment, parameters=rate, constraints=constraints, args={"rate_max": 0.3}
+        )
+        ```
 
     Args:
         equality: `equality(params, args)` returning rows satisfied at 0, or `None`.
@@ -62,14 +81,85 @@ class Constraints(eqx.Module):
     jacobian: str = eqx.field(static=True, default="auto")
     scales: Any = None
 
-    def lower(self, objective: Callable, unflatten: Callable) -> ConstraintClosures:
+    def lower(self, objective: Callable | None, unflatten: Callable) -> ConstraintClosures:
         """Lower to closures on the flat vector, with Jacobians and Lagrangian Hessians by AD.
 
         Args:
-            objective: `objective(x, args)` on the flat vector, whose Hessian joins the Lagrangian's.
+            objective: `objective(x, args)` on the flat vector, whose Hessian joins the Lagrangian's, or `None` for the Hessian of the constraint terms alone.
             unflatten: The map from the flat vector to the parameter view the functions take.
 
         Returns:
             The [ConstraintClosures][diff_soup.optimization.ConstraintClosures].
         """
-        raise NotImplementedError
+        if self.jacobian not in ("auto", "forward", "reverse"):
+            raise ConfigurationError(
+                f"Constraints jacobian must be 'auto', 'forward' or 'reverse'; got "
+                f"{self.jacobian!r}."
+            )
+        rows = _rows(self, unflatten)
+        mode = self.jacobian
+        n_rows = self.n_equality + self.n_inequality
+
+        def constraints_and_jacobians(x, args):
+            forward = mode == "forward" or (mode == "auto" and n_rows > jnp.shape(x)[-1])
+            differentiate = jax.jacfwd if forward else jax.jacrev
+            jacobians, values = differentiate(lambda y: _twice(rows(y, args)), has_aux=True)(x)
+            return (*values, *jacobians)
+
+        def lagrangian(x, lam_eq, lam_ineq, args):
+            equality, inequality = rows(x, args)
+            weighted = lam_eq @ equality + lam_ineq @ inequality
+            return weighted if objective is None else objective(x, args) + weighted
+
+        gradient = jax.grad(lagrangian)
+
+        def lagrangian_hessian(x, lam_eq, lam_ineq, args):
+            return jax.jacfwd(gradient)(x, lam_eq, lam_ineq, args)
+
+        def lagrangian_hessian_vector(x, lam_eq, lam_ineq, v, args):
+            return jax.jvp(lambda y: gradient(y, lam_eq, lam_ineq, args), (x,), (v,))[1]
+
+        return ConstraintClosures(
+            constraints=rows,
+            constraints_and_jacobians=constraints_and_jacobians,
+            lagrangian_hessian=lagrangian_hessian,
+            lagrangian_hessian_vector=lagrangian_hessian_vector,
+            n_equality=self.n_equality,
+            n_inequality=self.n_inequality,
+        )
+
+
+def _rows(constraints: Constraints, unflatten: Callable) -> Callable:
+    """`(x, args) -> (equality, inequality)` on the flat vector, each 1-D and of its declared length."""
+
+    def side(function, count, params, args, dtype, name):
+        if function is None:
+            if count:
+                raise ConfigurationError(
+                    f"Constraints declares n_{name}={count} and no {name} function."
+                )
+            return jnp.zeros((0,), dtype)
+        values = jnp.reshape(jnp.asarray(function(params, args), dtype), (-1,))
+        if values.shape[0] != count:
+            raise ConfigurationError(
+                f"Constraints {name} returned {values.shape[0]} rows; n_{name} declares {count}."
+            )
+        return values
+
+    def rows(x, args):
+        params = unflatten(x)
+        dtype = jnp.result_type(x)
+        equality = side(
+            constraints.equality, constraints.n_equality, params, args, dtype, "equality"
+        )
+        inequality = side(
+            constraints.inequality, constraints.n_inequality, params, args, dtype, "inequality"
+        )
+        return equality, inequality
+
+    return rows
+
+
+def _twice(value: Any) -> tuple[Any, Any]:
+    """`(value, value)`: the output of a function differentiated with `has_aux`, and its aux."""
+    return value, value

@@ -81,7 +81,7 @@ def heat(q):
 
 A learnable function is an `eqx.Module` whose array leaves are the
 fitted coefficients, such as a
-`diff_soup.inference.approx.LegendreExpansion` coefficient series. A
+`diff_soup.optimization.inference.approx.LegendreExpansion` coefficient series. A
 neural network is declared the same way, here as a learned reaction
 rate:
 
@@ -120,7 +120,7 @@ R = spec.geometry("R", value=1.0, learnable=True, bounds=(0.1, 10.0))
 
 A fit selects declared learnable parameters by their handles and
 respects the declared bounds, and MAP estimation reads the declared
-priors. `ds.inference.InferenceProblem(parameters=)` takes the handles
+priors. `ds.optimization.inference.InferenceProblem(parameters=)` takes the handles
 to fit, or `ds.ParameterSet(shared=, varying=)` for parameters tied
 across experiments. The estimation objectives, parameter transforms,
 and optimizers are covered with [inference](../inference/index.md).

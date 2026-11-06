@@ -26,7 +26,7 @@ mesh = ds.global_mesh(("data",))
 layout = ds.Layout(mesh=mesh)
 
 lowered = ds.lower(study, layout=layout)
-result = ds.inference.optsolve(lowered, ds.inference.TrustRegion())
+result = ds.optimization.optsolve(lowered, ds.optimization.inference.TrustRegion())
 ```
 
 - `ds.global_mesh(("data",))` builds a device mesh over every GPU
@@ -35,7 +35,7 @@ result = ds.inference.optsolve(lowered, ds.inference.TrustRegion())
   joint inference
   problem](hierarchical.md#pose-the-joint-inference-problem)). The
   default `None` runs on one device.
-- `ds.inference.TrustRegion` drives a study split across devices ([run
+- `ds.optimization.inference.TrustRegion` drives a study split across devices ([run
   the fit](hierarchical.md#run-the-fit)).
 - `balance_steps=` on the layout moves experiments between devices when
   one device holds several and their step counts differ. The default
@@ -114,7 +114,7 @@ a cohort across an allocation](cohorts.md)):
 
 ```python
 with ds.distributed.run(study) as lowered:
-    result = ds.inference.optsolve(lowered, ds.inference.TrustRegion())
+    result = ds.optimization.optsolve(lowered, ds.optimization.inference.TrustRegion())
 ```
 
 - Process 0 runs the block, and the other processes evaluate their
@@ -133,13 +133,13 @@ checkpointing system, `checkpointed_map`, is used for independent
 experiments and records the state of each finished run as it completes.
 
 ```python
-from diff_soup.inference.design import checkpointed_map
+from diff_soup.optimization.inference.design import checkpointed_map
 
 
 def fit_particle(item):
     mine = tuple(e for e in experiments if e.id.startswith(item["task_id"]))
-    problem = ds.inference.InferenceProblem(mine, parameters=(D, k))
-    res = ds.inference.optsolve(problem, ds.inference.NewtonTrustRegion(grad_tol=1e-5))
+    problem = ds.optimization.inference.InferenceProblem(mine, parameters=(D, k))
+    res = ds.optimization.optsolve(problem, ds.optimization.NewtonTrustRegion(grad_tol=1e-5))
     return {"D": float(res[D]), "k": float(res[k]), "converged": bool(res.converged)}
 
 

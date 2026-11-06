@@ -8,27 +8,27 @@ estimation](../../overview/inference/statistical-estimation.md).
 
 Pass one as `likelihood=` of a `Measurement`.
 
-::: diff_soup.inference.Gaussian
+::: diff_soup.optimization.inference.Gaussian
     options:
       members: false
 
-::: diff_soup.inference.CorrelatedGaussian
+::: diff_soup.optimization.inference.CorrelatedGaussian
     options:
       members: false
 
-::: diff_soup.inference.StudentT
+::: diff_soup.optimization.inference.StudentT
     options:
       members: false
 
-::: diff_soup.inference.Poisson
+::: diff_soup.optimization.inference.Poisson
     options:
       members: false
 
-::: diff_soup.inference.LogNormal
+::: diff_soup.optimization.inference.LogNormal
     options:
       members: false
 
-::: diff_soup.inference.MultiplicativeGaussian
+::: diff_soup.optimization.inference.MultiplicativeGaussian
     options:
       members: false
 
@@ -38,14 +38,14 @@ Pass one as `likelihood=` of a `Measurement`.
 
 A `MAP` fit needs one on every fitted parameter handle.
 
-::: diff_soup.inference.NormalPrior
+::: diff_soup.optimization.inference.NormalPrior
     options:
       members: false
 
-::: diff_soup.inference.LogNormalPrior
+::: diff_soup.optimization.inference.LogNormalPrior
     options:
       members: false
 
-::: diff_soup.inference.GaussianCoefficientPrior
+::: diff_soup.optimization.inference.GaussianCoefficientPrior
     options:
       members: false

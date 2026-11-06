@@ -230,7 +230,7 @@ class Segment:
 class Schedule:
     """An operating protocol, a sequence of segments run one after another.
 
-    Each segment starts where the one before it ended. Pass the schedule as `schedule=` on `ds.inference.Experiment`.
+    Each segment starts where the one before it ended. Pass the schedule as `schedule=` on `ds.optimization.inference.Experiment`.
 
     Args:
         segments: Sequence of at least one `Segment`.

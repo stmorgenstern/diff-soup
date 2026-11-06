@@ -11,7 +11,7 @@ import equinox as eqx
 import jax
 import numpy as np
 
-from diff_soup.inference._abc import OptSolver
+from diff_soup.optimization._abc import OptSolver
 
 
 class SolveStatus(enum.IntEnum):
@@ -122,13 +122,13 @@ class CompiledSolver(OptSolver):
         raise NotImplementedError
 
     def solve(self, problem: Any, *, callbacks: tuple = ()) -> Any:
-        """Run on the host and return the `OptResult`, as `ds.inference.optsolve` expects.
+        """Run on the host and return the `OptResult`, as `ds.optimization.optsolve` expects.
 
         The run compiles once and has no host step: each callback's `on_start` sees the
         problem, `on_step` the final step and `on_end` the result. The `SolveRecord` is
         `result.info["record"]`.
         """
-        from diff_soup.inference.fitting.result import OptResult, StepInfo
+        from diff_soup.optimization.inference.fitting.result import OptResult, StepInfo
 
         args = getattr(problem, "args", None)
         x0 = problem.x0
@@ -176,7 +176,7 @@ _INTERIM = {"KKT_TOL": "SUCCESS", "INFEASIBLE": "STALLED", "RESTORATION_FAILED":
 
 def _termination_status(code: int) -> Any:
     """The `TerminationStatus` of a `SolveStatus` code, by name."""
-    from diff_soup.inference.fitting.result import TerminationStatus
+    from diff_soup.optimization.inference.fitting.result import TerminationStatus
 
     name = SolveStatus(code).name
     if name not in TerminationStatus.__members__:
