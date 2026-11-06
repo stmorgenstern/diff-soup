@@ -849,7 +849,8 @@ def analyze(
         layout: The device placement, or `None` for one device.
         precision: The precision of the factors, `"fp64"` or `"fp32"`.
         symmetric: Declare the matrix symmetric, which is never detected from the values.
-        spd: Declare the matrix symmetric positive definite, which implies `symmetric`.
+        spd: Declare the matrix real symmetric positive definite, which implies `symmetric`.
+            Complex values are refused on such an analysis.
 
     Returns:
         The `Analysis` to pass to `factor`.
@@ -999,7 +1000,27 @@ def _check_values(analysis: Analysis, values: Any, caller: str) -> Array:
         raise FactorContractError(
             f"{caller}() needs floating or complex values; got dtype {values.dtype}."
         )
+    _check_spd(analysis, values.dtype, caller)
     return values
+
+
+def _check_spd(analysis: Analysis, dtype: Any, caller: str) -> None:
+    """Refuse complex values on an analysis declared ``spd``.
+
+    ``spd`` declares a real symmetric positive definite matrix. A complex
+    matrix with ``A = A^T`` is symmetric but never positive definite, and a
+    Hermitian one is not symmetric, so its transposed solve is not its plain
+    one.
+
+    Raises:
+        FactorContractError: If ``dtype`` is complex and the analysis declares ``spd``.
+    """
+    if analysis.spd and jnp.issubdtype(dtype, jnp.complexfloating):
+        raise FactorContractError(
+            f"{caller}() received complex values ({jnp.dtype(dtype)}) on an analysis declared "
+            "spd=True, which declares a real symmetric positive definite matrix. Analyze with "
+            "symmetric=True for a complex symmetric matrix (A = A^T), or without either."
+        )
 
 
 def _check_rhs(f: Factor, b: Any, caller: str) -> Array:
@@ -1153,8 +1174,8 @@ def factor(
         The `Factor`.
 
     Raises:
-        FactorContractError: For values of the wrong shape, or no `ctx` where the backend needs
-            one.
+        FactorContractError: For values of the wrong shape, complex values on an `spd`
+            analysis, or no `ctx` where the backend needs one.
     """
     analysis = _check_analysis(analysis, "factor")
     orientation = check_orientation(orientation)
@@ -1234,6 +1255,7 @@ def empty_factor(
             f"empty_factor() needs a floating or complex dtype for the factor's values; got "
             f"{dtype}."
         )
+    _check_spd(analysis, dtype, "empty_factor")
     if storage is not None and (not isinstance(storage, str) or not 0 < len(storage) <= 64):
         raise FactorContractError(
             "empty_factor() takes storage=None or a storage name of 1 to 64 characters; got "
