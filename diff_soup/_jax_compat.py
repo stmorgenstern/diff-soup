@@ -129,11 +129,15 @@ def _check_jax_version(version: str) -> None:
 
 _check_jax_version(jax.__version__)
 
+from jax._src import api_util as internal_api_util  # noqa: E402
 from jax._src import array as internal_array  # noqa: E402
 from jax._src import core as internal_core  # noqa: E402
 from jax._src import dispatch  # noqa: E402
+from jax._src import flattree as internal_flattree  # noqa: E402
+from jax._src.interpreters import batching as internal_batching  # noqa: E402
 from jax._src.interpreters import mlir as internal_mlir  # noqa: E402
 from jax._src.interpreters import partial_eval as internal_partial_eval  # noqa: E402
+from jax._src.lax.control_flow import common as internal_control_flow  # noqa: E402
 from jax._src.lib.mlir import ir  # noqa: E402
 from jax._src.lib.mlir.dialects import hlo  # noqa: E402
 from jax.experimental import mesh_utils, multihost_utils  # noqa: E402
@@ -144,10 +148,17 @@ __all__ = [
     # jax._src: JAX's private implementation (``internal_partial_eval`` holds
     # the rematerialisation policy types a partial-evaluation rule reads;
     # ``dispatch`` holds the tokens of the effects of dispatched programs;
-    # ``internal_core`` and ``internal_array`` hold the constant-hoisting state)
+    # ``internal_core`` and ``internal_array`` hold the constant-hoisting state;
+    # ``internal_api_util``, ``internal_flattree`` and ``internal_control_flow``
+    # trace the branches of a conditional primitive the way ``lax.cond`` does,
+    # and ``internal_batching`` batches them)
     "dispatch",
+    "internal_api_util",
     "internal_array",
+    "internal_batching",
+    "internal_control_flow",
     "internal_core",
+    "internal_flattree",
     "internal_partial_eval",
     "internal_mlir",
     "ir",
