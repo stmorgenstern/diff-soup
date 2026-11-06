@@ -38,6 +38,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
+from diff_soup import _environment
 from diff_soup._errors import ConfigurationError
 from diff_soup._warnings import warn_user
 
@@ -59,27 +60,25 @@ _ABORT_CODE = 3
 _POLL_SECONDS = 0.0005
 
 
-def _seconds(name: str, default: float) -> float:
-    text = os.environ.get(name)
-    if text is None or not text.strip():
-        return float(default)
+def _seconds(variable: _environment.Variable) -> float:
+    """The positive number of seconds ``variable`` gives, or its default."""
+    text = variable.get()
     try:
         value = float(text)
     except ValueError:
         raise ConfigurationError(
-            f"{name}={text!r} is not a number of seconds; give a positive number."
+            f"{variable.name}={text!r} is not a number of seconds; give a positive number."
         ) from None
     if not value > 0.0:
-        raise ConfigurationError(f"{name}={text!r}; give a positive number of seconds.")
+        raise ConfigurationError(f"{variable.name}={text!r}; give a positive number of seconds.")
     return value
 
 
-DEADLINE_FLOOR_SECONDS: float = _seconds("DIFF_SOUP_DEADLINE_SECONDS", 600.0)
+DEADLINE_FLOOR_SECONDS: float = _seconds(_environment.DEADLINE_SECONDS)
 """The shortest time process 0 waits for any reply, in seconds.
 
 600 unless the environment variable ``DIFF_SOUP_DEADLINE_SECONDS`` gives
-another; process 0 reads it at every wait, so setting it in process 0 changes
-the next wait.
+another, read when this module is first imported.
 """
 
 DEADLINE_FACTOR: float = 10.0
@@ -88,7 +87,7 @@ evaluation of a lane took so far (the study's ledger) times the most units any
 process evaluates in the request, and never sooner than ``DEADLINE_FLOOR_SECONDS``;
 before any lane has a measured time, within the deadline of a prepare."""
 
-PREPARE_DEADLINE_SECONDS: float = _seconds("DIFF_SOUP_PREPARE_DEADLINE_SECONDS", 21600.0)
+PREPARE_DEADLINE_SECONDS: float = _seconds(_environment.PREPARE_DEADLINE_SECONDS)
 """The time process 0 waits for every process's reply to ``PREPARE``, in seconds:
 21,600 unless ``DIFF_SOUP_PREPARE_DEADLINE_SECONDS`` gives another."""
 
