@@ -296,35 +296,45 @@ def test_the_gradient_of_a_projected_dae_event_time_is_the_closed_form():
 _DURATION_BOUND = 1e-6
 #: The central-difference step in the first segment's duration.
 _DURATION_STEP = 1e-4
+#: Two holds of ``u' = -u + I`` from ``u = 2``: ``I1`` for ``d1``, then ``I2`` for ``0.4``.
+_HOLDS = jnp.asarray([0.5, 1.5])
+_HELD_FOR = jnp.asarray([0.3, 0.4])
 
 
-def test_a_scheduled_sample_differentiates_through_a_segment_duration():
-    """``u' = -u + I`` held at ``I1 = 0.5`` for ``d1 = 0.3`` and then at ``I2 = 1.5`` has, at
-    the sample ``t = 0.5`` of the second hold, ``du/dd1 = (I1 - I2) e^{-(0.5 - d1)}``: jax.jvp
-    through solve_schedule gives it, and so do central differences."""
+@pytest.fixture(scope="module")
+def held_sample():
+    """``u`` at ``t = 0.5``, in the second hold, as a jitted function of the durations and the
+    currents of the two holds."""
     problem = operational_cell().build()
-    first, second, d1 = 0.5, 1.5, 0.3
     holds = ds.schedule_arrays(
-        ds.Schedule(
-            [ds.Segment(current=first, duration=d1), ds.Segment(current=second, duration=0.4)]
-        ),
+        ds.Schedule([ds.Segment(current=0.5, duration=0.3), ds.Segment(current=1.5, duration=0.4)]),
         problem.operational_modes(),
     )
-    initial = jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))])
 
     @jax.jit
-    def sample(duration):
-        schedule = dataclasses.replace(holds, duration=jnp.stack([duration, jnp.asarray(0.4)]))
+    def sample(durations, currents):
         solution, _ = ds.solve_schedule(
             problem,
             ds.JIDA(linear="dense", **_VERY_TIGHT),
-            schedule,
-            initial,
+            dataclasses.replace(holds, duration=durations, target=currents),
+            jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))]),
             t0=0.0,
             t_end=0.7,
             times=jnp.asarray([0.5, 0.7]),
         )
         return solution.ys[0, 0]
+
+    return sample
+
+
+def test_a_scheduled_sample_differentiates_through_a_segment_duration(held_sample):
+    """``u' = -u + I`` held at ``I1 = 0.5`` for ``d1 = 0.3`` and then at ``I2 = 1.5`` has, at
+    the sample ``t = 0.5`` of the second hold, ``du/dd1 = (I1 - I2) e^{-(0.5 - d1)}``: jax.jvp
+    through solve_schedule gives it, and so do central differences."""
+    first, second, d1 = 0.5, 1.5, 0.3
+
+    def sample(duration):
+        return held_sample(jnp.stack([duration, _HELD_FOR[1]]), _HOLDS)
 
     duration = jnp.asarray(d1)
     tangent = jax.jvp(sample, (duration,), (jnp.ones_like(duration),))[1]
@@ -332,6 +342,38 @@ def test_a_scheduled_sample_differentiates_through_a_segment_duration():
     central = (sample(duration + step) - sample(duration - step)) / (2.0 * step)
     expected = (first - second) * np.exp(-(0.5 - d1))
     np.testing.assert_allclose([tangent, central], expected, rtol=_DURATION_BOUND)
+
+
+def test_a_second_tangent_through_a_segment_duration_is_refused(held_sample):
+    """jax.jvp of a scheduled sample's tangent in the segment durations raises: the tangent
+    rule moves a segment boundary to first order only."""
+    direction = jnp.asarray([1.0, -0.5])
+
+    def tangent(durations):
+        return jax.jvp(lambda d: held_sample(d, _HOLDS), (durations,), (direction,))[1]
+
+    with pytest.raises(NotImplementedError, match="no second derivative"):
+        jax.jvp(tangent, (_HELD_FOR,), (direction,))
+
+
+# measured 7.0e-9 relative, workstation 2026-11-06,
+# pytest tests/public_api/test_adjoints.py::test_a_second_tangent_through_the_segment_targets_is_the_closed_form
+_TARGET_HESSIAN_BOUND = 1e-6
+
+
+def test_a_second_tangent_through_the_segment_targets_is_the_closed_form(held_sample):
+    """The square of the sample ``u(0.5) = I2 + (I1 + (2 - I1) e^{-d1} - I2) e^{-(0.5 - d1)}``
+    has the second tangent ``2 (g v)(g w)`` in the targets, ``g`` its gradient."""
+    v, w = jnp.asarray([1.0, -0.5]), jnp.asarray([0.3, 0.8])
+
+    def tangent(currents):
+        return jax.jvp(lambda i: held_sample(_HELD_FOR, i) ** 2, (currents,), (v,))[1]
+
+    second = jax.jvp(tangent, (_HOLDS,), (w,))[1]
+    decay = np.exp(-(0.5 - 0.3))
+    gradient = np.asarray([(1.0 - np.exp(-0.3)) * decay, 1.0 - decay])
+    expected = 2.0 * float(gradient @ np.asarray(v)) * float(gradient @ np.asarray(w))
+    np.testing.assert_allclose(second, expected, rtol=_TARGET_HESSIAN_BOUND)
 
 
 def _level_stop(time, state, args, **kwargs):

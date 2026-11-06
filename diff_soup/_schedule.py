@@ -822,11 +822,30 @@ def _segment_solve_impl(problem, solver, span, state, times, theta, control, opt
 _segment_solve = eqx.filter_custom_jvp(_segment_solve_impl)
 
 
+@jax.custom_jvp
+def _boundary_times(span):
+    """A segment's start and end, as the tangent rule reads them; refused under a second tangent."""
+    return span
+
+
+@_boundary_times.defjvp
+def _boundary_times_jvp(primals, tangents):
+    """Refuse a second derivative through a moving segment boundary."""
+    raise NotImplementedError(
+        "solve_schedule has no second derivative with respect to the start or end of a "
+        "segment (a segment duration, t0 or t_end): its tangent rule moves a segment "
+        "boundary to first order only. Take second derivatives with respect to the "
+        "targets, the parameters and the initial state."
+    )
+
+
 @_segment_solve.def_jvp
 def _segment_solve_jvp(primals, tangents):
     """Differentiate at fixed internal times and attach the boundary flow terms."""
     problem, solver, span, state, times, theta, control, options = primals
     dproblem, dsolver, dspan, dstate, dtimes, dtheta, dcontrol, doptions = tangents
+    span = _boundary_times(span)
+    primals = (problem, solver, span, state, times, theta, control, options)
     if all(value is None for value in dspan):
         return eqx.filter_jvp(_segment_solve_impl, primals, tangents)
     view = solver_view(problem)
