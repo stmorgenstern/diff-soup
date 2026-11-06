@@ -19,6 +19,7 @@ _ROOT = {"rtol": 1e-10, "atol": 1e-12}
 _FINE = {"rtol": 1e-8, "atol": 1e-10}
 _RESISTANCE = {"rtol": 1e-10, "atol": 1e-12}
 _VDP = {"rtol": 1e-6, "atol": 1e-8}
+_FLOOR = {"rtol": 1e-8, "atol": 1e-12}
 _PROJECTED = ds.DenseOutputPolicy(mode="projected")
 # measured worst event-time error 1.1e-9 (projected DAE cutoff; 1.0e-13 for a time event),
 # CPU VM 2026-10-22, pytest tests/public_api/test_solve_outputs.py
@@ -181,6 +182,42 @@ def test_the_save_grid_is_evaluated_only_on_attempts_that_cover_a_save_time():
     )
     assert int(solution.stats.trial_steps) > 5
     assert 0 < int(solution.stats.saveat_interpolations) <= 5 * 5
+
+
+#: ``y' = -y`` and ``0 = 3 z - y``, whose residual at ``y`` near 1e8 cannot fall below about
+#: 7.5e-9 for many values of ``y``: no float ``z`` meets ``3 z = y`` closer.
+_THIRDS = ds.MassProblem(
+    rhs=lambda t, y, theta, control: jnp.stack([-y[0], 3.0 * y[1] - y[0]]),
+    mass=ds.MassOperator.sparse(
+        [0],
+        [0],
+        lambda t, y, theta, control: jnp.ones((1,), y.dtype),
+        n=2,
+        dependencies=ds.Dependencies(time=False, state=False, parameters=False, control=False),
+    ),
+    structure=ds.DAEStructure(differential_vars=np.array([True, False])),
+)
+# measured 1.8e-8 relative on every row, workstation 2026-11-05,
+# pytest tests/public_api/test_solve_outputs.py::test_projected_rows_at_the_rounding_floor_pass_the_gate_of_the_solves_own_start
+_FLOOR_BOUND = 1e-6
+
+
+def test_projected_rows_at_the_rounding_floor_pass_the_gate_of_the_solves_own_start():
+    """Projected rows of ``y' = -y``, ``0 = 3 z - y`` from ``y = 1.95e8`` at ``atol = 1e-12``,
+    where the algebraic residual often cannot fall below 7.5e-9, are each projected under the
+    gate the solve's own initialization passed: every row is finite and equals ``y0 e^{-t}``,
+    ``z = y/3``."""
+    start, times = 195046369.6325935, jnp.linspace(0.0, 0.5, 41)
+    solution = ds.pdesolve(
+        _THIRDS,
+        ds.JIDA(linear="dense", **_FLOOR),
+        (0.0, 0.5),
+        jnp.asarray([start, start / 3.0]),
+        saveat=ds.SaveAt(ts=times, output=_PROJECTED),
+        max_steps=2000,
+    )
+    y = start * np.exp(-np.asarray(times))
+    np.testing.assert_allclose(solution.ys, np.stack([y, y / 3.0], axis=1), rtol=_FLOOR_BOUND)
 
 
 @pytest.mark.parametrize(
