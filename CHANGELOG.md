@@ -31,6 +31,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Fixed the derivative of consistent initialization with respect to the start time.
 - Fixed `SolveContext.resident_bytes` on `KLU`, which read uninitialized memory for any factor with a singleton block.
 - A `KLU`, `SuperLU` or `CuDSS` factor lowered into a program over several devices of one process now raises `FactorContractError`. Previously XLA failed with an internal error, or, in a `shard_map` body, the devices shared one native factor.
+- Complex values on an analysis declared `spd=True`, and on a `CuDSS` analysis with `downcast_factors` or `emulation_mantissa_bits`, now raise `FactorContractError`. Previously cuDSS factored them as a real symmetric positive definite matrix, or ignored the option.
 
 ### Performance
 

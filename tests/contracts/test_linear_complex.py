@@ -16,6 +16,7 @@ from diff_soup.linear import (
     KLU,
     CuDSS,
     Dense,
+    FactorContractError,
     SolveContext,
     SolveStatus,
     SparseTopology,
@@ -45,6 +46,9 @@ _BATTERY = 1e-10
 # measured at most 9.5e-10 relative between a derivative and its central difference (step 1e-6),
 # CPU workstation 2026-11-05, same file
 _FD = 1e-7
+# measured at most 1.1e-7 relative against NumPy for complex64 cuDSS solves at the fp32 rung,
+# RTX 4070 Ti 2026-11-05 (.ports/probe_cudss_complex.py of the complex GPU work)
+_FP32 = 1e-4
 #: Dimensionless angular frequencies of the battery operator ``i w M - J``.
 OMEGAS = (1e-3, 1.0, 1e3)
 
@@ -155,10 +159,116 @@ def test_a_real_factor_solves_a_complex_right_hand_side(make):
     real_matrix[BC_ROW, BC_ROW] = 1.0
     b = _rhs(N, shape=(2,))
     for transpose, op in ((False, real_matrix), (True, real_matrix.T)):
+        before = _solves(make)
         x = run(real, b, transpose)
         assert x.dtype == jnp.complex128
         assert _relative(x, np.linalg.solve(op, b.T).T) <= _EXACT
+        assert before is None or _solves(make) - before == 1
     assert run(real, jnp.real(b[0])).dtype == jnp.float64
+
+
+def _solves(make):
+    """The backend's native solve count; ``None`` for a backend whose factors are arrays."""
+    stats = getattr(make, "native_stats", None) or getattr(make, "contract_stats", None)
+    return None if stats is None else stats()["solves"]
+
+
+@pytest.mark.parametrize("make", BACKENDS)
+def test_complex_values_report_non_finite_and_singular_statuses(make):
+    """A complex factor with a ``nan`` entry reports ``NONFINITE`` and one of zero values
+    ``SINGULAR``, each with a ``nan`` solution."""
+    topology, values, _ = _random_system()
+    analysis, ctx = analyze(topology, backend=make()), _context(make)
+    for bad, status in (
+        (values.at[0].set(jnp.nan), SolveStatus.NONFINITE),
+        (jnp.zeros_like(values), SolveStatus.SINGULAR),
+    ):
+        x, _, report = solve_checked(factor(analysis, bad, ctx=ctx), _rhs(N))
+        assert int(report.status) == status and np.all(np.isnan(np.asarray(x)))
+
+
+@pytest.mark.parametrize("make", BACKENDS)
+def test_a_real_and_a_complex_factor_on_one_shared_storage_each_solve(make):
+    """A real and a complex factor started on one shared storage name and refactored in turn,
+    each call its own execution, each solve their own matrix, so the storage switches kind and
+    refactors complex values in place."""
+    topology, values, matrix = _random_system()
+    analysis, ctx = analyze(topology, backend=make()), _context(make)
+    real, b = jnp.real(values), _rhs(N)
+    real_matrix = matrix.real.copy()
+    real_matrix[BC_ROW, BC_ROW] = 1.0
+    held = [
+        empty_factor(analysis, ctx=ctx, dtype=t, storage="kinds")
+        for t in (real.dtype, values.dtype)
+    ]
+
+    for scale in (1.0, 2.0):
+        for k, (v, op) in enumerate(((real, real_matrix), (values, matrix))):
+            held[k] = refactor(held[k], scale * v, True)
+            x = solve(held[k], b)[0]
+            assert _relative(x, np.linalg.solve(scale * op + _unit(scale), b)) <= _EXACT
+
+
+@pytest.mark.parametrize("make", BACKENDS)
+def test_complex_values_on_an_spd_analysis_are_refused(make):
+    """An analysis declared ``spd`` refuses complex values in ``factor`` and ``empty_factor``:
+    a complex symmetric matrix is never positive definite, and a Hermitian one is not
+    symmetric."""
+    topology, values, _ = _random_system()
+    analysis = analyze(SparseTopology(topology.rows, topology.cols, N), backend=make(), spd=True)
+    ctx = _context(make)
+    with pytest.raises(FactorContractError, match="spd=True"):
+        factor(analysis, values, ctx=ctx)
+    with pytest.raises(FactorContractError, match="spd=True"):
+        empty_factor(analysis, ctx=ctx, dtype=jnp.complex128)
+
+
+@pytest.mark.requires_cudss
+@pytest.mark.parametrize("option", [{"downcast_factors": True}, {"emulation_mantissa_bits": 40}])
+def test_cudss_refuses_a_float64_precision_option_on_complex_values(option):
+    """``downcast_factors`` and ``emulation_mantissa_bits`` act on float64 factors only, so a
+    complex factor of an analysis that sets one is refused when it is traced."""
+    topology, values, _ = _random_system()
+    analysis = analyze(topology, backend=CuDSS(**option))
+    with pytest.raises(FactorContractError, match=next(iter(option))):
+        factor(analysis, values, ctx=SolveContext())
+
+
+@pytest.mark.requires_cudss
+@pytest.mark.parametrize("transpose", [False, True], ids=["plain", "transposed"])
+def test_cudss_real_lanes_solve_a_complex_right_hand_side_as_one_batch(transpose):
+    """Real values as ``vmap`` lanes, one native batch, solve each lane's complex right-hand
+    side as one real block of its parts."""
+    topology, values, matrix = _random_system()
+    analysis, ctx = analyze(topology, backend=CuDSS()), SolveContext()
+    real_matrix = matrix.real.copy()
+    real_matrix[BC_ROW, BC_ROW] = 1.0
+    scales, b = jnp.asarray([1.0, 2.0]), _rhs(N, shape=(2,))
+
+    def one(v, rhs):
+        return solve(factor(analysis, v, ctx=ctx), rhs, transpose=transpose)[0]
+
+    xs = jax.jit(jax.vmap(one))(scales[:, None] * jnp.real(values), b)
+    for x, scale, rhs in zip(xs, np.asarray(scales), b):
+        op = scale * real_matrix + _unit(scale).real
+        assert _relative(x, np.linalg.solve(op.T if transpose else op, rhs)) <= _EXACT
+
+
+@pytest.mark.requires_cudss
+def test_cudss_complex64_lanes_solve_at_the_fp32_rung():
+    """complex64 values as ``vmap`` lanes at the ``"fp32"`` rung, one native batch, solve each
+    lane's matrix in complex64 to float32 accuracy."""
+    topology, values, matrix = _random_system()
+    analysis, ctx = analyze(topology, backend=CuDSS(), precision="fp32"), SolveContext()
+    scales, b = jnp.asarray([1.0, 2.0 + 1.0j], jnp.complex64), _rhs(N).astype(jnp.complex64)
+
+    def one(v):
+        return solve(factor(analysis, v, ctx=ctx), b)[0]
+
+    xs = jax.jit(jax.vmap(one))(scales[:, None] * values.astype(jnp.complex64))
+    assert xs.dtype == jnp.complex64
+    for x, scale in zip(xs, np.asarray(scales)):
+        assert _relative(x, np.linalg.solve(scale * matrix + _unit(scale), b)) <= _FP32
 
 
 @pytest.mark.parametrize("make", BACKENDS)

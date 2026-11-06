@@ -57,10 +57,11 @@ class CuDSS(LinearSolver):
             symmetric factorization instead of a general LU.
         zero_fill: `True` zeros the solution buffer before every solve, and `None` does so for
             float32 factors only.
-        downcast_factors: `True` or `"block_diagonal"` stores the factor in float32 except its
-            diagonal blocks, and `"strict_diagonal"` except its diagonal.
+        downcast_factors: `True` or `"block_diagonal"` stores a float64 factor in float32 except
+            its diagonal blocks, and `"strict_diagonal"` except its diagonal. Complex values
+            refuse it.
         emulation_mantissa_bits: From 1 to 64, the mantissa bits cuDSS uses to emulate a float64
-            factorization on GPUs that support it.
+            factorization on GPUs that support it. Complex values refuse it.
         batch_layout: `"stacked"` (default) factors a `jax.vmap` batch as one block-diagonal
             matrix, and `"uniform"` refactors only the matrices that ask.
 

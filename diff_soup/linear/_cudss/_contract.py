@@ -1285,6 +1285,34 @@ def _is_complex(dtype: Any, precision: str, what: str = "values") -> bool:
     return bool(np.issubdtype(np.dtype(dtype), np.complexfloating))
 
 
+def _check_complex_options(analysis: Analysis, dtype: Any, precision: str) -> None:
+    """Refuse the float64 precision options on complex values, which the handlers ignore.
+
+    ``downcast_factors`` and ``emulation_mantissa_bits`` act on float64
+    factors only; a complex factor would silently keep its full width.
+
+    Raises:
+        FactorContractError: If the values are complex and the analysis sets either option.
+    """
+    if not _is_complex(dtype, precision):
+        return
+    options = dict(analysis.options)
+    named = [
+        name
+        for name, unset in (
+            ("downcast_factors", (None, False)),
+            ("emulation_mantissa_bits", (None,)),
+        )
+        if options.get(name) not in unset
+    ]
+    if named:
+        raise FactorContractError(
+            f"cuDSS applies {' and '.join(named)} to float64 factors only, and these values are "
+            f"{np.dtype(dtype).name}; analyze the complex operator without "
+            f"{' and '.join(named)}."
+        )
+
+
 def _rung(precision: str, complex_: bool = False) -> tuple[str, np.dtype]:
     """The FFI target suffix and the value dtype of a precision rung, real or complex."""
     try:
@@ -1301,10 +1329,11 @@ def factor_avals(
     """The handle: three ``int32`` scalars, the context id, the slot and its generation.
 
     Raises:
-        FactorContractError: If the values are not real.
+        FactorContractError: If cuDSS does not take the values' dtype, or complex values
+            meet a float64 precision option.
     """
-    del analysis, orientation, tol
-    _is_complex(values_aval.dtype, precision)
+    del orientation, tol
+    _check_complex_options(analysis, values_aval.dtype, precision)
     scalar = ShapedArray((), jnp.int32)
     return (scalar, scalar, scalar)
 
@@ -1321,10 +1350,11 @@ def empty_handle(
     """The handle of an empty factor: ``(context id, -1, -1)``, slot ``-1`` holding nothing.
 
     Raises:
-        FactorContractError: If the values are not real.
+        FactorContractError: If cuDSS does not take the values' dtype, or complex values
+            meet a float64 precision option.
     """
-    del analysis, orientation, tol
-    _is_complex(values_aval.dtype, precision)
+    del orientation, tol
+    _check_complex_options(analysis, values_aval.dtype, precision)
     return empty_slot_handle(context_id, leaves=3)
 
 
