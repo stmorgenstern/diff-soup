@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 44,
-    "test_functions": 399,
-    "collected_tests": 607,
-    "source_lines": 14490
+    "test_functions": 401,
+    "collected_tests": 609,
+    "source_lines": 14549
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
-      "functions": 177,
-      "collected": 281,
-      "lines": 5692
+      "functions": 178,
+      "collected": 282,
+      "lines": 5722
     },
     "contracts": {
       "files": 18,
@@ -20,9 +20,9 @@
     },
     "performance_contracts": {
       "files": 2,
-      "functions": 11,
-      "collected": 28,
-      "lines": 480
+      "functions": 12,
+      "collected": 29,
+      "lines": 509
     },
     "multi_device": {
       "files": 2,
@@ -208,7 +208,7 @@
     },
     {
       "file": "tests/public_api/test_solve_outputs_ad.py",
-      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
+      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap, lanes that cover their save times at different steps equal to their unbatched solves, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
     },
     {
       "file": "tests/public_api/test_adjoints.py",
@@ -328,7 +328,7 @@
     },
     {
       "file": "tests/performance_contracts/test_compile_cache.py",
-      "feature": "Compile cache: no retrace for a value change, program text flat in the mesh, identical text for inexact arguments, batched solves keep corrector branches, bounded checkpoint carries, root matrices assembled inside the reverse sweep's transposed solves"
+      "feature": "Compile cache: no retrace for a value change, program text flat in the mesh, identical text for inexact arguments, batched solves keep corrector branches, bounded checkpoint carries, saved output holding a bounded number of copies of the trajectory, root matrices assembled inside the reverse sweep's transposed solves"
     },
     {
       "file": "tests/performance_contracts/test_batch_lowering.py",

@@ -1,8 +1,9 @@
 """Compile cache: value changes never retrace, the program is flat in the mesh, inexact-solve
 arguments leave an exact solve's program unchanged, batched solves keep their corrector
 branches, a checkpoint stores the iteration matrix once, a reverse sweep assembles a root's
-matrix inside the solve that factors it, and an undifferentiated checkpoint solve keeps its
-compiled temporaries at their measured size."""
+matrix inside the solve that factors it, an undifferentiated checkpoint solve keeps its
+compiled temporaries at their measured size, and saved output holds a bounded number of copies
+of the trajectory."""
 
 from __future__ import annotations
 
@@ -24,7 +25,12 @@ from diff_soup.linear import (
     solve,
     solve_checked,
 )
-from tests.support.problems import DecayODE, observed_recipe, operational_cell
+from tests.support.problems import (
+    DecayODE,
+    observed_recipe,
+    operational_cell,
+    reaction_diffusion_recipe,
+)
 from tests.support.programs import equations
 
 #: Solver settings (requested tolerances, not asserted bounds).
@@ -275,3 +281,26 @@ def test_an_undifferentiated_checkpoint_solve_keeps_its_compiled_temporaries():
 
     memory = jax.jit(run).lower(jnp.asarray(1.3)).compile().memory_analysis()
     assert memory.temp_size_in_bytes <= _PRIMAL_CHECKPOINT_TEMP
+
+
+def test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory():
+    """The compiled temporaries of a jitted JNDF solve of forty cells grow by at most three state
+    rows per save time added (from 250 to 450 times): the branches that fill the save buffers
+    do not each keep a copy of the whole trajectory."""
+    spec = reaction_diffusion_recipe(name="saved_copies", n=40)
+    problem, y0 = spec.build(), spec.assemble_state({})
+    solver = ds.JNDF.stock(linear="dense", **_FINE)
+
+    def temporaries(count):
+        saveat = ds.SaveAt(ts=jnp.linspace(0.01, 1.0, count))
+
+        def run(scale):
+            return ds.pdesolve(problem, solver, (0.0, 1.0), scale * y0, saveat=saveat).ys
+
+        return jax.jit(run).lower(jnp.asarray(1.0)).compile().memory_analysis().temp_size_in_bytes
+
+    rows = (temporaries(450) - temporaries(250)) / (200 * 8 * y0.size)
+    # measured 2.0 state rows per added save time (5.0 while each fill branch selected whole
+    # output buffers), workstation 2026-11-05,
+    # pytest tests/performance_contracts/test_compile_cache.py::test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory
+    assert rows <= 3.0

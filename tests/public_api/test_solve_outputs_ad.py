@@ -1,6 +1,6 @@
-"""Solve outputs under transformations: named outputs under jax.jit and jax.vmap, the
-reverse-mode gradient through a terminal sample that replaced a requested row, and the Diffrax
-backend's outputs mapping."""
+"""Solve outputs under transformations: named outputs under jax.jit and jax.vmap, lanes that
+cover their save times at different steps, the reverse-mode gradient through a terminal sample
+that replaced a requested row, and the Diffrax backend's outputs mapping."""
 
 from __future__ import annotations
 
@@ -76,6 +76,36 @@ def test_named_outputs_batch_over_a_parameter(named):
     assert all(batched[name].shape == (3, 24) for name in _NAMED)
     for name in _NAMED:
         np.testing.assert_allclose(batched[name][1], named[name], rtol=0.0, atol=_LANE_BOUND)
+
+
+#: The 24 save times with twenty more packed within 2e-6 of t = 0.4, more than one step fills
+#: sample by sample: every lane covers the cluster in one step, each at its own step.
+_CLUSTERED = jnp.asarray(
+    np.sort(np.concatenate([np.linspace(0.05, 1.0, 24), 0.4 + 1e-7 * np.arange(1, 21)]))
+)
+# measured 3.5e-13 (load_gap, rate 1.3) between a lane and its unbatched jitted solve, the same
+# on KLU, workstation 2026-11-05, pytest tests/public_api/test_solve_outputs_ad.py::test_lanes_that_cover_their_save_times_at_different_steps_store_what_each_stores_alone
+_ALONE_BOUND = 1e-11
+
+
+def test_lanes_that_cover_their_save_times_at_different_steps_store_what_each_stores_alone():
+    """``jax.vmap`` over three rates, whose solves take 48, 62 and 112 steps and so cover the
+    save grid and its packed cluster at different attempts, stores in each lane the save times,
+    step and interpolation counts of the lane's unbatched jitted solve, and its named outputs to
+    rounding."""
+
+    def stored(value):
+        solution = _observed_solve(value, _NAMED, ts=_CLUSTERED)
+        stats = solution.stats
+        return solution.ts, dict(solution.outputs), stats.accepts, stats.saveat_interpolations
+
+    values = jnp.asarray([0.6, 1.3, 3.1])
+    batched = jax.jit(jax.vmap(stored))(values)
+    np.testing.assert_array_equal(batched[2], [48, 62, 112])
+    for lane, value in enumerate(values):
+        alone = jax.jit(stored)(value)
+        for got, expected in zip(jax.tree.leaves(batched), jax.tree.leaves(alone)):
+            np.testing.assert_allclose(got[lane], expected, rtol=0.0, atol=_ALONE_BOUND)
 
 
 #: A terminating event at a requested save time: its sample replaces that row.
