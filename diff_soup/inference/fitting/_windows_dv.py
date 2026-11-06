@@ -86,7 +86,7 @@ import numpy as np
 from diff_soup._logging import log as logger
 from diff_soup._warnings import warn_user
 from diff_soup.inference.fitting._forward_seam import _solution_failed
-from diff_soup.inference.fitting._lane_map import folds_enclosing_batches, lane_map
+from diff_soup.inference.fitting._lane_map import lane_map
 from diff_soup.inference.fitting.dependencies import (
     ResidualDependencyBlock,
     ResidualDependencyBucket,
@@ -1479,15 +1479,9 @@ class DecisionWindowBuild:
             seg_starts,
         )
         if parallel:
-            # On a forward-only seam an enclosing vmap over parameter points folds
-            # into the segment axis, keeping the solves on one matrix-batch axis.
-            saved, failed, steps = lane_map(
-                one,
-                (None, 0, 0, 0, 0, 0),
-                theta_p,
-                *segment_data,
-                fold=folds_enclosing_batches(self.solver),
-            )
+            # An enclosing vmap over parameter points folds into the segment axis,
+            # keeping the solves on one matrix-batch axis.
+            saved, failed, steps = lane_map(one, (None, 0, 0, 0, 0, 0), theta_p, *segment_data)
         else:
             saved, failed, steps = jax.lax.map(lambda seg: one(theta_p, *seg), segment_data)
         saved = jnp.reshape(saved, (plan.n_saved,) + saved.shape[2:])
