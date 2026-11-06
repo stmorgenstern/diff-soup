@@ -53,12 +53,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.custom_derivatives import zero_from_primal
+from jax.custom_derivatives import SymbolicZero, zero_from_primal
 
 from diff_soup.linear import LinearSolver, SparseTopology
 from diff_soup.linear._resolver import BackendResolver
 from diff_soup.nonlinear._kkt import LinearPlan, RouteFactor, linear_route, transposable_solve
 from diff_soup.problem.implicit.linearize import build_linearization_plan
+from diff_soup.utils.lanes import lane_cond
 from diff_soup.utils.placement import default_platform
 
 __all__ = [
@@ -69,6 +70,7 @@ __all__ = [
     "consistent_ic_root",
     "consistent_ic_root_reduced",
     "consistent_initial_state",
+    "initialization_route",
     "reduced_route_eligible",
 ]
 
@@ -102,6 +104,39 @@ def reduced_route_eligible(problem) -> bool:
     d_idx = np.asarray(structure.differential_indices, dtype=np.int64)
     diagonal = np.unique(d_idx * n + d_idx)
     return support.shape == diagonal.shape and bool(np.all(support == diagonal))
+
+
+def initialization_route(problem, route: str = "auto") -> tuple[str, int]:
+    """Resolve the initialization solve's route and the size of its linear system.
+
+    Args:
+        problem: The solver problem.
+        route: ``"auto"`` (the reduced route exactly when the problem is
+            eligible), ``"joint"`` or ``"reduced"``.
+
+    Returns:
+        The route, ``"joint"`` or ``"reduced"``, and its system size: the
+        state count on the joint route, the algebraic count on the reduced one.
+
+    Raises:
+        ValueError: If ``route`` is not one of the three names, or
+            ``"reduced"`` is requested for a problem without a diagonal mass.
+    """
+    if route not in ("joint", "reduced", "auto"):
+        raise ValueError(f"route must be 'joint', 'reduced', or 'auto'; got {route!r}.")
+    if route == "auto":
+        route = "reduced" if reduced_route_eligible(problem) else "joint"
+    elif route == "reduced" and not reduced_route_eligible(problem):
+        raise ValueError(
+            "the reduced initialization route requires a diagonal mass: a "
+            "MassProblem whose deduplicated derivative support is exactly "
+            "one (d, d) entry per differential slot. This problem's "
+            "derivative structure does not satisfy that; use route='joint' "
+            "(or 'auto')."
+        )
+    structure = problem.structure
+    block = int(structure.algebraic_indices.size) if route == "reduced" else int(structure.n)
+    return route, block
 
 
 #: Process-global backend singletons for name-based selection (one KLU / SuperLU /
@@ -158,19 +193,19 @@ def resolve_backend_route(backend, *, plan_mode: str, n_dofs: int):
     memoised process-globally on topology content. An iterative backend
     ([Krylov][diff_soup.linear.Krylov]) resolves to its exact inner backend:
     the initialization's Newton steps and its implicit-function derivative
-    solve with exact inverses. If that backend exposes a bound ``layout.n_dofs``
-    different from the initialization system size, initialization uses Dense
-    at every size and on every platform; the time-stepping backend is unchanged.
+    solve with exact inverses. A backend whose bound ``layout.n_dofs`` differs
+    from the initialization system size resolves as ``"auto"`` does, by size
+    and platform; the time-stepping backend is unchanged.
     """
     if isinstance(backend, LinearSolver):
         from diff_soup.linear._krylov import exact_backend
 
         backend = exact_backend(backend)
         bound_size = getattr(getattr(backend, "layout", None), "n_dofs", None)
-        if bound_size is not None and int(bound_size) != n_dofs:
-            return "dense", None
-        name = backend.backend_name
-        return name, (None if name == "dense" else backend)
+        if bound_size is None or int(bound_size) == n_dofs:
+            name = backend.backend_name
+            return name, (None if name == "dense" else backend)
+        backend = "auto"
     if isinstance(backend, str):
         if backend == "auto" and plan_mode == "dense":
             return "dense", None
@@ -268,11 +303,12 @@ class ConsistentInitPlan:
             problem: The solver problem.
             plan: Optional prebuilt linearization plan for ``problem``.
             tol: Absolute residual 2-norm target for Newton iterations.
-            rtol: Relative final residual gate, scaled by the initial residual
-                2-norm. Positive values also allow eight machine epsilons
-                times the residual scale from componentwise state/slopes
-                rounding. Zero retains the absolute-only gate. Newton still
-                attempts the absolute target first.
+            rtol: Relative part of the final residual gate. A positive value
+                also accepts a residual 2-norm up to ``tol + (rtol + γ) S``,
+                with ``S = ‖|F_y| |y| + |F_ydot| |ydot|‖₂`` at the final
+                iterate and ``γ`` the rounding bound of the longest residual
+                row. Zero keeps the absolute gate only. Newton aims at
+                ``tol`` either way.
             max_iters: Total Newton iteration budget (chord and exact phases
                 together).
             chord_iters: Iteration budget for the frozen-factor (chord)
@@ -334,18 +370,7 @@ class ConsistentInitPlan:
         self.adjoint_dtype = getattr(policy, "adjoint_compute_dtype", None)
         self.structure = structure
 
-        if route not in ("joint", "reduced", "auto"):
-            raise ValueError(f"route must be 'joint', 'reduced', or 'auto'; got {route!r}.")
-        if route == "auto":
-            route = "reduced" if reduced_route_eligible(problem) else "joint"
-        elif route == "reduced" and not reduced_route_eligible(problem):
-            raise ValueError(
-                "the reduced initialization route requires a diagonal mass: a "
-                "MassProblem whose deduplicated derivative support is exactly "
-                "one (d, d) entry per differential slot. This problem's "
-                "derivative structure does not satisfy that; use route='joint' "
-                "(or 'auto')."
-            )
+        route, self.block = initialization_route(problem, route)
         self.route = route
 
         # The joint unknowns are state-aligned: slot s holds y[s] when
@@ -374,6 +399,7 @@ class ConsistentInitPlan:
                 n_dofs=self.n,
             )
 
+        self._scale_terms, self._scale_length = _scale_terms(self)
         self._resolve_linear_route(backend, analysis)
 
     def _build_reduced_maps(self) -> None:
@@ -409,8 +435,8 @@ class ConsistentInitPlan:
         policy. The pattern is analysed on the factor contract when the first
         matrix is factored.
         """
-        block = self.n_a if self.route == "reduced" else self.n
-        if self.route == "reduced" and self.n_a == 0:
+        block = self.block
+        if block == 0:
             # No algebraic unknowns: the reduced route is pure slope
             # reconstruction with no linear system at all.
             self.backend_name = "dense"
@@ -651,27 +677,70 @@ def _k_solver(icp, t, y, ydot, theta, control):
 _CHORD_CONTRACTION_LIMIT = 0.5
 
 
-def _roundoff_gate(icp, t, y, ydot, theta, control):
-    """Eight-epsilon residual scale for componentwise rounding of state/slopes.
+def _scale_terms(icp: ConsistentInitPlan):
+    """The terms of the residual scale on the rows the solve drives to zero.
 
-    Uses ``||abs(F_y) abs(y) + abs(F_ydot) abs(ydot)||2``, restricted to
-    algebraic rows on the reduced route. Sparse plans stay sparse.
+    Returns, for ``F_y`` and (joint route only) ``F_ydot``, the indices of the
+    pattern entries in those rows and their row numbers among them, and the
+    longest such row. The reduced route keeps the algebraic rows and leaves
+    out ``F_ydot``, whose slopes are zero there.
     """
     plan = icp.plan
-    fy = plan.fy_values(t, y, ydot, theta, control)
-    fd = plan.fydot_values(t, y, ydot, theta, control)
-    if plan.mode == "dense":
-        scale = jnp.abs(fy) @ jnp.abs(y) + jnp.abs(fd) @ jnp.abs(ydot)
-    else:
-        scale = jnp.zeros_like(y)
-        for values, topology, state in ((fy, plan.fy_topology, y), (fd, plan.fydot_topology, ydot)):
-            scale = scale.at[topology.rows].add(jnp.abs(values) * jnp.abs(state[topology.cols]))
-    if icp.route == "reduced":
-        scale = scale[icp.a_idx]
-    return 8 * jnp.finfo(y.dtype).eps * jnp.linalg.norm(scale)
+    n_rows = icp.n_a if icp.route == "reduced" else icp.n
+    row_of = np.full(icp.n, -1, dtype=np.int64)
+    row_of[np.asarray(icp.a_idx) if icp.route == "reduced" else np.arange(icp.n)] = np.arange(
+        n_rows
+    )
+    blocks = (("fy", plan.fy_topology),)
+    if icp.route == "joint":
+        blocks += (("fydot", plan.fydot_topology),)
+    terms, length = [], np.zeros(n_rows, dtype=np.int64)
+    for name, topology in blocks:
+        rows = row_of[np.asarray(topology.rows)] if plan.mode == "sparse" else None
+        if rows is None:
+            length += icp.n
+            terms.append((name, None, None))
+            continue
+        keep = np.flatnonzero(rows >= 0)
+        np.add.at(length, rows[keep], 1)
+        terms.append((name, keep, rows[keep]))
+    return terms, int(length.max(initial=0))
 
 
-def _phased_newton(icp: ConsistentInitPlan, z0, residual_at, make_solver, roundoff_at):
+def _residual_scale(icp: ConsistentInitPlan, t, y, ydot, theta, control):
+    """``‖|F_y| |y| + |F_ydot| |ydot|‖₂`` over the rows the solve drives to zero.
+
+    The size of the residual's own terms at the iterate, the scale of the
+    relative gate. The reduced route evaluates the algebraic rows of ``F_y``
+    only. Sparse plans stay sparse.
+    """
+    plan = icp.plan
+    rows = jnp.asarray(icp.a_idx) if icp.route == "reduced" else slice(None)
+    scale = jnp.zeros(icp.n_a if icp.route == "reduced" else icp.n, dtype=y.dtype)
+    for name, keep, row in icp._scale_terms:
+        values = getattr(plan, f"{name}_values")(t, y, ydot, theta, control)
+        state = y if name == "fy" else ydot
+        if keep is None:
+            scale = scale + jnp.abs(values[rows]) @ jnp.abs(state)
+            continue
+        cols = getattr(plan, f"{name}_topology").cols[keep]
+        scale = scale.at[row].add(jnp.abs(values[keep]) * jnp.abs(state[cols]))
+    return jnp.linalg.norm(scale)
+
+
+def _rounding_bound(length: int, dtype) -> float:
+    """``γ_m = m u / (1 - m u)``, the relative rounding bound of an ``m``-term sum.
+
+    Evaluating ``Σ_j a_j x_j`` in floating point errs by at most
+    ``γ_m Σ_j |a_j| |x_j|`` (Higham, Accuracy and Stability of Numerical
+    Algorithms, 2nd ed., 2002, eq. 3.5), so a residual row with ``m``
+    structural terms cannot be driven below ``γ_m`` times its scale.
+    """
+    unit = float(np.finfo(dtype).eps) / 2.0
+    return length * unit / (1.0 - length * unit)
+
+
+def _phased_newton(icp: ConsistentInitPlan, z0, residual_at, make_solver, scale_at):
     """Chord phase over one frozen factor, then fresh-Jacobian exact Newton.
 
     The chord phase factors the iteration matrix once at the seed and reuses
@@ -744,15 +813,16 @@ def _phased_newton(icp: ConsistentInitPlan, z0, residual_at, make_solver, roundo
         (norm0 > icp.tol) & jnp.isfinite(norm0), solve_phases, already_done, None
     )
     norm = jnp.linalg.norm(r)
-    # Preserve the absolute Newton target and its returned digits. Only the
-    # final gate admits relative residuals and componentwise round-off, after
-    # the absolute solve has been tried. An explicit rtol=0 keeps it strict.
-    roundoff = (
-        jax.lax.cond(norm > icp.tol, roundoff_at, lambda _: jnp.zeros_like(norm), z)
-        if icp.rtol > 0.0
-        else jnp.zeros_like(norm)
-    )
-    gate = icp.tol + icp.rtol * norm0 + roundoff
+    # Newton aims at the absolute target; only the final gate admits the
+    # relative part, scaled by the residual's own terms at the final iterate
+    # and evaluated only where the absolute target was missed.
+    if icp.rtol > 0.0:
+        scale = lane_cond(
+            norm > icp.tol, scale_at, lambda _: jnp.zeros_like(norm), z, false_is_free=True
+        )
+        gate = icp.tol + (icp.rtol + _rounding_bound(icp._scale_length, norm.dtype)) * scale
+    else:
+        gate = jnp.asarray(icp.tol, norm.dtype)
     converged = (norm <= gate) & jnp.isfinite(norm) & jnp.isfinite(norm0) & jnp.isfinite(gate)
     return z, norm, iterations, converged
 
@@ -782,11 +852,12 @@ def _newton_primal(icp: ConsistentInitPlan, t0, y0, ydot_guess, theta, control):
         y, ydot = _embed(icp, y0, z)
         return _k_solver(icp, t0, y, ydot, theta, control)
 
-    def roundoff_at(z):
+    def scale_at(z):
+        """The relative gate's scale at the embedded joint iterate."""
         y, ydot = _embed(icp, y0, z)
-        return _roundoff_gate(icp, t0, y, ydot, theta, control)
+        return _residual_scale(icp, t0, y, ydot, theta, control)
 
-    z, norm, iterations, converged = _phased_newton(icp, z0, residual_at, make_solver, roundoff_at)
+    z, norm, iterations, converged = _phased_newton(icp, z0, residual_at, make_solver, scale_at)
     y_star, ydot_star = _embed(icp, y0, z)
     return y_star, ydot_star, norm, iterations, converged
 
@@ -801,6 +872,19 @@ def _pinned_residual_fn(icp: ConsistentInitPlan, t0, y_star, ydot_star):
         return icp.plan._residual(t0, y, ydot_star, theta_in, control_in)
 
     return pinned_residual
+
+
+def _instantiated(tangents):
+    """``tangents`` with every symbolic zero replaced by an array of zeros."""
+
+    def fill(t):
+        if not isinstance(t, SymbolicZero):
+            return t
+        if t.dtype == jax.dtypes.float0:
+            return np.zeros(t.shape, dtype=jax.dtypes.float0)
+        return jnp.zeros(t.shape, t.dtype)
+
+    return jax.tree_util.tree_map(fill, tangents, is_leaf=lambda x: isinstance(x, SymbolicZero))
 
 
 def _zero_cotangent(x):
@@ -825,11 +909,13 @@ def consistent_ic_root(icp, t0, y0, ydot_guess, theta, control):
     return _newton_primal(icp, t0, y0, ydot_guess, theta, control)
 
 
-@consistent_ic_root.defjvp
+@functools.partial(consistent_ic_root.defjvp, symbolic_zeros=True)
 def _consistent_ic_root_jvp(icp, primals, tangents):
     """Tangent: exact implicit solve in the joint unknowns at the root."""
     t0, y0, ydot_guess, theta, control = primals
     dt0, dy0, _dydot_guess, dtheta, dcontrol = tangents
+    fixed_time = isinstance(dt0, SymbolicZero)
+    dt0, dy0, dtheta, dcontrol = _instantiated((dt0, dy0, dtheta, dcontrol))
     # The primal through the entry itself: differentiating this rule again
     # differentiates the root by this rule, never through the Newton loop.
     out = consistent_ic_root(icp, t0, y0, ydot_guess, theta, control)
@@ -842,12 +928,13 @@ def _consistent_ic_root_jvp(icp, primals, tangents):
     dy0_pinned = _zero_where_not(valid, jnp.where(diff_mask, dy0, 0.0))
     dtheta, dcontrol = _zero_where_not(valid, (dtheta, dcontrol))
     _, rhs_dot = jax.jvp(pinned_residual, (y0, theta, control), (dy0_pinned, dtheta, dcontrol))
-    _, time_dot = jax.jvp(
-        lambda t: icp.plan._residual(t, y_star, ydot_star, theta, control),
-        (t0,),
-        (_zero_where_not(valid, dt0),),
-    )
-    rhs_dot = rhs_dot + time_dot
+    if not fixed_time:
+        _, time_dot = jax.jvp(
+            lambda t: icp.plan._residual(t, y_star, ydot_star, theta, control),
+            (t0,),
+            (_zero_where_not(valid, dt0),),
+        )
+        rhs_dot = rhs_dot + time_dot
     dz = _gated_root_tangent(icp, values, icp.n, rhs_dot, valid)
 
     dy = jnp.where(diff_mask, dy0, dz)
@@ -944,11 +1031,12 @@ def _reduced_newton_primal(icp: ConsistentInitPlan, t0, y0, theta, control):
         y = y0.at[a_idx].set(z, unique_indices=True, indices_are_sorted=True)
         return _g_solver(icp, t0, y, theta, control)
 
-    def roundoff_at(z):
+    def scale_at(z):
+        """The relative gate's scale at the embedded algebraic iterate."""
         y = y0.at[a_idx].set(z, unique_indices=True, indices_are_sorted=True)
-        return _roundoff_gate(icp, t0, y, zeros, theta, control)
+        return _residual_scale(icp, t0, y, zeros, theta, control)
 
-    z, _norm, iterations, converged = _phased_newton(icp, z0, residual_at, make_solver, roundoff_at)
+    z, _norm, iterations, converged = _phased_newton(icp, z0, residual_at, make_solver, scale_at)
     y_star = y0.at[a_idx].set(z, unique_indices=True, indices_are_sorted=True)
     return y_star, iterations, converged
 
@@ -979,11 +1067,13 @@ def _reduced_ic_root(icp, t0, y0, theta, control):
     return _reduced_newton_primal(icp, t0, y0, theta, control)
 
 
-@_reduced_ic_root.defjvp
+@functools.partial(_reduced_ic_root.defjvp, symbolic_zeros=True)
 def _reduced_ic_root_jvp(icp, primals, tangents):
     """Tangent: exact implicit solve on the algebraic block at the root."""
     t0, y0, theta, control = primals
     dt0, dy0, dtheta, dcontrol = tangents
+    fixed_time = isinstance(dt0, SymbolicZero)
+    dt0, dy0, dtheta, dcontrol = _instantiated((dt0, dy0, dtheta, dcontrol))
     # The primal through the entry itself, as in the joint rule.
     out = _reduced_ic_root(icp, t0, y0, theta, control)
     y_star, iterations, converged = out
@@ -996,12 +1086,13 @@ def _reduced_ic_root_jvp(icp, primals, tangents):
     dy0_pinned = _zero_where_not(valid, jnp.where(diff_mask, dy0, 0.0))
     dtheta, dcontrol = _zero_where_not(valid, (dtheta, dcontrol))
     _, rhs_dot = jax.jvp(pinned_residual, (y0, theta, control), (dy0_pinned, dtheta, dcontrol))
-    _, time_dot = jax.jvp(
-        lambda t: icp.plan._residual(t, y_star, jnp.zeros_like(y_star), theta, control)[a_idx],
-        (t0,),
-        (_zero_where_not(valid, dt0),),
-    )
-    rhs_dot = rhs_dot + time_dot
+    if not fixed_time:
+        _, time_dot = jax.jvp(
+            lambda t: icp.plan._residual(t, y_star, jnp.zeros_like(y_star), theta, control)[a_idx],
+            (t0,),
+            (_zero_where_not(valid, dt0),),
+        )
+        rhs_dot = rhs_dot + time_dot
     dz = _gated_root_tangent(icp, values, icp.n_a, rhs_dot, valid)
 
     dz_full = jnp.zeros_like(y_star).at[a_idx].set(dz, unique_indices=True, indices_are_sorted=True)
@@ -1114,9 +1205,11 @@ def consistent_initial_state(
         plan: A prebuilt linearization plan, or `None` to build one.
         init_plan: A prebuilt `ConsistentInitPlan`, which overrides every setting below it.
         tol: The residual 2-norm at which Newton's method stops.
-        rtol: Relative final gate scaled by the initial residual 2-norm, after
-            attempting the absolute target. Positive values also enable the
-            state/slopes round-off allowance; zero keeps the absolute-only gate.
+        rtol: Relative part of the final gate: a positive value also accepts a
+            residual 2-norm up to ``tol + (rtol + γ) S``, with
+            ``S = ‖|F_y| |y| + |F_ydot| |ydot|‖₂`` at the final iterate and ``γ``
+            the rounding bound of the longest residual row. Zero keeps the
+            absolute gate only.
         max_iters: The total Newton iteration budget.
         chord_iters: The first iterations, which reuse one factorization before each later
             iteration refactors.
@@ -1208,9 +1301,11 @@ def check_consistent_init(
         plan: A prebuilt linearization plan, or `None` to build one.
         init_plan: A prebuilt `ConsistentInitPlan`, which overrides every setting below it.
         tol: The residual 2-norm at which Newton's method stops.
-        rtol: Relative final gate scaled by the initial residual 2-norm, after
-            attempting the absolute target. Positive values also enable the
-            state/slopes round-off allowance; zero keeps the absolute-only gate.
+        rtol: Relative part of the final gate: a positive value also accepts a
+            residual 2-norm up to ``tol + (rtol + γ) S``, with
+            ``S = ‖|F_y| |y| + |F_ydot| |ydot|‖₂`` at the final iterate and ``γ``
+            the rounding bound of the longest residual row. Zero keeps the
+            absolute gate only.
         max_iters: The total Newton iteration budget.
 
     Returns:

@@ -1,22 +1,22 @@
 {
   "budgets": {
     "test_files": 49,
-    "test_functions": 450,
-    "collected_tests": 705,
-    "source_lines": 16094
+    "test_functions": 454,
+    "collected_tests": 709,
+    "source_lines": 16241
   },
   "tier_budgets": {
     "public_api": {
       "files": 21,
-      "functions": 197,
-      "collected": 319,
-      "lines": 6365
+      "functions": 198,
+      "collected": 320,
+      "lines": 6403
     },
     "contracts": {
       "files": 20,
-      "functions": 193,
-      "collected": 313,
-      "lines": 6247
+      "functions": 196,
+      "collected": 316,
+      "lines": 6355
     },
     "performance_contracts": {
       "files": 2,
@@ -310,7 +310,7 @@
     },
     {
       "file": "tests/contracts/test_lane_select.py",
-      "feature": "Lane selects: the taken operand unbatched, the per-lane choice under vmap and nested vmap, its tangent and transpose"
+      "feature": "Lane selects and the lane conditional: the taken operand unbatched, the per-lane choice under vmap and nested vmap, its tangent and transpose; one conditional unbatched with each branch traced once, each lane's own branch under vmap, derivatives that follow it"
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",
