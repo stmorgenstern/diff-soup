@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 44,
-    "test_functions": 401,
-    "collected_tests": 609,
-    "source_lines": 14549
+    "test_functions": 405,
+    "collected_tests": 613,
+    "source_lines": 14704
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
-      "functions": 178,
-      "collected": 282,
-      "lines": 5722
+      "functions": 182,
+      "collected": 286,
+      "lines": 5877
     },
     "contracts": {
       "files": 18,
@@ -212,7 +212,7 @@
     },
     {
       "file": "tests/public_api/test_adjoints.py",
-      "feature": "Adjoints: gradients, jvp, checkpointing, second order through solves and events, a differential global and a projected DAE event time, forward and checkpoint adjoint parity"
+      "feature": "Adjoints: gradients, jvp, checkpointing, second order through solves and events, a differential global and a projected DAE event time, forward and checkpoint adjoint parity, a scheduled solve's tangent in a segment duration, an event condition differentiated through the parameters it reads"
     },
     {
       "file": "tests/public_api/test_operators.py",

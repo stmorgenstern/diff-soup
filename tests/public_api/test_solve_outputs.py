@@ -434,6 +434,38 @@ def test_schedules_and_segments_are_value_types_that_validate_their_entries():
         ds.Schedule([held, "hold"])
 
 
+def test_a_schedule_step_budget_bounds_each_segment_and_not_the_schedule():
+    """``max_steps`` of solve_schedule is each segment's budget: two current holds whose
+    attempts add up to one more than the budget both run to success, and a budget of one
+    attempt stops the first hold with MAX_STEPS before the second runs."""
+    problem = operational_cell().build()
+    holds = ds.schedule_arrays(
+        ds.Schedule([ds.Segment(current=0.5, duration=0.3), ds.Segment(current=1.5, duration=0.4)]),
+        problem.operational_modes(),
+    )
+
+    def solve(**keywords):
+        return ds.solve_schedule(
+            problem,
+            ds.JIDA(linear="dense", **_RESISTANCE),
+            holds,
+            jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))]),
+            t0=0.0,
+            t_end=0.7,
+            times=jnp.asarray([0.5, 0.7]),
+            **keywords,
+        )
+
+    attempts = int(solve()[0].stats.trial_steps)
+    within, _ = solve(max_steps=attempts - 1)
+    capped, ends = solve(max_steps=1)
+    assert (
+        bool(within.ok)
+        and capped.result == ds.RESULT.MAX_STEPS
+        and np.asarray(ends.ran).tolist() == [True, False]
+    )
+
+
 def _van_der_pol():
     return ds.MassProblem(
         rhs=lambda t, y, theta, control: jnp.stack(

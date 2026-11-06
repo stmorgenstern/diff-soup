@@ -185,6 +185,41 @@ def test_a_family_solve_on_a_member_block_backend_initializes_consistently():
     np.testing.assert_allclose(np.concatenate(got), np.concatenate(expected), rtol=_MEMBER_BOUND)
 
 
+#: ``y' = -y`` and ``0 = 3 z - y``.
+_THIRDS = ds.MassProblem(
+    rhs=lambda t, y, theta, control: jnp.stack([-y[0], 3.0 * y[1] - y[0]]),
+    mass=ds.MassOperator.sparse(
+        [0], [0], lambda t, y, theta, control: jnp.ones((1,), y.dtype), n=2, dependencies=_CONSTANT
+    ),
+    structure=ds.DAEStructure(differential_vars=np.array([True, False])),
+)
+#: A start ``y`` near 2e8 whose nearest floats ``z`` to ``y/3`` all leave ``3 z - y`` at 7.5e-9,
+#: the residual initialization ends with (measured, workstation 2026-11-05).
+_FLOOR_Y = 195046369.6325935
+#: Requested tolerances (not asserted bounds): ``atol`` far below the residual floor.
+_FLOOR_TOLERANCES = {"rtol": 1e-8, "atol": 1e-12}
+
+
+def test_a_start_at_the_rounding_floor_of_large_values_passes_the_relative_gate():
+    """``y' = -y``, ``0 = 3 z - y`` from ``y = 1.95e8``, ``z = y/3`` holds an algebraic residual
+    of 7.5e-9 that no float ``z`` lowers, far above ``atol = 1e-12``: initialization's relative
+    gate, whose round-off term scales with ``|F_y| |y|``, accepts the start, and the
+    absolute-only gate of ``ic_rtol=0`` refuses it with INCONSISTENT_IC."""
+
+    def solve(ic_rtol):
+        return ds.pdesolve(
+            _THIRDS,
+            ds.JIDA(linear="dense", **_FLOOR_TOLERANCES),
+            (0.0, 0.01),
+            jnp.asarray([_FLOOR_Y, _FLOOR_Y / 3.0]),
+            tolerances=ds.ToleranceSpec(**_FLOOR_TOLERANCES, ic_rtol=ic_rtol),
+            saveat=ds.SaveAt(t1=True),
+        )
+
+    accepted, refused = solve(None), solve(0.0)
+    assert bool(accepted.ok) and refused.result == ds.RESULT.INCONSISTENT_IC
+
+
 def _quadratic():
     """``x0' = -x0`` and the algebraic row ``0 = x1^2 - 4``."""
     return ds.MassProblem(
