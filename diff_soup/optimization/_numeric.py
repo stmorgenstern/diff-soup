@@ -213,6 +213,8 @@ class OptimizationProblem(eqx.Module):
     ) -> OptimizationProblem:
         """This problem under `constraints`, lowered to closures with AD Jacobians and Lagrangian Hessians.
 
+        The Lagrangian Hessians follow the problem's `hessian_composition`.
+
         Args:
             constraints: The [Constraints][diff_soup.optimization.Constraints], or `None` for this problem unchanged.
             unflatten: The map from the flat vector to the view the constraint functions take; the flat vector itself when `None`.
@@ -229,14 +231,22 @@ class OptimizationProblem(eqx.Module):
         if "value_gradient" not in self.structure:
             raise _missing(self, "value_gradient", "with_constraints")
         # The constraint rows are differentiated twice alone; the objective's Hessian is its own
-        # exact one, or forward over reverse of its value.
-        lowered = constraints.lower(None, _derived.identity if unflatten is None else unflatten)
+        # exact one, or that of its value in the problem's composition (`None` is the default).
+        composition = (
+            "forward-over-forward"
+            if self.hessian_composition == "forward-over-forward"
+            else "forward-over-reverse"
+        )
+        lowered = constraints.lower(
+            None, _derived.identity if unflatten is None else unflatten, composition=composition
+        )
         if "hessian" in self.structure:
             objective_hessian = self._value_gradient_hessian
             objective_product = self._hessian_vector
         else:
-            objective_hessian = Derived(_derived.value_gradient_hessian, self._value)
-            objective_product = Derived(_derived.hessian_vector, self._value)
+            _, hessian_rule, product_rule = _derived.objective_rules(composition)
+            objective_hessian = Derived(hessian_rule, self._value)
+            objective_product = Derived(product_rule, self._value)
         keys = {"constraint_jacobian", "lagrangian_hessian", "constraint_hessian"}
         if constraints.n_equality or constraints.n_inequality:
             keys.add("constraints")
@@ -381,10 +391,12 @@ class OptimizationProblem(eqx.Module):
         unflatten: Callable | None = None,
         static: Any = None,
         hessian: bool = False,
+        hessian_composition: str = "forward-over-reverse",
     ) -> OptimizationProblem:
         """Pose a problem from a scalar objective of a 1-D array.
 
-        The gradient comes from reverse-mode autodiff, and every function is compiled with
+        The gradient comes from reverse-mode autodiff, or forward mode under
+        `hessian_composition="forward-over-forward"`, and every function is compiled with
         `jax.jit`.
 
         Args:
@@ -396,6 +408,7 @@ class OptimizationProblem(eqx.Module):
             unflatten: A function rebuilding the fitted model's arrays from `x`, used with `static`.
             static: The static part of the fitted model, combined with `unflatten(x)`.
             hessian: If `True`, also provide the exact Hessian by autodiff.
+            hessian_composition: `"forward-over-reverse"` takes the Hessians in forward mode over a reverse-mode gradient. `"forward-over-forward"` takes the gradient in forward mode too, at the cost of `n` forward passes: choose it when `value` runs an inner solve that supports forward mode only, such as a DAE solve under a forward-only adjoint.
 
         Returns:
             An `OptimizationProblem` with the `"value_gradient"` structure, and `"hessian"` when requested.
@@ -403,6 +416,8 @@ class OptimizationProblem(eqx.Module):
         x0 = _derived.as_vector(x0)
         value = ignoring_args(value)
         jit = _derived.jit
+        gradient_rule, hessian_rule, product_rule = _derived.objective_rules(hessian_composition)
+        forward = hessian_composition == "forward-over-forward"
         structure = {"value_gradient", "hessian"} if hessian else {"value_gradient"}
         return cls(
             x0=x0,
@@ -411,14 +426,13 @@ class OptimizationProblem(eqx.Module):
             _static=static,
             bounds=_derived.as_bounds(bounds, x0),
             _regularization=regularization,
-            ad="reverse",
-            hessian_composition="forward-over-reverse" if hessian else None,
+            ad="forward" if forward else "reverse",
+            # Recorded for `with_constraints` even without a Hessian, unless it is the default.
+            hessian_composition=hessian_composition if hessian or forward else None,
             _value=jit(value),
-            _value_and_gradient=jit(Derived(_derived.value_and_gradient, value)),
-            _value_gradient_hessian=(
-                jit(Derived(_derived.value_gradient_hessian, value)) if hessian else None
-            ),
-            _hessian_vector=jit(Derived(_derived.hessian_vector, value)) if hessian else None,
+            _value_and_gradient=jit(Derived(gradient_rule, value)),
+            _value_gradient_hessian=jit(Derived(hessian_rule, value)) if hessian else None,
+            _hessian_vector=jit(Derived(product_rule, value)) if hessian else None,
             _is_valid=jit(ignoring_args(is_valid)),
         )
 

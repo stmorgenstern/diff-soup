@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
-from typing import Any
 
 import equinox as eqx
 import jax
@@ -64,7 +63,11 @@ class ActiveSet(eqx.Module):
 
 
 def active_set(
-    x: Any, record: SolveRecord, bounds: Bounds, jac_eq: Any = None, jac_ineq: Any = None
+    x: Float[Array, "n"],
+    record: SolveRecord,
+    bounds: Bounds,
+    jac_eq: Float[Array, "n_eq n"] | None = None,
+    jac_ineq: Float[Array, "n_ineq n"] | None = None,
 ) -> ActiveSet:
     """Read the active set from the record's multipliers and slacks.
 
@@ -95,13 +98,25 @@ def active_set(
     return ActiveSet(inequality, lower, upper, degenerate)
 
 
-def _lagrangian_gradient(closures: Closures, x, lam_e, lam_i, args):
+def _lagrangian_gradient(
+    closures: Closures,
+    x: Float[Array, "n"],
+    lam_e: Float[Array, "n_eq"],
+    lam_i: Float[Array, "n_ineq"],
+    args: PyTree,
+) -> Float[Array, "n"]:
     """`grad_x (f + lam_e . c_E + lam_i . c_I)`."""
     _, gradient, _, _, jac_eq, jac_ineq = closures.evaluate_with_derivatives(x, args)
     return gradient + jac_eq.T @ lam_e + jac_ineq.T @ lam_i
 
 
-def _hessian(closures: Closures, x, lam_e, lam_i, args):
+def _hessian(
+    closures: Closures,
+    x: Float[Array, "n"],
+    lam_e: Float[Array, "n_eq"],
+    lam_i: Float[Array, "n_ineq"],
+    args: PyTree,
+) -> Float[Array, "n n"]:
     """The exact Lagrangian Hessian: the problem's closure, or forward over its gradient."""
     if closures.lagrangian_hessian is not None:
         return closures.lagrangian_hessian(x, lam_e, lam_i, args)
@@ -204,12 +219,12 @@ def kkt_tangent(
     return dx, tangent, solved
 
 
-def _zero(leaf: Any) -> Any:
+def _zero(leaf: Array) -> ArrayLike:
     """The zero tangent of a gradient-dead leaf (`float0` for an integer or bool)."""
     return zero_from_primal(leaf, symbolic_zeros=False)
 
 
-def _poison(tree: Any, valid: Any) -> Any:
+def _poison(tree: PyTree, valid: Bool[Array, ""]) -> PyTree:
     """NaN in every inexact leaf of `tree` where `valid` is false."""
 
     def gate(leaf):
@@ -220,7 +235,7 @@ def _poison(tree: Any, valid: Any) -> Any:
     return jax.tree.map(gate, tree)
 
 
-def _zero_where_not(keep: Any, tree: Any) -> Any:
+def _zero_where_not(keep: Bool[Array, ""], tree: PyTree) -> PyTree:
     """Exact zeros in every inexact leaf of `tree` where `keep` is false."""
 
     def gate(leaf):

@@ -293,9 +293,9 @@ def _locate_crossing(
     the previous always-on cost — never worse.
 
     Args:
-        cond_fn: The event condition ``(t, y, args, *, control, **kw) -> real``.
-            Called with ``args=None`` here (the in-loop ``lam`` is folded into
-            the interpolated state by the caller when needed).
+        cond_fn: The event condition ``(t, y, args, *, control, **kw) -> real``,
+            called with ``args`` as its third argument (the caller folds the
+            in-loop ``lam`` into the interpolated state when needed).
         interp_fn: One-step state interpolant ``t -> y`` over ``[t_lo, t_hi]``.
         root_finder: A [Bisection][diff_soup.timestepping.events.Bisection] (or any object with a
             ``solve(fn, lo, hi)`` method).

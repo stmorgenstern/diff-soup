@@ -24,6 +24,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `ds.jacobian_pattern(fn, y, *args, within=None)`, the entries of a Jacobian that can be nonzero, read from the function's tangent map without evaluating it. Rules cover loops, branches, gathers and scatters at known indices, cumulative sums, convolutions and linear solves; an operation without one falls back to every entry with a warning, bounded by `within`. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - `ds.topology_report` adds `pullback_count`, and its `color_count` is now the solver's own: the colors of the rows the solver colors, with the rows it holds out recovered by pullback. Previously it colored the whole pattern.
 - `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.
+- Added `hessian_composition=` to `OptimizationProblem.from_value` and `LeastSquaresProblem.from_residual`. Under `"forward-over-forward"` the gradient, the Hessians and the Lagrangian Hessians `with_constraints` adds are all forward mode, so `InteriorPoint`, `SQP`, `AugmentedLagrangian` and their implicit derivative take an objective whose inner solve supports forward mode only, such as a DAE solve under `ForwardAdjoint`. The default, `"forward-over-reverse"`, is unchanged.
 
 ### Bugfixes
 
@@ -35,6 +36,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Fixed a MAP fit of a joint problem, which read every shared parameter's prior from one handle. Each occurrence now takes its prior from the declarations of the experiments behind it, and a MAP refuses an occurrence whose schema records none.
 - A `KLU`, `SuperLU` or `CuDSS` factor lowered into a program over several devices of one process now raises `FactorContractError`. Previously XLA failed with an internal error, or, in a `shard_map` body, the devices shared one native factor.
 - Complex values on an analysis declared `spd=True`, and on a `CuDSS` analysis with `downcast_factors` or `emulation_mantissa_bits`, now raise `FactorContractError`. Previously cuDSS factored them as a real symmetric positive definite matrix, or ignored the option.
+- Fixed `SuperLU` on more than one thread, which returned a wrong solution for a few factors in a hundred with a success status. Its factors on any number of threads now equal one thread's, bit for bit; the build patches SuperLU_MT 4.0.2 (`diff_soup/_internal/superlu_ffi/patches/`).
 
 ### Performance
 

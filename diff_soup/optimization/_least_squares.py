@@ -79,6 +79,7 @@ class LeastSquaresProblem(OptimizationProblem):
         static: Any = None,
         segment_fns: tuple[Callable, ...] = (),
         hessian: bool = True,
+        hessian_composition: str = "forward-over-reverse",
     ) -> LeastSquaresProblem:
         """Pose a least-squares problem from a residual function of a 1-D array.
 
@@ -97,6 +98,7 @@ class LeastSquaresProblem(OptimizationProblem):
             static: The static part of the fitted model, combined with `unflatten(x)`.
             segment_fns: Residual functions whose outputs concatenate to `residual(x)`, with `()` meaning `(residual,)`.
             hessian: If `True`, also provide the exact Hessian of the objective by autodiff.
+            hessian_composition: `"forward-over-reverse"` takes the Hessians in forward mode over a reverse-mode gradient. `"forward-over-forward"` takes them over a forward-mode gradient, at the cost of `n` forward passes per gradient: choose it when `residual` runs an inner solve that supports forward mode only, such as a DAE solve under a forward-only adjoint.
 
         Returns:
             A `LeastSquaresProblem`.
@@ -118,6 +120,8 @@ class LeastSquaresProblem(OptimizationProblem):
         residual = closure(residual)
         residual_and_jacobian = Derived(_derived.residual_and_jacobian, residual, closure(jacobian))
         value = Derived(_derived.half_squared, residual)
+        _, hessian_rule, product_rule = _derived.objective_rules(hessian_composition)
+        forward = hessian_composition == "forward-over-forward"
         structure = {"value_gradient", "residual_jacobian", "gauss_newton"}
         if hessian:
             structure.add("hessian")
@@ -130,13 +134,12 @@ class LeastSquaresProblem(OptimizationProblem):
             bounds=_derived.as_bounds(bounds, x0),
             _regularization=regularization,
             ad="forward",
-            hessian_composition="forward-over-reverse" if hessian else None,
+            # Recorded for `with_constraints` even without a Hessian, unless it is the default.
+            hessian_composition=hessian_composition if hessian or forward else None,
             _value=jit(value),
             _value_and_gradient=jit(Derived(_derived.gradient, residual_and_jacobian)),
-            _value_gradient_hessian=(
-                jit(Derived(_derived.value_gradient_hessian, value)) if hessian else None
-            ),
-            _hessian_vector=jit(Derived(_derived.hessian_vector, value)) if hessian else None,
+            _value_gradient_hessian=jit(Derived(hessian_rule, value)) if hessian else None,
+            _hessian_vector=jit(Derived(product_rule, value)) if hessian else None,
             _gauss_newton=jit(Derived(_derived.gauss_newton, residual_and_jacobian)),
             _is_valid=jit(closure(is_valid)),
             _residual=jit(residual),

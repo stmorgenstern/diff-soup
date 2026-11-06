@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup.utils.lanes import lane_where
+from diff_soup.utils.lanes import _lane_where as lane_where
 
 _N = 12
 _KNOWN = jnp.eye(_N) * 2.0 + jnp.diag(jnp.ones(_N - 1), 1)

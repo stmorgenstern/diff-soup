@@ -239,7 +239,9 @@ class SuperLU(LinearSolver):
     """SuperLU_MT, a threaded sparse direct solver on the CPU.
 
     It factors float64 and complex128 matrices. `linear="superlu"` selects it with default
-    settings, and `"auto"` never picks it. It needs a source build with SuperLU_MT.
+    settings, and `"auto"` never picks it. It needs a source build with SuperLU_MT, patched by
+    `build_superlu_mt.sh` so that its factors on any number of threads equal one thread's, bit
+    for bit.
 
     Args:
         ordering: The fill-reducing column ordering, `"colamd"` (default), `"mmd_ata"`,

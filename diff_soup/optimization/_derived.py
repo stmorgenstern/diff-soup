@@ -143,6 +143,46 @@ def hessian_vector(value: Callable, x: Any, v: Any, args: Any) -> Any:
     return jax.jvp(lambda y: jax.grad(value)(y, args), (x,), (v,))[1]
 
 
+def forward_value_and_gradient(value: Callable, x: Any, args: Any) -> tuple[Any, Any]:
+    """The value and its gradient, forward mode."""
+    return jax.jacfwd(lambda y: (value(y, args),) * 2, has_aux=True)(x)[::-1]
+
+
+def forward_value_gradient_hessian(value: Callable, x: Any, args: Any) -> tuple[Any, Any, Any]:
+    """The value, its gradient, and its Hessian forward over forward."""
+
+    def gradient(y):
+        cost, slope = forward_value_and_gradient(value, y, args)
+        return slope, (cost, slope)
+
+    hessian, (cost, slope) = jax.jacfwd(gradient, has_aux=True)(x)
+    return cost, slope, hessian
+
+
+def forward_hessian_vector(value: Callable, x: Any, v: Any, args: Any) -> Any:
+    """The Hessian of the value times `v`, forward over forward."""
+    return jax.jvp(lambda y: forward_value_and_gradient(value, y, args)[1], (x,), (v,))[1]
+
+
+def objective_rules(composition: str) -> tuple[Callable, Callable, Callable]:
+    """The rules `(value_and_gradient, value_gradient_hessian, hessian_vector)` of `composition`.
+
+    `"forward-over-reverse"` takes forward mode over a reverse-mode gradient, and
+    `"forward-over-forward"` over a forward-mode one.
+
+    Raises:
+        ConfigurationError: If `composition` is neither.
+    """
+    if composition not in ("forward-over-reverse", "forward-over-forward"):
+        raise ConfigurationError(
+            "hessian_composition must be 'forward-over-reverse' or 'forward-over-forward'; "
+            f"got {composition!r}."
+        )
+    if composition == "forward-over-forward":
+        return forward_value_and_gradient, forward_value_gradient_hessian, forward_hessian_vector
+    return value_and_gradient, value_gradient_hessian, hessian_vector
+
+
 def half_sum_of_squares(r: Any) -> Any:
     """`0.5 * sum(r**2)`, the least-squares value of the residual `r`."""
     return 0.5 * jnp.sum(r * r)
