@@ -195,11 +195,11 @@ problem = _sys.modules["diff_soup.problem"]
 # __all__ — the curated public surface
 # ---------------------------------------------------------------------------
 
-# ``inference`` and ``learnables`` are resolved on first access by the module
+# ``optimization`` and ``learnables`` are resolved on first access by the module
 # ``__getattr__`` below; every other name is bound when ``diff_soup`` imports.
 __all__ = [
     "distributed",
-    "inference",
+    "optimization",
     "problem",
     "global_mesh",
     "mesh_groups",
