@@ -28,10 +28,15 @@ transposes to one lane map of each lane's ``jax.vjp``, which folds an enclosing
 batch into its lanes as the forward map does, and an argument every lane shares
 takes the sum of its lanes' cotangents. A lane's ``jax.vjp`` differentiates the
 kernel in reverse mode, so ``jax.grad`` of a fold whose kernel solves under
-``CheckpointAdjoint`` is defined; the forward derivative of that transpose (second
-order through a reverse sweep) is not yet, which
-[folds_enclosing_batches][diff_soup.inference.fitting._lane_map.folds_enclosing_batches]
-accounts for.
+``CheckpointAdjoint`` (a ``custom_vjp``) is defined.
+
+Second order through a reverse sweep (``jax.jacfwd`` of ``jax.grad``, a Laplace
+approximation) composes as well. The transpose is itself a lane map, whose forward
+derivative pushes each lane's ``jax.vjp`` forward. The forward pass of the reverse
+derivative runs the primal map, and an enclosing ``jax.jvp`` differentiates that map
+through its kernel's linearization, as JAX differentiates a ``custom_vjp`` inside a
+``vjp``: the ``custom_vjp``'s forward rule is differentiated as ordinary code, and the
+kernel is never pushed forward directly.
 """
 
 from __future__ import annotations
@@ -120,16 +125,50 @@ def lane_map(
 
 
 class _Kernel:
-    """A lane kernel carried as a primitive parameter (hashed by identity)."""
+    """A lane kernel carried as a primitive parameter (hashed by identity).
 
-    __slots__ = ("fn", "__weakref__")
+    ``reverse`` marks the primal map of a reverse-mode derivative's forward pass. Its
+    own forward derivative (second order through a reverse sweep) goes through the
+    kernel's linearization, as JAX differentiates a ``custom_vjp`` inside a ``vjp``,
+    so a kernel that solves under ``CheckpointAdjoint`` is never pushed forward
+    directly.
+    """
 
-    def __init__(self, fn: Callable):
+    __slots__ = ("fn", "reverse", "__weakref__")
+
+    def __init__(self, fn: Callable, reverse: bool = False):
         """Hold ``fn``, the kernel on flat leaves."""
         self.fn = fn
+        self.reverse = reverse
 
     def __call__(self, *args):
         return self.fn(*args)
+
+
+def _through_linearization(kernel: _Kernel) -> _Kernel:
+    """The kernel's primal, computed through ``jax.vjp`` in its inexact leaves.
+
+    It equals the kernel. Under ``jax.jvp`` the linearization runs a ``custom_vjp``'s
+    forward rule on the outer trace, which differentiates it as ordinary code, where
+    pushing the kernel forward directly would refuse the ``custom_vjp``. The linear
+    part is never used, and ``jit`` removes it.
+    """
+
+    def primal(*leaves):
+        index = [i for i, leaf in enumerate(leaves) if _is_differentiable(leaf)]
+        if not index:
+            return kernel(*leaves)
+
+        def differentiable(*diff):
+            full = list(leaves)
+            for i, value in zip(index, diff):
+                full[i] = value
+            return kernel(*full)
+
+        out, _ = jax.vjp(differentiable, *[leaves[i] for i in index])
+        return out
+
+    return _Kernel(primal)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +334,8 @@ def _lane_map_jvp(primals, tangents, *, kernel, axes):
 
     Arguments with a symbolically zero tangent (data, masks, anything the
     differentiated input does not reach) are held constant, as ``jax.jvp`` of
-    the plain map would.
+    the plain map would. The forward pass of a reverse derivative pushes its
+    kernel forward through the kernel's linearization (``_Kernel.reverse``).
     """
     differentiable = tuple(
         bool(_is_differentiable(p)) and type(t) is not ad.Zero for p, t in zip(primals, tangents)
@@ -304,8 +344,9 @@ def _lane_map_jvp(primals, tangents, *, kernel, axes):
         outs = _lane_map_p.bind(*primals, kernel=kernel, axes=axes)
         return outs, [_zero_tangent(o) for o in outs]
     directions = [t[None] for t, d in zip(tangents, differentiable) if d]
+    pushed = _through_linearization(kernel) if kernel.reverse else kernel
     res = _lane_jvp_p.bind(
-        *primals, *directions, kernel=kernel, axes=axes, differentiable=differentiable
+        *primals, *directions, kernel=pushed, axes=axes, differentiable=differentiable
     )
     n_out = _n_primal_outputs(res)
     outs, d_outs = res[:n_out], iter(res[n_out:])
@@ -403,14 +444,16 @@ def _lane_jvp_partial_eval(trace, *tracers, kernel, axes, differentiable):
 
     ``jax.linearize`` needs the primal outputs known while the tangent map is
     recorded for later application; the staged map recomputes the primal it
-    differentiates.
+    differentiates. The known map is the forward pass of a reverse derivative, so
+    an enclosing ``jax.jvp`` (forward over reverse) differentiates it through its
+    kernel's linearization.
     """
     params = dict(kernel=kernel, axes=axes, differentiable=differentiable)
     n_p = len(axes)
     known = [t.pval.get_known() for t in tracers]
     if all(k is not None for k in known) or any(k is None for k in known[:n_p]):
         return trace.default_process_primitive(_lane_jvp_p, tracers, params)
-    outs = _lane_map_p.bind(*known[:n_p], kernel=kernel, axes=axes)
+    outs = _lane_map_p.bind(*known[:n_p], kernel=_Kernel(kernel.fn, reverse=True), axes=axes)
     staged = trace.default_process_primitive(_lane_jvp_p, tracers, params)
     return [trace.new_const(o) for o in outs] + list(staged[len(outs) :])
 
