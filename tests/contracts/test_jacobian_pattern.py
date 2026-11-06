@@ -51,6 +51,7 @@ _EXACT = {
     "unstack": lambda y: jnp.stack(jax.lax.unstack(y.reshape(3, 4) ** 2, axis=0)[::-1]).ravel(),
     "split": lambda y: jnp.concatenate(jnp.split(y**2, [5])[::-1]),
     "gather at known indices": lambda y: y[jnp.asarray([3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8])] ** 2,
+    "gather of one element": lambda y: y[jnp.asarray(3)] * y,
     "dynamic_slice": lambda y: jax.lax.dynamic_slice(y**2, (jnp.int32(4),), (6,)),
     "dynamic_update_slice": lambda y: jax.lax.dynamic_update_slice(y, y[:4] ** 2, (jnp.int32(5),)),
     "pad": lambda y: jax.lax.pad(y**2, 0.0, ((2, -3, 1),)),
