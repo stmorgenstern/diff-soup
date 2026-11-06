@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup.linear import SparseTopology
-from diff_soup.problem._ad.tangent_pattern import tangent_pattern
+from diff_soup.problem._ad.tangent_pattern import jacobian_pattern
 from diff_soup.problem._cache import BoundedContentCache
 from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
 from diff_soup.problem.implicit._coo import coo_matvec
@@ -112,7 +112,7 @@ def _exact_rhs_sparsity(problem, rhs, n: int, operational: bool):
         if operational
         else None
     )
-    rows, cols = tangent_pattern(
+    rows, cols = jacobian_pattern(
         lambda y, t, theta, state: rhs(t, y, theta, state),
         jnp.zeros((n,), dtype=zero.dtype),
         zero,

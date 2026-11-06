@@ -242,10 +242,15 @@ def register_pattern_rule(primitive, rule: PatternRule) -> None:
 class Walk:
     """The flows of one walk of a [Program][diff_soup.problem._ad.pattern_walk.Program]."""
 
-    def __init__(self, program: Program, seeds: int):
-        """Start a walk with ``seeds`` columns and no flow."""
+    def __init__(self, program: Program, seeds: int, taint: int | None = None):
+        """Start a walk with ``seeds`` columns and no flow.
+
+        A ``taint`` column, when given, is added to every element a fallback reaches, so
+        the walk's result tells which of its rows a fallback decided.
+        """
         self.program = program
         self.seeds = seeds
+        self.taint = taint
         self.flows: dict[int, object] = {}
         self.fallbacks: set = set()
 
@@ -284,11 +289,14 @@ class Walk:
         if key not in self.fallbacks:
             self.fallbacks.add(key)
             warn_user(
-                f"tangent_pattern: {op.primitive.name} {reason}, so each of its outputs is "
+                f"jacobian_pattern: {op.primitive.name} {reason}, so each of its outputs is "
                 "declared to read each of its inputs."
             )
         reaching = [self.flow(atom) for atom in op.invars if self.flow(atom) is not None]
-        return F.anywhere(reaching, [self.size(var) for var in op.outvars], self.seeds)
+        outputs = F.anywhere(reaching, [self.size(var) for var in op.outvars], self.seeds)
+        if self.taint is None:
+            return outputs
+        return [F.union(flow, F.column(flow.shape[0], self.taint, self.seeds)) for flow in outputs]
 
     def block(self, block: Block, inputs) -> list:
         """Walk ``block`` from the flows of its ``inputs``; return its outputs' flows."""
