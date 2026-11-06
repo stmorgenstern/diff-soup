@@ -1468,7 +1468,7 @@ class ProblemSpec:
 
         return _build_equation_set(self)
 
-    def build(self, *, layout=None, precision=None, exact_sparsity=False):
+    def build(self, *, layout=None, precision=None, exact_sparsity=None):
         """Validate the recipe and lower it into a solve-ready problem.
 
         Recipes equal in structure and values, bounds and priors included,
@@ -1477,7 +1477,7 @@ class ProblemSpec:
         Args:
             layout: Device placement, a [`Layout`][diff_soup.Layout], or `None` for the default.
             precision: [`Precision`][diff_soup.Precision], or `None` for the default.
-            exact_sparsity: If `True`, the solver's Jacobian holds only the entries a tangent can reach, read from the residual with no state probes, plus the diagonal. Needs a residual with an explicit mass, so no `q.dt`. If `False`, it holds the declared blocks and a dense border for each global.
+            exact_sparsity: If `True`, the solver's Jacobian holds only the entries a tangent can reach, read from the residual with no state probes, plus the diagonal. Needs a residual with an explicit mass, so no `q.dt`. If `False`, it holds the declared blocks, measured at probe states, and a dense border for each global. `None` (the default) is `True` unless an equation uses `q.dt`, and `False` then.
 
         Returns:
             The [`LoweredProblem`][diff_soup.problem.LoweredProblem].

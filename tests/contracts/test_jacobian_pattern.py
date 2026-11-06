@@ -1,9 +1,11 @@
 """Jacobian patterns read from a tangent map: each rule holds exactly the entries ``jax.jacfwd``
 finds nonzero at random states, a branch or loop of unknown outcome holds every one of them,
-an operation no rule covers falls back to every entry with a warning, and ``within`` bounds
-the rows a fallback reaches."""
+a gather at an index passed in holds what it reads at every index, an operation no rule covers
+falls back to every entry with a warning, and ``within`` bounds the rows a fallback reaches."""
 
 from __future__ import annotations
+
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -77,7 +79,9 @@ _UNKNOWN_OUTCOME = {
     )[1],
 }
 _FALLBACK = {
-    "gather at an index of the state": lambda y: jnp.sort(y) + y,
+    "dynamic_slice at an index of the state": lambda y: jax.lax.dynamic_slice(
+        y**2, (jnp.argmax(y),), (6,)
+    ),
     "a primitive with no rule": lambda y: jnp.fft.fft(y).real,
 }
 
@@ -99,21 +103,45 @@ def test_a_branch_or_loop_of_unknown_outcome_holds_every_entry_jacfwd_finds(name
 
 @pytest.mark.parametrize("name", sorted(_FALLBACK))
 def test_a_fallback_warns_and_holds_every_entry_jacfwd_finds(name):
-    """An index the state sets and a primitive with no rule warn, and the pattern holds every
-    entry ``jax.jacfwd`` finds nonzero."""
+    """A slice at an index the state sets and a primitive with no rule warn, and the pattern holds
+    every entry ``jax.jacfwd`` finds nonzero."""
     reached = _reached(_FALLBACK[name])
     with pytest.warns(UserWarning, match="jacobian_pattern"):
         pattern = _pattern(_FALLBACK[name], reached.shape)
     assert not np.any(reached & ~pattern)
 
 
+def test_a_gather_at_an_index_passed_in_holds_what_it_reads_at_every_index():
+    """A row of a table read by ``jnp.take`` and an entry read by ``.at[].get(mode="fill")``,
+    both at an index passed in, hold exactly the entries ``jax.jacfwd`` finds nonzero at some
+    index, with no warning."""
+
+    def fn(y, index):
+        row = jnp.take(y.reshape(3, 4), index, axis=0, mode="clip")
+        return row * y[9:].at[index].get(mode="fill", fill_value=0.0)
+
+    state = jnp.asarray(np.random.default_rng(1).uniform(0.5, 1.5, _N))
+    reached = np.any([np.asarray(jax.jacfwd(fn)(state, index)) != 0 for index in range(3)], 0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        rows, cols = ds.jacobian_pattern(fn, jnp.zeros(_N), jnp.int32(0))
+    pattern = np.zeros(reached.shape, dtype=bool)
+    pattern[rows, cols] = True
+    np.testing.assert_array_equal(pattern, reached)
+
+
 def test_within_bounds_only_the_rows_a_fallback_reaches():
-    """Sorting the state makes its six rows read all twelve columns; with ``within`` the
-    six keep the first six columns, and the six squared rows keep their diagonal."""
+    """Slicing the state at an index it sets makes its six rows read all twelve columns; with
+    ``within`` the six keep the first six columns, and the six squared rows keep their
+    diagonal."""
     within = (np.repeat(np.arange(6), 6), np.tile(np.arange(6), 6))
     with pytest.warns(UserWarning, match="jacobian_pattern"):
         rows, cols = ds.jacobian_pattern(
-            lambda y: jnp.concatenate([jnp.sort(y)[:6], y[6:] ** 2]), jnp.zeros(_N), within=within
+            lambda y: jnp.concatenate(
+                [jax.lax.dynamic_slice(y, (jnp.argmax(y),), (6,)), y[6:] ** 2]
+            ),
+            jnp.zeros(_N),
+            within=within,
         )
     expected = sorted([*zip(*within), *((row, row) for row in range(6, _N))])
     assert list(zip(rows.tolist(), cols.tolist())) == expected
