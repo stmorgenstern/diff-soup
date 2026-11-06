@@ -12,10 +12,17 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
-from diff_soup._schedule import Schedule, Segment, schedule_arrays, solve_schedule
+from diff_soup._schedule import Schedule, Segment, schedule_arrays
 from diff_soup.optimization._abc import OptimizationProblem, _as_bounds
-from diff_soup.optimization.control._horizon_cache import cached
+from diff_soup.optimization._binding import Held, hold
+from diff_soup.optimization.control._horizon import Configuration, Horizon
 from diff_soup.optimization.problem import AbstractOptimizationProblem
+
+#: How far above the horizon a save time may lie and still be its end: Higham's bound on
+#: the rounding error of a sum of `n` positive terms added in order, `(n - 1) * u * sum`
+#: with `u` the unit roundoff (Higham, Accuracy and Stability of Numerical Algorithms,
+#: 2nd ed., eq. 4.4), taken as `n * eps * horizon`.
+_END_ROUNDING = np.finfo(np.float64).eps
 
 
 def _lengths(duration: Any) -> float | tuple:
@@ -62,8 +69,11 @@ class PiecewiseConstant(eqx.Module):
 
     @property
     def horizon(self) -> float:
-        """The length of the horizon, the sum of the durations."""
-        return float(sum(self.durations))
+        """The end of the horizon: the durations added in order, as the schedule adds them."""
+        end = 0.0
+        for duration in self.durations:
+            end += duration
+        return end
 
     @property
     def interval(self) -> float:
@@ -75,6 +85,10 @@ class PiecewiseConstant(eqx.Module):
                 f"durations {durations}."
             )
         return durations[0]
+
+    def interval_controls(self) -> PiecewiseConstant:
+        """The parameterization of one interval of this grid, keeping its mode, scale and step carry."""
+        return dataclasses.replace(self, intervals=1, duration=self.interval)
 
     def segments(self, u: Any, modes: tuple) -> Any:
         """The schedule arrays of the horizon for the decision vector `u`, traced, never retraced for a new `u`.
@@ -102,13 +116,37 @@ class PiecewiseConstant(eqx.Module):
         return dataclasses.replace(template, target=self.scale * u)
 
 
+def _static_times(times: Any) -> tuple[float, ...] | None:
+    """Save times as Python floats, static and hashable; a traced value is refused."""
+    if times is None:
+        return None
+    if isinstance(times, jax.core.Tracer):
+        raise ConfigurationError(
+            "ControlProblem save_times are static: give concrete times, not traced ones."
+        )
+    return tuple(float(t) for t in np.asarray(times, dtype=np.float64).ravel())
+
+
+def _static_start(start: Any) -> tuple[float, ...] | None:
+    """The first guess as Python floats, static; a traced value is refused."""
+    if start is None:
+        return None
+    if isinstance(start, jax.core.Tracer):
+        raise ConfigurationError(
+            "ControlProblem start is static: give a concrete first guess, not a traced one."
+        )
+    return tuple(float(value) for value in np.asarray(start, dtype=np.float64).ravel())
+
+
 class ControlProblem(AbstractOptimizationProblem, eqx.Module):
     """Minimize a cost over the controls of a model under path and terminal constraints.
 
     The horizon runs through `ds.solve_schedule` with the segment targets as traced arrays of
     `u`. The path rows' Jacobian is forward mode through the schedule tangents; the cost
     gradient is reverse mode under `CheckpointAdjoint` when it pays. `args` carries the initial
-    state, `theta` and the limits, so a batch of cells or scenarios is one `vmap`.
+    state, `theta` and the limits, so a batch of cells or scenarios is one `vmap`. The model,
+    the save times and the first guess are static: the model is held by identity, so two
+    problems over one model, one configuration and different `args` share a compile.
 
     Args:
         problem: A built diff-soup problem whose operational table has the row `controls` drives.
@@ -119,8 +157,8 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         n_path: The number of rows `path` returns per saved time.
         n_terminal: The number of rows `terminal` returns.
         bounds: `(lower, upper)` on `u`, broadcast, or `None`.
-        constraints: [Constraints][diff_soup.optimization.Constraints] on `u` itself, functions of `(u, args)`, or `None`.
-        save_times: The times the solution is sampled at for the functionals, after the horizon's start at 0.
+        constraints: [Constraints][diff_soup.optimization.Constraints] on `u` itself, functions of `(u, args)`, or `None`. Their scales are padded with ones over the terminal and path rows, and their `jacobian` mode differentiates their own rows.
+        save_times: The times the solution is sampled at for the functionals, after the horizon's start at 0. A last time at the horizon's end, within the rounding of its sum, is the schedule's own end.
         initial_state: The state the horizon starts from; an `args` leaf.
         theta: The model parameters; an `args` leaf.
         limits: What the functionals read as limits, such as a voltage ceiling; an `args` leaf.
@@ -132,89 +170,126 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
 
     constraints: Any = None
     bounds: Any = None
-    # The model holds arrays, so it is a leaf, not static; the closures are keyed by its identity.
-    problem: Any = None
+    problem: Held = eqx.field(static=True, default=None, converter=hold)
     controls: Any = eqx.field(static=True, default=None)
     cost: Callable | None = eqx.field(static=True, default=None)
     path: Callable | None = eqx.field(static=True, default=None)
     terminal: Callable | None = eqx.field(static=True, default=None)
     n_path: int = eqx.field(static=True, default=0)
     n_terminal: int = eqx.field(static=True, default=0)
-    save_times: Any = None
+    save_times: tuple[float, ...] | None = eqx.field(
+        static=True, default=None, converter=_static_times
+    )
     initial_state: Any = None
     theta: Any = None
     limits: Any = None
-    start: Any = None
+    start: tuple[float, ...] | None = eqx.field(static=True, default=None, converter=_static_start)
     solver: Any = eqx.field(static=True, default=None)
     adjoint: Any = eqx.field(static=True, default=None)
     layout: Any = eqx.field(static=True, default=None)
 
-    def numeric_problem(self, optimizer: Any) -> Any:
+    def __post_init__(self) -> None:
+        """Take a last save time within the rounding of the horizon's sum as its end."""
+        times = _static_times(self.save_times)
+        if times and self.controls is not None:
+            end = self.controls.horizon
+            rounding = len(self.controls.durations) * _END_ROUNDING * end
+            if end < times[-1] <= end + rounding:
+                self.save_times = (*times[:-1], end)
+
+    @property
+    def model(self) -> Any:
+        """The built diff-soup problem, held by identity."""
+        return self.problem.value
+
+    def numeric_problem(self, optimizer: Any) -> OptimizationProblem:
         """Lower to closures over `u` and `args`; see [AbstractOptimizationProblem.numeric_problem][diff_soup.optimization.AbstractOptimizationProblem.numeric_problem]."""
-        self._check()
+        horizon = self._closures()
         n = self.controls.intervals
-        closures = self._closures()
-        start = self.start
-        if start is None:
-            start = _middle(self.bounds, n)
-        x0 = np.asarray(start, dtype=np.float64).reshape((n,))
-        structure = {"value_gradient", "hessian", "constraint_jacobian", "lagrangian_hessian"}
-        if closures.n_equality or closures.n_inequality:
+        start = _middle(self.bounds, n) if self.start is None else jnp.asarray(self.start)
+        x0 = jnp.reshape(jnp.asarray(start, dtype=jnp.float64), (n,))
+        structure = {
+            "value_gradient",
+            "hessian",
+            "constraint_jacobian",
+            "lagrangian_hessian",
+            "constraint_hessian",
+        }
+        n_equality, n_inequality = horizon.n_equality, horizon.n_inequality
+        if n_equality or n_inequality:
             structure.add("constraints")
         return OptimizationProblem(
             x0=x0,
             structure=frozenset(structure),
             bounds=_as_bounds(self.bounds, x0),
             args=self.args(),
-            n_equality=closures.n_equality,
-            n_inequality=closures.n_inequality,
-            constraint_scales=None if self.constraints is None else self.constraints.scales,
+            n_equality=n_equality,
+            n_inequality=n_inequality,
+            constraint_scales=self._row_scales(),
             ad="forward" if self.adjoint is None else "reverse",
-            _value=closures.value,
-            _value_and_gradient=closures.value_and_gradient,
-            _value_gradient_hessian=closures.value_gradient_hessian,
-            _constraints=closures.constraints,
-            _constraints_and_jacobians=closures.constraints_and_jacobians,
-            _lagrangian_hessian=closures.lagrangian_hessian,
-            _evaluate=closures.evaluate,
-            _evaluate_with_derivatives=closures.evaluate_with_derivatives,
+            _value=horizon.closure("value"),
+            _value_and_gradient=horizon.closure("value_and_gradient"),
+            _value_gradient_hessian=horizon.closure("value_gradient_hessian"),
+            _constraints=horizon.closure("constraints"),
+            _constraints_and_jacobians=horizon.closure("constraints_and_jacobians"),
+            _lagrangian_hessian=horizon.closure("lagrangian_hessian"),
+            _constraint_hessian=horizon.closure("constraint_hessian"),
+            _evaluate=horizon.closure("evaluate"),
+            _evaluate_with_derivatives=horizon.closure("evaluate_with_derivatives"),
         )
 
-    def args(self) -> Any:
+    def args(self) -> tuple[Any, Any, Any]:
         """`(initial_state, theta, limits)`, the leaves a batch varies."""
         return (self.initial_state, self.theta, self.limits)
 
-    def _closures(self) -> Any:
-        """The `(u, args)` closures of the horizon, built once per problem and configuration.
+    def _closures(self) -> Horizon:
+        """The horizon's closures, equal for every control problem of this configuration.
 
-        A second `ControlProblem` over the same model with the same functionals, controls,
-        solver and save times reuses them, so a solver compiled for one horizon serves the
-        next without retracing.
+        Problems over the same model with the same functionals, controls, constraints on `u`,
+        save times, solver and adjoint have equal closures, so a solver compiled for one
+        serves the next without retracing.
         """
-        self._check()
-        times = tuple(float(t) for t in np.asarray(self.save_times, dtype=np.float64).ravel())
         constraints = self.constraints
-        key = (
-            self.controls,
-            self.cost,
-            self.path,
-            self.terminal,
-            self.n_path,
-            self.n_terminal,
-            None if constraints is None else _constraints_key(constraints),
-            times,
-            self.solver,
-            self.adjoint,
+        if constraints is not None:
+            # The scales are arrays the solver reads from the numeric problem, not the closures.
+            constraints = dataclasses.replace(constraints, scales=None)
+        return Horizon(
+            Configuration(
+                model=self.problem,
+                controls=self.controls,
+                cost=self.cost,
+                path=self.path,
+                terminal=self.terminal,
+                n_path=self.n_path,
+                n_terminal=self.n_terminal,
+                constraints=constraints,
+                save_times=self.save_times,
+                solver=self.solver,
+                adjoint=self.adjoint,
+            )
         )
-        return cached(self.problem, key, lambda: _horizon_closures(self, times))
 
-    def _check(self) -> None:
-        """Refuse a control problem missing what its lowering needs."""
+    def _row_scales(self) -> tuple[Any, Any] | None:
+        """The scales of the `Constraints` on `u`, after ones for the terminal and path rows."""
+        scales = None if self.constraints is None else self.constraints.row_scales()
+        if scales is None:
+            return None
+        path = self.n_path * len(self.save_times)
+        equality, inequality = scales
+        return (
+            jnp.concatenate([jnp.ones((self.n_terminal,), equality.dtype), equality]),
+            jnp.concatenate([jnp.ones((path,), inequality.dtype), inequality]),
+        )
+
+    def __check_init__(self) -> None:
+        """Refuse a control problem missing what its lowering needs, or with save times off its horizon."""
         missing = [
             name
-            for name in ("problem", "controls", "cost", "save_times", "initial_state", "solver")
+            for name in ("controls", "cost", "save_times", "initial_state", "solver")
             if getattr(self, name) is None
         ]
+        if self.model is None:
+            missing.insert(0, "problem")
         if missing:
             raise ConfigurationError(f"ControlProblem needs {', '.join(missing)}.")
         if (self.path is None) != (self.n_path == 0) or (self.terminal is None) != (
@@ -224,7 +299,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
                 "ControlProblem: give path with n_path and terminal with n_terminal, or "
                 "neither of each pair."
             )
-        times = np.asarray(self.save_times, dtype=np.float64).ravel()
+        times = np.asarray(self.save_times, dtype=np.float64)
         horizon = self.controls.horizon
         if times.size == 0 or np.any(np.diff(times) <= 0) or times[0] < 0 or times[-1] > horizon:
             raise ConfigurationError(
@@ -232,177 +307,12 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
             )
 
 
-@dataclasses.dataclass(frozen=True)
-class _Closures:
-    """The closures of a horizon, each taking `(u, args)` with `args = (state, theta, limits)`."""
-
-    value: Callable
-    value_and_gradient: Callable
-    value_gradient_hessian: Callable
-    constraints: Callable
-    constraints_and_jacobians: Callable
-    lagrangian_hessian: Callable
-    evaluate: Callable
-    evaluate_with_derivatives: Callable
-    n_equality: int
-    n_inequality: int
-
-
-def _constraints_key(constraints: Any) -> tuple:
-    """The static configuration of a `Constraints`, which keys the closures it builds."""
-    return (
-        constraints.equality,
-        constraints.inequality,
-        constraints.n_equality,
-        constraints.n_inequality,
-    )
-
-
-def _middle(bounds: Any, n: int) -> np.ndarray:
+def _middle(bounds: Any, n: int) -> Any:
     """The middle of finite bounds, the finite bound where one side is open, zero where both are."""
     if bounds is None:
-        return np.zeros((n,))
-    lower, upper = (np.broadcast_to(np.asarray(side, dtype=np.float64), (n,)) for side in bounds)
-    middle = np.where(np.isfinite(lower) & np.isfinite(upper), 0.5 * (lower + upper), 0.0)
-    middle = np.where(np.isfinite(lower) & ~np.isfinite(upper), lower, middle)
-    return np.where(~np.isfinite(lower) & np.isfinite(upper), upper, middle)
-
-
-def _horizon_closures(control: ControlProblem, times: tuple) -> _Closures:
-    """Build the closures: one schedule solve per evaluation, its rows stacked for AD."""
-    model, controls, solver, adjoint = (
-        control.problem,
-        control.controls,
-        control.solver,
-        control.adjoint,
-    )
-    cost, path, terminal = control.cost, control.path, control.terminal
-    extra = control.constraints
-    modes = tuple(model.operational_modes())
-    n = controls.intervals
-    save_times = np.asarray(times, dtype=np.float64)
-    n_path_rows = control.n_path * save_times.size
-    n_equality = control.n_terminal + (0 if extra is None else extra.n_equality)
-    n_inequality = n_path_rows + (0 if extra is None else extra.n_inequality)
-    n_rows = 1 + n_equality + n_inequality
-    # Reverse mode needs an adjoint that supports it, and pays when columns exceed rows.
-    reverse_all = adjoint is not None and n > n_rows
-    reverse_cost = adjoint is not None and n > 1
-    reverse_rows = adjoint is not None and n > n_equality + n_inequality
-    extra_rows = None if extra is None else extra.lower(None, _identity).constraints
-
-    def rows(u, args):
-        state, theta, _limits = args
-        solution, _ = solve_schedule(
-            model,
-            solver,
-            controls.segments(u, modes),
-            state,
-            t0=0.0,
-            t_end=controls.horizon,
-            times=jnp.asarray(save_times),
-            theta=theta,
-            adjoint=adjoint,
-        )
-        value = jnp.reshape(jnp.asarray(cost(solution, u, args)), ())
-        equality = [_sized(terminal, solution, u, args, control.n_terminal, "terminal")]
-        inequality = [_sized(path, solution, u, args, n_path_rows, "path")]
-        if extra_rows is not None:
-            on_u = extra_rows(u, args)
-            equality.append(on_u[0])
-            inequality.append(on_u[1])
-        dtype = jnp.result_type(value)
-        equality = jnp.concatenate([jnp.asarray(r, dtype) for r in equality])
-        inequality = jnp.concatenate([jnp.asarray(r, dtype) for r in inequality])
-        # A failed horizon solve is a rejected trial (M5): every output is NaN.
-        ok = solution.ok & jnp.all(solution.valid_mask)
-        fail = lambda r: jnp.where(ok, r, jnp.nan)  # noqa: E731
-        return fail(value), fail(equality), fail(inequality)
-
-    def stacked(u, args):
-        value, equality, inequality = rows(u, args)
-        return jnp.concatenate([value[None], equality, inequality])
-
-    def split(vector):
-        return vector[0], vector[1 : 1 + n_equality], vector[1 + n_equality :]
-
-    def value(u, args):
-        return rows(u, args)[0]
-
-    def value_and_gradient(u, args):
-        gradient, primal = (jax.jacrev if reverse_cost else jax.jacfwd)(
-            lambda x: (value(x, args),) * 2, has_aux=True
-        )(u)
-        return primal, gradient
-
-    def value_gradient_hessian(u, args):
-        gradient = (jax.grad if reverse_cost else jax.jacfwd)(lambda x: value(x, args))
-        hessian = jax.jacfwd(gradient)(u)
-        primal, first = value_and_gradient(u, args)
-        return primal, first, hessian
-
-    def constraints(u, args):
-        return rows(u, args)[1:]
-
-    def constraint_vector(u, args):
-        return jnp.concatenate(rows(u, args)[1:])
-
-    def constraints_and_jacobians(u, args):
-        jacobian, vector = (jax.jacrev if reverse_rows else jax.jacfwd)(
-            lambda x: (constraint_vector(x, args),) * 2, has_aux=True
-        )(u)
-        return (
-            vector[:n_equality],
-            vector[n_equality:],
-            jacobian[:n_equality],
-            jacobian[n_equality:],
-        )
-
-    def evaluate(u, args):
-        return rows(u, args)
-
-    def evaluate_with_derivatives(u, args):
-        jacobian, vector = (jax.jacrev if reverse_all else jax.jacfwd)(
-            lambda x: (stacked(x, args),) * 2, has_aux=True
-        )(u)
-        value, equality, inequality = split(vector)
-        gradient, jac_eq, jac_ineq = split(jacobian)
-        return value, gradient, equality, inequality, jac_eq, jac_ineq
-
-    def lagrangian(u, lam_eq, lam_ineq, args):
-        value, equality, inequality = rows(u, args)
-        return value + lam_eq @ equality + lam_ineq @ inequality
-
-    def lagrangian_hessian(u, lam_eq, lam_ineq, args):
-        first = jax.grad if reverse_cost else jax.jacfwd
-        return jax.jacfwd(first(lagrangian))(u, lam_eq, lam_ineq, args)
-
-    return _Closures(
-        value=value,
-        value_and_gradient=value_and_gradient,
-        value_gradient_hessian=value_gradient_hessian,
-        constraints=constraints,
-        constraints_and_jacobians=constraints_and_jacobians,
-        lagrangian_hessian=lagrangian_hessian,
-        evaluate=evaluate,
-        evaluate_with_derivatives=evaluate_with_derivatives,
-        n_equality=n_equality,
-        n_inequality=n_inequality,
-    )
-
-
-def _identity(u: Any) -> Any:
-    """The decision vector as the view the `Constraints` on `u` take."""
-    return u
-
-
-def _sized(function: Callable | None, solution: Any, u: Any, args: Any, count: int, name: str):
-    """The rows `function` returns, flattened and checked against `count`; empty without one."""
-    if function is None:
-        return jnp.zeros((0,))
-    values = jnp.reshape(jnp.asarray(function(solution, u, args)), (-1,))
-    if values.shape[0] != count:
-        raise ConfigurationError(
-            f"ControlProblem {name} returned {values.shape[0]} rows; it declares {count}."
-        )
-    return values
+        return jnp.zeros((n,))
+    lower, upper = (jnp.broadcast_to(jnp.asarray(side, dtype=jnp.float64), (n,)) for side in bounds)
+    finite_lower, finite_upper = jnp.isfinite(lower), jnp.isfinite(upper)
+    middle = jnp.where(finite_lower & finite_upper, 0.5 * (lower + upper), 0.0)
+    middle = jnp.where(finite_lower & ~finite_upper, lower, middle)
+    return jnp.where(~finite_lower & finite_upper, upper, middle)

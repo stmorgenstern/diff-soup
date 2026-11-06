@@ -74,7 +74,7 @@ class InferenceProblem(EstimationProblem):
         regularization: A penalty on the parameters added to the objective, such as `Tikhonov`.
         trial_predicate: A function of the parameters returning whether a trial point may be evaluated.
         constraints: [Constraints][diff_soup.optimization.Constraints] whose functions take the fitted values, `values[handle]` as `InferenceProblem.values` reads them, and `args`.
-        args: What the constraint functions take as `args`, such as limits; a batch of fits differs only in it.
+        args: What the constraint functions take as `args`, such as limits: the numeric problem's `args` leaf, which `with_args` replaces without a new lowering.
     """
 
     def __init__(
@@ -471,6 +471,8 @@ class LoweredStudy(InferenceProblem):
         retry_first_step_factors: Any = RETRY_FIRST_STEP_FACTORS,
         retry_tolerance_factors: Any = (),
         measured: Any = None,
+        constraints: Any = None,
+        args: Any = None,
     ):
         """Lower a study: its experiments, the plan of its lanes, and their numbers.
 
@@ -526,6 +528,10 @@ class LoweredStudy(InferenceProblem):
                 without a measurement is balanced by its modelled cost.
                 ``None`` balances every lane by its modelled cost. Ignored in
                 a run of one process, so the same script runs everywhere.
+            constraints: Optional ``Constraints`` on the fitted values, as
+                ``InferenceProblem`` takes them; a solver that requires
+                ``"batched_lanes"`` refuses them.
+            args: What the constraint functions take as ``args``.
 
         Raises:
             TypeError: If ``study`` is not a ``Study``, ``device`` is not a
@@ -561,6 +567,8 @@ class LoweredStudy(InferenceProblem):
             trajectory=trajectory,
             regularization=regularization,
             trial_predicate=trial_predicate,
+            constraints=constraints,
+            args=args,
         )
         lowered_at = time.perf_counter()
         joint = self._inference_problem

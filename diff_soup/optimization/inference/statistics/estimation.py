@@ -11,8 +11,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._precision import cast_floating_leaves
+from diff_soup.optimization._binding import Derived, Held
 from diff_soup.optimization.inference.fitting._layout import resolve_point
-from diff_soup.optimization.inference.fitting.inference_problem import _MemoryCheckedHessian
+from diff_soup.optimization.inference.fitting.inference_problem import (
+    _MemoryCheckedHessian,
+    lower_residual_problem,
+    parameter_values,
+)
 from diff_soup.optimization.inference.fitting.regularization import NoReg
 from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.optimization.inference.statistics.likelihoods import (
@@ -149,8 +154,8 @@ def _compile_prior_blocks(schema: Any, objective: Any) -> tuple:
     """Compile each handle occurrence exactly once for a physical MAP.
 
     An occurrence takes its prior from the declarations of the experiments
-    behind it, which must agree, or from the entry's handle where the schema
-    records none.
+    behind it, which must agree; an occurrence whose schema records no
+    declaration is refused.
     """
     if isinstance(objective, MLE):
         return ()
@@ -158,9 +163,13 @@ def _compile_prior_blocks(schema: Any, objective: Any) -> tuple:
     missing = set()
     for entry in schema.entries:
         for occurrence in entry.occurrences:
-            declarations = tuple(
-                {id(item): item for item in occurrence.declarations or (entry.handle,)}.values()
-            )
+            if not occurrence.declarations:
+                raise ValueError(
+                    f"MAP: the parameter schema records no declaration of {entry.handle.name!r}, "
+                    "so its prior is unknown. Fit a problem whose schema records the "
+                    "declarations (a Study, an InferenceProblem or a joint problem)."
+                )
+            declarations = tuple({id(item): item for item in occurrence.declarations}.values())
             declared = [getattr(item, "prior", None) is not None for item in declarations]
             if not any(declared):
                 missing.add(entry.handle.name)
@@ -600,8 +609,25 @@ class EstimationProblem(AbstractOptimizationProblem):
         statistics reduced across the mesh. The bounds are resolved once;
         ``regularization`` is this problem's, or, for a solver that requires
         ``"batched_lanes"``, the prior rows with their columns.
+
+        The lowering is kept on this problem, one per kind of solver (its
+        ``requires``, ``ad`` and ``composition``), so a compiled solver given
+        it again reuses its compile; what varies between solves is ``args``.
         """
-        return lower_estimation(self, self, optimizer)
+        key = (
+            frozenset(getattr(optimizer, "requires", ())),
+            getattr(optimizer, "ad", None),
+            getattr(optimizer, "composition", "auto"),
+        )
+        held = self.__dict__.get("_lowerings")
+        if held is None or held[0] is not self:
+            # A copy of this problem (a joint view) lowers afresh.
+            held = (self, {})
+            object.__setattr__(self, "_lowerings", held)
+        lowered = held[1].get(key)
+        if lowered is None:
+            lowered = held[1][key] = lower_estimation(self, self, optimizer)
+        return lowered
 
     def args(self) -> Any:
         """What the constraint functions take as ``args``, the numeric problem's ``args`` leaf.
@@ -757,11 +783,6 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
         lanes: The lowered study that evaluates the objective on its lanes,
             or ``None``.
     """
-    from diff_soup.optimization.inference.fitting.inference_problem import (
-        lower_residual_problem,
-        parameter_values,
-    )
-
     gauss_newton = value = None
     if lanes is not None:
         gauss_newton = getattr(evaluator, "gauss_newton_fn", None)
@@ -782,16 +803,19 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
         gauss_newton=gauss_newton,
         value=value,
         regularization=regularization,
-        joint_view=lambda: problem.joint_view(),
+        joint_view=problem.joint_view,
     )
     if problem.constraints is None:
         return numeric
     # The constraint functions read the fitted values by parameter, and args.
-    schema = problem.parameter_schema
-    constrained = numeric.with_constraints(
-        problem.constraints, unflatten=lambda x: parameter_values(schema, x)
-    )
+    view = Derived(_values_of, Held(problem.parameter_schema))
+    constrained = numeric.with_constraints(problem.constraints, unflatten=view)
     return constrained.with_args(problem.args())
+
+
+def _values_of(schema: Held, x: Any) -> Any:
+    """The fitted values by parameter at the flat vector `x`."""
+    return parameter_values(schema.value, x)
 
 
 __all__ = ["MLE", "MAP", "EstimationProblem"]

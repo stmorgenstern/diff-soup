@@ -3389,11 +3389,21 @@ class JointInferenceProblem:
                             "complete value in one shared, owner, or local group"
                         )
                     value = ParameterOccurrence(
-                        owner=label, columns=tuple(mapping[c] for c in columns)
+                        owner=label,
+                        columns=tuple(mapping[c] for c in columns),
+                        declarations=occurrence.declarations,
                     )
                     values = occurrences.setdefault(name, [])
                     if value not in values:
                         values.append(value)
+                    else:
+                        # The children sharing an occurrence each declare it: a MAP checks
+                        # that their priors agree.
+                        at = values.index(value)
+                        values[at] = dataclasses.replace(
+                            values[at],
+                            declarations=values[at].declarations + value.declarations,
+                        )
         record = (
             tuple(schema.fingerprint for schema in schemas),
             self.param_group_names,
