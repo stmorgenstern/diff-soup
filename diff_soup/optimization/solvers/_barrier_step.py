@@ -11,7 +11,6 @@ restoration phase; an iterate the original filter accepts ends it.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
 
 import jax.numpy as jnp
 from jaxtyping import Array, Float, PyTree
@@ -35,7 +34,7 @@ from diff_soup.optimization.solvers._barrier_problem import (
     terms,
 )
 from diff_soup.optimization.solvers._closures import Closures, evaluate, trial
-from diff_soup.optimization.solvers._core import lagrangian_secant
+from diff_soup.optimization.solvers._core import ConstrainedSolver, lagrangian_secant
 from diff_soup.optimization.solvers._line_search import Correction, filter_line_search
 from diff_soup.optimization.solvers._protocol import _int, _select
 from diff_soup.utils.lanes import live_lane_cond
@@ -46,7 +45,13 @@ DELTA_C = 1e-8
 KAPPA_C = 0.25
 
 
-def _hessian_of(solver, closures, state, args, restores):
+def _hessian_of(
+    solver: ConstrainedSolver,
+    closures: Closures,
+    state: InteriorPointState,
+    args: PyTree,
+    restores: bool,
+) -> Float[Array, "n n"]:
     """The primal block's curvature: the Lagrangian Hessian, or in restoration that of the rows alone.
 
     The constraint curvature is the problem's `constraint_hessian` closure, else the difference
@@ -81,7 +86,7 @@ def _hessian_of(solver, closures, state, args, restores):
 
 
 def barrier_step(
-    solver: Any,
+    solver: ConstrainedSolver,
     closures: Closures,
     bounds: Bounds,
     state: InteriorPointState,

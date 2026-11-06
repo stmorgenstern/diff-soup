@@ -1,5 +1,5 @@
-"""Optimization solvers through `ds.optimization`: each compiled solver's `solve`, a warm start
-from a record, and `lanes` over a batch of problems on one device."""
+"""Optimization solvers through `ds.optimization`: each compiled solver through `optsolve`, a warm
+start from a record or from a record of zeros, and `lanes` over a batch of problems on one device."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from tests.support.optimization import hs35
+from tests.support.optimization import hs7, hs35
 
 # The solvers' stopping tolerances; measured: every run ends KKT_TOL, workstation CPU 2026-11-06
 SOLVERS = {
@@ -21,15 +21,17 @@ SOLVERS = {
     ),
 }
 TOY = hs35()
+WARM_TOY = hs7()
 
-# measured 2.2e-11 (interior point and SQP), workstation CPU 2026-11-06, pytest tests/public_api/test_optimization_solvers.py
+# measured 2.2e-11 (worst over solvers, optsolve and the record of zeros), workstation CPU 2026-11-06,
+# pytest tests/public_api/test_optimization_solvers.py
 _SOLUTION = 1e-9
 
 
 @pytest.mark.parametrize("solver", SOLVERS)
-def test_solve_returns_the_solution_and_its_record(solver):
-    """`solve` returns the minimizer as `params` and the run's `SolveRecord` in `info`."""
-    result = SOLVERS[solver].solve(TOY.problem)
+def test_optsolve_returns_the_solution_and_its_record(solver):
+    """`optsolve` returns the minimizer as `params` and the run's `SolveRecord` in `info`."""
+    result = ds.optimization.optsolve(TOY.problem, SOLVERS[solver])
     exact = np.asarray(TOY.solution(TOY.problem.args)[0])
     record = result.info["record"]
     assert np.max(np.abs(result.params - exact)) <= _SOLUTION and (
@@ -37,15 +39,33 @@ def test_solve_returns_the_solution_and_its_record(solver):
     )
 
 
-def test_a_warm_start_from_a_record_takes_fewer_steps():
-    """Started from the last solution and its record, a solve with a moved limit is shorter."""
-    solver = SOLVERS["interior_point"]
-    warm = jax.jit(lambda x0, a, record: solver.run(TOY.problem, x0, a, warm_start=record))
-    cold = jax.jit(lambda x0, a: solver.run(TOY.problem, x0, a))
-    x, record = cold(TOY.problem.x0, 3.0)
-    _, moved_cold = cold(TOY.problem.x0, 3.03)
-    _, moved_warm = warm(x, 3.03, record)
-    assert int(moved_warm.steps) < int(moved_cold.steps)
+def _work(record):
+    """The run's steps and the inner steps of its subproblems."""
+    return int(record.steps) + int(record.inner_steps)
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_a_warm_start_from_a_record_takes_fewer_steps(solver):
+    """Started from the last solution and its record, a solve with a moved right-hand side is shorter."""
+    problem, run = WARM_TOY.problem, SOLVERS[solver].run
+    warm = jax.jit(lambda x0, a, record: run(problem, x0, a, warm_start=record))
+    cold = jax.jit(lambda x0, a: run(problem, x0, a))
+    x, record = cold(problem.x0, 4.0)
+    _, moved_cold = cold(problem.x0, 4.04)
+    _, moved_warm = warm(x, 4.04, record)
+    assert _work(moved_warm) < _work(moved_cold)
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_a_record_of_zeros_warm_starts_a_run_to_the_solution(solver):
+    """`SolveRecord.zeros` as the warm start: the run ends with `KKT_TOL` at the minimizer."""
+    zeros = ds.optimization.SolveRecord.zeros(3, 0, 1)
+    run = jax.jit(lambda a, w: SOLVERS[solver].run(TOY.problem, TOY.problem.x0, a, warm_start=w))
+    x, record = run(TOY.problem.args, zeros)
+    exact = np.asarray(TOY.solution(TOY.problem.args)[0])
+    assert np.max(np.abs(np.asarray(x) - exact)) <= _SOLUTION and (
+        int(record.status) == ds.optimization.TerminationStatus.KKT_TOL
+    )
 
 
 def test_lanes_on_one_device_is_vmap_of_run():
