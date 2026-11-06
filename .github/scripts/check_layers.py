@@ -39,13 +39,14 @@ TOP = "__init__"
 LAYERS: tuple[str, ...] = (
     # Leaves: import nothing from diff_soup, or only the leaves listed above them.
     "_version",  # reads the installed version; imports nothing from diff_soup
-    "_jax_constants",  # sets JAX environment defaults before JAX loads; no imports
-    "_jax_compat",  # the one place that touches JAX internals; imports only JAX
-    "_jax_typed_ffi",  # typed FFI call helpers built on _jax_compat
     "_errors",  # the exception hierarchy every package raises
-    "_optional",  # optional-dependency loader; raises an _errors type
     "_logging",  # the package logger; imports nothing from diff_soup
     "_warnings",  # warnings attributed to the user's line; imports nothing from diff_soup
+    "_environment",  # the variables diff_soup reads and the changes importing it makes
+    "_jax_compat",  # the one place that touches JAX internals; imports only JAX
+    "_jax_constants",  # turns on JAX's constant hoisting; on _jax_compat and _warnings
+    "_jax_typed_ffi",  # the typed-FFI custom-call builder, on _jax_compat
+    "_optional",  # optional-dependency loader; raises an _errors type
     "_precision",  # dtype policy; raises _errors types
     "_layout",  # state-vector layout helpers; raises _errors types
     "_solution",  # solution container shared by solvers and the schedule

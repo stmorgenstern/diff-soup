@@ -27,8 +27,8 @@ of dispatched programs, waited on when a solve context is released), and
 
 This module imports JAX and nothing from diff_soup, so any module of the
 package can import it without an import cycle. The package imports
-``diff_soup._jax_constants`` before anything else, so JAX's constant-hoisting
-setting is in place before this module first runs.
+``diff_soup._environment`` before anything else, so JAX's constant-hoisting
+variable is set before this module first runs.
 """
 
 from __future__ import annotations

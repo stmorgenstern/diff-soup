@@ -14,16 +14,18 @@ import jax
 import numpy as np
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 
+from diff_soup._environment import (
+    COORDINATOR,
+    LAUNCH_COORDINATOR,
+    LAUNCH_RANK,
+    LAUNCH_SIZE,
+    MGMN,
+    MPI_LIBRARY,
+    add_xla_flags,
+)
 from diff_soup._jax_compat import mesh_utils, multihost_utils
 
 _AXES = frozenset(("data", "model"))
-_DEFAULT_XLA_FLAGS = {
-    "--xla_gpu_enable_latency_hiding_scheduler": "true",
-    "--xla_gpu_all_reduce_combine_threshold_bytes": "16777216",
-    # Independent submeshes can compile different kernels at the same time.
-    # Distributed autotuning waits for matching programs across all processes.
-    "--xla_gpu_shard_autotuning": "false",
-}
 # The process count and rank an MPI launcher announces: OpenMPI, PMI (MPICH, Slurm's pmi2), PMIx.
 _MPI_LAUNCHERS = (
     ("OMPI_COMM_WORLD_SIZE", "OMPI_COMM_WORLD_RANK"),
@@ -32,19 +34,6 @@ _MPI_LAUNCHERS = (
 )
 _debug = False
 _decision_mesh = contextvars.ContextVar("diff_soup_decision_mesh", default=None)
-
-
-def configure() -> None:
-    """Add diff-soup's default XLA GPU flags to `XLA_FLAGS`, keeping any flag already set.
-
-    It runs when `diff_soup` is imported and again in `initialize`.
-    """
-    flags = os.environ.get("XLA_FLAGS", "").split()
-    present = {flag.split("=", 1)[0] for flag in flags}
-    flags.extend(
-        f"{key}={value}" for key, value in _DEFAULT_XLA_FLAGS.items() if key not in present
-    )
-    os.environ["XLA_FLAGS"] = " ".join(flags)
 
 
 def initialize(
@@ -70,20 +59,16 @@ def initialize(
         ValueError: If only some of `coordinator_address`, `num_processes`, and `process_id` are given.
     """
     global _debug
-    configure()
+    add_xla_flags()
     _debug = bool(debug)
     if jax.distributed.is_initialized():
         _initialize_mgmn_host()
         return
     explicit = (coordinator_address, num_processes, process_id)
-    forked = os.environ.get("DIFFSOUP_LAUNCH_COORDINATOR")
+    forked = LAUNCH_COORDINATOR.get()
     if forked and all(value is None for value in explicit):
         # A process forked by the launcher: one local device, identity from its environment.
-        explicit = (
-            forked,
-            int(os.environ["DIFFSOUP_LAUNCH_SIZE"]),
-            int(os.environ["DIFFSOUP_LAUNCH_RANK"]),
-        )
+        explicit = (forked, int(LAUNCH_SIZE.get()), int(LAUNCH_RANK.get()))
         kwargs.setdefault("local_device_ids", [0])
     coordinator_address, num_processes, process_id = explicit
     if any(value is not None for value in explicit):
@@ -148,7 +133,7 @@ def _mpi_launch() -> tuple[int, int, str] | None:
     ``DIFFSOUP_COORDINATOR`` names process 0's ``host:port``: without it the
     launch is left to the lane route (``ds.distributed.run``).
     """
-    coordinator = os.environ.get("DIFFSOUP_COORDINATOR", "").strip()
+    coordinator = (COORDINATOR.get() or "").strip()
     if not coordinator:
         return None
     for size_name, rank_name in _MPI_LAUNCHERS:
@@ -160,12 +145,12 @@ def _mpi_launch() -> tuple[int, int, str] | None:
 
 def _initialize_mgmn_host() -> None:
     """Join the MPI world collectively before any process enters subgroup work."""
-    if os.environ.get("DIFFSOUP_MGMN") == "1":
+    if MGMN.get() == "1":
         from diff_soup.linear._cudss._ffi_loader import native_solver
 
         if not hasattr(native_solver, "mgmn_initialize_mpi"):
             raise RuntimeError("The cuDSS extension must be rebuilt with MGMN support.")
-        native_solver.mgmn_initialize_mpi(os.environ.get("DIFFSOUP_MPI_LIBRARY", "libmpi.so.40"))
+        native_solver.mgmn_initialize_mpi(MPI_LIBRARY.get())
         from diff_soup.linear._cudss._model_axis._mgmn import finalize_mpi_at_exit
 
         finalize_mpi_at_exit()
@@ -452,6 +437,3 @@ def is_primary() -> bool:
         `True` on process 0.
     """
     return jax.process_index() == 0
-
-
-configure()
