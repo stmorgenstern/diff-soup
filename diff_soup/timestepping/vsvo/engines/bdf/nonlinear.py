@@ -83,9 +83,9 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     empty_held,
     linearize,
 )
-from diff_soup.timestepping.vsvo.common.weights import wrms_norm
 from diff_soup.utils import safe_div
 from diff_soup.utils.lanes import lane_cond
+from diff_soup.utils.weights import wrms_norm
 
 from .flags import NonlinearFlag
 

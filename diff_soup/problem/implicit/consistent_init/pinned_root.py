@@ -1,14 +1,12 @@
-"""Shared implicit-function-theorem boundary for the consistent-IC paths.
+"""The implicit-function boundary of the Euler-Newton initialization.
 
-Both consistent-IC entries -- the pin-differential projection and the
-Euler-Newton subset -- must be differentiable through the *converged* root, never
-through the Newton iteration that reaches it. This module provides the one shared
-autodiff boundary they route their projected state through:
-[consistent_project][diff_soup.timestepping.consistent_ic.ift.consistent_project],
-a ``custom_jvp`` that serves every differentiation mode -- forward tangents
-directly, reverse cotangents through JAX's transposition of its tangent solve,
-and repeated differentiation of the rule, so ``jax.hessian``-style compositions
-work over it.
+The Euler-Newton initialization must be differentiable through the *converged* root,
+never through the Newton iteration that reaches it. It routes its projected state
+through
+[consistent_project][diff_soup.problem.implicit.consistent_init.pinned_root.consistent_project],
+a ``custom_jvp`` that serves every differentiation mode: forward tangents directly,
+reverse cotangents through JAX's transposition of its tangent solve, and repeated
+differentiation of the rule, so ``jax.hessian``-style compositions work over it.
 
 The primal value comes from a caller-supplied ``primal_fn`` (the path-specific
 Newton solve). The derivative comes from the implicit-function rule linearized at
@@ -38,7 +36,7 @@ import numpy as np
 
 from diff_soup.nonlinear._kkt import kkt_solve
 from diff_soup.nonlinear.solver import _factor_state_block, linearize_at_root_jvp
-from diff_soup.timestepping.consistent_ic.pin_differential import PinnedOperator
+from diff_soup.problem.implicit.consistent_init.pinned import PinnedOperator
 
 
 def _diff_mask_for(base_operator, pin_kind):
