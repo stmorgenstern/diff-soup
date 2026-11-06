@@ -46,30 +46,22 @@ def lanes(
     layout: Any = None,
     max_steps: int | None = None,
 ) -> tuple[Any, Any]:
-    """Run `solver` on a batch of problems that differ only in `args` and `x0`.
+    """Solve a batch of problems that differ in `args` and `x0`.
 
-    On one device this is `vmap` of the solver's `run` with masked termination. With a `Layout`
-    whose mesh has a `data` axis, the lane axis is sharded over it with `shard_map` and a loop
-    per device, so devices never synchronize per iteration and gather at the end. Across
-    processes the same program runs on `ds.global_mesh(("data",))` with each process's local
-    shard.
-
-    A lane count that the `data` axis does not divide is padded with copies of the last lane,
-    which are dropped from the result. Across processes, every process passes the same full
-    batch (or global arrays already sharded over `data`), and every process receives the whole
-    result. The derivative in `args` is the solver's implicit one, lane by lane.
+    On one device this is `jax.vmap` of `solver.run`. With a `Layout` whose mesh has a `"data"`
+    axis, each device solves its share and the results are gathered once. Every process passes
+    the same full batch.
 
     Args:
         solver: A [CompiledSolver][diff_soup.optimization.CompiledSolver].
-        problem: The numeric problem the lanes share.
-        args_batch: The `args` of each lane, batched along the leading axis.
-        x0_batch: The starting point of each lane, `(lanes, n)`.
-        layout: The placement of the lane axis, or `None` for one device.
-        max_steps: The step budget, or the solver's own.
+        problem: The numeric problem every member of the batch solves.
+        args_batch: The `args` of each problem, batched along the leading axis.
+        x0_batch: The starting point of each problem, `(count, n)`.
+        layout: The placement, or `None` for one device.
+        max_steps: The step budget, or `None` for the solver's own.
 
     Returns:
-        `(x, record)`: the solutions, `(lanes, n)`, and the batched
-        [SolveRecord][diff_soup.optimization.SolveRecord].
+        `(x, record)`, each batched along the leading axis, as `vmap` of `run` returns them.
     """
 
     def run(x0, args):

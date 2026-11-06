@@ -55,7 +55,6 @@ from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
     _solution_failed,
 )
-from diff_soup.optimization.inference.fitting._lane_map import folds_enclosing_batches
 from diff_soup.optimization.inference.fitting._sharding import (
     device_count,
     identity_order,
@@ -1273,9 +1272,7 @@ def _build_homogeneous_residual(
                 r = r[0]
             return jnp.where(act, r, jnp.zeros_like(r))
 
-        return run_child_kernel(
-            masked, inputs, active, placement, fold=folds_enclosing_batches(forward)
-        )
+        return run_child_kernel(masked, inputs, active, placement, fold=True)
 
     if mode == "single":
         union_ts = rep._union_ts

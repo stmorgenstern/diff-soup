@@ -137,6 +137,22 @@ def gradient_scales(closures: Closures, x: Any, args: Any) -> Scales:
     )
 
 
+def problem_scales(problem: Any, closures: Closures, x: Any, args: Any) -> Scales:
+    """The problem's own `objective_scale` and `constraint_scales`, else the gradient-based ones."""
+    dtype = x.dtype
+    objective = getattr(problem, "objective_scale", None)
+    rows = getattr(problem, "constraint_scales", None)
+    if objective is None and rows is None:
+        return gradient_scales(closures, x, args)
+    unit = unit_scales(closures, dtype)
+    equality, inequality = (unit.equality, unit.inequality) if rows is None else rows
+    return Scales(
+        jnp.asarray(1.0 if objective is None else objective, dtype),
+        jnp.asarray(equality, dtype),
+        jnp.asarray(inequality, dtype),
+    )
+
+
 def scaled_closures(closures: Closures) -> Closures:
     """The closures of the scaled problem, which take `args = (args, scales)`."""
 
