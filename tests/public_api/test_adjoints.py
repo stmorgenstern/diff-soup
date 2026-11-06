@@ -1,9 +1,11 @@
 """Adjoints: reverse-mode gradients through an affect, forward and checkpoint parity, the
-checkpoint record, second order through an event solve, and the compositions of jax.jvp,
-jax.grad, jax.jit and jax.vmap over a checkpointed solve."""
+checkpoint record, second order through an event solve, the compositions of jax.jvp,
+jax.grad, jax.jit and jax.vmap over a checkpointed solve, a scheduled solve's tangent in a
+segment duration, and an event condition differentiated through the solve's parameters."""
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 
 import jax
@@ -13,7 +15,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.timestepping import Bisection
-from tests.support.problems import ConstrainedDAE, DecayODE
+from tests.support.problems import ConstrainedDAE, DecayODE, operational_cell
 
 _THETA = jnp.asarray(0.4)
 #: Solver and root-finder settings (requested tolerances, not asserted bounds).
@@ -287,3 +289,89 @@ def test_the_gradient_of_a_projected_dae_event_time_is_the_closed_form():
     crossing = np.log(4.0 / 3.0) / (2.0 * float(_THETA))
     gradient = jax.grad(event_time)(_THETA)
     np.testing.assert_allclose(gradient, -crossing / float(_THETA), rtol=_EVENT_GRADIENT_BOUND)
+
+
+# measured 1.7e-9 relative for the tangent and 2.4e-8 for the central difference, workstation
+# 2026-11-05, pytest tests/public_api/test_adjoints.py::test_a_scheduled_sample_differentiates_through_a_segment_duration
+_DURATION_BOUND = 1e-6
+#: The central-difference step in the first segment's duration.
+_DURATION_STEP = 1e-4
+
+
+def test_a_scheduled_sample_differentiates_through_a_segment_duration():
+    """``u' = -u + I`` held at ``I1 = 0.5`` for ``d1 = 0.3`` and then at ``I2 = 1.5`` has, at
+    the sample ``t = 0.5`` of the second hold, ``du/dd1 = (I1 - I2) e^{-(0.5 - d1)}``: jax.jvp
+    through solve_schedule gives it, and so do central differences."""
+    problem = operational_cell().build()
+    first, second, d1 = 0.5, 1.5, 0.3
+    holds = ds.schedule_arrays(
+        ds.Schedule(
+            [ds.Segment(current=first, duration=d1), ds.Segment(current=second, duration=0.4)]
+        ),
+        problem.operational_modes(),
+    )
+    initial = jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))])
+
+    @jax.jit
+    def sample(duration):
+        schedule = dataclasses.replace(holds, duration=jnp.stack([duration, jnp.asarray(0.4)]))
+        solution, _ = ds.solve_schedule(
+            problem,
+            ds.JIDA(linear="dense", **_VERY_TIGHT),
+            schedule,
+            initial,
+            t0=0.0,
+            t_end=0.7,
+            times=jnp.asarray([0.5, 0.7]),
+        )
+        return solution.ys[0, 0]
+
+    duration = jnp.asarray(d1)
+    tangent = jax.jvp(sample, (duration,), (jnp.ones_like(duration),))[1]
+    step = _DURATION_STEP
+    central = (sample(duration + step) - sample(duration - step)) / (2.0 * step)
+    expected = (first - second) * np.exp(-(0.5 - d1))
+    np.testing.assert_allclose([tangent, central], expected, rtol=_DURATION_BOUND)
+
+
+def _level_stop(time, state, args, **kwargs):
+    return state[0] - args["level"]
+
+
+#: A terminating event whose level is a parameter of the solve, read from ``args``.
+_PARAMETER_STOP = ds.Event(_level_stop, root_finder=Bisection(**_ROOT), direction="down")
+_LEVEL_DECAY = ds.MassProblem(
+    rhs=lambda t, y, theta, control: -theta["k"] * y,
+    mass=ds.MassOperator.identity(1),
+    structure=ds.DAEStructure(differential_vars=np.array([True])),
+)
+# measured 1.9e-9 relative in the crossing and 1.1e-7 in its level derivative, workstation
+# 2026-11-05, pytest tests/public_api/test_adjoints.py::test_an_event_condition_reads_the_solve_parameters_and_differentiates_through_them
+_CONDITION_BOUND = 1e-6
+
+
+def test_an_event_condition_reads_the_solve_parameters_and_differentiates_through_them():
+    """A condition ``y - args["level"]`` on ``y' = -k y`` is given the solve's parameters as
+    ``args``: the solve stops at ``t* = ln(1/level)/k``, and reverse mode under
+    CheckpointAdjoint gives ``dt*/dlevel = -1/(k level)``."""
+
+    def event_time(theta):
+        return ds.pdesolve(
+            _LEVEL_DECAY,
+            ds.JNDF.stock(linear="dense", **_TIGHT),
+            (0.0, 3.0),
+            jnp.ones((1,)),
+            theta=theta,
+            adjoint=ds.CheckpointAdjoint(),
+            event=_PARAMETER_STOP,
+            saveat=ds.SaveAt(t1=True),
+            max_steps=2000,
+        ).terminal.t
+
+    theta = {"k": jnp.asarray(0.4), "level": jnp.asarray(0.5)}
+    crossing, gradient = jax.value_and_grad(event_time)(theta)
+    np.testing.assert_allclose(
+        [crossing, gradient["level"]],
+        [np.log(2.0) / 0.4, -1.0 / (0.4 * 0.5)],
+        rtol=_CONDITION_BOUND,
+    )
