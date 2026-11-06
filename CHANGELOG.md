@@ -14,7 +14,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 ### Features
 
 - `ds.linear.{KLU,SuperLU,CuDSS}` now factor and solve complex matrices (`complex128`, and `complex64` on `CuDSS`) on the real symbolic analysis, solve a complex right-hand side on a real factor, and differentiate both ways.
-- Added `ds.solve_schedule` and `ds.schedule_arrays`, which run a `Schedule` against a model's operating table, with `max_steps` per segment and derivatives with respect to segment durations. See [Events and protocols](https://stmorgenstern.github.io/diff-soup/reference/simulation/events/).
+- Added `ds.solve_schedule` and `ds.schedule_arrays`, which run a `Schedule` against a model's operating table, with `max_steps` per segment and first and second derivatives with respect to segment durations. See [Events and protocols](https://stmorgenstern.github.io/diff-soup/reference/simulation/events/).
 - Added a `"resistance"` row to `spec.control.operational` and `Segment(resistance=)`, which hold `voltage = target * current`.
 - `Event` conditions now receive the solve's `theta` as `args`, so a condition can read and differentiate a parameter. Previously `args` was `None`.
 - Added `spec.build(exact_sparsity=True)`, which declares only the Jacobian entries a tangent can reach. A default build is unchanged.

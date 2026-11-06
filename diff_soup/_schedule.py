@@ -19,6 +19,7 @@ one program.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
 import numbers
 from collections.abc import Iterator
@@ -780,11 +781,17 @@ def _merge(merged: Any, part: Any, take: Any, count: int) -> Any:
     return jnp.where(mask, part.astype(merged.dtype), merged)
 
 
-def _flow(view, solver, t, state, theta, control):
-    """Full flow, including algebraic rows, from the initialization manifold."""
+def _slope(view, solver, t, state, theta, control):
+    """The time derivative of the consistent state through ``(t, state)``, in the solver's units.
 
-    def initialize(time, value):
-        return view.consistent_initial_state(
+    One consistent initialization at ``(t, state)``; the slope is the tangent of its
+    consistent state along ``(1, ydot)``, which ``jax.linearize`` reads from the
+    implicit-function rule at the converged root, so the initialization is solved once.
+    ``NaN`` where the initialization does not converge.
+    """
+
+    def consistent(time, value):
+        result = view.consistent_initial_state(
             time,
             value,
             theta,
@@ -793,14 +800,111 @@ def _flow(view, solver, t, state, theta, control):
             rtol=solver.rtol,
             backend=solver.linear,
         )
+        return result.y, (result.ydot, result.converged)
 
-    initial = initialize(t, state)
-    _, slope = jax.jvp(
-        lambda time, value: initialize(time, value).y,
-        (t, state),
-        (jnp.ones_like(t), initial.ydot),
+    _, along, (ydot, converged) = jax.linearize(consistent, t, state, has_aux=True)
+    slope = along(jnp.ones_like(t), ydot)
+    return jnp.where(converged, slope, jnp.nan)
+
+
+def _acceleration(view, solver, t, state, theta, control):
+    """The second time derivative of the consistent state through ``(t, state)``."""
+    slope, along = jax.linearize(
+        lambda time, value: _slope(view, solver, time, value, theta, control), t, state
     )
-    return jnp.where(initial.converged, slope, jnp.nan)
+    return along(jnp.ones_like(t), slope)
+
+
+@eqx.filter_custom_jvp
+def _vanishing(term, like, scale, args):
+    """``scale * term(*args)`` at ``scale == 0``: zeros shaped as ``like``, differentiable.
+
+    The value is zero and ``term`` is not evaluated. A derivative evaluates only the
+    part it needs: a tangent of ``scale`` gives ``dscale * term(*args)``, and a tangent of
+    ``args`` gives another vanishing product, ``scale`` times the tangent of ``term``, whose
+    value is again zero. So ``term`` runs only where ``scale`` is differentiated, and its
+    derivatives only where ``scale`` is differentiated again.
+    """
+    del term
+    zero = jnp.zeros(like.shape, like.dtype)
+    # The zeros select over every input, so ``jax.vmap`` batches them wherever it batches
+    # an input, as it batches the tangent.
+    for leaf in jax.tree_util.tree_leaves((scale, args)):
+        if eqx.is_array(leaf):
+            zero = jnp.where(False, jnp.sum(jnp.ravel(leaf)[:1]).astype(like.dtype), zero)
+    return zero
+
+
+def _term_tangent(term, args, dargs):
+    """The tangent of ``term(*args)`` along ``dargs``."""
+    return eqx.filter_jvp(term, args, dargs)[1]
+
+
+@_vanishing.def_jvp
+def _vanishing_jvp(primals, tangents):
+    """``dscale * term(*args)``, plus ``scale`` times the tangent of ``term``, itself vanishing."""
+    term, like, scale, args = primals
+    _, _, dscale, dargs = tangents
+    out = _vanishing(term, like, scale, args)
+    tangent = None
+    if dscale is not None:
+        tangent = dscale * term(*args)
+    if jax.tree_util.tree_leaves(dargs):
+        deeper = _vanishing(functools.partial(_term_tangent, term), like, scale, (args, dargs))
+        tangent = deeper if tangent is None else tangent + deeper
+    return out, tangent
+
+
+def _like(state):
+    """The shape and dtype of ``state``."""
+    return jax.ShapeDtypeStruct(jnp.shape(state), jnp.result_type(state))
+
+
+def _velocity(view, solver, t, step, state, theta, control):
+    """The slope at ``(t, state)`` plus half the vanishing ``step`` times the acceleration."""
+    half = _vanishing(_acceleration, _like(state), step, (view, solver, t, state, theta, control))
+    return _slope(view, solver, t, state, theta, control) + 0.5 * half
+
+
+def _moved(view, solver, t, step, state, theta, control):
+    """How far the trajectory through ``(t, state)`` moves over the vanishing time ``step``.
+
+    ``step * f + step**2 / 2 * f'``, with ``f`` the slope and ``f'`` the acceleration at
+    ``(t, state)``: the Taylor shift of the flow, exact in every derivative that
+    differentiates ``step`` at most twice. Zero in value.
+    """
+    args = (view, solver, t, step, state, theta, control)
+    return _vanishing(_velocity, _like(state), step, args)
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
+def _motion(order, shift):
+    """The motion of a segment end, zero in value, differentiable ``order`` more times."""
+    del order
+    return shift
+
+
+@_motion.defjvp
+def _motion_jvp(order, primals, tangents):
+    """Pass the tangent on; refuse a derivative past the order the Taylor shifts carry."""
+    if order == 0:
+        raise NotImplementedError(
+            "solve_schedule has no third derivative with respect to the start or end of a "
+            "segment (a segment duration, t0, t_end or a sample time at a segment's end): "
+            "a moving segment end enters as a second-order Taylor shift along the flow. "
+            "Differentiate at most twice in these times."
+        )
+    (shift,), (dshift,) = primals, tangents
+    return _motion(order - 1, shift), dshift
+
+
+#: The derivatives a moving segment end carries: its Taylor shift is of second order.
+_MOTION_ORDER = 2
+
+
+def _endpoint_motion(value):
+    """``value`` minus itself held out of differentiation: zero, with ``value``'s tangents."""
+    return _motion(_MOTION_ORDER, value - jax.lax.stop_gradient(value))
 
 
 def _segment_solve_impl(problem, solver, span, state, times, theta, control, options):
@@ -819,112 +923,74 @@ def _segment_solve_impl(problem, solver, span, state, times, theta, control, opt
     return eqx.tree_at(lambda s: s.prob, solution, None)
 
 
-_segment_solve = eqx.filter_custom_jvp(_segment_solve_impl)
+def _moving_solve(problem, solver, span, state, times, theta, control, options):
+    """The segment's solve as a function of its ends, for differentiation.
 
-
-@jax.custom_jvp
-def _boundary_times(span):
-    """A segment's start and end, as the tangent rule reads them; refused under a second tangent."""
-    return span
-
-
-@_boundary_times.defjvp
-def _boundary_times_jvp(primals, tangents):
-    """Refuse a second derivative through a moving segment boundary."""
-    raise NotImplementedError(
-        "solve_schedule has no second derivative with respect to the start or end of a "
-        "segment (a segment duration, t0 or t_end): its tangent rule moves a segment "
-        "boundary to first order only. Take second derivatives with respect to the "
-        "targets, the parameters and the initial state."
+    The solve runs between its ends held fixed, so its adaptive mesh stays frozen.
+    Moving the start by ``s`` starts the solve from the state the flow through
+    ``(start + s, state)`` has at ``start``; moving the end by ``e`` moves the terminal
+    state along the flow by ``e``. Both are second-order Taylor shifts of the flow
+    (``_moved``), zero in value. A sample at the start is the state at the start, and
+    moves with it back along the start's shift; a sample at the end is the solution at
+    that fixed time, and moves only with its own time.
+    """
+    view = solver_view(problem)
+    n_u = int(view.n_u)
+    units = _field_units(view)
+    held = jax.lax.stop_gradient(span)
+    start, end = _endpoint_motion(span[0]), _endpoint_motion(span[1])
+    back = _moved(
+        view, solver, held[0] + start, -start, view.to_internal_state(state), theta, control
     )
+    shift = back if units is None else back.at[:n_u].multiply(units[0])
+    out = _segment_solve_impl(problem, solver, held, state + shift, times, theta, control, options)
+    ok = jnp.asarray(out.ok, dtype=bool)
+    terminal = jnp.concatenate([out.terminal.y, out.terminal.lam])
+
+    def rows(values):
+        """The samples as full states, the field unknowns then the globals."""
+        return values if out.lambdas is None else jnp.concatenate([values, out.lambdas], axis=1)
+
+    # The flow carries the consistent state at the held start to the moved start
+    # by minus the start's own shift, to the shift's order.
+    at_start = (times == held[0])[:, None]
+    samples = rows(out.ys) - jnp.where(at_start, back[None, :], 0.0)
+    # SaveAt clips a query to the span, which halves a query-time tangent at
+    # the end; the sample at the end is the terminal state, moved by its own time.
+    at_end = ((times == held[1]) & ok)[:, None]
+    query = _endpoint_motion(times)
+    to_query = jax.vmap(lambda step: _moved(view, solver, held[1], step, terminal, theta, control))
+    at_end_rows = (
+        jax.lax.stop_gradient(samples)
+        + (terminal - jax.lax.stop_gradient(terminal))[None, :]
+        + to_query(query)
+    )
+    samples = jnp.where(at_end, at_end_rows, samples)
+    forward = jnp.where(ok, _moved(view, solver, held[1], end, terminal, theta, control), 0.0)
+    terminal = terminal + forward
+    out = eqx.tree_at(
+        lambda s: (s.ys, s.terminal.y, s.terminal.lam, s.terminal.t, s.stats.t_reached),
+        out,
+        (
+            samples[:, :n_u],
+            terminal[:n_u],
+            terminal[n_u:],
+            out.terminal.t + jnp.where(ok, end, 0.0),
+            out.stats.t_reached + jnp.where(ok, end, 0.0),
+        ),
+    )
+    if out.lambdas is not None:
+        out = eqx.tree_at(lambda s: s.lambdas, out, samples[:, n_u:])
+    return out
+
+
+_segment_solve = eqx.filter_custom_jvp(_segment_solve_impl)
 
 
 @_segment_solve.def_jvp
 def _segment_solve_jvp(primals, tangents):
-    """Differentiate at fixed internal times and attach the boundary flow terms."""
-    problem, solver, span, state, times, theta, control, options = primals
-    dproblem, dsolver, dspan, dstate, dtimes, dtheta, dcontrol, doptions = tangents
-    span = _boundary_times(span)
-    primals = (problem, solver, span, state, times, theta, control, options)
-    if all(value is None for value in dspan):
-        return eqx.filter_jvp(_segment_solve_impl, primals, tangents)
-    view = solver_view(problem)
-    units = _field_units(view)
-    dstart, dend = dspan
-    start_slope = None
-    if dstart is not None:
-        stored = view.to_internal_state(state)
-        start_slope = _flow(view, solver, span[0], stored, theta, control)
-        slope = start_slope
-        if units is not None:
-            slope = slope.at[: view.n_u].multiply(units[0])
-        dstate = (jnp.zeros_like(state) if dstate is None else dstate) - slope * dstart
-    # Adaptive step times are frozen by the step-root rule. Apply the flow-map
-    # boundary terms explicitly: -Phi f(start) dstart and +f(end) dend.
-    out, dout = eqx.filter_jvp(
-        _segment_solve_impl,
-        primals,
-        (dproblem, dsolver, (None, None), dstate, dtimes, dtheta, dcontrol, doptions),
-    )
-    dout = jax.tree_util.tree_map(
-        lambda value, tangent: (
-            jnp.zeros_like(value) if tangent is None and eqx.is_inexact_array(value) else tangent
-        ),
-        out,
-        dout,
-        is_leaf=lambda value: value is None,
-    )
-    if dstart is not None:
-        at_start = (times == span[0])[:, None]
-        dout = eqx.tree_at(
-            lambda s: s.ys,
-            dout,
-            dout.ys + jnp.where(at_start, start_slope[: view.n_u] * dstart, 0.0),
-        )
-        if dout.lambdas is not None:
-            dout = eqx.tree_at(
-                lambda s: s.lambdas,
-                dout,
-                dout.lambdas + jnp.where(at_start, start_slope[view.n_u :] * dstart, 0.0),
-            )
-    if dend is not None or dtimes is not None:
-        terminal = out.terminal
-        stored = jnp.concatenate([terminal.y, terminal.lam])
-        end_slope = _flow(view, solver, terminal.t, stored, theta, control)
-        # SaveAt clips queries to the span. At equality its min/max rule
-        # halves the query-time tangent; use the smooth endpoint limit.
-        query_dot = jnp.zeros_like(times) if dtimes is None else dtimes
-        at_end = ((times == span[1]) & out.ok)[:, None]
-        dout = eqx.tree_at(
-            lambda s: s.ys,
-            dout,
-            jnp.where(
-                at_end, dout.terminal.y + query_dot[:, None] * end_slope[: view.n_u], dout.ys
-            ),
-        )
-        if dout.lambdas is not None:
-            dout = eqx.tree_at(
-                lambda s: s.lambdas,
-                dout,
-                jnp.where(
-                    at_end,
-                    dout.terminal.lam + query_dot[:, None] * end_slope[view.n_u :],
-                    dout.lambdas,
-                ),
-            )
-    if dend is not None:
-        correction = jnp.where(out.ok, end_slope * dend, 0.0)
-        dout = eqx.tree_at(
-            lambda s: (s.terminal.y, s.terminal.lam, s.terminal.t, s.stats.t_reached),
-            dout,
-            (
-                dout.terminal.y + correction[: view.n_u],
-                dout.terminal.lam + correction[view.n_u :],
-                jnp.where(out.ok, dend, dout.terminal.t),
-                jnp.where(out.ok, dend, dout.stats.t_reached),
-            ),
-        )
-    return out, dout
+    """Differentiate the solve with its ends moving (``_moving_solve``)."""
+    return eqx.filter_jvp(_moving_solve, primals, tangents)
 
 
 def solve_schedule(
@@ -995,8 +1061,14 @@ def solve_schedule(
     ``jax.jit``, ``jax.vmap``, ``jax.jacfwd``, and ``jax.grad`` with a reverse
     adjoint such as ``CheckpointAdjoint``.
 
-    Moving boundaries use the flow-map terms ``-Phi f(start) dstart`` and
-    ``f(end) dend`` while the adaptive mesh stays fixed under differentiation.
+    The adaptive mesh stays fixed under differentiation, and a segment's ends
+    move along the flow: moving the start by ``s`` starts the solve from
+    ``y - s f + s**2 / 2 f'`` and moving the end by ``e`` moves the terminal
+    state by ``e f + e**2 / 2 f'``, with ``f`` and ``f'`` the first and second
+    time derivatives of the consistent state there. First and second
+    derivatives in the segment ends (the durations, ``t0``, ``t_end``) are
+    exact, in any composition with derivatives in the targets and the
+    parameters; a third raises ``NotImplementedError``.
     A sample exactly at a switch belongs to the preceding segment; its
     derivative is that segment's smooth endpoint limit. A fixed query crossing
     a discontinuous operating switch has no two-sided derivative.
