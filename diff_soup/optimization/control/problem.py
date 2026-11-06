@@ -18,39 +18,77 @@ from diff_soup.optimization.control._horizon_cache import cached
 from diff_soup.optimization.problem import AbstractOptimizationProblem
 
 
+def _lengths(duration: Any) -> float | tuple:
+    """A duration as Python floats, a scalar or a tuple, so it is static and hashable."""
+    if np.ndim(duration) == 0:
+        return float(duration)
+    return tuple(float(d) for d in np.asarray(duration, dtype=np.float64).ravel())
+
+
 class PiecewiseConstant(eqx.Module):
     """Controls that hold one target of an operational row per interval of a fixed grid.
+
+    Interval `k` holds the target `scale * u[k]`.
 
     Args:
         mode: The row of `spec.control.operational` the targets drive: `"current"`, `"voltage"`, `"power"` or `"resistance"`.
         intervals: The number of intervals, the length of the decision vector.
-        duration: The length of each interval, in the model's time unit.
+        duration: The length of each interval in the model's time unit, or a tuple of one length per interval.
         carry_step: As `ds.Schedule(carry_step=)`: `None` continues the integrator's step into the next interval, `False` starts each afresh.
+        scale: The factor from the decision vector to the model's target, such as a C-rate's current with its sign.
     """
 
     mode: str = eqx.field(static=True)
     intervals: int = eqx.field(static=True)
-    duration: float = eqx.field(static=True)
+    duration: float | tuple = eqx.field(static=True, converter=_lengths)
     carry_step: bool | None = eqx.field(static=True, default=None)
+    scale: float = eqx.field(static=True, default=1.0, converter=float)
+
+    def __check_init__(self) -> None:
+        """Refuse a grid whose lengths do not match `intervals` or are not positive."""
+        durations = np.asarray(self.durations, dtype=np.float64)
+        if durations.shape != (self.intervals,) or not np.all(durations > 0):
+            raise ConfigurationError(
+                f"PiecewiseConstant needs {self.intervals} positive durations; got "
+                f"{self.duration!r}."
+            )
+
+    @property
+    def durations(self) -> tuple:
+        """The length of each interval."""
+        if isinstance(self.duration, tuple):
+            return tuple(float(d) for d in self.duration)
+        return (float(self.duration),) * self.intervals
 
     @property
     def horizon(self) -> float:
-        """The length of the horizon, `intervals * duration`."""
-        return self.intervals * self.duration
+        """The length of the horizon, the sum of the durations."""
+        return float(sum(self.durations))
+
+    @property
+    def interval(self) -> float:
+        """The one length of every interval, which the receding horizon and the estimators step by."""
+        durations = self.durations
+        if any(d != durations[0] for d in durations):
+            raise ConfigurationError(
+                "This needs intervals of one length; the PiecewiseConstant has "
+                f"durations {durations}."
+            )
+        return durations[0]
 
     def segments(self, u: Any, modes: tuple) -> Any:
         """The schedule arrays of the horizon for the decision vector `u`, traced, never retraced for a new `u`.
 
         Args:
-            u: The target of each interval, `(intervals,)`.
+            u: The decision vector, `(intervals,)`.
             modes: The model's mode names, `problem.operational_modes()`.
 
         Returns:
-            The [ScheduleArrays][diff_soup.ScheduleArrays] whose `target` leaf is `u`.
+            The [ScheduleArrays][diff_soup.ScheduleArrays] whose `target` leaf is `scale * u`.
         """
         template = schedule_arrays(
             Schedule(
-                [Segment(**{self.mode: 0.0}, duration=self.duration)] * self.intervals,
+                [Segment(**{self.mode: 0.0}, duration=d) for d in self.durations],
                 carry_step=self.carry_step,
             ),
             modes,
@@ -61,7 +99,7 @@ class PiecewiseConstant(eqx.Module):
                 f"PiecewiseConstant over {self.intervals} intervals takes a decision vector of "
                 f"shape ({self.intervals},); got {u.shape}."
             )
-        return dataclasses.replace(template, target=u)
+        return dataclasses.replace(template, target=self.scale * u)
 
 
 class ControlProblem(AbstractOptimizationProblem, eqx.Module):

@@ -2,13 +2,15 @@
 arguments leave an exact solve's program unchanged, batched solves keep their corrector
 branches, a checkpoint stores the iteration matrix once, a reverse sweep assembles a root's
 matrix inside the solve that factors it, an undifferentiated checkpoint solve keeps its
-compiled temporaries at their measured size, and saved output holds a bounded number of copies
-of the trajectory."""
+compiled temporaries at their measured size, saved output holds a bounded number of copies
+of the trajectory, a problem lowered twice compiles once, and a control grid is static while its
+targets are traced."""
 
 from __future__ import annotations
 
 import functools
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -304,3 +306,42 @@ def test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory():
     # output buffers), workstation 2026-11-05,
     # pytest tests/performance_contracts/test_compile_cache.py::test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory
     assert rows <= 3.0
+
+
+def test_a_problem_lowered_twice_compiles_once():
+    """Two numeric problems over the same closures have equal static parts, so one compile serves both."""
+
+    def value_and_gradient(x, args):
+        return jnp.sum(x**2), 2.0 * x
+
+    traces = []
+
+    @eqx.filter_jit
+    def value(problem, x):
+        traces.append(None)
+        return problem.value(x)
+
+    for _ in range(2):
+        problem = ds.optimization.OptimizationProblem(
+            x0=np.zeros(3),
+            structure=frozenset({"value_gradient"}),
+            _value_and_gradient=value_and_gradient,
+        )
+        value(problem, jnp.ones(3))
+    assert len(traces) == 1
+
+
+def test_a_control_grid_is_static_and_its_targets_are_traced():
+    """`PiecewiseConstant` holds its grid as Python floats and lowers `u` to the targets `scale * u`."""
+    PiecewiseConstant = ds.optimization.control.PiecewiseConstant
+    controls = PiecewiseConstant(
+        mode="current", intervals=2, duration=np.array([1.0, 3.0]), scale=np.float64(-2.0)
+    )
+    arrays = jax.jit(lambda u: controls.segments(u, ("current", "voltage")))(jnp.array([0.5, 1.0]))
+    np.testing.assert_array_equal(arrays.target, [-1.0, -2.0])
+    np.testing.assert_array_equal(arrays.duration, [1.0, 3.0])
+    assert controls.horizon == 4.0 and hash(controls) == hash(
+        PiecewiseConstant(mode="current", intervals=2, duration=(1.0, 3.0), scale=-2.0)
+    )
+    with pytest.raises(ds.ConfigurationError):
+        _ = controls.interval

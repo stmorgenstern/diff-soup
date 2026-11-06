@@ -1,15 +1,15 @@
 {
   "budgets": {
     "test_files": 48,
-    "test_functions": 434,
+    "test_functions": 436,
     "collected_tests": 666,
-    "source_lines": 15675
+    "source_lines": 15716
   },
   "tier_budgets": {
     "public_api": {
       "files": 20,
       "functions": 191,
-      "collected": 302,
+      "collected": 300,
       "lines": 6188
     },
     "contracts": {
@@ -20,9 +20,9 @@
     },
     "performance_contracts": {
       "files": 2,
-      "functions": 12,
-      "collected": 29,
-      "lines": 509
+      "functions": 14,
+      "collected": 31,
+      "lines": 550
     },
     "multi_device": {
       "files": 3,
@@ -45,7 +45,6 @@
   },
   "public_namespaces": [
     "diff_soup",
-    "diff_soup.inference",
     "diff_soup.optimization",
     "diff_soup.optimization.inference",
     "diff_soup.optimization.inference.approx",
@@ -59,8 +58,7 @@
     "diff_soup.distributed",
     "diff_soup.projection",
     "diff_soup.pdesolve",
-    "diff_soup.utils",
-    "diff_soup.optimization"
+    "diff_soup.utils"
   ],
   "private_imports": {
     "tests/contracts/test_architecture.py": "diff_soup.problem._cache",
