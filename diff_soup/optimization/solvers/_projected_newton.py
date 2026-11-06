@@ -12,26 +12,36 @@ coordinates.
 
 The loop is one `lax.while_loop` with masked lanes. A failed evaluation (NaN, a refused
 point) rejects the trial and shrinks the radius; `max_failed` of them in a row end the loop.
+The derivatives are evaluated only at an accepted trial. The trust-region subproblem goes
+through a [TrustRegionStep][], whose one implementation is dense: an eigendecomposition of
+the reduced model, `O(n^3)` per step.
 """
 
 from __future__ import annotations
 
+import abc
 from collections.abc import Callable
-from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import lax
+from jaxtyping import Array, ArrayLike, Bool, Float, Int, PyTree
 
 from diff_soup.optimization.solvers._barrier import Bounds, distances
+from diff_soup.utils.lanes import live_lane_cond
 
+#: Ours: the largest binding-set width of Bertsekas (1982).
 EPSILON = 1e-3
+#: The ratio test and the radius update of Nocedal and Wright, Algorithm 4.1: accept at
+#: `ETA`, shrink by `SHRINK` below a ratio of 1/4, grow by `GROW` above 3/4.
 ETA = 1e-4
 SHRINK = 0.25
 GROW = 2.0
+#: Ours: the radius bounds; below `RADIUS_MIN (1 + |x|)` the loop ends.
 RADIUS_MAX = 1e10
 RADIUS_MIN = 1e-14
+#: Ours: the budget and the relative tolerance of Newton's method on the secular equation.
 _SECULAR_STEPS = 60
 _SECULAR_TOL = 1e-12
 
@@ -53,20 +63,20 @@ class InnerState(eqx.Module):
         failed_evaluations: Failed evaluations in all.
     """
 
-    x: Any
-    value: Any
-    gradient: Any
-    hessian: Any
-    aux: Any
-    radius: Any
-    steps: Any
-    done: Any
-    converged: Any
-    consecutive_failed: Any
-    failed_evaluations: Any
+    x: Float[Array, "n"]
+    value: Float[Array, ""]
+    gradient: Float[Array, "n"]
+    hessian: Float[Array, "n n"]
+    aux: PyTree
+    radius: Float[Array, ""]
+    steps: Int[Array, ""]
+    done: Bool[Array, ""]
+    converged: Bool[Array, ""]
+    consecutive_failed: Int[Array, ""]
+    failed_evaluations: Int[Array, ""]
 
 
-def _limits(bounds: Bounds) -> tuple[Any, Any]:
+def _limits(bounds: Bounds) -> tuple[Float[Array, "n"], Float[Array, "n"]]:
     """The bounds with `-inf` and `inf` where absent."""
     return (
         jnp.where(bounds.has_lower, bounds.lower, -jnp.inf),
@@ -74,18 +84,22 @@ def _limits(bounds: Bounds) -> tuple[Any, Any]:
     )
 
 
-def project(x: Any, bounds: Bounds) -> Any:
+def project(x: Float[Array, "n"], bounds: Bounds) -> Float[Array, "n"]:
     """`x` clipped into the box."""
     lower, upper = _limits(bounds)
     return jnp.clip(x, lower, upper)
 
 
-def projected_gradient(x: Any, gradient: Any, bounds: Bounds) -> Any:
+def projected_gradient(
+    x: Float[Array, "n"], gradient: Float[Array, "n"], bounds: Bounds
+) -> Float[Array, "n"]:
     """`x - P(x - g)`, zero exactly at a stationary point of the box-constrained problem."""
     return x - project(x - gradient, bounds)
 
 
-def bound_multipliers(x: Any, gradient: Any, bounds: Bounds) -> tuple[Any, Any]:
+def bound_multipliers(
+    x: Float[Array, "n"], gradient: Float[Array, "n"], bounds: Bounds
+) -> tuple[Float[Array, "n"], Float[Array, "n"]]:
     """The `(z_lower, z_upper)` that best account for the gradient at `x`.
 
     A lower bound at distance `d` takes `max(g, 0) / (1 + d)`, which balances the residual
@@ -98,7 +112,30 @@ def bound_multipliers(x: Any, gradient: Any, bounds: Bounds) -> tuple[Any, Any]:
     return z_lower, z_upper
 
 
-def trust_region_step(hessian: Any, gradient: Any, radius: Any) -> Any:
+class TrustRegionStep(eqx.Module):
+    """How the loop solves its trust-region subproblem on the free coordinates."""
+
+    @abc.abstractmethod
+    def __call__(
+        self, hessian: Float[Array, "n n"], gradient: Float[Array, "n"], radius: Float[Array, ""]
+    ) -> Float[Array, "n"]:
+        """The minimizer of `g d + d H d / 2` over `|d| <= radius`."""
+        raise NotImplementedError
+
+
+class DenseTrustRegion(TrustRegionStep):
+    """The trust-region step by a dense eigendecomposition, after Moré and Sorensen (1983)."""
+
+    def __call__(
+        self, hessian: Float[Array, "n n"], gradient: Float[Array, "n"], radius: Float[Array, ""]
+    ) -> Float[Array, "n"]:
+        """The minimizer of `g d + d H d / 2` over `|d| <= radius`; see [trust_region_step][]."""
+        return trust_region_step(hessian, gradient, radius)
+
+
+def trust_region_step(
+    hessian: Float[Array, "n n"], gradient: Float[Array, "n"], radius: Float[Array, ""]
+) -> Float[Array, "n"]:
     """The minimizer of `g d + d H d / 2` over `|d| <= radius` (Moré and Sorensen 1983).
 
     With `H = Q diag(lam) Q^T`: the Newton step when `H` is positive definite and the step
@@ -157,7 +194,9 @@ def trust_region_step(hessian: Any, gradient: Any, radius: Any) -> Any:
     return jnp.where(interior, newton, jnp.where(hard, escape, boundary)).astype(dtype)
 
 
-def _binding(x: Any, gradient: Any, bounds: Bounds) -> tuple[Any, Any]:
+def _binding(
+    x: Float[Array, "n"], gradient: Float[Array, "n"], bounds: Bounds
+) -> tuple[Bool[Array, "n"], Bool[Array, "n"]]:
     """Bertsekas' binding sets: within `eps` of a bound with the gradient pushing outward."""
     below, above = distances(x, bounds)
     eps = jnp.minimum(
@@ -168,14 +207,14 @@ def _binding(x: Any, gradient: Any, bounds: Bounds) -> tuple[Any, Any]:
     return lower, upper
 
 
-def _proposal(state: InnerState, bounds: Bounds) -> Any:
+def _proposal(state: InnerState, bounds: Bounds, step: TrustRegionStep) -> Float[Array, "n"]:
     """The projected trial point of one step."""
     x, gradient, hessian, radius = state.x, state.gradient, state.hessian, state.radius
     lower, upper = _binding(x, gradient, bounds)
     keep = (~(lower | upper)).astype(x.dtype)
     big = 1.0 + jnp.sqrt(jnp.sum(hessian**2))
     reduced = keep[:, None] * hessian * keep[None, :] + jnp.diag((1.0 - keep) * big)
-    free = keep * trust_region_step(reduced, keep * gradient, radius)
+    free = keep * step(reduced, keep * gradient, radius)
     below, above = distances(x, bounds)
     onto = jnp.where(lower, -jnp.minimum(below, radius), 0.0) + jnp.where(
         upper, jnp.minimum(above, radius), 0.0
@@ -184,7 +223,13 @@ def _proposal(state: InnerState, bounds: Bounds) -> Any:
 
 
 def start_state(
-    x: Any, value: Any, gradient: Any, hessian: Any, aux: Any, radius: Any, done: Any
+    x: Float[Array, "n"],
+    value: Float[Array, ""],
+    gradient: Float[Array, "n"],
+    hessian: Float[Array, "n n"],
+    aux: PyTree,
+    radius: Float[ArrayLike, ""],
+    done: Bool[ArrayLike, ""],
 ) -> InnerState:
     """The loop's carry at `x`, inside the box, with its value and derivatives."""
     zero = jnp.asarray(0, jnp.int32)
@@ -209,9 +254,10 @@ def minimize(
     state: InnerState,
     bounds: Bounds,
     *,
-    tol: Any,
+    tol: Float[Array, ""],
     max_steps: int,
     max_failed: int,
+    step: TrustRegionStep = DenseTrustRegion(),
 ) -> InnerState:
     """Run the loop from `state` until the projected gradient falls below `tol`.
 
@@ -225,6 +271,7 @@ def minimize(
         tol: The projected gradient, in the infinity norm, at which the loop ends.
         max_steps: The step budget.
         max_failed: Consecutive failed evaluations before the loop ends.
+        step: The trust-region subproblem's solver.
 
     Returns:
         The final carry; `converged` says whether the tolerance was met.
@@ -252,19 +299,25 @@ def minimize(
 
     def body(current):
         x = current.x
-        candidate = _proposal(current, bounds)
-        step = candidate - x
-        predicted = -(current.gradient @ step + 0.5 * step @ (current.hessian @ step))
+        candidate = _proposal(current, bounds, step)
+        move = candidate - x
+        predicted = -(current.gradient @ move + 0.5 * move @ (current.hessian @ move))
         value, valid = trial(candidate)
         actual = current.value - value
         noise = 10.0 * jnp.finfo(x.dtype).eps * jnp.maximum(1.0, jnp.abs(current.value))
         small = predicted <= noise
         ratio = jnp.where(small, 1.0, actual / jnp.where(predicted > 0.0, predicted, 1.0))
         accepted = valid & jnp.where(small, actual >= -noise, ratio >= ETA)
-        new_value, gradient, hessian, aux, finite = derivatives(candidate, x, current.aux)
+        new_value, gradient, hessian, aux, finite = live_lane_cond(
+            accepted,
+            lambda: derivatives(candidate, x, current.aux),
+            lambda: (current.value, current.gradient, current.hessian, current.aux, True),
+            live=~current.done,
+            false_is_free=True,
+        )
         moved = accepted & finite
         failed = ~valid | (accepted & ~finite)
-        length = jnp.linalg.norm(step)
+        length = jnp.linalg.norm(move)
         radius = jnp.where(
             moved,
             jnp.where(

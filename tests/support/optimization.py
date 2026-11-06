@@ -1,9 +1,7 @@
 """Small constrained problems with closed-form solutions, as the numeric problems a compiled solver reads.
 
-A compiled solver reads a problem's raw ``(x, args)`` closures: ``_value``,
-``_value_and_gradient``, ``_constraints``, ``_constraints_and_jacobians`` and
-``_lagrangian_hessian``, the static row counts ``n_equality`` and ``n_inequality``, and
-``bounds``. Each toy's ``args`` is what varies between lanes (a constraint limit or an
+A compiled solver reads a problem's raw ``(x, args)`` closures through
+``problem.closure(name)``. Each toy's ``args`` is what varies between lanes (a constraint limit or an
 objective weight), and ``solution(args)`` gives ``(x, lam_eq, lam_ineq, z_lower, z_upper)``
 exactly, differentiably in ``args``.
 """
@@ -13,28 +11,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-
-class NumericProblem(eqx.Module):
-    """The closures and sizes a compiled solver reads, built from plain functions."""
-
-    bounds: Any
-    x0: Any
-    args: Any
-    _value: Callable = eqx.field(static=True)
-    _value_and_gradient: Callable = eqx.field(static=True)
-    _constraints: Callable = eqx.field(static=True)
-    _constraints_and_jacobians: Callable = eqx.field(static=True)
-    _lagrangian_hessian: Callable = eqx.field(static=True)
-    n_equality: int = eqx.field(static=True)
-    n_inequality: int = eqx.field(static=True)
+from diff_soup.optimization import OptimizationProblem
 
 
 def numeric_problem(objective, equality, inequality, n_eq, n_ineq, x0, args, bounds=None):
-    """A ``NumericProblem`` with derivatives by ``jax.jacfwd`` and ``jax.hessian``."""
+    """An ``OptimizationProblem`` with derivatives by ``jax.jacfwd`` and ``jax.hessian``."""
 
     def constraints(x, a):
         eq = equality(x, a) if n_eq else jnp.zeros((0,), x.dtype)
@@ -54,24 +38,28 @@ def numeric_problem(objective, equality, inequality, n_eq, n_ineq, x0, args, bou
 
         return jax.hessian(lagrangian)(x)
 
-    return NumericProblem(
-        bounds=None if bounds is None else tuple(jnp.asarray(b, jnp.float64) for b in bounds),
+    structure = {"value_gradient", "constraint_jacobian", "lagrangian_hessian"}
+    if n_eq or n_ineq:
+        structure.add("constraints")
+    return OptimizationProblem(
         x0=jnp.asarray(x0, jnp.float64),
+        structure=frozenset(structure),
+        bounds=None if bounds is None else tuple(jnp.asarray(b, jnp.float64) for b in bounds),
         args=jnp.asarray(args, jnp.float64),
+        n_equality=n_eq,
+        n_inequality=n_ineq,
         _value=objective,
         _value_and_gradient=jax.value_and_grad(objective),
         _constraints=constraints,
         _constraints_and_jacobians=constraints_and_jacobians,
         _lagrangian_hessian=lagrangian_hessian,
-        n_equality=n_eq,
-        n_inequality=n_ineq,
     )
 
 
 class Toy(NamedTuple):
     """A problem, a batch of its ``args`` (one per lane) and its exact solution."""
 
-    problem: NumericProblem
+    problem: OptimizationProblem
     args_batch: Any
     solution: Callable
 
@@ -152,7 +140,7 @@ def hs21() -> Toy:
     return Toy(problem, jnp.array([0.01, 1.0, 0.1, 10.0]), solution)
 
 
-def duplicate_rows() -> NumericProblem:
+def duplicate_rows() -> OptimizationProblem:
     """``min |x - 2|^2`` with ``x1 + x2 <= a`` twice: both rows active, ``x* = (a, a) / 2``."""
     return numeric_problem(
         lambda x, a: jnp.sum((x - 2.0) ** 2),
@@ -165,14 +153,14 @@ def duplicate_rows() -> NumericProblem:
     )
 
 
-def infeasible() -> NumericProblem:
+def infeasible() -> OptimizationProblem:
     """``min x1 + x2`` with ``x1^2 + x2^2 + a <= 0``, which no point satisfies for ``a > 0``."""
     return numeric_problem(
         lambda x, a: x[0] + x[1], None, lambda x, a: jnp.stack([x @ x + a]), 0, 1, [1.0, 1.0], 1.0
     )
 
 
-def nan_region() -> NumericProblem:
+def nan_region() -> OptimizationProblem:
     """``(x - 2)^2`` below ``x = a`` and NaN from there on, so the iterates crowd the edge."""
     return numeric_problem(
         lambda x, a: jnp.where(x[0] < a, (x[0] - 2.0) ** 2, jnp.nan), None, None, 0, 0, [0.0], 1.0

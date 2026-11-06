@@ -14,8 +14,11 @@ from typing import Any
 
 import equinox as eqx
 import jax.numpy as jnp
+from jaxtyping import Array, Float
 
-# Ipopt's defaults.
+# Ipopt's defaults (Wächter and Biegler 2006, section 3.2): `gamma_theta`, `gamma_phi`,
+# `eta_phi`, `delta`, `s_theta`, `s_phi`, `alpha_min_frac`, and `theta_max_fact`,
+# `theta_min_fact`. `CAPACITY` is ours: the filter's slots under `jit`.
 GAMMA_THETA = 1e-5
 GAMMA_PHI = 1e-8
 ETA_PHI = 1e-8
@@ -36,8 +39,8 @@ class Filter(eqx.Module):
         phi: The barrier objective of each entry, `(CAPACITY,)`.
     """
 
-    theta: Any
-    phi: Any
+    theta: Float[Array, "capacity"]
+    phi: Float[Array, "capacity"]
 
 
 def empty_filter(dtype: Any) -> Filter:

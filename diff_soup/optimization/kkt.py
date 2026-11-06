@@ -6,8 +6,8 @@ The interior point and SQP steps solve
     [ A                        -delta_c I] [dlam] = [r_dual  ]
 
 The dense backend takes the condensed route: a Cholesky factorization of the primal block,
-`delta_w` raised until it succeeds, then the Schur complement on the constraint rows. A banded
-backend on cuDSS replaces only this class when multiple shooting or transcription needs it.
+`delta_w` raised until it succeeds, then the Schur complement on the constraint rows. Another
+backend (a banded one, say) replaces only this class.
 
 The primal block alone factors only when `W + Sigma` is positive definite, which is more than
 the correct inertia asks: a nonconvex `W` whose reduced Hessian is positive definite needs no
@@ -33,16 +33,17 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import lax
+from jaxtyping import Array, Bool, Float
 
 # Ipopt's inertia-correction constants (Wächter and Biegler 2006, Algorithm IC).
 _FIRST_GROWTH = 100.0
 _SHRINK = 1.0 / 3.0
 _DELTA_W_MIN = 1e-20
-# A Cholesky pivot below this fraction of its diagonal entry is a zero pivot: the matrix is
-# singular to working precision and the factorization does not certify the inertia.
+# Ours: a Cholesky pivot below this fraction of its diagonal entry is a zero pivot: the matrix
+# is singular to working precision and the factorization does not certify the inertia.
 _PIVOT_RTOL = 1e-13
-# The augmented route weights each constraint row so that its term in the primal block is
-# this many times the curvature of the primal block along the row.
+# Ours: the augmented route weights each constraint row so that its term in the primal block
+# is this many times the curvature of the primal block along the row.
 _RHO_REL = 1e3
 
 # The attempts of one inertia correction, in order.
@@ -70,16 +71,16 @@ class KKTFactor(eqx.Module):
         schur_ok: Whether the Schur complement factored.
     """
 
-    primal: Any
-    jacobian: Any
-    dual: Any
-    weight: Any
-    scale: Any
-    lower_primal: Any
-    half_jacobian: Any
-    lower_schur: Any
-    primal_ok: Any
-    schur_ok: Any
+    primal: Float[Array, "n n"]
+    jacobian: Float[Array, "m n"]
+    dual: Float[Array, "m"]
+    weight: Float[Array, "m"]
+    scale: Float[Array, "m"]
+    lower_primal: Float[Array, "n n"]
+    half_jacobian: Float[Array, "n m"]
+    lower_schur: Float[Array, "m m"]
+    primal_ok: Bool[Array, ""]
+    schur_ok: Bool[Array, ""]
 
     @property
     def ok(self) -> Any:
@@ -93,6 +94,10 @@ class KKTSolve(eqx.Module):
     A backend implements `factor` and `solve_factored`, and `solve` and the inertia correction
     are built on them.
     """
+
+    delta_w_init: eqx.AbstractVar[float]
+    delta_w_max: eqx.AbstractVar[float]
+    delta_w_factor: eqx.AbstractVar[float]
 
     @abc.abstractmethod
     def factor(
@@ -132,7 +137,7 @@ class KKTSolve(eqx.Module):
         rhs_primal: Any,
         rhs_dual: Any,
     ) -> tuple[Any, Any, Any]:
-        """Solve the KKT system at the given regularization.
+        """Solve the KKT system at the given regularization: the plain route, else the augmented one.
 
         Args:
             primal_block: `W + Sigma`, the Lagrangian Hessian plus the barrier diagonal, `(n, n)`.
@@ -147,8 +152,11 @@ class KKTSolve(eqx.Module):
                 factorization certified the inertia `(n, m, 0)` at this `delta_w`.
         """
         plain = self.factor(primal_block, constraint_jacobian, delta_w, delta_c)
-        augmented = self.factor(primal_block, constraint_jacobian, delta_w, delta_c, True)
-        factor = jax.tree.map(lambda a, b: jnp.where(plain.ok, a, b), plain, augmented)
+        factor = lax.cond(
+            plain.ok,
+            lambda: plain,
+            lambda: self.factor(primal_block, constraint_jacobian, delta_w, delta_c, True),
+        )
         dx, dlam = self.solve_factored(factor, rhs_primal, rhs_dual)
         return dx, dlam, factor.ok
 
@@ -211,11 +219,12 @@ class KKTSolve(eqx.Module):
 
         zero = jnp.zeros((), dtype=primal_block.dtype)
         route = jnp.asarray(_PLAIN, dtype=jnp.int32)
-        factor, delta_w, _ = lax.while_loop(cond, body, (attempt(zero, route), zero, route))
+        first = self.factor(primal_block, constraint_jacobian, zero, delta_c, False)
+        factor, delta_w, _ = lax.while_loop(cond, body, (first, zero, route))
         return factor, delta_w
 
 
-def _cholesky(matrix: Any) -> tuple[Any, Any]:
+def cholesky(matrix: Any) -> tuple[Any, Any]:
     """The lower Cholesky factor of `matrix` and whether it certifies positive definiteness."""
     size = matrix.shape[-1]
     if size == 0:
@@ -271,14 +280,17 @@ class DenseKKT(KKTSolve):
         dtype = primal_block.dtype
         primal = primal_block + delta_w * jnp.eye(size, dtype=dtype)
         dual = jnp.broadcast_to(jnp.asarray(delta_c, dtype=dtype), (rows,))
-        weight, scale = _row_weights(primal, constraint_jacobian, dual)
-        weight = jnp.where(augmented, weight, 0.0)
-        scale = jnp.where(augmented, scale, 1.0)
-        lower, primal_ok = _cholesky(
-            primal + constraint_jacobian.T @ (weight[:, None] * constraint_jacobian)
-        )
+        if augmented is False:
+            weight, scale = jnp.zeros_like(dual), jnp.ones_like(dual)
+            condensed = primal
+        else:
+            weight, scale = _row_weights(primal, constraint_jacobian, dual)
+            weight = jnp.where(augmented, weight, 0.0)
+            scale = jnp.where(augmented, scale, 1.0)
+            condensed = primal + constraint_jacobian.T @ (weight[:, None] * constraint_jacobian)
+        lower, primal_ok = cholesky(condensed)
         half = jax.scipy.linalg.solve_triangular(lower, constraint_jacobian.T, lower=True)
-        schur, schur_ok = _cholesky(half.T @ half + jnp.diag(dual / scale))
+        schur, schur_ok = cholesky(half.T @ half + jnp.diag(dual / scale))
         return KKTFactor(
             primal,
             constraint_jacobian,
@@ -311,17 +323,3 @@ class DenseKKT(KKTSolve):
         residual_dual = rhs_dual - factor.jacobian @ dx + factor.dual * dlam
         cx, clam = self._solve_once(factor, residual_primal, residual_dual)
         return dx + cx, dlam + clam
-
-    def solve(
-        self,
-        primal_block: Any,
-        constraint_jacobian: Any,
-        delta_w: Any,
-        delta_c: Any,
-        rhs_primal: Any,
-        rhs_dual: Any,
-    ) -> tuple[Any, Any, Any]:
-        """Solve by the condensed route, as [KKTSolve.solve][diff_soup.optimization.solvers.KKTSolve.solve] describes."""
-        return super().solve(
-            primal_block, constraint_jacobian, delta_w, delta_c, rhs_primal, rhs_dual
-        )
