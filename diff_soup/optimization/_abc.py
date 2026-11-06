@@ -153,6 +153,8 @@ class OptimizationProblem(eqx.Module):
     _constraints_and_jacobians: Any = eqx.field(static=True, default=None)
     _lagrangian_hessian: Any = eqx.field(static=True, default=None)
     _lagrangian_hessian_vector: Any = eqx.field(static=True, default=None)
+    _evaluate: Any = eqx.field(static=True, default=None)
+    _evaluate_with_derivatives: Any = eqx.field(static=True, default=None)
     _joint_view: Any = eqx.field(static=True, default=None)
 
     def __post_init__(self):
@@ -182,6 +184,18 @@ class OptimizationProblem(eqx.Module):
             self.structure = frozenset(self.structure) | implied
         if self._lagrangian_hessian_vector is None and self._lagrangian_hessian is not None:
             self._lagrangian_hessian_vector = _lagrangian_times(self._lagrangian_hessian)
+        # A compiled solver evaluates the objective and the rows together; a problem whose
+        # evaluations share one expensive solve gives the pair directly.
+        if self._evaluate is None and self._value is not None and self._constraints is not None:
+            self._evaluate = _evaluate_of(self._value, self._constraints)
+        if (
+            self._evaluate_with_derivatives is None
+            and self._value_and_gradient is not None
+            and self._constraints_and_jacobians is not None
+        ):
+            self._evaluate_with_derivatives = _evaluate_with_derivatives_of(
+                self._value_and_gradient, self._constraints_and_jacobians
+            )
 
     def __check_init__(self):
         """Refuse a structure key outside ``STRUCTURE_KEYS``, or a key without its closures."""
@@ -281,6 +295,9 @@ class OptimizationProblem(eqx.Module):
             _constraints_and_jacobians=lowered.constraints_and_jacobians,
             _lagrangian_hessian=hessian,
             _lagrangian_hessian_vector=hessian_vector,
+            # Derived again from the constrained closures.
+            _evaluate=None,
+            _evaluate_with_derivatives=None,
         )
 
     def _bound(self, name: str) -> Callable:
@@ -349,6 +366,16 @@ class OptimizationProblem(eqx.Module):
         Empty rows and ``(0, n)`` Jacobians for a problem without constraints.
         """
         return self._bound("constraints_and_jacobians")
+
+    @property
+    def evaluate(self) -> Callable:
+        """``x -> (f, equality, inequality)``, the objective and the rows from one evaluation."""
+        return self._bound("evaluate")
+
+    @property
+    def evaluate_with_derivatives(self) -> Callable:
+        """``x -> (f, g, eq, ineq, J_eq, J_ineq)``, values and first derivatives from one evaluation."""
+        return self._bound("evaluate_with_derivatives")
 
     @property
     def lagrangian_hessian(self) -> Callable:
@@ -475,6 +502,8 @@ _KEY_OF = {
     "constraints_and_jacobians": "constraint_jacobian",
     "lagrangian_hessian": "lagrangian_hessian",
     "lagrangian_hessian_vector": "lagrangian_hessian",
+    "evaluate": "value_gradient",
+    "evaluate_with_derivatives": "constraint_jacobian",
 }
 
 #: The closures every problem holds, with empty rows when it has no constraints.
@@ -541,6 +570,26 @@ def _no_constraint_jacobians(x: Any, args: Any) -> tuple:
     empty = jnp.zeros((0,), dtype=jnp.result_type(x))
     jacobian = jnp.zeros((0, jnp.shape(x)[-1]), dtype=jnp.result_type(x))
     return empty, empty, jacobian, jacobian
+
+
+def _evaluate_of(value: Callable, constraints: Callable) -> Callable:
+    """``(x, args) -> (f, eq, ineq)`` from the objective and the constraint rows."""
+
+    def evaluate(x, args):
+        return (value(x, args), *constraints(x, args))
+
+    return evaluate
+
+
+def _evaluate_with_derivatives_of(
+    value_and_gradient: Callable, constraints_and_jacobians: Callable
+) -> Callable:
+    """``(x, args) -> (f, g, eq, ineq, J_eq, J_ineq)`` from the two first-order closures."""
+
+    def evaluate_with_derivatives(x, args):
+        return (*value_and_gradient(x, args), *constraints_and_jacobians(x, args))
+
+    return evaluate_with_derivatives
 
 
 def _rows_of(constraints_and_jacobians: Callable) -> Callable:
