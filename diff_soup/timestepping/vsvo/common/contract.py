@@ -29,8 +29,16 @@ from typing import Any, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 
-from diff_soup.timestepping.vsvo.common.backends import initialization_policy
+from diff_soup._errors import ConfigurationError
+from diff_soup._layout import Layout
+from diff_soup.linear import SparseTopology
+from diff_soup.problem.implicit.consistent_init.pinned import _structure
+from diff_soup.timestepping.vsvo.common.backends import analyze_sensitivity, initialization_policy
 from diff_soup.utils.weights import error_weight
+
+#: The endpoint clamp shortens a step to just shy of the endpoint by this many rounding
+#: errors (ours: a margin of a few ulps so ``t + h`` never lands past ``t1``).
+ENDPOINT_CLAMP_FUZZ = 4.0
 
 
 # ---------------------------------------------------------------------------
@@ -403,16 +411,109 @@ def consistent_start(engine: Any, cfg: Any, ic: Any, n_u: int, dtype: Any) -> Co
     )
 
 
+def refuse_unprojected_start(problem: Any, skip: bool, refused: str) -> None:
+    """Refuse to start a problem with algebraic rows from a state that is not projected.
+
+    Args:
+        problem: The solver problem.
+        skip: Whether this solve skips the startup projection.
+        refused: The options that skip it, with their verb, as the message names them.
+
+    Raises:
+        ConfigurationError: If ``skip`` holds and the problem has algebraic rows or
+            bordered globals.
+    """
+    if skip and _structure(problem)[4]:
+        raise ConfigurationError(
+            f"this problem has algebraic rows; {refused} not supported for it. "
+            "Enable consistent initialization."
+        )
+
+
+def sensitivity_analyses(engine: Any, problem: Any, backend: Any, layout: Any) -> tuple[Any, Any]:
+    """The forward and reverse analyses of the accepted root's sensitivity solves.
+
+    The per-step root derivative factors the full-system matrix at the accepted
+    root exactly, the tangent solve the matrix and a reverse sweep its transpose,
+    each under the precision policy of its direction, through the engine's own
+    backend; a dense-mode plan hands them the full dense pattern. The symbolic
+    analysis is problem-static.
+    """
+    topology = problem.full_topology
+    if topology is None:
+        topology = SparseTopology.full(int(problem.n))
+    forward, reverse = (
+        analyze_sensitivity(backend, topology, layout=layout, precision=engine.precision, mode=mode)
+        for mode in ("forward", "reverse")
+    )
+    return forward, reverse
+
+
+def problem_layout(problem: Any) -> Layout:
+    """The device placement of every analysis of a solve: the problem's lowered layout.
+
+    The lowering-declared layout places each corrector rung's factor and the
+    sensitivity pattern alike, so a multi-GPU factorization request reaches the
+    adjoint's transpose factor too; a problem without one takes the default.
+    """
+    layout = getattr(problem, "layout", None)
+    return Layout() if layout is None else layout
+
+
+def clamp_initial_step(
+    h: jax.Array,
+    t0: jax.Array,
+    t1: jax.Array,
+    hmax_inv: jax.Array,
+    hmin: jax.Array,
+    uround: Any,
+    step: Any,
+    dtype: Any,
+) -> jax.Array:
+    """Clamp a first step to ``hmax`` and ``hmin``, then short of ``t1``, or replay a recorded one.
+
+    Args:
+        h: The proposed first step.
+        t0: The start time.
+        t1: The end time.
+        hmax_inv: ``1 / hmax``, or zero for no maximum.
+        hmin: The minimum step magnitude.
+        uround: The unit roundoff of ``dtype``.
+        step: ``None``, or ``(replay, recorded)``: a replayed restart enters with the
+            step its forward sweep recorded where ``replay`` holds.
+        dtype: The state dtype.
+
+    Returns:
+        The first step.
+    """
+    rh = jnp.abs(h) * hmax_inv
+    h = jnp.where(rh > 1.0, h / jnp.where(rh > 1.0, rh, 1.0), h)
+    at_min = jnp.abs(h) < hmin
+    h = jnp.where(at_min, h * (hmin / jnp.where(at_min, jnp.abs(h), 1.0)), h)
+    overshoot = (t0 + h - t1) * h > 0
+    h = jnp.where(overshoot, (t1 - t0) * (1.0 - ENDPOINT_CLAMP_FUZZ * uround), h)
+    if step is not None:
+        replay, recorded = step
+        recorded = jax.lax.stop_gradient(jnp.asarray(recorded).astype(dtype))
+        h = jnp.where(replay, recorded, h)
+    return h
+
+
 __all__ = [
+    "ENDPOINT_CLAMP_FUZZ",
     "ENGINE_CAPABILITIES",
     "ConsistentStart",
+    "clamp_initial_step",
     "EngineCapabilities",
     "coerce_problem",
     "consistent_start",
     "initialization_policies",
     "pack_state",
+    "problem_layout",
     "project_start",
+    "refuse_unprojected_start",
     "register_problem_coercion",
+    "sensitivity_analyses",
     "unpack_state",
     "validate_requirements",
     "where_state",

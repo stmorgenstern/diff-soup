@@ -46,14 +46,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
 from diff_soup._precision import Precision
-from diff_soup.linear import SparseTopology
 from diff_soup.nonlinear.border_cache import initial_border_cache
 from diff_soup.nonlinear.generations import certify_exact_root, initial_generations
 from diff_soup.nonlinear.result import LinearizationDirective
-from diff_soup.problem.implicit.consistent_init.pinned import _structure
 from diff_soup.timestepping.vsvo.common.adaptive import (
     CAUSE_ESCALATION,
     CAUSE_FALSE_CONVERGENCE,
@@ -63,19 +60,23 @@ from diff_soup.timestepping.vsvo.common.adaptive import (
     initial_rung_state,
 )
 from diff_soup.timestepping.vsvo.common.backends import (
-    analyze_sensitivity,
     initialization_policy,
     resolve_backend,
 )
 from diff_soup.timestepping.vsvo.common.contract import (
+    ENDPOINT_CLAMP_FUZZ,
     ENGINE_CAPABILITIES,
     EngineCapabilities,
+    clamp_initial_step,
     closure_moved,
     consistent_start,
     ic_gate_tolerance,
     initialization_policies,
     pack_state,
+    problem_layout,
     project_start,
+    refuse_unprojected_start,
+    sensitivity_analyses,
     where_state,
 )
 from diff_soup.timestepping.vsvo.common.decisions import replay_decisions
@@ -125,10 +126,6 @@ _PREV_PREC_FAIL = 3
 
 # The internal time snaps onto the endpoint within this many rounding errors.
 _TN_SNAP_FUZZ = 100.0
-
-# The endpoint clamp shortens a step to just shy of the endpoint by this
-# many rounding errors.
-_ENDPOINT_CLAMP_FUZZ = 4.0
 
 # The step-size floor is this many spacings of the current time (the hard
 # ``hmin`` bound still applies on top when set).
@@ -450,13 +447,7 @@ class NDFEngine(eqx.Module):
         t1 = jnp.asarray(t1, dtype=dtype)
         uround = jnp.asarray(jnp.finfo(dtype).eps, dtype=dtype)
 
-        _, _, _diff, _alg_index, needs_projection = _structure(problem)
-        if not bool(cfg.consistent_ic) and needs_projection:
-            raise ConfigurationError(
-                "this problem has algebraic rows; "
-                "consistent_ic=False is not supported for it. Enable "
-                "consistent initialization."
-            )
+        refuse_unprojected_start(problem, not bool(cfg.consistent_ic), "consistent_ic=False is")
         policies = initialization_policies(problem, self.precision)
         _, _, ic_reverse_precision = policies
         ic = project_start(
@@ -515,18 +506,7 @@ class NDFEngine(eqx.Module):
             jax.lax.cond(dt0 != 0.0, lambda _: dt0, _auto_initial_step, operand=None)
         )
 
-        rh = jnp.abs(hh) * hmax_inv
-        hh = jnp.where(rh > 1.0, hh / jnp.where(rh > 1.0, rh, 1.0), hh)
-        at_min = jnp.abs(hh) < hmin
-        hh = jnp.where(at_min, hh * (hmin / jnp.where(at_min, jnp.abs(hh), 1.0)), hh)
-        overshoot = (t0 + hh - t1) * hh > 0
-        hh = jnp.where(overshoot, (t1 - t0) * (1.0 - _ENDPOINT_CLAMP_FUZZ * uround), hh)
-
-        if step is not None:
-            # A replayed restart enters with the step its forward sweep recorded.
-            replay, recorded = step
-            recorded = jax.lax.stop_gradient(jnp.asarray(recorded).astype(dtype))
-            hh = jnp.where(replay, recorded, hh)
+        hh = clamp_initial_step(hh, t0, t1, hmax_inv, hmin, uround, step, dtype)
 
         state = init_ndf_state(y_aug0, ydot_aug0, hh, dtype.type)
 
@@ -616,14 +596,7 @@ class NDFEngine(eqx.Module):
         max_order = jnp.asarray(carry.max_order, jnp.int32)
 
         backend = self.backend
-        # The problem's lowering-declared Layout is the single source of
-        # truth for device placement: it places EVERY analysis of this solve
-        # — each corrector rung's factor and the sensitivity pattern alike —
-        # so a multi-GPU factorization request reaches the adjoint's
-        # transpose factor too, never silently staying single-device.
-        layout = getattr(problem, "layout", None)
-        if layout is None:
-            layout = Layout()
+        layout = problem_layout(problem)
         adaptive = self.precision.solve_mode == "adaptive"
         # The corrector's routes: one per precision rung (two under the
         # adaptive ladder, which switches between them on the carried rung).
@@ -685,29 +658,7 @@ class NDFEngine(eqx.Module):
             rung_changed=None if prec is None else prec.entered,
             control=carry.control,
         )
-        # The sensitivity solves of the per-step root derivative factor the
-        # full-system matrix at the accepted root exactly — the tangent solve
-        # the matrix, a reverse sweep its transpose, each under the precision
-        # policy of its direction — through this engine's own backend; a
-        # dense-mode plan hands it the full dense pattern. The symbolic
-        # analysis is problem-static.
-        full_topology = problem.full_topology
-        if full_topology is None:
-            full_topology = SparseTopology.full(int(problem.n))
-        sens_analysis = analyze_sensitivity(
-            backend,
-            full_topology,
-            layout=layout,
-            precision=self.precision,
-            mode="forward",
-        )
-        rev_analysis = analyze_sensitivity(
-            backend,
-            full_topology,
-            layout=layout,
-            precision=self.precision,
-            mode="reverse",
-        )
+        sens_analysis, rev_analysis = sensitivity_analyses(self, problem, backend, layout)
         nls = ndf_corrector_root(
             problem,
             backend,
@@ -807,7 +758,7 @@ class NDFEngine(eqx.Module):
         at_end = jnp.abs(tn_new - t1) <= _TN_SNAP_FUZZ * uround * (jnp.abs(tn_new) + dt_abs)
         overtake = (tn_new + dt_acc - t1) * dt > 0
         clamp = jnp.logical_and(jnp.logical_not(at_end), overtake)
-        dt_acc = jnp.where(clamp, (t1 - tn_new) * (1.0 - _ENDPOINT_CLAMP_FUZZ * uround), dt_acc)
+        dt_acc = jnp.where(clamp, (t1 - tn_new) * (1.0 - ENDPOINT_CLAMP_FUZZ * uround), dt_acc)
         # the constant-step counter survives only an unchanged step size
         nconsteps_acc = jnp.where(dt_acc == dt, acc.nconsteps_next, jnp.zeros((), jnp.int32))
         accept_state = NDFState(
