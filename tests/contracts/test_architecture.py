@@ -107,15 +107,13 @@ def test_the_public_inference_problem_is_a_facade_over_a_numeric_leaf():
 
 
 def test_every_problem_shares_one_array_free_base_and_the_module_problems_stay_pytrees():
-    """InferenceProblem and the control and design problems subclass one abstract base that holds
+    """InferenceProblem and the control problem subclass one abstract base that holds
     no state; a ControlProblem's leaves are its own arrays, so a batch of them is one
     filter_vmap and filter_jit traces it."""
     base = ds.optimization.AbstractOptimizationProblem
     control = ds.optimization.control
     assert issubclass(inf.InferenceProblem, base) and issubclass(inf.LoweredStudy, base)
-    assert issubclass(control.ControlProblem, base) and issubclass(
-        ds.optimization.design.DesignProblem, base
-    )
+    assert issubclass(control.ControlProblem, base)
     assert not issubclass(base, eqx.Module) and "__init__" not in vars(base)
     batch = control.ControlProblem(initial_state=jnp.ones((3, 2)), theta=jnp.arange(3.0))
     assert len(jax.tree.leaves(batch)) == 2

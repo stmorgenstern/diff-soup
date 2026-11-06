@@ -3,9 +3,8 @@
 Every user-facing problem shares one base,
 [AbstractOptimizationProblem][diff_soup.optimization.AbstractOptimizationProblem], and
 lowers to the numeric [OptimizationProblem][diff_soup.optimization.OptimizationProblem]
-a solver takes. `diff_soup.optimization.inference` fits models to measurements,
-`diff_soup.optimization.control` poses and runs control problems, and
-`diff_soup.optimization.design` is reserved for experiment design.
+a solver takes. `diff_soup.optimization.inference` fits models to measurements, and
+`diff_soup.optimization.control` poses and runs control problems.
 
 `diff_soup.inference` is a deprecated alias of `diff_soup.optimization.inference`, kept
 for one release.
@@ -31,7 +30,7 @@ from diff_soup.optimization.solvers import (
 )
 from diff_soup.optimization.inference.fitting._optsolve import optsolve
 from diff_soup.optimization.inference.fitting.result import OptResult, TerminationStatus
-from diff_soup.optimization import control, design
+from diff_soup.optimization import control
 
 __all__ = [
     "AbstractOptimizationProblem",
@@ -50,7 +49,6 @@ __all__ = [
     "SolveRecord",
     "TerminationStatus",
     "control",
-    "design",
     "inference",
     "lanes",
     "optsolve",
