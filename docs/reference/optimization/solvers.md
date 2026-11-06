@@ -31,13 +31,10 @@ These solvers minimize a numeric problem under equality and inequality constrain
 
 ### Results
 
-Every `run` returns the solution and a `SolveRecord`.
+Every `run` returns the solution and a `SolveRecord`, whose `status` is a
+[TerminationStatus][diff_soup.optimization.TerminationStatus] code.
 
 ::: diff_soup.optimization.SolveRecord
-    options:
-      members: false
-
-::: diff_soup.optimization.SolveStatus
     options:
       members: false
 

@@ -40,7 +40,6 @@ from diff_soup.optimization.solvers import (
     NewtonTrustRegion,
     Optax,
     SolveRecord,
-    SolveStatus,
 )
 from diff_soup.optimization.inference.fitting._optsolve import optsolve
 from diff_soup.optimization.inference.fitting.result import OptResult, TerminationStatus
@@ -69,7 +68,6 @@ __all__ = [
     "SQP",
     "STRUCTURE_KEYS",
     "SolveRecord",
-    "SolveStatus",
     "TerminationStatus",
     "control",
     "design",

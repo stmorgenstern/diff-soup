@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from diff_soup.optimization import SQP, AugmentedLagrangian, InteriorPoint, SolveStatus
+from diff_soup.optimization import SQP, AugmentedLagrangian, InteriorPoint, TerminationStatus
 from tests.support.optimization import duplicate_rows, hs7, hs21, hs35, infeasible, nan_region
 
 # The solvers' stopping tolerances; measured: every lane ends KKT_TOL, workstation CPU 2026-11-06
@@ -125,11 +125,11 @@ def test_an_infeasible_problem_ends_infeasible(solver):
     """Constraints no point satisfies end the run with `INFEASIBLE`."""
     problem = infeasible()
     _, record = jax.jit(lambda a: SOLVERS[solver].run(problem, problem.x0, a))(1.0)
-    assert int(record.status) == SolveStatus.INFEASIBLE
+    assert int(record.status) == TerminationStatus.INFEASIBLE
 
 
 def test_a_nan_region_ends_with_solver_failed_at_a_finite_point():
     """Repeated NaN trials end the run with `SOLVER_FAILED`, the last accepted point kept."""
     problem = nan_region()
     x, record = jax.jit(lambda a: SOLVERS["interior_point"].run(problem, problem.x0, a))(1.0)
-    assert int(record.status) == SolveStatus.SOLVER_FAILED and bool(jnp.all(jnp.isfinite(x)))
+    assert int(record.status) == TerminationStatus.SOLVER_FAILED and bool(jnp.all(jnp.isfinite(x)))

@@ -32,10 +32,11 @@ import jax
 import jax.numpy as jnp
 from jax.custom_derivatives import zero_from_primal
 
+from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.kkt import _cholesky
 from diff_soup.optimization.solvers._barrier import Bounds, distances
 from diff_soup.optimization.solvers._closures import Closures
-from diff_soup.optimization.solvers._protocol import SolveRecord, SolveStatus
+from diff_soup.optimization.solvers._protocol import SolveRecord
 
 DEGENERATE = 1e2
 # The barrier diagonals of the degenerate system are capped, so the branch that is not
@@ -238,7 +239,7 @@ def _entry_jvp(primal, prepare, static, primals, tangents):
     out = _entry(primal, prepare, static, dynamic, x0, args, warm)
     x, record = out
     closures, bounds = prepare(eqx.combine(dynamic, static), x)
-    valid = record.status == SolveStatus.KKT_TOL
+    valid = record.status == TerminationStatus.KKT_TOL
     dargs = _zero_where_not(valid, dargs)
     dx, drecord = kkt_tangent(closures, bounds, x, record, args, dargs)
     return out, _poison((dx, drecord), valid)

@@ -11,6 +11,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from diff_soup._errors import ConfigurationError
+from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.kkt import DenseKKT
 from diff_soup.optimization.solvers import _filter, _hessian, _restoration
 from diff_soup.optimization.solvers._barrier import (
@@ -43,7 +44,6 @@ from diff_soup.optimization.solvers._protocol import (
     CompiledSolver,
     SolveRecord,
     SolverState,
-    SolveStatus,
 )
 from diff_soup.utils.lanes import live_lane_cond
 
@@ -272,7 +272,9 @@ class InteriorPoint(CompiledSolver):
             x=x,
             step=_int(0),
             done=~valid,
-            status=_int(jnp.where(valid, SolveStatus.MAX_STEPS, SolveStatus.SOLVER_FAILED)),
+            status=_int(
+                jnp.where(valid, TerminationStatus.MAX_STEPS, TerminationStatus.SOLVER_FAILED)
+            ),
             slacks=s,
             lam_e=lam_e,
             lam_i=lam_i,
@@ -553,8 +555,12 @@ class InteriorPoint(CompiledSolver):
         consecutive = jnp.where(accepted, 0, consecutive)
         failure = jnp.where(
             exhausted | (consecutive >= self.max_failed_evaluations),
-            SolveStatus.SOLVER_FAILED,
-            jnp.where(outcome.infeasible, SolveStatus.INFEASIBLE, SolveStatus.RESTORATION_FAILED),
+            TerminationStatus.SOLVER_FAILED,
+            jnp.where(
+                outcome.infeasible,
+                TerminationStatus.INFEASIBLE,
+                TerminationStatus.RESTORATION_FAILED,
+            ),
         )
         failed_now = (~moved) | (consecutive >= self.max_failed_evaluations)
         return eqx.tree_at(
@@ -639,8 +645,8 @@ class InteriorPoint(CompiledSolver):
             state.status,
             jnp.where(
                 converged,
-                SolveStatus.KKT_TOL,
-                jnp.where(diverged, SolveStatus.DIVERGED, SolveStatus.MAX_STEPS),
+                TerminationStatus.KKT_TOL,
+                jnp.where(diverged, TerminationStatus.DIVERGED, TerminationStatus.MAX_STEPS),
             ),
         )
         return state.done | converged | diverged | over, _int(status)
