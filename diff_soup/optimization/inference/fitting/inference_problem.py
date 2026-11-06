@@ -600,7 +600,9 @@ def _recipe_parameter_schema(problem: Any, parameters: ParameterGroups, seam: An
         entries.append(
             ParameterEntry(
                 handle=handle,
-                occurrences=(ParameterOccurrence(owner=None, columns=columns),),
+                occurrences=(
+                    ParameterOccurrence(owner=None, columns=columns, declarations=(handle,)),
+                ),
                 size=size,
                 decode=decode,
             )

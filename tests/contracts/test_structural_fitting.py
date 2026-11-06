@@ -434,3 +434,19 @@ def test_the_lagrangian_hessian_adds_the_constraint_curvature_to_the_objectives(
     # pytest tests/contracts/test_structural_fitting.py
     np.testing.assert_allclose(hessian, expected, atol=1e-14)
     np.testing.assert_allclose(product, expected @ direction, atol=1e-14)
+
+
+@pytest.mark.parametrize("solver", ["InteriorPoint", "SQP"])
+def test_a_compiled_solver_minimizes_the_regularized_objective(solver):
+    """A compiled solver reads the regularization's penalty in the problem's closures: (x - 1)^2
+    under Tikhonov at lambda 2 has its optimum at 0.5, not at the unregularized 1."""
+    problem = ds.optimization.OptimizationProblem.from_value(
+        np.zeros(1),
+        lambda x: (x[0] - 1.0) ** 2,
+        regularization=inf.Tikhonov(lambda_=2.0, weights=np.ones(1)),
+        hessian=True,
+    )
+    result = ds.optimization.optsolve(problem, getattr(ds.optimization, solver)())
+    # measured 0.0 from 0.5 with InteriorPoint and SQP, workstation 2026-11-06,
+    # pytest tests/contracts/test_structural_fitting.py
+    np.testing.assert_allclose(result.params, [0.5], atol=1e-12)

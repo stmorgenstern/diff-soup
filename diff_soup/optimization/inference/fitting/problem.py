@@ -471,6 +471,8 @@ class LoweredStudy(InferenceProblem):
         retry_first_step_factors: Any = RETRY_FIRST_STEP_FACTORS,
         retry_tolerance_factors: Any = (),
         measured: Any = None,
+        constraints: Any = None,
+        args: Any = None,
     ):
         """Lower a study: its experiments, the plan of its lanes, and their numbers.
 
@@ -526,6 +528,10 @@ class LoweredStudy(InferenceProblem):
                 without a measurement is balanced by its modelled cost.
                 ``None`` balances every lane by its modelled cost. Ignored in
                 a run of one process, so the same script runs everywhere.
+            constraints: Optional ``Constraints`` on the fitted values, as
+                ``InferenceProblem`` takes them; a solver that requires
+                ``"batched_lanes"`` refuses them.
+            args: What the constraint functions take as ``args``.
 
         Raises:
             TypeError: If ``study`` is not a ``Study``, ``device`` is not a
@@ -561,6 +567,8 @@ class LoweredStudy(InferenceProblem):
             trajectory=trajectory,
             regularization=regularization,
             trial_predicate=trial_predicate,
+            constraints=constraints,
+            args=args,
         )
         lowered_at = time.perf_counter()
         joint = self._inference_problem

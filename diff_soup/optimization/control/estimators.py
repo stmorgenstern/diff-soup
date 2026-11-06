@@ -124,7 +124,7 @@ def one_interval(control_problem: Any, state: Any, u: Any, theta: Any) -> Any:
         The state at the interval's end, in the same layout.
     """
     controls = control_problem.controls
-    model = control_problem.problem
+    model = control_problem.model
     duration = controls.interval
     interval = dataclasses.replace(controls, intervals=1, duration=duration)
     solution, _ = solve_schedule(

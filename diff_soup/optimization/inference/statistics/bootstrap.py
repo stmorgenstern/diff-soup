@@ -1787,11 +1787,14 @@ class BootstrapResult:
             }
         entries = []
         for record in meta["schema"]["entries"]:
+            handle = _SavedHandle(record["name"], record["kind"])
             entries.append(
                 ParameterEntry(
-                    handle=_SavedHandle(record["name"], record["kind"]),
+                    handle=handle,
                     occurrences=tuple(
-                        ParameterOccurrence(owner=_tupled(owner), columns=tuple(columns))
+                        ParameterOccurrence(
+                            owner=_tupled(owner), columns=tuple(columns), declarations=(handle,)
+                        )
                         for owner, columns in record["occurrences"]
                     ),
                     size=int(record["size"]),
