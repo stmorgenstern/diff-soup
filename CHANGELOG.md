@@ -21,6 +21,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - Under `jax.default_device`, `linear="auto"` and consistent initialization choose their backend by that device's platform, and native factors are kept per device, so one process can run lanes on a GPU and on CPUs. `checkpointed_map(device_groups=)` accepts groups of another platform than the default backend's.
 - `KLU.native_stats` reports `live_lu_entries`.
+- `ds.topology_report` adds `pullback_count`, and its `color_count` is now the solver's own: the colors of the rows the solver colors, with the rows it holds out recovered by pullback. Previously it colored the whole pattern.
 - `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.
 
 ### Bugfixes
@@ -35,6 +36,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 - A vmapped solve no longer keeps extra copies of its saved output, and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
 - JIDA does its whole-array work only on the path an attempt takes, with identical results.
+- `spec.build(exact_sparsity=True)` reads its pattern without compiling a constant subexpression of the residual, and neither build colors the declared pattern unless `physics_jacobian_blocks` is called.
 - Member rows that read every site of their member are recovered by shared pullbacks instead of one color per site: an LFP half cell with 50 volumes of 10 particles needs 8 colors instead of 108.
 
 ### Other
