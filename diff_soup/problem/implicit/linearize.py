@@ -28,13 +28,15 @@ from typing import Any, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import Int
 
 from diff_soup.linear import SparseTopology
-from diff_soup.problem._ad.pattern import dedup_coo
+from diff_soup.problem._ad.pattern import Pattern, dedup_coo
 from diff_soup.problem._ad.sparse_jac import SparseJacobian
 from diff_soup.problem.implicit.problems import ImplicitProblem, MassProblem
 
 __all__ = [
+    "Linearization",
     "LinearizationPlan",
     "build_linearization_plan",
 ]
@@ -85,6 +87,36 @@ _RECOLOR_PASSES = 4
 _NONE = np.empty((0,), dtype=np.int64)
 
 
+class Linearization(NamedTuple):
+    """The sparsity of ``A(cj) = F_y + cj F_ydot`` and how one assembly recovers it.
+
+    Each pattern is recovered by a column coloring of its rows not held out plus one
+    residual pullback per group of held-out rows.
+
+    Attributes:
+        pattern: The pattern of ``A(cj)``, the union of the two below.
+        fy: The pattern of ``F_y``.
+        fydot: The pattern of ``F_ydot``.
+        held_rows: Rows recovered by pullback, sorted.
+        pullback_groups: Each held row's pullback.
+        color_count: Tangents per assembly of ``A(cj)``.
+        pullback_count: Pullbacks per assembly of ``A(cj)``.
+    """
+
+    pattern: Pattern
+    fy: Pattern
+    fydot: Pattern
+    held_rows: Int[np.ndarray, " held"]
+    pullback_groups: Int[np.ndarray, " held"]
+    color_count: int
+    pullback_count: int
+
+
+def _split_seeds(split: "_RowSplit", coloring: SparseJacobian) -> tuple[int, int]:
+    """Tangents and pullbacks of the split route."""
+    return int(coloring.n_colors), (int(split.row_seeds.max()) + 1 if split.active else 0)
+
+
 class _WideRows(NamedTuple):
     """Wide rows that share pullbacks.
 
@@ -132,11 +164,6 @@ def _colliding_columns(rows, cols, split, coloring) -> np.ndarray:
     keys = rows[on_wide] * coloring.n_colors + colors[on_wide]
     taken = keys[interior[on_wide]]
     return np.unique(cols[on_wide[np.isin(keys, taken) & ~interior[on_wide]]])
-
-
-def _pattern_keys(rows: np.ndarray, cols: np.ndarray, n: int) -> np.ndarray:
-    """Row-major position keys of a COO pattern."""
-    return rows.astype(np.int64) * np.int64(n) + cols.astype(np.int64)
 
 
 def _disjoint_groups(rows: np.ndarray, cols: np.ndarray, held: np.ndarray, n: int) -> np.ndarray:
@@ -347,6 +374,8 @@ class LinearizationPlan:
             recovered by residual pullback instead — the declared bordered-global
             rows plus any other row dense enough to wreck the column compression.
             Empty when every row is colored.
+        linearization: The [Linearization][diff_soup.problem.implicit.linearize.Linearization]
+            the assemblies follow (sparse mode), or ``None``.
     """
 
     __hash__ = object.__hash__
@@ -394,22 +423,19 @@ class LinearizationPlan:
         self.fydot_topology: Optional[SparseTopology] = None
         self.union_topology: Optional[SparseTopology] = None
         self.held_out_rows: np.ndarray = np.empty((0,), dtype=np.int64)
+        self.linearization: Optional[Linearization] = None
         if self.mode == "sparse":
             fy_rows, fy_cols, self._fy_declared_map = dedup_coo(dy_decl.rows, dy_decl.cols, n)
             fyd_rows, fyd_cols, self._fydot_declared_map = dedup_coo(
                 dydot_decl.rows, dydot_decl.cols, n
             )
-            self.fy_topology = SparseTopology(rows=fy_rows, cols=fy_cols, n_dofs=n)
-            self.fydot_topology = SparseTopology(rows=fyd_rows, cols=fyd_cols, n_dofs=n)
-
-            fy_keys = _pattern_keys(fy_rows, fy_cols, n)
-            fyd_keys = _pattern_keys(fyd_rows, fyd_cols, n)
-            union_keys = np.unique(np.concatenate([fy_keys, fyd_keys]))
-            u_rows = (union_keys // n).astype(np.int32)
-            u_cols = (union_keys % n).astype(np.int32)
-            self.union_topology = SparseTopology(rows=u_rows, cols=u_cols, n_dofs=n)
-            self._fy_to_union = np.searchsorted(union_keys, fy_keys).astype(np.int32)
-            self._fydot_to_union = np.searchsorted(union_keys, fyd_keys).astype(np.int32)
+            fy, fydot = Pattern(fy_rows, fy_cols, (n, n)), Pattern(fyd_rows, fyd_cols, (n, n))
+            union = fy.union(fydot)
+            u_rows, u_cols = union.rows, union.cols
+            self.fy_topology, self.fydot_topology = fy.topology(), fydot.topology()
+            self.union_topology = union.topology()
+            self._fy_to_union = union.positions(fy)
+            self._fydot_to_union = union.positions(fydot)
 
             # Hold structurally dense rows out of every coloring (see above);
             # each pattern colors its own remaining rows and recovers the rest
@@ -456,18 +482,26 @@ class LinearizationPlan:
             self.held_out_rows = held
             self._fy_split, self._fydot_split, self._union_split = splits
             self._fy_coloring, self._fydot_coloring, self._union_coloring = colorings
+            forward, reverse = _split_seeds(self._union_split, self._union_coloring)
+            self.linearization = Linearization(
+                pattern=union,
+                fy=fy,
+                fydot=fydot,
+                held_rows=np.asarray(held, dtype=np.int64),
+                pullback_groups=np.asarray(seeds, dtype=np.int32),
+                color_count=int(forward),
+                pullback_count=int(reverse),
+            )
 
     @property
     def color_count(self) -> Optional[int]:
         """Colored tangents per assembly of ``A(cj)``, or ``None`` for a dense plan."""
-        return None if self.mode == "dense" else int(self._union_coloring.n_colors)
+        return None if self.linearization is None else self.linearization.color_count
 
     @property
     def pullback_count(self) -> int:
-        """Residual pullbacks per assembly of ``A(cj)``, one per group of held-out rows."""
-        if self.mode == "dense" or not self._union_split.active:
-            return 0
-        return int(self._union_split.row_seeds.max()) + 1
+        """Residual pullbacks per assembly of ``A(cj)``."""
+        return 0 if self.linearization is None else self.linearization.pullback_count
 
     @staticmethod
     def _coloring(rows, cols, split: "_RowSplit", n: int) -> SparseJacobian:

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from diff_soup.problem._ad.pattern import dedup_coo
+from diff_soup.problem._ad.pattern import Pattern, dedup_coo
 from diff_soup.problem._ir.bc import FluxBC
 from diff_soup.problem._ir.equation import MultiEquation
 from diff_soup.problem._ir.equation_set import EquationSet
@@ -437,7 +437,7 @@ def _family_self_block_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, 
 
     Builds the ONE-member stencil (host-side, once — not per member) in the
     member's BLOCKED per-field coordinates and stamps it ``count`` times at
-    member-major offsets ``fam_base + member * member_state_size``.  Returns
+    member-major offsets ``fam_base + member * member_state_size`` (`Pattern.stamp`).  Returns
     the stamped ``(rows, cols)`` in global indexing, member by member;
     [_sparsity][diff_soup._lowering.sparsity._sparsity] unions them with the
     rest of the topology.
@@ -555,9 +555,9 @@ def _family_self_block_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, 
         )
     fam_base = layout.offset_of((fam.name, fam.member_variables[0].name))
     base = fam_base + np.arange(int(fam.count), dtype=np.int64) * member_state_size
-    rows = (r1[None, :] + base[:, None]).reshape(-1).astype(np.int32)
-    cols = (c1[None, :] + base[:, None]).reshape(-1).astype(np.int32)
-    return rows, cols
+    tile = Pattern.of(r1, c1, member_state_size)
+    stamped = tile.stamp(np.stack([base, base], axis=1), (layout.total_size, layout.total_size))
+    return stamped.rows, stamped.cols
 
 
 def _family_graph_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, np.ndarray]:

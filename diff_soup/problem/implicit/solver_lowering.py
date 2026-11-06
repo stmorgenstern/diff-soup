@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup.linear import SparseTopology
+from diff_soup.problem._ad.pattern import Pattern
 from diff_soup.problem._ad.tangent_pattern import jacobian_pattern
 from diff_soup.problem._cache import BoundedContentCache
 from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
@@ -120,9 +121,9 @@ def _exact_rhs_sparsity(problem, rhs, n: int, operational: bool):
         control,
     )
     diagonal = np.arange(n, dtype=np.int32)
-    return SparseTopology(
-        rows=np.concatenate((rows, diagonal)), cols=np.concatenate((cols, diagonal)), n_dofs=n
-    )
+    return Pattern.of(
+        np.concatenate((rows, diagonal)), np.concatenate((cols, diagonal)), n
+    ).topology()
 
 
 def _pinned_mask(pinned_rows, n: int) -> np.ndarray:
