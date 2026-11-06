@@ -134,6 +134,16 @@ class Evaluation(eqx.Module):
     gauss_newton: Float[Array, "k k"]
 
     @property
+    def rows_finite(self) -> Bool[Array, ""]:
+        """Whether the constraint rows and their Jacobians are finite."""
+        return (
+            jnp.all(jnp.isfinite(self.equality))
+            & jnp.all(jnp.isfinite(self.inequality))
+            & jnp.all(jnp.isfinite(self.jacobian_equality))
+            & jnp.all(jnp.isfinite(self.jacobian_inequality))
+        )
+
+    @property
     def finite(self) -> Bool[Array, ""]:
         """Whether every entry is finite."""
         return (
@@ -291,16 +301,20 @@ def evaluate(
 
 
 def trial(
-    closures: Closures, x: Float[Array, "n"], args: PyTree
+    closures: Closures,
+    x: Float[Array, "n"],
+    args: PyTree,
+    value_required: bool | Bool[Array, ""] = True,
 ) -> tuple[Float[Array, ""], Float[Array, "n_eq"], Float[Array, "n_ineq"], Bool[Array, ""]]:
     """`(value, equality, inequality, valid)` at a trial point, without derivatives.
 
-    `valid` is false where the problem's trial predicate refuses the point or any value is
-    not finite: a failed evaluation the line search rejects.
+    `valid` is false where the problem's trial predicate refuses the point or a row is not
+    finite, or the objective is not finite where `value_required`: a failed evaluation the
+    line search rejects.
     """
     value, equality, inequality = closures.evaluate(x, args)
     valid = (
-        jnp.isfinite(value)
+        (jnp.isfinite(value) | ~jnp.asarray(value_required))
         & jnp.all(jnp.isfinite(equality))
         & jnp.all(jnp.isfinite(inequality))
         & jnp.asarray(closures.is_valid(x, args))
