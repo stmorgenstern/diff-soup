@@ -3,22 +3,23 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 from jax import lax
+from jaxtyping import Array, ArrayLike, Float, PyTree
 
 from diff_soup._errors import ConfigurationError
+from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.inference.fitting.result import TerminationStatus
-from diff_soup.optimization.kkt import DenseKKT
+from diff_soup.optimization.kkt import DenseKKT, KKTSolve
 from diff_soup.optimization.solvers import _filter, _hessian, _restoration
 from diff_soup.optimization.solvers._barrier import (
+    Bounds,
     barrier_gradient,
     barrier_value,
     bound_multiplier_steps,
-    bounds_from,
     distances,
     dual_fraction_to_boundary,
     fraction_to_boundary,
@@ -27,89 +28,64 @@ from diff_soup.optimization.solvers._barrier import (
     safeguard_multipliers,
 )
 from diff_soup.optimization.solvers._closures import (
+    Closures,
     Evaluation,
     Scales,
-    bounds_of,
-    closures_of,
     evaluate,
-    problem_scales,
-    scaled_closures,
     trial,
     unit_scales,
 )
-from diff_soup.optimization.solvers._implicit import active_set, implicit_run
-from diff_soup.optimization.solvers._line_search import filter_line_search
-from diff_soup.optimization.solvers._optimality import constraint_violation, optimality_error
-from diff_soup.optimization.solvers._protocol import (
-    CompiledSolver,
-    SolveRecord,
-    SolverState,
+from diff_soup.optimization.solvers._core import (
+    ConstrainedSolver,
+    CoreState,
+    Start,
+    core_fields,
+    lagrangian_secant,
 )
+from diff_soup.optimization.solvers._line_search import Correction, filter_line_search
+from diff_soup.optimization.solvers._optimality import optimality_error
+from diff_soup.optimization.solvers._protocol import _int, _select
 from diff_soup.utils.lanes import live_lane_cond
 
+#: Ipopt's `barrier_tol_factor`: the barrier problem is solved to `KAPPA_EPS * mu`.
 KAPPA_EPS = 10.0
+#: Ipopt's `constr_mult_init_max`: larger least-squares multipliers start at 0.
 LAMBDA_MAX = 1e3
-DIVERGED_X = 1e20
+#: Ours: how far inside its bounds a warm start's point, slacks and multipliers start.
 WARM_PUSH = 1e-6
+#: Ipopt's `bound_mult_reset_threshold`: after restoration, larger bound multipliers reset to 1.
 BOUND_MULTIPLIER_RESET = 1e3
-_DELTA_C = 1e-8
-_KAPPA_C = 0.25
+#: Ipopt's `jacobian_regularization_value` and `jacobian_regularization_exponent`:
+#: `delta_c = DELTA_C * mu**KAPPA_C` for a rank-deficient constraint Jacobian.
+DELTA_C = 1e-8
+KAPPA_C = 0.25
 
 
-def _int(value: Any) -> Any:
-    """`value` as an int32 array, the dtype of every counter in the state."""
-    return jnp.asarray(value, dtype=jnp.int32)
-
-
-class InteriorPointState(SolverState):
+class InteriorPointState(CoreState):
     """The carry of [InteriorPoint][diff_soup.optimization.InteriorPoint], in the scaled problem.
 
     Attributes:
         slacks: The inequality slacks `s >= 0`, with `c_I(x) + s = 0` at a solution.
-        lam_e: The equality multipliers.
-        lam_i: The inequality multipliers.
-        z_lower: The lower-bound multipliers of `x`, 0 where the bound is absent.
-        z_upper: The upper-bound multipliers of `x`, 0 where the bound is absent.
         v: The multipliers of `s >= 0`.
         mu: The barrier parameter.
         tau: The fraction to the boundary.
-        evaluation: The objective, constraints and first derivatives at `x`.
         filt: The line-search filter.
         theta_min: The switching threshold on the constraint violation.
         theta_max: The largest constraint violation a trial may have.
         delta_w_last: The last nonzero primal regularization.
-        consecutive_failed: The failed trial evaluations in a row.
-        failed_evaluations: The failed trial evaluations in all.
-        kkt_error: The scaled optimality error `E_0` at `x`.
-        scales: The objective and constraint scales.
-        quasi_newton: The BFGS matrix, `(n, n)`, or `(0, 0)` when not used.
-        quasi_newton_updates: How many updates the BFGS matrix has had.
-        restoration_steps: The steps taken in restoration phases.
     """
 
-    slacks: Any
-    lam_e: Any
-    lam_i: Any
-    z_lower: Any
-    z_upper: Any
-    v: Any
-    mu: Any
-    tau: Any
-    evaluation: Evaluation
+    slacks: Float[Array, "n_ineq"]
+    v: Float[Array, "n_ineq"]
+    mu: Float[Array, ""]
+    tau: Float[Array, ""]
     filt: _filter.Filter
-    theta_min: Any
-    theta_max: Any
-    delta_w_last: Any
-    consecutive_failed: Any
-    failed_evaluations: Any
-    kkt_error: Any
-    scales: Scales
-    quasi_newton: Any
-    quasi_newton_updates: Any
-    restoration_steps: Any
+    theta_min: Float[Array, ""]
+    theta_max: Float[Array, ""]
+    delta_w_last: Float[Array, ""]
 
 
-def _error(state: InteriorPointState, mu: Any, bounds: Any) -> Any:
+def _error(state: InteriorPointState, mu: Float[ArrayLike, ""], bounds: Bounds) -> Float[Array, ""]:
     """The scaled optimality error `E_mu` at the state's primal-dual point."""
     return optimality_error(
         state.evaluation,
@@ -125,18 +101,15 @@ def _error(state: InteriorPointState, mu: Any, bounds: Any) -> Any:
     )
 
 
-def _theta(equality: Any, inequality: Any, s: Any) -> tuple[Any, Any]:
+def _theta(
+    equality: Float[Array, "n_eq"], inequality: Float[Array, "n_ineq"], s: Float[Array, "n_ineq"]
+) -> tuple[Float[Array, ""], Float[Array, "m"]]:
     """`(theta, c)`: the 1-norm of `c = [c_E; c_I + s]`, and `c`."""
     constraint = jnp.concatenate([equality, inequality + s])
     return jnp.sum(jnp.abs(constraint)), constraint
 
 
-def _select(pred: Any, new: Any, old: Any) -> Any:
-    """`new` where `pred`, else `old`, leaf by leaf."""
-    return jax.tree.map(lambda a, b: jnp.where(pred, a, b), new, old)
-
-
-class InteriorPoint(CompiledSolver):
+class InteriorPoint(ConstrainedSolver):
     """A primal-dual interior point with Ipopt's filter line search, after Wächter and Biegler (2006).
 
     The inequalities take slacks, and the slacks and the bounds of `x` take the log barrier. A
@@ -175,28 +148,34 @@ class InteriorPoint(CompiledSolver):
     scaling: str = eqx.field(static=True, default="gradient")
     restoration: bool = eqx.field(static=True, default=True)
     max_failed_evaluations: int = eqx.field(static=True, default=10)
-    kkt: Any = eqx.field(static=True, default_factory=DenseKKT)
+    kkt: KKTSolve = eqx.field(static=True, default_factory=DenseKKT)
 
     @property
     def _mu_floor(self) -> float:
         """The least barrier parameter: `mu_min`, or below `tol` when `tol` is tighter."""
         return min(self.mu_min, self.tol / (KAPPA_EPS + 1.0))
 
-    # -- set-up ---------------------------------------------------------------------------
+    # -- the start -------------------------------------------------------------------------
 
-    def _prepare(self, problem: Any, like: Any) -> tuple[Any, Any, Any]:
-        """The raw closures, the scaled closures and the bounds of `problem`."""
-        raw = closures_of(problem)
-        _hessian.check_mode(self.hessian, raw)
+    def _check(self, raw: Closures) -> None:
+        """Refuse a Hessian mode the problem cannot serve, or an unknown scaling."""
+        super()._check(raw)
         if self.scaling not in ("gradient", "none"):
             raise ConfigurationError(f"scaling must be 'gradient' or 'none'; got {self.scaling!r}.")
-        return raw, scaled_closures(raw), bounds_from(*bounds_of(problem, like))
 
-    def _scales(self, problem: Any, raw: Any, x: Any, args: Any) -> Scales:
+    def _scales(
+        self, problem: OptimizationProblem, raw: Closures, evaluation: Evaluation
+    ) -> Scales:
         """The problem's own scales, else the gradient-based ones, else 1."""
         if self.scaling == "none":
-            return unit_scales(raw, x.dtype)
-        return problem_scales(problem, raw, x, args)
+            return unit_scales(raw, evaluation.gradient.dtype)
+        return super()._scales(problem, raw, evaluation)
+
+    def _place(self, x0: Float[Array, "n"], bounds: Bounds, warm: bool) -> Float[Array, "n"]:
+        """`x0` pushed inside its bounds: by `bound_push` and `bound_frac`, or `WARM_PUSH` warm."""
+        if warm:
+            return push_into_bounds(x0, bounds, WARM_PUSH, WARM_PUSH)
+        return push_into_bounds(x0, bounds, self.bound_push, self.bound_frac)
 
     def _least_squares_multipliers(self, evaluation, z_lower, z_upper, v):
         """Ipopt's least-squares constraint multipliers, 0 when larger than `LAMBDA_MAX`."""
@@ -216,36 +195,60 @@ class InteriorPoint(CompiledSolver):
         lam = jnp.where(ok, lam, 0.0)
         return lam[:n_eq], lam[n_eq:]
 
-    def _start(
+    def _begin(self, closures: Closures, bounds: Bounds, start: Start) -> InteriorPointState:
+        """Slacks from the inequalities, and the least-squares or the warm start's multipliers."""
+        dtype = start.x.dtype
+        if start.warm is None:
+            return self._at(
+                closures,
+                bounds,
+                start,
+                z_lower=jnp.where(bounds.has_lower, 1.0, 0.0).astype(dtype),
+                z_upper=jnp.where(bounds.has_upper, 1.0, 0.0).astype(dtype),
+            )
+        lam_e, lam_i, z_lower, z_upper = start.warm
+        return self._at(
+            closures,
+            bounds,
+            start,
+            lam_e=lam_e,
+            lam_i=lam_i,
+            z_lower=jnp.where(bounds.has_lower, jnp.maximum(z_lower, WARM_PUSH), 0.0),
+            z_upper=jnp.where(bounds.has_upper, jnp.maximum(z_upper, WARM_PUSH), 0.0),
+            v=jnp.maximum(lam_i, WARM_PUSH),
+            slack_push=WARM_PUSH,
+            warm=True,
+        )
+
+    def _at(
         self,
         closures,
         bounds,
-        x,
+        start,
         *,
-        args,
-        lam_e,
-        lam_i,
         z_lower,
         z_upper,
-        v,
-        mu,
-        scales,
+        lam_e=None,
+        lam_i=None,
+        v=None,
+        mu=None,
         slack_push=None,
         warm=False,
     ) -> InteriorPointState:
-        """The state at a point inside the bounds.
+        """The state at a point inside the bounds, from its evaluation.
 
-        `lam_e = None` takes the least-squares multipliers; `v = None` takes 1; `warm` takes
-        `mu` from the complementarity of the point, between the floor and `mu`.
+        `lam_e = None` takes the least-squares multipliers, `v = None` takes 1 and `mu = None`
+        takes `mu_init`. `warm` takes `mu` from the point's complementarity instead, between
+        the floor and `mu`.
         """
+        x, evaluation = start.x, start.evaluation
         dtype = x.dtype
-        n = x.shape[0]
-        evaluation = evaluate(closures, x, args, _hessian.uses_gauss_newton(self.hessian, closures))
         push = self.bound_push if slack_push is None else slack_push
         s = jnp.maximum(-evaluation.inequality, push)
         v = jnp.ones_like(s) if v is None else v
         if lam_e is None:
             lam_e, lam_i = self._least_squares_multipliers(evaluation, z_lower, z_upper, v)
+        mu = self.mu_init if mu is None else mu
         if warm:
             below, above = distances(x, bounds)
             products = jnp.concatenate(
@@ -256,102 +259,41 @@ class InteriorPoint(CompiledSolver):
                 ]
             )
             count = jnp.sum(bounds.has_lower) + jnp.sum(bounds.has_upper) + s.shape[0]
-            mean = jnp.sum(products) / jnp.maximum(count, 1)
-            mu = jnp.clip(mean, self._mu_floor, mu)
+            mu = jnp.clip(jnp.sum(products) / jnp.maximum(count, 1), self._mu_floor, mu)
         mu = jnp.asarray(mu, dtype)
         theta, _ = _theta(evaluation.equality, evaluation.inequality, s)
         scale = jnp.maximum(1.0, theta)
-        if scales is None:
-            scales = Scales(
-                jnp.ones((), dtype),
-                jnp.ones((closures.n_equality,), dtype),
-                jnp.ones((closures.n_inequality,), dtype),
-            )
-        valid = evaluation.finite
+        fields = core_fields(
+            start._replace(warm=(lam_e, lam_i, z_lower, z_upper)), closures, self.hessian
+        )
         state = InteriorPointState(
-            x=x,
-            step=_int(0),
-            done=~valid,
-            status=_int(
-                jnp.where(valid, TerminationStatus.MAX_STEPS, TerminationStatus.SOLVER_FAILED)
-            ),
+            **fields,
             slacks=s,
-            lam_e=lam_e,
-            lam_i=lam_i,
-            z_lower=z_lower,
-            z_upper=z_upper,
             v=v,
             mu=mu,
             tau=jnp.maximum(self.tau_min, 1.0 - mu),
-            evaluation=evaluation,
             filt=_filter.empty_filter(dtype),
             theta_min=_filter.THETA_MIN_FACTOR * scale,
             theta_max=_filter.THETA_MAX_FACTOR * scale,
             delta_w_last=jnp.zeros((), dtype),
-            consecutive_failed=_int(0),
-            failed_evaluations=_int(0),
-            kkt_error=jnp.zeros((), dtype),
-            scales=scales,
-            quasi_newton=_hessian.initial_matrix(self.hessian, closures, n, dtype),
-            quasi_newton_updates=_int(0),
-            restoration_steps=_int(0),
         )
-        state = eqx.tree_at(lambda t: t.kkt_error, state, _error(state, 0.0, bounds))
-        return self._with_termination(state)
+        return eqx.tree_at(lambda t: t.kkt_error, state, _error(state, 0.0, bounds))
 
-    def init(self, problem: Any, x0: Any, args: Any, *, warm_start: Any = None) -> SolverState:
-        """Push `x0` inside its bounds, set the slacks from the inequalities, estimate the multipliers.
+    def _start(self, closures, bounds, x, args, **multipliers) -> InteriorPointState:
+        """The state at `x` on closures used as given (a QP, the restoration problem), unscaled."""
+        evaluation = evaluate(closures, x, args, _hessian.uses_gauss_newton(self.hessian, closures))
+        start = Start(x, evaluation, unit_scales(closures, x.dtype), None)
+        return self._with_termination(self._at(closures, bounds, start, **multipliers))
 
-        A `warm_start` record supplies the multipliers instead. The point is then pushed only
-        `WARM_PUSH` inside its bounds, and `mu` starts from the point's complementarity.
-        """
-        x0 = jnp.asarray(x0)
-        raw, closures, bounds = self._prepare(problem, x0)
-        dtype = x0.dtype
-        if warm_start is None:
-            x = push_into_bounds(x0, bounds, self.bound_push, self.bound_frac)
-            scales = self._scales(problem, raw, x, args)
-            return self._start(
-                closures,
-                bounds,
-                x,
-                args=(args, scales),
-                lam_e=None,
-                lam_i=None,
-                z_lower=jnp.where(bounds.has_lower, 1.0, 0.0).astype(dtype),
-                z_upper=jnp.where(bounds.has_upper, 1.0, 0.0).astype(dtype),
-                v=None,
-                mu=self.mu_init,
-                scales=scales,
-            )
-        record = warm_start
-        x = push_into_bounds(x0, bounds, WARM_PUSH, WARM_PUSH)
-        scales = self._scales(problem, raw, x, args)
-        objective = scales.objective
-        z_lower, z_upper = record.bound_multipliers
-        lam_i = jnp.asarray(record.multipliers_inequality, dtype) * objective / scales.inequality
-        return self._start(
-            closures,
-            bounds,
-            x,
-            args=(args, scales),
-            lam_e=jnp.asarray(record.multipliers_equality, dtype) * objective / scales.equality,
-            lam_i=lam_i,
-            z_lower=jnp.where(bounds.has_lower, jnp.maximum(objective * z_lower, WARM_PUSH), 0.0),
-            z_upper=jnp.where(bounds.has_upper, jnp.maximum(objective * z_upper, WARM_PUSH), 0.0),
-            v=jnp.maximum(lam_i, WARM_PUSH),
-            mu=self.mu_init,
-            scales=scales,
-            slack_push=WARM_PUSH,
-            warm=True,
-        )
+    # -- one step --------------------------------------------------------------------------
 
-    # -- one step -------------------------------------------------------------------------
+    def _slacks(self, state: InteriorPointState) -> Float[Array, "n_ineq"]:
+        """The record's slacks: the state's own."""
+        return state.slacks
 
-    def _with_termination(self, state):
-        """`state` with `done` and `status` from `terminate`."""
-        done, status = self.terminate(None, state, None)
-        return eqx.tree_at(lambda s: (s.done, s.status), state, (done, status))
+    def _mu(self, state: InteriorPointState) -> Float[Array, ""]:
+        """The record's barrier parameter: the final `mu`."""
+        return state.mu
 
     def _update_barrier(self, state: InteriorPointState, bounds) -> InteriorPointState:
         """Ipopt's monotone update: reduce `mu` while the barrier problem is solved to `kappa_eps mu`."""
@@ -376,8 +318,10 @@ class InteriorPoint(CompiledSolver):
             self, max_steps=_restoration.MAX_STEPS, restoration=False, scaling="none"
         )
 
-    def _iterate(self, closures, bounds, state: InteriorPointState, args) -> InteriorPointState:
-        """One step on prepared closures, without the termination test."""
+    def _iterate(
+        self, closures: Closures, bounds: Bounds, state: InteriorPointState, args: PyTree
+    ) -> InteriorPointState:
+        """One barrier step: the KKT solve, fraction to the boundary, the filter line search."""
         state = self._update_barrier(state, bounds)
         x, s, evaluation = state.x, state.slacks, state.evaluation
         mu, tau = state.mu, state.tau
@@ -408,7 +352,7 @@ class InteriorPoint(CompiledSolver):
         primal_block = hessian + jnp.diag(primal_sigma(x, state.z_lower, state.z_upper, bounds))
         dual_diagonal = jnp.concatenate([jnp.zeros(n_eq, dtype), s_over_v])
         factor, delta_w = self.kkt.factor_regularized(
-            primal_block, jacobian, dual_diagonal, _DELTA_C * mu**_KAPPA_C, state.delta_w_last
+            primal_block, jacobian, dual_diagonal, DELTA_C * mu**KAPPA_C, state.delta_w_last
         )
         slack_rhs = jnp.concatenate([jnp.zeros(n_eq, dtype), r_s * s_over_v])
 
@@ -435,25 +379,21 @@ class InteriorPoint(CompiledSolver):
         )
         search = filter_line_search(
             trial_point,
-            direction,
             x,
             s,
             dx,
             ds,
-            dlam,
             alpha_max=alpha_max,
             theta=theta,
             phi=phi,
             slope=slope,
-            constraint=constraint,
             filt=state.filt,
             theta_min=state.theta_min,
             theta_max=state.theta_max,
-            tau=tau,
-            bounds=bounds,
             consecutive_failed=state.consecutive_failed,
             max_failed=self.max_failed_evaluations,
             accept_full=tiny & factor.ok,
+            correction=Correction(direction, constraint, dlam, tau, bounds),
         )
         searched = search.accepted & factor.ok
         exhausted = search.consecutive_failed >= self.max_failed_evaluations
@@ -461,10 +401,7 @@ class InteriorPoint(CompiledSolver):
             state.filt, (1.0 - _filter.GAMMA_THETA) * theta, phi - _filter.GAMMA_PHI * theta
         )
 
-        # The regular step.
         alpha = search.alpha
-        x_step = x + alpha * search.dx
-        s_step = s + alpha * search.ds
         dz_lower, dz_upper, dv = bound_multiplier_steps(
             x, search.dx, s, search.ds, state.z_lower, state.z_upper, state.v, mu, bounds
         )
@@ -472,20 +409,28 @@ class InteriorPoint(CompiledSolver):
             state.z_lower, dz_lower, state.z_upper, dz_upper, state.v, dv, tau, bounds
         )
         regular = (
-            x_step,
-            s_step,
+            x + alpha * search.dx,
+            s + alpha * search.ds,
             lam + alpha * search.dlam,
             state.z_lower + alpha_dual * dz_lower,
             state.z_upper + alpha_dual * dz_upper,
             state.v + alpha_dual * dv,
         )
 
-        # The restoration phase, where the line search failed.
         need = ~searched & ~exhausted & (theta > self.tol)
         if self.restoration and has_rows:
             outcome = live_lane_cond(
                 need,
-                lambda: self._restore(closures, bounds, state, args, need, theta, filt_current),
+                lambda: _restoration.restore(
+                    self._inner(),
+                    closures,
+                    bounds,
+                    state,
+                    args,
+                    run=need,
+                    theta=theta,
+                    filt=filt_current,
+                ),
                 lambda: _restoration.skipped(x, s),
                 live=~state.done,
                 false_is_free=True,
@@ -503,19 +448,13 @@ class InteriorPoint(CompiledSolver):
 
         filt = _select(searched & search.f_type, state.filt, filt_current)
         lam_e_new, lam_i_new = lam_new[:n_eq], lam_new[n_eq:]
-        gradient_change = (
-            evaluation_new.gradient
-            - evaluation.gradient
-            + (evaluation_new.jacobian_equality - evaluation.jacobian_equality).T @ lam_e_new
-            + (evaluation_new.jacobian_inequality - evaluation.jacobian_inequality).T @ lam_i_new
-        )
         quasi_newton, updates = _hessian.update(
             self.hessian,
             closures,
             state.quasi_newton,
             state.quasi_newton_updates,
             x_new - x,
-            gradient_change,
+            lagrangian_secant(evaluation_new, evaluation, lam_e_new, lam_i_new),
             evaluation_new,
         )
         moved_state = eqx.tree_at(
@@ -572,7 +511,7 @@ class InteriorPoint(CompiledSolver):
                 t.consecutive_failed,
                 t.failed_evaluations,
                 t.kkt_error,
-                t.restoration_steps,
+                t.inner_steps,
             ),
             state,
             (
@@ -583,14 +522,8 @@ class InteriorPoint(CompiledSolver):
                 _int(consecutive),
                 _int(state.failed_evaluations + search.failed + outcome.failed),
                 _error(state, 0.0, bounds),
-                _int(state.restoration_steps + outcome.steps),
+                _int(state.inner_steps + outcome.steps),
             ),
-        )
-
-    def _restore(self, closures, bounds, state, args, need, theta, filt):
-        """The restoration phase on the scaled problem."""
-        return _restoration.restore(
-            self._inner(), closures, bounds, state, args, run=need, theta=theta, filt=filt
         )
 
     def _after_restoration(self, outcome, state, bounds, lam):
@@ -619,88 +552,3 @@ class InteriorPoint(CompiledSolver):
         z_upper = jnp.where(reset, jnp.where(bounds.has_upper, 1.0, 0.0), z_upper)
         v = jnp.where(reset, 1.0, v)
         return outcome.x, outcome.s, jnp.zeros_like(lam), z_lower, z_upper, v
-
-    def _advance(self, closures, bounds, state, args) -> InteriorPointState:
-        """One step on prepared closures, with the termination test."""
-        return self._with_termination(self._iterate(closures, bounds, state, args))
-
-    def step(self, problem: Any, state: SolverState, args: Any) -> SolverState:
-        """One barrier step: the KKT solve, fraction to the boundary, the filter line search."""
-        _, closures, bounds = self._prepare(problem, state.x)
-        return self._iterate(closures, bounds, state, (args, state.scales))
-
-    def terminate(self, problem: Any, state: SolverState, args: Any) -> tuple[Any, Any]:
-        """End on the scaled optimality error, the budget, or a failure."""
-        converged = state.kkt_error <= self.tol
-        finite = (
-            jnp.all(jnp.isfinite(state.x))
-            & jnp.all(jnp.isfinite(state.lam_e))
-            & jnp.all(jnp.isfinite(state.lam_i))
-            & jnp.isfinite(state.kkt_error)
-        )
-        diverged = ~finite | (jnp.max(jnp.abs(state.x), initial=0.0) > DIVERGED_X)
-        over = state.step >= self.max_steps
-        status = jnp.where(
-            state.done,
-            state.status,
-            jnp.where(
-                converged,
-                TerminationStatus.KKT_TOL,
-                jnp.where(diverged, TerminationStatus.DIVERGED, TerminationStatus.MAX_STEPS),
-            ),
-        )
-        return state.done | converged | diverged | over, _int(status)
-
-    def run(
-        self,
-        problem: Any,
-        x0: Any,
-        args: Any,
-        *,
-        max_steps: int | None = None,
-        warm_start: Any = None,
-    ) -> tuple[Any, SolveRecord]:
-        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
-        solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
-        return implicit_run(solver._run_primal, _raw, problem, x0, args, warm_start)
-
-    def _run_primal(self, problem: Any, x0: Any, args: Any, warm_start: Any):
-        """The loop itself, never differentiated."""
-        state = self.init(problem, x0, args, warm_start=warm_start)
-        _, closures, bounds = self._prepare(problem, state.x)
-
-        def body(current):
-            new = self._advance(closures, bounds, current, (args, current.scales))
-            return _select(current.done, current, new)
-
-        state = lax.while_loop(lambda current: ~current.done, body, state)
-        return state.x, _record(state, bounds)
-
-
-def _raw(problem: Any, x: Any) -> tuple[Any, Any]:
-    """The raw closures and the bounds of `problem`, for the implicit derivative."""
-    return closures_of(problem), bounds_from(*bounds_of(problem, x))
-
-
-def _record(state: InteriorPointState, bounds: Any) -> SolveRecord:
-    """The `SolveRecord` of a finished state, with the multipliers and slacks unscaled."""
-    scales = state.scales
-    objective = scales.objective
-    record = SolveRecord(
-        multipliers_equality=state.lam_e * scales.equality / objective,
-        multipliers_inequality=state.lam_i * scales.inequality / objective,
-        slacks=state.slacks / scales.inequality,
-        bound_multipliers=(state.z_lower / objective, state.z_upper / objective),
-        mu=state.mu,
-        steps=state.step,
-        failed_evaluations=state.failed_evaluations,
-        kkt_error=state.kkt_error,
-        constraint_violation=constraint_violation(state.evaluation, scales),
-        status=state.status,
-        degenerate=jnp.asarray(False),
-    )
-    ev = state.evaluation
-    degenerate = active_set(
-        state.x, record, bounds, ev.jacobian_equality, ev.jacobian_inequality
-    ).degenerate
-    return eqx.tree_at(lambda r: r.degenerate, record, degenerate)

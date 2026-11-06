@@ -94,8 +94,7 @@ def active_set(
 
 def _lagrangian_gradient(closures: Closures, x, lam_e, lam_i, args):
     """`grad_x (f + lam_e . c_E + lam_i . c_I)`."""
-    _, gradient = closures.value_and_gradient(x, args)
-    _, _, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, args)
+    _, gradient, _, _, jac_eq, jac_ineq = closures.evaluate_with_derivatives(x, args)
     return gradient + jac_eq.T @ lam_e + jac_ineq.T @ lam_i
 
 
@@ -109,22 +108,26 @@ def _hessian(closures: Closures, x, lam_e, lam_i, args):
 def kkt_tangent(
     closures: Closures, bounds: Bounds, x: Any, record: SolveRecord, args: Any, dargs: Any
 ) -> tuple[Any, SolveRecord]:
-    """The tangent of `(x*, record)` along `dargs`, linear in `dargs`."""
+    """The tangent of `(x*, record)` along `dargs`, linear in `dargs`.
+
+    One forward derivative of one evaluation gives the derivatives of the objective, of the
+    Lagrangian gradient and of the rows in `args`, and its primal gives the Jacobians.
+    """
     n = x.shape[0]
     lam_e, lam_i = record.multipliers_equality, record.multipliers_inequality
     n_eq, n_ineq = lam_e.shape[0], lam_i.shape[0]
     dtype = x.dtype
-    jac_eq0, jac_ineq0 = closures.constraints_and_jacobians(x, args)[2:]
-    active = active_set(x, record, bounds, jac_eq0, jac_ineq0)
-    degenerate = active.degenerate
 
     def residual(a):
-        equality, inequality, _, _ = closures.constraints_and_jacobians(x, a)
-        return _lagrangian_gradient(closures, x, lam_e, lam_i, a), equality, inequality
+        f, g, equality, inequality, jac_eq, jac_ineq = closures.evaluate_with_derivatives(x, a)
+        lagrangian = g + jac_eq.T @ lam_e + jac_ineq.T @ lam_i
+        return (f, lagrangian, equality, inequality), (g, jac_eq, jac_ineq)
 
-    _, (d_grad, d_eq, d_ineq) = jax.jvp(residual, (args,), (dargs,))
-
-    _, _, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, args)
+    _, (d_f, d_grad, d_eq, d_ineq), (gradient, jac_eq, jac_ineq) = jax.jvp(
+        residual, (args,), (dargs,), has_aux=True
+    )
+    active = active_set(x, record, bounds, jac_eq, jac_ineq)
+    degenerate = active.degenerate
     hessian = _hessian(closures, x, lam_e, lam_i, args)
     below, above = distances(x, bounds)
     z_lower, z_upper = record.bound_multipliers
@@ -181,18 +184,16 @@ def kkt_tangent(
         -slack_ratio * dlam_i,
         jnp.where(active.inequality, 0.0, -(jac_ineq @ dx + d_ineq)),
     )
-    tangent = SolveRecord(
-        multipliers_equality=dlam_e,
-        multipliers_inequality=dlam_i,
-        slacks=ds,
-        bound_multipliers=(dz_lower, dz_upper),
-        mu=_zero(record.mu),
-        steps=_zero(record.steps),
-        failed_evaluations=_zero(record.failed_evaluations),
-        kkt_error=_zero(record.kkt_error),
-        constraint_violation=_zero(record.constraint_violation),
-        status=_zero(record.status),
-        degenerate=_zero(record.degenerate),
+    tangent = eqx.tree_at(
+        lambda r: (
+            r.multipliers_equality,
+            r.multipliers_inequality,
+            r.slacks,
+            r.bound_multipliers,
+            r.value,
+        ),
+        jax.tree.map(_zero, record),
+        (dlam_e, dlam_i, ds, (dz_lower, dz_upper), d_f + gradient @ dx),
     )
     return dx, tangent
 
