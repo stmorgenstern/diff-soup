@@ -48,6 +48,7 @@ from diff_soup._precision import Precision, cast_to_compute_dtype, compute_dtype
 from diff_soup._warnings import warn_user
 from diff_soup.optimization._abc import LeastSquaresProblem
 from diff_soup.optimization._binding import ignoring_args
+from diff_soup.optimization._derived import half_sum_of_squares
 from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
     GroupedThetaSelection,
@@ -718,7 +719,7 @@ def _loss_fn_from_residual(residual_fn: Callable) -> Callable:
     @jax.jit
     def loss(x):
         residual = residual_fn(x)
-        return 0.5 * jnp.sum(residual * residual)
+        return half_sum_of_squares(residual)
 
     return loss
 
@@ -731,7 +732,7 @@ def _loss_and_grad_from_residual(residual_fn: Callable, ad: str) -> Callable:
         @jax.jit
         def forward_loss_and_grad(x):
             residual, jacobian = value_and_jacfwd(residual_fn, x)
-            loss = 0.5 * jnp.sum(residual * residual)
+            loss = half_sum_of_squares(residual)
             grad = jacobian.T @ residual
             failed = jnp.any(jnp.abs(residual) >= _FAILED_SENTINEL)
             return loss, jnp.where(failed, jnp.zeros_like(grad), grad)
@@ -742,7 +743,7 @@ def _loss_and_grad_from_residual(residual_fn: Callable, ad: str) -> Callable:
     def reverse_loss_and_grad(x):
         def objective(point):
             residual = residual_fn(point)
-            loss = 0.5 * jnp.sum(residual * residual)
+            loss = half_sum_of_squares(residual)
             failed = jnp.any(jnp.abs(residual) >= _FAILED_SENTINEL)
             return loss, failed
 

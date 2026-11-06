@@ -5,21 +5,27 @@ from __future__ import annotations
 import dataclasses
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import Array, ArrayLike, Float, Int, PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.solvers import SolveRecord
 from diff_soup.optimization.solvers.sqp import SQP
 
 if TYPE_CHECKING:
+    from diff_soup.optimization._numeric import OptimizationProblem
     from diff_soup.optimization.control.estimators import Estimator
     from diff_soup.optimization.control.problem import ControlProblem
     from diff_soup.optimization.solvers import CompiledSolver
+
+#: The carry of `mpc_step`: the estimator's state, the next horizon's start, the record its
+#: multipliers come from (`None` for a cold solve), and the plant's state.
+Carry = tuple[eqx.Module, Float[Array, " n"], SolveRecord | None, PyTree]
 
 _WARM_STARTS = ("shift", "previous", "cold")
 
@@ -37,12 +43,12 @@ class ClosedLoop(eqx.Module):
         compile_seconds: The wall time of compiling the horizon solve when driven by `HostLoop`, else `None`.
     """
 
-    controls: Any
-    estimates: Any
-    plant_states: Any
-    measurements: Any
+    controls: Float[Array, "*intervals"]
+    estimates: eqx.Module
+    plant_states: PyTree
+    measurements: PyTree
     records: SolveRecord
-    solve_seconds: Any = None
+    solve_seconds: Float[np.ndarray, " intervals"] | None = None
     compile_seconds: float | None = eqx.field(static=True, default=None)
 
 
@@ -60,15 +66,15 @@ class HostLoop(eqx.Module):
 
 
 def mpc_step(
-    carry: tuple[Any, Any, Any, Any],
-    inputs: Any,
+    carry: Carry,
+    inputs: Int[ArrayLike, ""],
     *,
     control_problem: ControlProblem,
     solver: CompiledSolver,
     plant: Callable,
     estimator: Estimator,
     warm_start: str = "shift",
-) -> tuple[tuple[Any, Any, Any, Any], ClosedLoop]:
+) -> tuple[Carry, ClosedLoop]:
     """One interval: estimate, solve the horizon warm-started, apply the first move, advance the plant.
 
     Args:
@@ -205,7 +211,7 @@ def _next_start(control_problem, numeric, solution, record, warm_start):
     return solution[moves], shifted
 
 
-def _zero_record(numeric: Any) -> SolveRecord:
+def _zero_record(numeric: OptimizationProblem) -> SolveRecord:
     """A record of zeros sized for `numeric`, which the warm path starts the first horizon from."""
     return SolveRecord.zeros(
         numeric.n, numeric.n_equality, numeric.n_inequality, dtype=jnp.result_type(numeric.x0)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import abc
 from typing import TYPE_CHECKING, Any
 
+from jaxtyping import PyTree
+
 if TYPE_CHECKING:
     from diff_soup.optimization._abc import OptimizationProblem, OptSolver
     from diff_soup.optimization.constraints import Constraints
@@ -43,7 +45,7 @@ class AbstractOptimizationProblem(abc.ABC):
         """
         raise NotImplementedError
 
-    def args(self) -> Any:
+    def args(self) -> PyTree:
         """The dynamic leaves the numeric problem carries: limits, initial states, outer parameters.
 
         A batch of problems is a batch of `args`; an outer loop differentiates through them.
