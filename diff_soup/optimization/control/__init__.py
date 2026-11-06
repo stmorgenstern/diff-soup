@@ -5,6 +5,7 @@ from diff_soup.optimization.control.estimators import (
     ExtendedKalmanFilter,
     FullState,
     MovingHorizonEstimator,
+    PlantEstimate,
 )
 from diff_soup.optimization.control.horizon import (
     ClosedLoop,
@@ -23,6 +24,7 @@ __all__ = [
     "HostLoop",
     "MovingHorizonEstimator",
     "PiecewiseConstant",
+    "PlantEstimate",
     "mpc_step",
     "receding_horizon",
 ]
