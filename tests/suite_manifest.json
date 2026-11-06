@@ -1,22 +1,22 @@
 {
   "budgets": {
     "test_files": 48,
-    "test_functions": 437,
-    "collected_tests": 668,
-    "source_lines": 15723
+    "test_functions": 444,
+    "collected_tests": 689,
+    "source_lines": 15823
   },
   "tier_budgets": {
     "public_api": {
       "files": 20,
-      "functions": 192,
-      "collected": 302,
-      "lines": 6201
+      "functions": 193,
+      "collected": 307,
+      "lines": 6221
     },
     "contracts": {
       "files": 20,
-      "functions": 185,
-      "collected": 293,
-      "lines": 6040
+      "functions": 191,
+      "collected": 309,
+      "lines": 6108
     },
     "performance_contracts": {
       "files": 2,
@@ -372,11 +372,11 @@
     },
     {
       "file": "tests/contracts/test_compiled_solvers.py",
-      "feature": "Compiled constrained solvers: InteriorPoint, SQP and AugmentedLagrangian in jit and vmap lanes, the implicit derivative in args under jvp and grad, the record's dtypes, degenerate and infeasible problems, failed evaluations"
+      "feature": "Compiled constrained solvers: InteriorPoint, SQP and AugmentedLagrangian in jit and vmap lanes, each Hessian mode and the unscaled interior point, the implicit derivative in args under jvp and grad, the record's dtypes, degenerate and infeasible problems, the step budget, divergence, a failed subproblem, the restoration phase, failed evaluations"
     },
     {
       "file": "tests/public_api/test_optimization_solvers.py",
-      "feature": "Optimization solvers through ds.optimization: each compiled solver's solve and its record, a warm start from a record, lanes on one device"
+      "feature": "Optimization solvers through ds.optimization: each compiled solver through optsolve and its record, each solver's warm start from a record and from a record of zeros, lanes on one device"
     },
     {
       "file": "tests/multi_device/test_optimization_lanes.py",
