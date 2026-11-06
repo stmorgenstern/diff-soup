@@ -14,8 +14,9 @@
 
 namespace diff_soup_assembly {
 
-// Scalar types the assembly reads and writes.
-enum class Scalar : int { kFloat64 = 0, kFloat32 = 1 };
+// Scalar types the assembly reads and writes. A complex value is its real part then its
+// imaginary part; complex values assemble only into complex values, of either precision.
+enum class Scalar : int { kFloat64 = 0, kFloat32 = 1, kComplex128 = 2, kComplex64 = 3 };
 
 // The device-resident map of one CSR pattern (one orientation of an analysis):
 //   offsets[p] .. offsets[p + 1]  the positions in `entries` of the coordinate entries that add

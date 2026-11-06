@@ -38,11 +38,19 @@ def ida_predict(phi: jax.Array, gamma: jax.Array, kk: jax.Array) -> tuple[jax.Ar
     j = jnp.arange(MXORDP1)
     kk = jnp.asarray(kk)
     zero = jnp.zeros((), dtype=phi.dtype)
-    yy_mask = (j <= kk)[:, None]
-    yp_mask = ((j >= 1) & (j <= kk))[:, None]
-    yypredict = jnp.sum(jnp.where(yy_mask, phi, zero), axis=0)
-    yppredict = jnp.sum(jnp.where(yp_mask, gamma[:, None] * phi, zero), axis=0)
-    return yypredict, yppredict
+    yy_rows = jnp.where((j <= kk)[:, None], phi, zero)
+    yp_rows = jnp.where(((j >= 1) & (j <= kk))[:, None], gamma[:, None] * phi, zero)
+    return _sum_rows(yy_rows), _sum_rows(yp_rows)
+
+
+def _sum_rows(rows: jax.Array) -> jax.Array:
+    """Add the history rows in one elementwise loop.
+
+    ``jnp.sum(rows, axis=0)`` is the same sum, grouped as here, but it runs row
+    by row through a library kernel with a thread-pool wait, about five times
+    slower on a long state.
+    """
+    return (rows[0] + rows[1] + rows[2] + rows[3]) + (rows[4] + rows[5])
 
 
 __all__ = ["ida_predict"]

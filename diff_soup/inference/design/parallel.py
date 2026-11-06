@@ -478,7 +478,10 @@ def _normalize_device_groups(device_groups):
     groups = tuple(device_groups)
     if not groups or any(not isinstance(group, Mesh) or not group.devices.size for group in groups):
         raise ValueError("checkpointed_map device_groups must be nonempty JAX submeshes.")
-    available, assigned = set(jax.devices()), set()
+    # A group may hold another platform's devices than the default backend's.
+    platforms = {device.platform for group in groups for device in group.devices.flat}
+    available = {device for platform in platforms for device in jax.devices(platform)}
+    assigned = set()
     for group in groups:
         if not set(group.axis_names) <= {"data", "model"} or any(
             kind != AxisType.Auto for kind in group.axis_types

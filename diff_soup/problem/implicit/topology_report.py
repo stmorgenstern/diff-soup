@@ -79,6 +79,25 @@ def _row_names(sources, n: int) -> list:
     return names
 
 
+def jacobian_nnz(problem) -> int:
+    """Return the structural entry count of the solver's iteration matrix.
+
+    Reads the cached sparse topology without constructing a dense matrix.
+    Dense solver views report their full matrix size, including structural zeros.
+
+    Args:
+        problem: A problem accepted by ``pdesolve``.
+
+    Returns:
+        Number of stored entries in ``F_y + cj * F_ydot``, including globals.
+    """
+    from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
+
+    view = get_or_build_solver_view(problem)
+    topology = view.full_topology
+    return int(view.n) ** 2 if topology is None else int(topology.rows.size)
+
+
 def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
     """Summarize the Jacobian sparsity pattern a problem presents to the solvers.
 
@@ -111,9 +130,15 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
         cols = np.asarray(topo.cols)
         degrees = np.bincount(rows, minlength=n).astype(np.int64)
         nnz = int(rows.shape[0])
-        color_count = int(
-            SparseJacobian.from_coo(rows.astype(np.int32), cols.astype(np.int32), n).n_colors
-        )
+        # memory-bounded-report: a full row makes every pair of columns
+        # adjacent, so the exact coloring needs n colors. Do not materialize
+        # its n-by-n adjacency or padded color arrays just to count them.
+        if np.any(degrees == n):
+            color_count = n
+        else:
+            color_count = int(
+                SparseJacobian.from_coo(rows.astype(np.int32), cols.astype(np.int32), n).n_colors
+            )
 
     names = _row_names(owner_sources, n)
     order = np.argsort(-degrees, kind="stable")[: max(int(top_k), 0)]

@@ -6,7 +6,10 @@ residual ``F(t, y, ydot, theta)``, the exact materialized iteration matrix
 linear-solver setup gate driven by the leading-coefficient window, and an
 inexact-Newton convergence test using a rate-based estimate (the rate memory
 ``ss``, the first-iteration direct pass, and the ``rate > 0.9`` divergence
-trip).
+trip). A sweep that would fail with its correction at the rounding floor, the
+size of the correction a one-ulp move of the iterate makes, has reached the
+root to working precision: a fresh matrix accepts it, and a carried or
+recomposed one retries fresh.
 
 The corrector solves ``F = 0`` over the augmented state ``x = [u; lam]`` for the
 correction ``ee`` under the fixed-leading-coefficient update ``yy = yypredict +
@@ -64,7 +67,9 @@ from diff_soup.timestepping.vsvo.common.adaptive import (
 )
 from diff_soup.timestepping.vsvo.common.linear_ops import (
     empty_held,
+    held_solves,
     linearize,
+    refactor_held,
 )
 from diff_soup.timestepping.vsvo.common.weights import wrms_norm
 from diff_soup.utils import safe_div, safe_power
@@ -116,6 +121,23 @@ couplings. Algebraic-suppressed solves retain bounded reuse."""
 _DIRECT_PASS_FACTOR = 1e-4
 """First-iteration direct-acceptance factor on ``toldel``; the direct test is
 ``delnrm <= 1e-4 * toldel``."""
+
+_FIRST_PASS_NORM = 1.0
+"""Largest first-iteration correction a carried rate memory may accept.
+
+With algebraic rows out of the error test, this is the only bound on them. The
+rate memory describes the last iteration that measured one, often on a fresh
+matrix, where it can be orders of magnitude below the rate of the aged matrix now
+in use, and it is never updated while steps converge on their first iteration. So
+a larger correction takes a second iteration, which measures the rate."""
+
+_FLOOR_FACTOR = 2.0
+"""Largest ratio of a failing correction to the rounding floor that is accepted as converged.
+
+The floor is the weighted norm of the correction the same matrix makes from the
+residual's change when the iterate moves by one rounding unit: the noise every
+correction at the root carries. Two such corrections differ by up to about a factor
+of two, so a correction within twice the floor cannot be told from noise."""
 
 _SCHUR_EPS = 1e-12
 """Tikhonov regularization for the small Schur-complement solve over the global
@@ -314,6 +336,7 @@ class _NewtonCarry(NamedTuple):
     lin_ir_steps: Any = None
     lin_failures: Any = None
     krylov_iters: Any = None
+    floor_retry: Any = None  # a failure at the rounding floor on a matrix not fresh
 
 
 def ida_corrector(
@@ -336,6 +359,8 @@ def ida_corrector(
     jacobian_values_dtype=None,
     detect_precision: bool = False,
     live: Optional[jax.Array] = None,
+    held_current: Optional[jax.Array] = None,
+    suppressalg: bool = False,
 ) -> IDANlsResult:
     """Solve ``F = 0`` for the fixed-leading-coefficient correction ``ee``.
 
@@ -430,6 +455,14 @@ def ida_corrector(
             live lane takes them; a live lane computes exactly what it
             computes with ``None``, and a lane that is not live may receive
             another branch's result. Unbatched it is not read.
+        held_current: Whether the factor storage holds the held matrix because
+            an earlier attempt of this execution refactored it, or ``None``
+            when a replay may have moved the storage. Where it holds, a
+            gate-closed attempt makes no native call at all and passes the
+            matrix on without a copy.
+        suppressalg: Whether the error test leaves out the algebraic rows.
+            Then a first-iteration correction above ``_FIRST_PASS_NORM`` takes
+            a second iteration, whatever the carried rate memory says.
 
     Returns:
         The [IDANlsResult]
@@ -478,11 +511,14 @@ def ida_corrector(
 
     conv_bound = NEWTON_CONV_COEFF
     direct_floor = _DIRECT_PASS_FACTOR * DIRECT_TEST_TOL
+    first_floor = _FIRST_PASS_NORM
     if newton_tol_factor != 1.0:
         conv_bound = NEWTON_CONV_COEFF * float(newton_tol_factor)
         direct_floor = direct_floor * float(newton_tol_factor)
+        first_floor = first_floor * float(newton_tol_factor)
     epsnewt = jnp.asarray(conv_bound, dtype=dtype)
     direct_pass = jnp.asarray(direct_floor, dtype=dtype)
+    first_pass = jnp.asarray(first_floor, dtype=dtype)
     ratemax = jnp.asarray(NEWTON_DIVERGENCE_RATE, dtype=dtype)
 
     # A gate-closed attempt reuses the supplied held matrix and coupling blocks
@@ -592,11 +628,16 @@ def ida_corrector(
             )
         )
 
+    # A forward loop whose storage holds the held matrix goes through one branch:
+    # a gate-closed attempt then passes the matrix on untouched, without a copy
+    # for each conditional it would otherwise cross.
+    one_branch = has_frozen and not inexact and not adaptive and held_current is not None
     if not has_frozen or inexact:
         # Without blocks to reuse, and on an iterative route (whose operator is
         # the current matrix at every attempt, the setup gate deciding only the
         # preconditioner's rebuild), the attempt assembles the matrix fresh.
         blocks_use, fydot_use, njac_primary = _factored(_assemble_fresh_pack(None))
+        a_use, b_use, c_use, d_use = blocks_use
     else:
         fydot_reuse = (
             frozen_fydot if frozen_fydot is not None else problem.zero_state_partials(dtype)[1]
@@ -606,10 +647,32 @@ def ida_corrector(
         def _reuse_pack(_operand):
             return (a_frozen_primary, b_frozen, c_frozen, d_frozen), fydot_reuse, zero_i32_pack
 
-        blocks_use, fydot_use, njac_primary = live_lane_cond(
-            call_lsetup, _setup_pack, _reuse_pack, None, live=live, false_is_free=True
-        )
-    a_use, b_use, c_use, d_use = blocks_use
+        def _primary_pack(_operand):
+            return live_lane_cond(
+                call_lsetup, _setup_pack, _reuse_pack, None, live=live, false_is_free=True
+            )
+
+        if one_branch:
+
+            def _setup_held(_operand):
+                (a_new, *rest), fydot_new, njac_new = _primary_pack(None)
+                refreshed = refactor_held(held_frozen, a_new, call_lsetup, linear=linear)
+                return refreshed, tuple(rest), fydot_new, njac_new
+
+            call_native = call_lsetup | jnp.logical_not(jnp.asarray(held_current, jnp.bool_))
+            held_setup, (b_use, c_use, d_use), fydot_use, njac_primary = live_lane_cond(
+                call_native,
+                _setup_held,
+                lambda _: (held_frozen, (b_frozen, c_frozen, d_frozen), fydot_reuse, zero_i32_pack),
+                None,
+                live=live,
+                false_is_free=True,
+            )
+            blocks_use = (None, b_use, c_use, d_use)
+            a_use = None
+        else:
+            blocks_use, fydot_use, njac_primary = _primary_pack(None)
+            a_use, b_use, c_use, d_use = blocks_use
 
     def _linearize(held, a_block, b_block, c_block, d_block, refresh, cache, factor_key):
         """Refactor the held state block where it was replaced; make the border/Schur data current.
@@ -624,16 +687,22 @@ def ida_corrector(
         refactored on every iteration.
         """
         rung = ctx.prec_rung if adaptive else None
-        held, solve, solve_many = linearize(
-            held,
-            a_block,
-            refresh,
-            linear=linear,
-            rung=rung,
-            rung_changed=ctx.rung_changed if adaptive else None,
-            flagged=flagged,
-            **linear_test,
-        )
+        if a_block is None:
+            # The one branch above has already refactored it.
+            solve, solve_many = held_solves(
+                held, linear=linear, rung=rung, flagged=flagged, **linear_test
+            )
+        else:
+            held, solve, solve_many = linearize(
+                held,
+                a_block,
+                refresh,
+                linear=linear,
+                rung=rung,
+                rung_changed=ctx.rung_changed if adaptive else None,
+                flagged=flagged,
+                **linear_test,
+            )
         if n_lam > 0:
             if cache is not None:
                 cache, du_b_built, schur_built = refresh_border_cache(
@@ -669,13 +738,16 @@ def ida_corrector(
 
         return held, solve, du_b, schur_solve, cache, du_b_built, schur_built
 
-    def _run_loop(solve, du_b, c_block, schur_solve, ss_init, scale):
-        """One Newton sweep with the rate-based convergence test."""
+    def _run_loop(solve, du_b, c_block, schur_solve, ss_init, scale, fresh=None):
+        """One Newton sweep with the rate-based convergence test.
 
-        def newton_delta(ee):
-            yy = yypredict + ee
-            yp = yppredict + cj * ee
-            resid = ida_residual(problem, t, yy, yp, theta, control)
+        ``fresh`` is true where the sweep's matrix was assembled from both
+        partials at this attempt's predictor. Such a sweep accepts an iterate
+        whose failing correction is at the rounding floor; any other sweep asks
+        for the fresh retry there. ``None``, on an iterative route, skips the floor.
+        """
+
+        def correction(resid):
             r = resid[:n_u]
             g = resid[n_u:]
             if flagged or inexact:
@@ -689,11 +761,36 @@ def ida_corrector(
             else:
                 dlam = jnp.zeros((0,), dtype=dtype)
                 du = du_r
+            return jnp.concatenate([du, dlam]) * scale, lflag, lsteps
+
+        def newton_delta(ee):
+            yy = yypredict + ee
+            yp = yppredict + cj * ee
+            resid = ida_residual(problem, t, yy, yp, theta, control)
+            delta, lflag, lsteps = correction(resid)
             resnrm = jnp.linalg.norm(resid) if detect_precision else None
-            return jnp.concatenate([du, dlam]) * scale, resnrm, lflag, lsteps
+            return delta, resnrm, lflag, lsteps, resid
+
+        def rounding_floor(ee, resid):
+            """The weighted norm of the correction made from a rounding-sized move.
+
+            The iterate and its derivative move by one unit in the last place,
+            with alternating signs, and the residual's change goes through the
+            same solve as a Newton correction. It carries the evaluation's
+            rounding and the matrix's amplification of it, so it is the size of
+            the correction left once the residual is pure rounding.
+            """
+            yy = yypredict + ee
+            yp = yppredict + cj * ee
+            index = jnp.arange(n)
+            eps = jnp.finfo(dtype).eps
+            nudge_y = jnp.where(index % 2 == 0, 1.0 + eps, 1.0 - eps).astype(dtype)
+            nudge_yp = jnp.where(index % 4 < 2, 1.0 + eps, 1.0 - eps).astype(dtype)
+            moved = ida_residual(problem, t, yy * nudge_y, yp * nudge_yp, theta, control)
+            return wrms_norm(correction(moved - resid)[0], ewt, mask=None)
 
         def take_step(carry: _NewtonCarry) -> _NewtonCarry:
-            delta, resnrm, lflag, lsteps = newton_delta(carry.ee)
+            delta, resnrm, lflag, lsteps, resid = newton_delta(carry.ee)
             ee_new = carry.ee + delta
             dn = wrms_norm(delta, ewt, mask=None)
             is_first = carry.m == 0
@@ -706,21 +803,55 @@ def ida_corrector(
             # bounded corrector — would poison reverse-mode cotangents of the
             # live update.
             rate_actual = safe_power(safe_div(dn, oldnrm_new), 1.0 / m_denom)
-            diverged_now = jnp.logical_and(jnp.logical_not(is_first), rate_actual > ratemax)
+            diverged_rate = jnp.logical_and(jnp.logical_not(is_first), rate_actual > ratemax)
             # ss = rate/(1-rate) is written only on a non-diverging m >= 1 step;
-            # a diverging step keeps the carried memory. The clamp only guards
-            # the unused diverging branch.
+            # a diverging step, or one stopped by the rounding floor, keeps the
+            # carried memory. The clamp only guards the unused diverging branch.
             ss_updated = rate_actual / jnp.maximum(
                 1.0 - rate_actual, jnp.asarray(1e-12, dtype=dtype)
             )
-            ss_step = jnp.where(diverged_now, carry.ss, ss_updated)
+            ss_step = jnp.where(diverged_rate, carry.ss, ss_updated)
             ss_new = jnp.where(is_first, carry.ss, ss_step)
             rate_new = jnp.where(is_first, jnp.asarray(0.0, dtype=dtype), rate_actual)
             direct_conv = jnp.logical_and(is_first, dn <= direct_pass)
             tol_conv = (ss_new * dn) <= epsnewt
-            converged_now = jnp.logical_or(
-                direct_conv, jnp.logical_and(jnp.logical_not(diverged_now), tol_conv)
+            if suppressalg:
+                tol_conv = tol_conv & (jnp.logical_not(is_first) | (dn <= first_pass))
+            rate_conv = jnp.logical_or(
+                direct_conv, jnp.logical_and(jnp.logical_not(diverged_rate), tol_conv)
             )
+            if fresh is None:
+                floored = jnp.zeros((), jnp.bool_)
+                floor_retry = None
+            else:
+                # A correction that stops shrinking at the size of the rounding
+                # floor is the root to working precision, not a failure. A tight
+                # atol puts the floor near the convergence bound, and a short
+                # step, as where the step is cut to land on t_end, leaves nothing
+                # else to correct, so the rate of two rounding-sized corrections
+                # either trips the divergence bound or never meets the rate test.
+                # The floor is read where the sweep would fail: a divergence, or
+                # the last iteration unconverged. Only a matrix fresh at the
+                # predictor tells the floor from slow contraction, since Newton
+                # then contracts fast; on a carried or recomposed matrix the floor
+                # asks for the fresh retry instead.
+                last = carry.m + 1 >= MAX_NEWTON_ITERS
+                failing = jnp.logical_and(
+                    jnp.logical_not(is_first),
+                    jnp.logical_and(jnp.logical_not(rate_conv), diverged_rate | last),
+                )
+                at_floor = live_lane_cond(
+                    failing,
+                    lambda _: dn <= _FLOOR_FACTOR * rounding_floor(carry.ee, resid),
+                    lambda _: jnp.zeros((), jnp.bool_),
+                    None,
+                    live=live,
+                    false_is_free=True,
+                )
+                floored = jnp.logical_and(at_floor, fresh)
+                floor_retry = carry.floor_retry | (at_floor & jnp.logical_not(fresh))
+            diverged_now = jnp.logical_and(diverged_rate, jnp.logical_not(floored))
+            converged_now = jnp.logical_or(rate_conv, floored)
             if inexact:
                 # A linear solve that missed its tolerance ends the sweep as a
                 # failure: the caller rebuilds a stale preconditioner and retries.
@@ -763,6 +894,7 @@ def ida_corrector(
                 lin_ir_steps=lin_ir_steps,
                 lin_failures=lin_failures,
                 krylov_iters=krylov_iters,
+                floor_retry=floor_retry,
             )
 
         init = _NewtonCarry(
@@ -783,6 +915,7 @@ def ida_corrector(
             lin_ir_steps=jnp.zeros((), jnp.float64) if flagged else None,
             lin_failures=jnp.asarray(0, jnp.int32) if inexact else None,
             krylov_iters=jnp.asarray(0, jnp.int32) if inexact else None,
+            floor_retry=None if fresh is None else jnp.asarray(False),
         )
 
         def done(carry: _NewtonCarry) -> jax.Array:
@@ -814,11 +947,10 @@ def ida_corrector(
 
     # Generation counters in effect for each stage: the primary setup (when
     # the gate fires) replaces the factor and every coupling block BEFORE the
-    # sweep consumes them, and the retry — which runs only when the gate
-    # stayed closed — replaces them once more. The caller advances the
-    # carried record by exactly the setup count this attempt reports, so the
-    # keys stored in the cache equal the record the next attempt validates
-    # against.
+    # sweep consumes them, and the retry replaces them once more. The caller
+    # advances the carried record by exactly the setup count this attempt
+    # reports, two when the gate fired and the retry ran, so the keys stored
+    # in the cache equal the record the next attempt validates against.
     zero_key = jnp.asarray(0, jnp.int32)
     if caching:
         factor_key0 = generations.factor + call_lsetup.astype(jnp.int32)
@@ -828,7 +960,7 @@ def ida_corrector(
     cache_in = border_cache if caching else None
 
     held1, solve0, du_b0, schur_solve0, cache1, dub0, sb0 = _linearize(
-        held_frozen,
+        held_setup if one_branch else held_frozen,
         a_use,
         b_use,
         c_use,
@@ -837,14 +969,27 @@ def ida_corrector(
         cache_in,
         factor_key0,
     )
-    carry1 = _run_loop(solve0, du_b0, c_use, schur_solve0, ss0, step_scale)
+    carry1 = _run_loop(
+        solve0,
+        du_b0,
+        c_use,
+        schur_solve0,
+        ss0,
+        step_scale,
+        None if inexact else njac_primary > 0,
+    )
 
     # A recoverable failure taken with a stale Jacobian retries once with a
-    # fresh factorization from the predictor.
+    # fresh factorization from the predictor, as does a failure at the
+    # rounding floor on a matrix the gate recomposed from a saved F_y: only a
+    # fresh matrix decides whether the floor is the root.
     # The retry assembles its own fresh blocks inside the branch — at the same
     # predictor point, so the values are identical to a primary-setup assembly
     # — and returns them so the caller persists the matrix actually in effect.
-    need_retry = jnp.logical_and(jnp.logical_not(carry1.converged), jnp.logical_not(call_lsetup))
+    stale = jnp.logical_not(call_lsetup)
+    if carry1.floor_retry is not None:
+        stale = stale | carry1.floor_retry
+    need_retry = jnp.logical_and(jnp.logical_not(carry1.converged), stale)
 
     def _retry(_operand):
         if inexact:
@@ -866,6 +1011,7 @@ def ida_corrector(
             schur_solve_r,
             jnp.asarray(_SS_FRESH, dtype=dtype),
             jnp.asarray(1.0, dtype=dtype),
+            None if inexact else jnp.asarray(True),
         )
         return carry_r, (held_r, b_r, c_r, d_r), fydot_r, cache_r, dub_r, sb_r
 
@@ -888,13 +1034,15 @@ def ida_corrector(
     du_b_builds = dub0 + dub_retry
     schur_builds = sb0 + sb_retry
 
-    converged = jnp.where(need_retry, carry2.converged, carry1.converged)
-    diverged = jnp.where(need_retry, carry2.diverged, carry1.diverged)
-    ee = jnp.where(need_retry, carry2.ee, carry1.ee)
-    iterations = jnp.where(need_retry, carry2.iterations, carry1.iterations)
-    delnrm = jnp.where(need_retry, carry2.delnrm, carry1.delnrm)
-    rate = jnp.where(need_retry, carry2.rate, carry1.rate)
-    ss_out = jnp.where(need_retry, carry2.ss, carry1.ss)
+    # ``carry2`` is the sweep the attempt keeps: the retry where it ran, the
+    # first sweep elsewhere (a lane the step loop discards may hold either).
+    converged = carry2.converged
+    diverged = carry2.diverged
+    ee = carry2.ee
+    iterations = carry2.iterations
+    delnrm = carry2.delnrm
+    rate = carry2.rate
+    ss_out = carry2.ss
 
     zero_i32 = jnp.asarray(0, dtype=jnp.int32)
     one_i32 = jnp.asarray(1, dtype=jnp.int32)
@@ -996,6 +1144,8 @@ def ida_corrector_root(
     jacobian_values_dtype=None,
     detect_precision: bool = False,
     live: Optional[jax.Array] = None,
+    held_current: Optional[jax.Array] = None,
+    suppressalg: bool = False,
 ) -> IDANlsResult:
     """One corrector attempt with the accepted root behind its derivative boundary.
 
@@ -1049,6 +1199,7 @@ def ida_corrector_root(
             p_nstlj,
             p_cj,
             p_live,
+            p_held_current,
         ) = primal_args
         ctx_p = IDANlsContext(
             t=t,
@@ -1080,6 +1231,8 @@ def ida_corrector_root(
             jacobian_values_dtype=jacobian_values_dtype,
             detect_precision=detect_precision,
             live=p_live,
+            held_current=p_held_current,
+            suppressalg=suppressalg,
         )
 
     def primal_fn(t, cj, q, theta, control, guess, primal_args):
@@ -1101,6 +1254,7 @@ def ida_corrector_root(
         nstlj,
         frozen_cj,
         live,
+        held_current,
     )
 
     def offering_extractor(aux, t, cj, theta, control, primal_args):

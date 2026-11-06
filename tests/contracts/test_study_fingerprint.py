@@ -1,5 +1,6 @@
 """Study fingerprints and lanes: device-free identity, memo safety, separability, effect-free
-lanes, lanes placed over the devices of a mesh, and the backends such a placement refuses."""
+lanes, lanes placed over the devices of a mesh, the backends such a placement refuses, and the
+platform, backend and factor sites a lane's default device selects."""
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup import inference as inf
+from diff_soup.utils import array_platform
 from tests.support.inference import (
     TIMES,
     decay_experiment,
@@ -25,6 +27,7 @@ from tests.support.inference import (
     mean_measurement,
     solver,
 )
+from tests.support.problems import SparseChainDAE
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -90,9 +93,8 @@ print("REPORT " + json.dumps(report))
 """
 
 
-@pytest.fixture(scope="module")
-def two_devices():
-    """The placed-study worker's report from one subprocess on two forced host devices."""
+def _two_device_report(worker):
+    """The report ``worker`` prints from one subprocess on two forced host devices."""
     env = {key: value for key, value in os.environ.items() if "proxy" not in key.lower()}
     env.update(
         JAX_PLATFORMS="cpu",
@@ -103,7 +105,7 @@ def two_devices():
         JAX_USE_SIMPLIFIED_JAXPR_CONSTANTS="1",
     )
     run = subprocess.run(
-        [sys.executable, "-c", _PLACED_WORKER],
+        [sys.executable, "-c", worker],
         cwd=_ROOT,
         env=env,
         capture_output=True,
@@ -113,6 +115,12 @@ def two_devices():
     assert run.returncode == 0, run.stderr[-4000:]
     line = next(item for item in run.stdout.splitlines() if item.startswith("REPORT "))
     return json.loads(line.removeprefix("REPORT "))
+
+
+@pytest.fixture(scope="module")
+def two_devices():
+    """The placed-study worker's report from one subprocess on two forced host devices."""
+    return _two_device_report(_PLACED_WORKER)
 
 
 def test_a_study_placed_over_two_devices_fits_to_the_point_of_one_device(two_devices):
@@ -143,6 +151,88 @@ def test_a_two_device_placement_refuses_a_backend_with_native_factor_storage(two
     names = ("KLU keeps", "2 devices", "Dense", "a layout whose data axis has one device")
     texts = two_devices["native"]
     assert [all(name in (text or "") for name in names) for text in texts] == [True, True]
+
+
+#: Run on two forced host CPU devices: one jitted KLU factor and solve, run under each device as
+#: the default device; the slots each run takes and the two solutions.
+_SITES_WORKER = r"""
+import json
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from diff_soup.linear import KLU, SolveContext, SparseTopology, analyze, factor, solve
+
+index = np.arange(12)
+pattern = SparseTopology(
+    rows=np.concatenate([index, index[1:], index[:-1]]),
+    cols=np.concatenate([index, index[:-1], index[1:]]),
+    n_dofs=12,
+)
+values = jnp.asarray(np.concatenate([np.full(12, 4.0), np.full(22, -1.0)]))
+backend, slots, solutions = KLU(), [], []
+with SolveContext() as ctx:
+    analysis = analyze(pattern, backend=backend)
+    program = jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), jnp.linspace(-1.0, 2.0, 12))[0])
+    for device in jax.devices():
+        with jax.default_device(device):
+            before = backend.native_stats()["live_slots"]
+            solutions.append(np.asarray(program(values)).tolist())
+            slots.append(backend.native_stats()["live_slots"] - before)
+print("REPORT " + json.dumps({"slots": slots, "same": solutions[0] == solutions[1]}))
+"""
+
+
+@pytest.mark.requires_klu
+def test_one_program_under_two_default_devices_factors_at_one_site_per_device():
+    """A jitted KLU factor and solve run under ``jax.default_device`` set to each of two host
+    devices takes a factor slot in each run, one site per device rather than one shared, and
+    both runs return the same solution."""
+    assert _two_device_report(_SITES_WORKER) == {"slots": [1, 1], "same": True}
+
+
+def test_a_program_staged_under_a_cpu_default_device_reads_the_cpu_platform():
+    """Under ``jax.default_device`` set to a CPU device, ``array_platform`` names ``"cpu"`` for an
+    array ``jax.jit`` stages and for no array at all, whatever backend the process defaults to."""
+    staged = []
+    with jax.default_device(jax.devices("cpu")[0]):
+        jax.jit(lambda x: staged.append(array_platform(x)) or x)(jnp.ones(2))
+        staged.append(array_platform())
+    assert staged == ["cpu", "cpu"]
+
+
+@pytest.mark.requires_cuda
+@pytest.mark.requires_klu
+def test_an_auto_solve_under_a_cpu_default_device_runs_klu_on_that_device():
+    """In a process whose default backend is a GPU, a jitted ``linear="auto"`` JIDA solve of a
+    25-unknown DAE that initializes consistently, run under ``jax.default_device`` set to a CPU
+    device, runs KLU on that device and stores bitwise what the same solve with ``linear="klu"``
+    stores."""
+    chain, cpu = SparseChainDAE(n=12), jax.devices("cpu")[0]
+
+    def solve(linear):
+        solver = ds.JIDA.stock(linear=linear, **{"rtol": 1e-8, "atol": 1e-10})
+
+        def run(rate):
+            solution = ds.pdesolve(
+                chain.problem,
+                solver,
+                (0.0, 0.5),
+                chain.initial_state(),
+                theta=rate,
+                saveat=ds.SaveAt(t1=True),
+                consistent_ic=True,
+            )
+            return solution.ys, solution.lambdas, solution.stats
+
+        with jax.default_device(cpu):
+            return jax.jit(run)(jnp.asarray(0.7))
+
+    auto, klu = solve("auto"), solve("klu")
+    assert (auto[2].linear_backend, auto[0].devices()) == ("klu", {cpu})
+    for got, expected in zip(auto[:2], klu[:2]):
+        np.testing.assert_array_equal(got, expected)
 
 
 def _placed_study(devices):

@@ -1,28 +1,28 @@
 {
   "budgets": {
-    "test_files": 43,
-    "test_functions": 390,
-    "collected_tests": 565,
-    "source_lines": 14100
+    "test_files": 45,
+    "test_functions": 418,
+    "collected_tests": 628,
+    "source_lines": 15129
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
-      "functions": 175,
-      "collected": 277,
-      "lines": 5592
+      "functions": 189,
+      "collected": 295,
+      "lines": 6143
     },
     "contracts": {
-      "files": 17,
-      "functions": 160,
-      "collected": 220,
-      "lines": 5400
+      "files": 19,
+      "functions": 173,
+      "collected": 264,
+      "lines": 5849
     },
     "performance_contracts": {
       "files": 2,
-      "functions": 11,
-      "collected": 28,
-      "lines": 480
+      "functions": 12,
+      "collected": 29,
+      "lines": 509
     },
     "multi_device": {
       "files": 2,
@@ -70,9 +70,12 @@
     "tests/contracts/test_linear_structured.py": "diff_soup.problem._ir._low_rank",
     "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
-    "tests/contracts/test_lowered_study.py": "diff_soup.inference.hierarchical"
+    "tests/contracts/test_lowered_study.py": "diff_soup.inference.hierarchical",
+    "tests/contracts/test_lane_select.py": "diff_soup.utils.lanes"
   },
-  "support_data": [],
+  "support_data": [
+    "tests/support/battery_jacobian.json"
+  ],
   "suite_files": [
     "tests/README.md",
     "tests/conftest.py",
@@ -83,6 +86,7 @@
     "tests/support/problems.py",
     "tests/support/inference.py",
     "tests/support/second_order.py",
+    "tests/support/battery_jacobian.json",
     "tests/public_api/test_recipe_build.py",
     "tests/public_api/test_recipe_observations.py",
     "tests/public_api/test_recipe_families.py",
@@ -111,6 +115,8 @@
     "tests/contracts/test_linear_primitive.py",
     "tests/contracts/test_linear_cudss.py",
     "tests/contracts/test_linear_ad.py",
+    "tests/contracts/test_linear_complex.py",
+    "tests/contracts/test_lane_select.py",
     "tests/contracts/test_second_order_ad.py",
     "tests/contracts/test_second_order_ad_precision.py",
     "tests/contracts/test_architecture.py",
@@ -156,6 +162,8 @@
     "tests/contracts/test_linear_primitive.py",
     "tests/contracts/test_linear_cudss.py",
     "tests/contracts/test_linear_ad.py",
+    "tests/contracts/test_linear_complex.py",
+    "tests/contracts/test_lane_select.py",
     "tests/contracts/test_second_order_ad.py",
     "tests/contracts/test_second_order_ad_precision.py",
     "tests/contracts/test_architecture.py",
@@ -175,7 +183,7 @@
   "feature_contracts": [
     {
       "file": "tests/public_api/test_recipe_build.py",
-      "feature": "Recipe API: domains and the grid factory, fields, equations, operators, boundary conditions, couplings and read-through aliases, build identity and transformability, the topology report's attribution and coloring, the public sparse-Jacobian coloring"
+      "feature": "Recipe API: domains and the grid factory, fields, equations, operators, boundary conditions, couplings and read-through aliases, build identity and transformability, exact-sparsity builds and their solves, the topology report's attribution and coloring, the public sparse-Jacobian coloring"
     },
     {
       "file": "tests/public_api/test_recipe_observations.py",
@@ -183,7 +191,7 @@
     },
     {
       "file": "tests/public_api/test_recipe_families.py",
-      "feature": "Recipe API: family recipes, per-member parameters, member boundary flux, surface projection, declared stencil radius, family graphs"
+      "feature": "Recipe API: family recipes, per-member parameters, member boundary flux, surface projection, declared stencil radius, member rows as wide as their member recovered by shared pullbacks, family graphs"
     },
     {
       "file": "tests/public_api/test_boundary_callbacks.py",
@@ -203,11 +211,11 @@
     },
     {
       "file": "tests/public_api/test_solve_outputs_ad.py",
-      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
+      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap, lanes that cover their save times at different steps equal to their unbatched solves, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
     },
     {
       "file": "tests/public_api/test_adjoints.py",
-      "feature": "Adjoints: gradients, jvp, checkpointing, second order through solves and events, a differential global and a projected DAE event time, forward and checkpoint adjoint parity"
+      "feature": "Adjoints: gradients, jvp, checkpointing, second order through solves and events, a differential global and a projected DAE event time, forward and checkpoint adjoint parity, a scheduled solve's tangent in a segment duration, an event condition differentiated through the parameters it reads"
     },
     {
       "file": "tests/public_api/test_operators.py",
@@ -286,6 +294,14 @@
       "feature": "Linear derivatives: refinement, route fallback, the options a route analyzes a backend with, root and initialization second derivatives, entry agreement, trace-once programs"
     },
     {
+      "file": "tests/contracts/test_linear_complex.py",
+      "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a battery impedance operator, the plain transpose, real factors with complex right-hand sides, value lanes, empty factors refactored in a loop, jvp and vjp against central differences, and the bytes a KLU factor holds"
+    },
+    {
+      "file": "tests/contracts/test_lane_select.py",
+      "feature": "Lane selects: the taken operand unbatched, the per-lane choice under vmap and nested vmap, its tangent and transpose"
+    },
+    {
       "file": "tests/contracts/test_second_order_ad.py",
       "feature": "Second-order AD through solves: Hessians under the checkpoint adjoint against the composable reverse-over-forward reference, the replay guard, run-time failures on an asynchronous device, a declared reverse-sweep dtype"
     },
@@ -311,7 +327,7 @@
     },
     {
       "file": "tests/contracts/test_study_fingerprint.py",
-      "feature": "Study fingerprints and lanes: fingerprints by axes not devices, memo safety under address reuse, window likelihood separability, the lane map over factorizations, lanes placed over the devices of a mesh with one program per mode and the fit of one device"
+      "feature": "Study fingerprints and lanes: fingerprints by axes not devices, memo safety under address reuse, window likelihood separability, the lane map over factorizations, lanes placed over the devices of a mesh with one program per mode and the fit of one device, the platform, backend and factor sites a default device selects"
     },
     {
       "file": "tests/contracts/test_packaging.py",
@@ -319,7 +335,7 @@
     },
     {
       "file": "tests/performance_contracts/test_compile_cache.py",
-      "feature": "Compile cache: no retrace for a value change, program text flat in the mesh, identical text for inexact arguments, batched solves keep corrector branches, bounded checkpoint carries, root matrices assembled inside the reverse sweep's transposed solves"
+      "feature": "Compile cache: no retrace for a value change, program text flat in the mesh, identical text for inexact arguments, batched solves keep corrector branches, bounded checkpoint carries, saved output holding a bounded number of copies of the trajectory, root matrices assembled inside the reverse sweep's transposed solves"
     },
     {
       "file": "tests/performance_contracts/test_batch_lowering.py",

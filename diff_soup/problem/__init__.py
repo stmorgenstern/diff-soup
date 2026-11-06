@@ -63,11 +63,14 @@ from diff_soup.problem.implicit import (
     MassProblem,
     ResidualLinearization,
     ResidualSparsity,
+    SolverView,
     get_or_build_solver_view,
+    solver_view,
 )
 from diff_soup.problem.implicit.topology_report import (
     RowOwner,
     TopologyReport,
+    jacobian_nnz,
     topology_report,
 )
 from diff_soup.problem.parameters import ParameterSet
@@ -187,6 +190,9 @@ __all__ = [
     "NodalInjectOp",
     # Iteration-matrix structure diagnostics
     "topology_report",
+    "jacobian_nnz",
+    "solver_view",
+    "SolverView",
     "TopologyReport",
     "RowOwner",
     # Identity/ownership

@@ -101,17 +101,22 @@ def _eval_constraint_residual(
         else:
             i_obs = jnp.asarray(constraint.current_fn(var_view, ctx, t)).reshape(())
         v_obs = jnp.asarray(constraint.voltage_fn(var_view, ctx, t)).reshape(())
-        forms = {"current": i_obs, "voltage": v_obs, "power": v_obs * i_obs}
-        rows = jnp.stack([forms[m] for m in constraint.modes])
-        mode_idx = jnp.asarray(mode, dtype=jnp.int32)
-        selected = jnp.take(rows, mode_idx)
         tgt = jnp.asarray(target)
         if getattr(control, "target_terms", None) is not None:
             # A target that varies in time, at the residual's own time.
             tgt = control.target_at(t)
+        forms = {
+            "current": i_obs - tgt,
+            "voltage": v_obs - tgt,
+            "power": v_obs * i_obs - tgt,
+            "resistance": v_obs - tgt * i_obs,
+        }
+        rows = jnp.stack([forms[m] for m in constraint.modes])
+        mode_idx = jnp.asarray(mode, dtype=jnp.int32)
+        selected = jnp.take(rows, mode_idx)
         # A negative mode is the initialization path's internal terminal-
         # voltage probe; user-facing states reject negative indices eagerly.
-        value = jnp.where(mode_idx < 0, v_obs - tgt, selected - tgt)
+        value = jnp.where(mode_idx < 0, v_obs - tgt, selected)
         return jnp.broadcast_to(value.reshape((-1,)), (constraint.dim,))
     # Residual is ``nondim_quantity - target_SI / integrand_scale``.
     # Default ``integrand_scale=1.0`` reproduces the un-scaled residual.

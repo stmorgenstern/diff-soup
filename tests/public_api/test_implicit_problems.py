@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
+from diff_soup.linear import MemberBlock, MemberBlockLayout
 from tests.support.problems import SparseChainDAE, reaction_diffusion_recipe
 
 _CONSTANT = ds.Dependencies(time=False, state=False, parameters=False, control=False)
@@ -123,6 +124,100 @@ def test_a_solve_starts_from_the_consistent_projection_of_an_off_manifold_state(
     start = jnp.concatenate([solution.ys[0], solution.lambdas[0]])
     assert int(solution.stats.ic_solves) == 1
     np.testing.assert_allclose(start, case.analytical(0.0, 0.4), rtol=0.0, atol=_EXACT)
+
+
+# measured 2.9e-9 relative at the end (the start exact), workstation 2026-11-05,
+# pytest tests/public_api/test_implicit_problems.py::test_a_family_solve_on_a_member_block_backend_initializes_consistently
+_MEMBER_BOUND = 1e-7
+
+
+def test_a_family_solve_on_a_member_block_backend_initializes_consistently():
+    """A family whose members carry ``c' = -c + j`` on three sites and the algebraic scalar
+    ``0 = j - k c_surface``, solved by JIDA on a MemberBlock backend whose layout covers the
+    whole state, starts from ``j = k c0`` (initialization solves only the rows of ``j``) and
+    ends at the closed form ``c = c0 e^{(k-1)t}``, ``j = k c``."""
+    rates, c0, end = np.array([0.5, 2.0]), np.array([1.0, 2.0]), 0.5
+    spec = ds.problem("member_block_start").domain(
+        "cell", ds.cartesian_grid_1d(2, 0.0, 1.0, method="fvm")
+    )
+    spec.field("m", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
+    members = spec.family(
+        "particles",
+        count=2,
+        domain=ds.cartesian_grid_1d(3, 0.0, 1.0, method="fvm"),
+        params={"k": rates},
+        scale={"c": 1.0, "j": 1.0},
+        residual_scale={"c": 1.0, "j": 1.0},
+    )
+    members.field_decl("c", mass="differential")
+    members.field_decl("j", mass="algebraic", shape=(1,))
+    members.equation(writes="c", reads=("c", "j"))(lambda q, member: -q.c + q.j)
+    members.equation(writes="j", reads=("c", "j"))(lambda q, member: q.j - member.k * q.c[-1])
+    members.couple(members.field("j").surface(), onto="cell", at=[0, 1], as_="rate")
+    spec.equation(writes="m", reads=("m", "rate"))(lambda q: -q.m + q.rate)
+    problem = spec.build()
+    view = problem.family_view("particles")
+    sites = view.field_slice("c")
+    layout = MemberBlockLayout(
+        [
+            view.base + k * view.member_state_size + np.arange(sites.start, sites.stop)[:, None]
+            for k in range(view.count)
+        ],
+        n_dofs=int(problem.state_size()),
+    )
+    initial = problem.assemble_state(
+        {
+            "m": jnp.zeros(2),
+            "particles.c": jnp.repeat(jnp.asarray(c0)[:, None], 3, axis=1),
+            "particles.j": jnp.zeros((2, 1)),
+        }
+    )
+    solution = ds.pdesolve(
+        problem,
+        ds.JIDA.stock(linear=MemberBlock(layout), **{"rtol": 1e-9, "atol": 1e-11}),
+        (0.0, end),
+        initial,
+        saveat=ds.SaveAt(t0=True, t1=True),
+    )
+    c_end = c0 * np.exp((rates - 1.0) * end)
+    got = [view.field(solution.ys[row], name)[:, 0] for row in (0, 1) for name in ("c", "j")]
+    expected = [c0, rates * c0, c_end, rates * c_end]
+    np.testing.assert_allclose(np.concatenate(got), np.concatenate(expected), rtol=_MEMBER_BOUND)
+
+
+#: ``y' = -y`` and ``0 = 3 z - y``.
+_THIRDS = ds.MassProblem(
+    rhs=lambda t, y, theta, control: jnp.stack([-y[0], 3.0 * y[1] - y[0]]),
+    mass=ds.MassOperator.sparse(
+        [0], [0], lambda t, y, theta, control: jnp.ones((1,), y.dtype), n=2, dependencies=_CONSTANT
+    ),
+    structure=ds.DAEStructure(differential_vars=np.array([True, False])),
+)
+#: A start ``y`` near 2e8 whose nearest floats ``z`` to ``y/3`` all leave ``3 z - y`` at 7.5e-9,
+#: the residual initialization ends with (measured, workstation 2026-11-05).
+_FLOOR_Y = 195046369.6325935
+#: Requested tolerances (not asserted bounds): ``atol`` far below the residual floor.
+_FLOOR_TOLERANCES = {"rtol": 1e-8, "atol": 1e-12}
+
+
+def test_a_start_at_the_rounding_floor_of_large_values_passes_the_relative_gate():
+    """``y' = -y``, ``0 = 3 z - y`` from ``y = 1.95e8``, ``z = y/3`` holds an algebraic residual
+    of 7.5e-9 that no float ``z`` lowers, far above ``atol = 1e-12``: initialization's relative
+    gate, whose round-off term scales with ``|F_y| |y|``, accepts the start, and the
+    absolute-only gate of ``ic_rtol=0`` refuses it with INCONSISTENT_IC."""
+
+    def solve(ic_rtol):
+        return ds.pdesolve(
+            _THIRDS,
+            ds.JIDA(linear="dense", **_FLOOR_TOLERANCES),
+            (0.0, 0.01),
+            jnp.asarray([_FLOOR_Y, _FLOOR_Y / 3.0]),
+            tolerances=ds.ToleranceSpec(**_FLOOR_TOLERANCES, ic_rtol=ic_rtol),
+            saveat=ds.SaveAt(t1=True),
+        )
+
+    accepted, refused = solve(None), solve(0.0)
+    assert bool(accepted.ok) and refused.result == ds.RESULT.INCONSISTENT_IC
 
 
 def _quadratic():

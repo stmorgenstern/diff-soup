@@ -567,6 +567,20 @@ def storage_key(storage: Optional[str]) -> np.int64:
 _SITE_ORDINALS = object()
 
 
+def _lowered_device() -> tuple:
+    """The id of the device under ``jax.default_device``, as key text; empty for the first device.
+
+    A site's slots are keyed by context and lane, and a cuDSS slot lives on the
+    device that created it. One program under ``jax.default_device`` is traced
+    and lowered once per device, so it takes one site per device. JAX lowers a
+    program with committed inputs once for every device, and that stays one
+    site. The first device keeps the plain key, so a program on one device
+    reads as it always did.
+    """
+    device = getattr(jax.config.jax_default_device, "id", 0)
+    return () if device == 0 else (f"device {device}",)
+
+
 def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
     """A deterministic key of one lowered native factor or refactor call, for its ``site``.
 
@@ -574,12 +588,14 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
     name stack, the ordinal of this call among the calls this function has
     keyed in the module so far, ``kind`` and ``parts`` (the analysis id,
     orientation, precision, lane count and whatever else tells the call
-    apart). Two lowerings of one program therefore give the same keys and
-    the same program text (so JAX's persistent compile cache recognises the
-    program), and the native handlers create a site on the first call that
-    carries an unknown key; the calls of one program, and of distinct
-    programs, get distinct keys. The key has bit 62 set, so it never equals
-    an id the extensions number their sites with by themselves.
+    apart). Two lowerings of one program under one default device therefore
+    give the same keys and the same program text (so JAX's persistent compile
+    cache recognises the program), and the native handlers create a site on the
+    first call that carries an unknown key; the calls of one program, and of
+    distinct programs, get distinct keys, as do lowerings under different
+    default devices ([_lowered_device][diff_soup.linear._primitive._lowered_device]).
+    The key has bit 62 set, so it never equals an id the extensions number their
+    sites with by themselves.
 
     Args:
         ctx: The lowering rule context.
@@ -597,7 +613,9 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
         name = ir.StringAttr(module.module.operation.attributes["sym_name"]).value
     except Exception:  # noqa: BLE001 - a module without a name keys on the rest
         name = ""
-    text = "|".join(str(part) for part in (name, ctx.name_stack, ordinal, kind, *parts))
+    text = "|".join(
+        str(part) for part in (name, ctx.name_stack, ordinal, kind, *parts, *_lowered_device())
+    )
     digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest()
     return np.int64((int.from_bytes(digest, "little") & ((1 << 62) - 1)) | (1 << 62))
 

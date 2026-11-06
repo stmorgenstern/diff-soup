@@ -33,11 +33,14 @@ struct LaneStatusWords {
 // Queue on `stream` a scan of `lanes` lanes into `out` (device memory, `lanes` entries, zeroed
 // by this call before the scan). `values` holds `value_count` entries per lane (lane i at
 // i * value_count) and `diagonal` holds `diagonal_count` entries per lane; either may be null
-// (or have a zero count) to skip it. Entries are float64 when `f64`, float32 otherwise. Nothing
-// is waited for. Returns the first CUDA error of the queued work, cudaSuccess otherwise.
+// (or have a zero count) to skip it. Entries are float64 when `f64`, float32 otherwise, and
+// complex of that precision when `complex` (the counts are then of complex entries; a value is
+// non-finite when either part is, and a diagonal magnitude is the modulus). Nothing is waited
+// for. Returns the first CUDA error of the queued work, cudaSuccess otherwise.
 cudaError_t QueueLaneStatusScan(cudaStream_t stream, bool f64, const void* values,
                                 int64_t value_count, const void* diagonal,
-                                int64_t diagonal_count, int64_t lanes, LaneStatusWords* out);
+                                int64_t diagonal_count, int64_t lanes, LaneStatusWords* out,
+                                bool complex = false);
 
 // The smallest finite diagonal magnitude a scan found; +inf when the lane has none.
 inline double SmallestMagnitude(const LaneStatusWords& words) {
@@ -64,15 +67,17 @@ constexpr double kProbeSolutionLargest = 1.75;
 // Queue on `stream` the right-hand sides b_l = A_l x* of `lanes` lanes. A_l is the CSR matrix of
 // `n` rows over `offsets` and `columns` (int32, device memory) with lane l's `nse` values at
 // `values` + l * nse; b_l is written at `b` + l * n. Entries are float64 when `f64`, float32
-// otherwise. Nothing is waited for. Returns the first CUDA error of the queued work.
+// otherwise, and complex of that precision when `complex` (x* stays real). Nothing is waited
+// for. Returns the first CUDA error of the queued work.
 cudaError_t QueueProbeRightHandSides(cudaStream_t stream, bool f64, const int32_t* offsets,
                                      const int32_t* columns, const void* values, int64_t n,
-                                     int64_t nse, int64_t lanes, void* b);
+                                     int64_t nse, int64_t lanes, void* b, bool complex = false);
 
 // Queue on `stream` the replacement of every entry of `x` (`lanes` lanes of `n` entries, lane l
 // at l * n) by its difference from x*. Nothing is waited for. Returns the first CUDA error of the
-// queued work.
-cudaError_t QueueProbeErrors(cudaStream_t stream, bool f64, void* x, int64_t n, int64_t lanes);
+// queued work. Complex entries when `complex`: x* is real, so only their real parts move.
+cudaError_t QueueProbeErrors(cudaStream_t stream, bool f64, void* x, int64_t n, int64_t lanes,
+                             bool complex = false);
 
 // Status codes the device writes into a side's verdict words (those of
 // diff_soup.linear.SolveStatus).
@@ -107,14 +112,16 @@ struct VerdictResult {
 };
 
 // Queue on `stream` one kernel over the `count` values of a factor's latest numeric phase
-// (float64 when `f64`, float32 otherwise) that sets `words->status` to NONFINITE when one of
+// (float64 when `f64`, float32 otherwise; a complex factor passes its values as twice as many
+// parts) that sets `words->status` to NONFINITE when one of
 // them is nan or infinite and to SUCCESS otherwise, then writes `result` when it is given.
 // Nothing is waited for. Returns the first CUDA error of the queued work.
 cudaError_t QueueValuesVerdict(cudaStream_t stream, bool f64, const void* values, int64_t count,
                                SideVerdictWords* words, const VerdictResult* result = nullptr);
 
 // Queue on `stream` one kernel after a solve with a factor whose words are `words`: `total`
-// right-hand-side entries at `b` and solution entries at `x` (float64 when `f64`). When the
+// right-hand-side entries at `b` and solution entries at `x` (float64 when `f64`; a complex solve
+// passes its entries as twice as many parts). When the
 // factor's status is SUCCESS, every right-hand-side entry is finite and a solution entry is not,
 // the factor's status becomes SINGULAR. When the factor's status is then other than SUCCESS,
 // every solution entry is set to nan. The solve's status is written to `words->solve_status`

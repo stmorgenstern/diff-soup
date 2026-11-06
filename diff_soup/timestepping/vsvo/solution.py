@@ -37,7 +37,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 
 from diff_soup._solution import RESULT, is_successful
-from diff_soup.utils.lanes import lane_cond
+from diff_soup.utils.lanes import _any_lane_p
 
 
 class SolverStats(eqx.Module):
@@ -553,17 +553,29 @@ def place_saveat_sample(buffers, pending, slot, rows, write):
     """
     discard = int(buffers[0].shape[0]) - 1
     slot = jnp.asarray(slot, jnp.int32)
-    if pending is None:
-        target = jnp.where(write, slot, discard)
-        return tuple(b.at[target].set(r) for b, r in zip(buffers, rows)), None
-    pending_slot, pending_rows = pending
-    flush = jnp.logical_and(jnp.logical_and(write, slot != pending_slot), pending_slot >= 0)
-    target = jnp.where(flush, pending_slot, discard)
-    buffers = tuple(b.at[target].set(r) for b, r in zip(buffers, pending_rows))
-    pending_rows = tuple(
-        jnp.where(write, jnp.asarray(r, p.dtype), p) for r, p in zip(rows, pending_rows)
+
+    # The writes mask each lane by ``write``; the branch only skips the work of
+    # the attempts on which no lane places a sample, which are most of them.
+    def place(operand):
+        buffers, pending = operand
+        if pending is None:
+            target = jnp.where(write, slot, discard)
+            return tuple(b.at[target].set(r) for b, r in zip(buffers, rows)), None
+        pending_slot, pending_rows = pending
+        flush = jnp.logical_and(jnp.logical_and(write, slot != pending_slot), pending_slot >= 0)
+        target = jnp.where(flush, pending_slot, discard)
+        buffers = tuple(b.at[target].set(r) for b, r in zip(buffers, pending_rows))
+        pending_rows = tuple(
+            jnp.where(write, jnp.asarray(r, p.dtype), p) for r, p in zip(rows, pending_rows)
+        )
+        return buffers, (jnp.where(write, slot, pending_slot), pending_rows)
+
+    return jax.lax.cond(
+        _any_lane_p.bind(jnp.asarray(write, jnp.bool_)),
+        place,
+        lambda operand: operand,
+        (tuple(buffers), pending),
     )
-    return buffers, (jnp.where(write, slot, pending_slot), pending_rows)
 
 
 def _write_saveat_rows(buffers, pending, idx, rows, covered, last, any_new):
@@ -736,14 +748,19 @@ def fill_saveat_window(
         return _fill(operand, start + jnp.arange(window, dtype=jnp.int32))
 
     def _cover(operand):
-        return lane_cond(overflow, _full, _windowed, operand)
+        return jax.lax.cond(_any_lane_p.bind(overflow), _full, _windowed, operand)
 
     # An attempt that covers no save time (every rejected attempt, most
     # accepted ones) evaluates nothing; under vmap the fill runs when some
     # lane covers a save time, and the full grid only when some lane overflows.
     covers = hi > cursor
-    buffers, pending = lane_cond(
-        covers, _cover, lambda operand: operand, (buffers, pending), false_is_free=True
+    # The writes already mask each lane by its own [cursor, hi) interval;
+    # both fill paths produce the same valid rows on a non-overflow lane.
+    # Select only which work the batch needs, not between whole output
+    # buffers. lane_cond's per-leaf where would retain old full trajectories
+    # across both nested conditionals (four extra copies in the arena).
+    buffers, pending = jax.lax.cond(
+        _any_lane_p.bind(covers), _cover, lambda operand: operand, (buffers, pending)
     )
     evaluations = jnp.where(
         covers,

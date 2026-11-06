@@ -2025,7 +2025,7 @@ def _build_full_jac_blocks_fn(
             row_lo = layout.offset_of((owner_comp.name, field_var.name))
             row_hi = row_lo + int(field_var.size)
             fallback_names.append(c.name)
-            if "power" not in c.modes and _field_eq_is_fully_declared(
+            if not {"power", "resistance"}.intersection(c.modes) and _field_eq_is_fully_declared(
                 owner_comp, field_var, _residual_bank(owner_comp), threaded_globals
             ):
                 # The current enters its row linearly, so the row's derivative
@@ -2039,7 +2039,7 @@ def _build_full_jac_blocks_fn(
                 held_names.append(c.name)
                 required_by.append((c.name, ()))
             else:
-                # A power row multiplies the current by the voltage, and an
+                # Power/resistance rows scale the current by voltage/target, and an
                 # under-declared field equation would drop a column from
                 # ``Avals``: differentiate the field's residual rows directly.
                 shortcut_meta.append(("fallback", _lam_off, dim_c))
@@ -2501,7 +2501,9 @@ def _capture_component_forms(eqset: EquationSet, probe_f, state_size: int, n_lam
     capture_forms(_component_form_cells(eqset), evaluate)
 
 
-def _analyze_family_layer(eqset: EquationSet, compute_dtype) -> _LoweringAnalysis:
+def _analyze_family_layer(
+    eqset: EquationSet, compute_dtype, probe_stencils: bool = True
+) -> _LoweringAnalysis:
     """Host analysis for the multi-component family / coupling / BC path.
 
     Uses the family-aware [_layout][diff_soup._lowering.layout._layout]
@@ -2565,14 +2567,16 @@ def _analyze_family_layer(eqset: EquationSet, compute_dtype) -> _LoweringAnalysi
             probe_controls,
         )[0]
 
-    stencil_offsets = _infer_stencil_offsets(
-        eqset,
-        layout.offset_of,
-        total,
-        int(sum(int(c.dim) for c in eqset.constraints)),
-        _probe_f,
-        compute_dtype,
-    )
+    stencil_offsets = {}
+    if probe_stencils:
+        stencil_offsets = _infer_stencil_offsets(
+            eqset,
+            layout.offset_of,
+            total,
+            int(sum(int(c.dim) for c in eqset.constraints)),
+            _probe_f,
+            compute_dtype,
+        )
     _capture_component_forms(
         eqset,
         _probe_f,
@@ -2679,7 +2683,9 @@ def _analyze_family_layer(eqset: EquationSet, compute_dtype) -> _LoweringAnalysi
     )
 
 
-def analyze(eqset: EquationSet, *, precision: Optional[Precision] = None) -> _LoweringAnalysis:
+def analyze(
+    eqset: EquationSet, *, precision: Optional[Precision] = None, probe_stencils: bool = True
+) -> _LoweringAnalysis:
     """Run the host analysis pass for ``lower()`` (the lowering provider).
 
     Builds the layout, sparse topology, mass diagonal, residual / Jacobian /
@@ -2693,6 +2699,7 @@ def analyze(eqset: EquationSet, *, precision: Optional[Precision] = None) -> _Lo
             analyse.
         precision: Dtype policy; its ``compute_dtype`` drives the boundary-cast
             at closure entry (default fp64).
+        probe_stencils: Whether to measure each block's stencil at probe states.
 
     Returns:
         The
@@ -2713,7 +2720,7 @@ def analyze(eqset: EquationSet, *, precision: Optional[Precision] = None) -> _Lo
     compute_dtype = precision.compute_dtype
 
     if _has_family_layer(eqset):
-        return _analyze_family_layer(eqset, compute_dtype)
+        return _analyze_family_layer(eqset, compute_dtype, probe_stencils)
 
     entries, offset_of, total = _build_layout(eqset)
     residual_fn = _build_residual_fn(eqset, offset_of, total, compute_dtype)
@@ -2727,14 +2734,16 @@ def analyze(eqset: EquationSet, *, precision: Optional[Precision] = None) -> _Lo
     def _probe_f(u, lam, t):
         return residual_fn(slim_equations, (), (), (), (), (), (), u, lam, t, ())[0]
 
-    stencil_offsets = _infer_stencil_offsets(
-        eqset,
-        lambda key: offset_of[key],
-        total,
-        0,
-        _probe_f,
-        compute_dtype,
-    )
+    stencil_offsets = {}
+    if probe_stencils:
+        stencil_offsets = _infer_stencil_offsets(
+            eqset,
+            lambda key: offset_of[key],
+            total,
+            0,
+            _probe_f,
+            compute_dtype,
+        )
     _capture_component_forms(eqset, _probe_f, total, 0, compute_dtype)
     rows, cols = _sparsity(eqset, offset_of, total, stencil_offsets=stencil_offsets)
     topo = SparseTopology(rows=rows, cols=cols, n_dofs=total, bc_indices=None)

@@ -57,6 +57,7 @@ __all__ = [
     "StructureSignature",
     "ThetaCodec",
     "get_or_build_solver_view",
+    "solver_view",
 ]
 
 
@@ -233,7 +234,7 @@ class SolverView:
     def full_topology(self) -> Optional[SparseTopology]:
         """The row-major full-system COO pattern of ``A(cj)``, or ``None``.
 
-        Sparse [iteration_matrix_values][] entries use this exact ordering.
+        Sparse ``iteration_matrix_values`` entries use this exact ordering.
         Dense problems return ``None`` and expose a full ``(n, n)`` matrix.
         """
         return self.plan.union_topology if self.plan.mode == "sparse" else None
@@ -393,8 +394,9 @@ class SolverView:
         ``target / V``. A nonzero power target at near-zero voltage with no
         explicit seed fails here — before any Newton iteration — with a typed
         error; under tracing (where no value is concrete) the guarded select
-        keeps the prior slot instead. Non-power modes write only an explicit
-        seed.
+        keeps the prior slot instead. Resistance defaults to ``V / target``;
+        a zero target without an explicit seed raises eagerly and keeps the
+        prior slot under tracing. Other modes write only an explicit seed.
         """
         from diff_soup._errors import ConfigurationError
 
@@ -458,6 +460,15 @@ class SolverView:
                     )
                 else:
                     slot = prior
+            elif modes[int(mode)] == "resistance":
+                if float(target) == 0.0:
+                    raise ConfigurationError(
+                        f"operational control {table.name!r}: resistance mode with "
+                        "zero target is a short circuit with no usable default "
+                        "current start; supply a current seed "
+                        "(ControlState.operating(current_seed=...))."
+                    )
+                slot = v0 / target
             else:
                 slot = prior
         else:
@@ -469,7 +480,15 @@ class SolverView:
             ok_v = jnp.abs(v0) > thr
             v_safe = jnp.where(ok_v, v0, jnp.ones_like(v0))
             power_default = jnp.where(ok_v, target / v_safe, prior)
-            slot = jnp.where(has_seed, seed_val, jnp.where(is_power, power_default, prior))
+            resistance_mask = jnp.asarray(np.array([m == "resistance" for m in modes]))
+            is_resistance = jnp.take(resistance_mask, mode)
+            ok_r = target != 0
+            r_safe = jnp.where(ok_r, target, jnp.ones_like(target))
+            resistance_default = jnp.where(ok_r, v0 / r_safe, prior)
+            default = jnp.where(
+                is_power, power_default, jnp.where(is_resistance, resistance_default, prior)
+            )
+            slot = jnp.where(has_seed, seed_val, default)
         return lam0.at[off].set(jnp.asarray(slot, dtype=lam0.dtype))
 
     def default_theta(self):
@@ -621,6 +640,7 @@ class SolverView:
         *,
         ydot0=None,
         tol,
+        rtol=0.0,
         max_iters=30,
         backend="auto",
         route="auto",
@@ -644,7 +664,7 @@ class SolverView:
         leaves the defaults. ``reverse_precision`` is the dtype policy of the
         transposed solve a reverse sweep runs at the root (``None`` uses
         ``precision``). One static solve plan per resolved
-        ``(tol, max_iters, linear route, solve route, layout, precision,
+        ``(tol, rtol, max_iters, linear route, solve route, layout, precision,
         reverse_precision)`` tuple is cached on the view so repeat solves reuse one
         compiled program. Both routes are resolved BEFORE keying, so every
         spelling that lands on the same solve shares one plan — and one
@@ -657,7 +677,10 @@ class SolverView:
             theta: Problem parameters. ``None`` uses [default_theta][].
             control: Control values read by the residual, or ``None``.
             ydot0: Optional initial slope guess.
-            tol: Absolute residual 2-norm gate for convergence.
+            tol: Absolute residual 2-norm target for Newton iterations.
+            rtol: Relative final gate scaled by the initial residual 2-norm,
+                applied after attempting the absolute target. Positive values
+                also enable the componentwise state/slopes round-off allowance.
             max_iters: Newton iteration budget.
             backend: Linear-backend selection for the initialization system.
             route: ``"auto"``, ``"joint"``, or ``"reduced"`` solve route.
@@ -667,13 +690,15 @@ class SolverView:
                 solve of a reverse sweep.
         """
         theta = self.default_theta() if theta is None else theta
-        route_name, _ = self.initialization_backend(backend)
         if route == "auto":
             ic_route = "reduced" if reduced_route_eligible(self.problem) else "joint"
         else:
             ic_route = route
+        block = int(self.structure.algebraic_indices.size) if ic_route == "reduced" else self.n
+        route_name, _ = resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
         key = (
             float(tol),
+            float(rtol),
             int(max_iters),
             route_name,
             ic_route,
@@ -688,6 +713,7 @@ class SolverView:
                 self.problem,
                 self.plan,
                 tol=tol,
+                rtol=rtol,
                 max_iters=max_iters,
                 backend=backend,
                 route=ic_route,
@@ -711,15 +737,23 @@ class SolverView:
 
         Returns ``(name, instance)`` exactly as
         [consistent_initial_state][diff_soup.problem.implicit.solver_problem.SolverView.consistent_initial_state]
-        resolves its ``backend`` argument for this problem: ``"auto"`` stays
+        resolves its ``backend`` argument for this problem's automatic solve route:
+        ``"auto"`` stays
         dense for a dense-mode linearization plan and otherwise picks the
         platform's route from the system size; a concrete name or a
-        [LinearSolver][diff_soup.linear.LinearSolver] instance is honored. The
+        [LinearSolver][diff_soup.linear.LinearSolver] instance is honored unless
+        its bound ``layout.n_dofs`` differs from the initialization system size,
+        in which case initialization uses Dense without changing the step backend. The
         instance is ``None`` on the dense route. Callers that batch
         initialization solves (for example projected output sampling) read the
         resolved backend's capabilities from the returned instance.
         """
-        return resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=self.n)
+        block = (
+            int(self.structure.algebraic_indices.size)
+            if reduced_route_eligible(self.problem)
+            else self.n
+        )
+        return resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
 
     def startup_slope(
         self,
@@ -1053,8 +1087,33 @@ def _build_solver_view(problem, source_key: Hashable) -> SolverView:
         )
 
 
+def solver_view(problem) -> SolverView:
+    """Return the view the solvers take of ``problem``.
+
+    The view is what ``pdesolve`` and the implicit-layer verbs read: the
+    residual ``F(t, y, ydot, theta, control)`` as ``residual``, the state size
+    ``n`` and its local block ``n_u``, the differential rows ``id_mask``, the
+    iteration matrix's sparse pattern ``full_topology`` and the linearization
+    ``plan`` its values follow. It is built once per model and cached, so a
+    rebuilt problem equal in content gets the same view.
+
+    Args:
+        problem: A lowered problem, a ``MassProblem`` or ``ImplicitProblem``,
+            or a view, which is returned unchanged.
+
+    Returns:
+        The problem's [SolverView][diff_soup.problem.SolverView].
+
+    Raises:
+        TypeError: If ``problem`` supplies no solver problem.
+    """
+    return get_or_build_solver_view(problem)
+
+
 def get_or_build_solver_view(problem) -> SolverView:
     """Return the cached engine-facing view of ``problem``, building it once.
+
+    [solver_view][diff_soup.problem.solver_view] is the public name.
 
     Accepts a solver problem ([MassProblem][] / [ImplicitProblem][]),
     a problem with a callable ``solver_problem()`` hook, or an already-built

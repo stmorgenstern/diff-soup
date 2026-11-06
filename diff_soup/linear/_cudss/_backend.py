@@ -80,6 +80,7 @@ class CuDSS(LinearSolver):
     batch_layout: str = eqx.field(static=True, default="stacked")
 
     backend_name = "cudss"
+    platforms = ("cuda",)
     # The settings: every analyze option of the one-device route. The
     # options of the per-call solver of a model axis across processes stay
     # analyze options only.
@@ -293,7 +294,7 @@ class CuDSS(LinearSolver):
             The MLIR values of ``(x, status, order)``.
 
         Raises:
-            FactorContractError: If ``b`` is complex.
+            FactorContractError: If the values or ``b`` are of a dtype cuDSS does not take.
         """
         if _model_axis.model_axis_record(params["analysis"]) is not None:
             return _LOWER_APPLY(ctx, *operands, **params)

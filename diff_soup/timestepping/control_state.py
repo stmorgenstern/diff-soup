@@ -12,7 +12,7 @@ invalidates exactly the cached quantities that depended on it, and the
 operational row table selects its active row from the same counter.
 
 A problem that declares an operational control table (a static ordered set of
-``current`` / ``voltage`` / ``power`` residual rows closing one algebraic
+``current`` / ``voltage`` / ``power`` / ``resistance`` rows closing one algebraic
 current unknown) additionally carries the *operating point* here: an ``int32``
 ``mode`` index into the table's static mode-name tuple, a scalar float
 ``target``, and an optional scalar ``current_seed`` for the algebraic current
