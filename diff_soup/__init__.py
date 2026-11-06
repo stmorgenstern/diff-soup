@@ -318,4 +318,8 @@ def __getattr__(name: str):
 
         inference = importlib.import_module("diff_soup.inference")
         return inference if name == "inference" else inference.learnables
+    if name == "optimization":
+        import importlib
+
+        return importlib.import_module("diff_soup.optimization")
     raise AttributeError(f"module 'diff_soup' has no attribute {name!r}")
