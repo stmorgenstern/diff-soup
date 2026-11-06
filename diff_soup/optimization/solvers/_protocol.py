@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import abc
 import enum
+import time
 from typing import Any, ClassVar
 
 import equinox as eqx
+import jax
+import numpy as np
 
 from diff_soup.inference._abc import OptSolver
 
@@ -119,5 +122,68 @@ class CompiledSolver(OptSolver):
         raise NotImplementedError
 
     def solve(self, problem: Any, *, callbacks: tuple = ()) -> Any:
-        """Run on the host and return the `OptResult`, as `ds.inference.optsolve` expects."""
-        raise NotImplementedError
+        """Run on the host and return the `OptResult`, as `ds.inference.optsolve` expects.
+
+        The run compiles once and has no host step: each callback's `on_start` sees the
+        problem, `on_step` the final step and `on_end` the result. The `SolveRecord` is
+        `result.info["record"]`.
+        """
+        from diff_soup.inference.fitting.result import OptResult, StepInfo
+
+        args = getattr(problem, "args", None)
+        x0 = problem.x0
+        for callback in callbacks:
+            callback.on_start(int(np.size(x0)), 0, int(getattr(self, "max_steps", 0)))
+        start = time.perf_counter()
+        x, record = eqx.filter_jit(self.run)(problem, x0, args)
+        x = jax.block_until_ready(x)
+        wall = time.perf_counter() - start
+        status = _termination_status(int(record.status))
+        cost = float(_problem_value(problem)(x, args))
+        info = StepInfo(
+            step=int(record.steps),
+            cost=cost,
+            grad_norm=float(record.kkt_error),
+            params=np.asarray(x),
+            accepted=True,
+            delta_norm=float("nan"),
+            wall_time=wall,
+        )
+        for callback in callbacks:
+            callback.on_step(info)
+        result = OptResult(
+            opt_params=problem.fitted(x) if hasattr(problem, "fitted") else None,
+            params=np.asarray(x),
+            initial_params=np.asarray(x0),
+            cost=cost,
+            grad_norm=float(record.kkt_error),
+            status=status,
+            message=SolveStatus(int(record.status)).name.lower(),
+            n_steps=int(record.steps),
+            max_steps=int(getattr(self, "max_steps", 0)),
+            n_accepted=int(record.steps),
+            wall_time=wall,
+            info={"record": jax.tree.map(np.asarray, record)},
+        )
+        for callback in callbacks:
+            callback.on_end(result)
+        return result
+
+
+# Until `TerminationStatus` gains the compiled solvers' statuses, the nearest existing one.
+_INTERIM = {"KKT_TOL": "SUCCESS", "INFEASIBLE": "STALLED", "RESTORATION_FAILED": "STALLED"}
+
+
+def _termination_status(code: int) -> Any:
+    """The `TerminationStatus` of a `SolveStatus` code, by name."""
+    from diff_soup.inference.fitting.result import TerminationStatus
+
+    name = SolveStatus(code).name
+    if name not in TerminationStatus.__members__:
+        name = _INTERIM[name]
+    return TerminationStatus[name]
+
+
+def _problem_value(problem: Any) -> Any:
+    """The raw `(x, args)` objective of a numeric problem."""
+    return problem._value
