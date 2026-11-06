@@ -18,26 +18,30 @@ import numpy as np
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._schedule import solve_schedule
-from diff_soup.optimization._binding import Derived, Held
+from diff_soup.optimization._binding import Derived, Held, Lowered
+from diff_soup.optimization._derived import identity
 
 if TYPE_CHECKING:
-    pass
+    from diff_soup._adjoints import AbstractAdjoint
+    from diff_soup.optimization.constraints import Constraints
+    from diff_soup.optimization.control.problem import PiecewiseConstant
+    from diff_soup.timestepping.vsvo.classes import JBDF, JIDA, JNDF
 
 
 class Configuration(NamedTuple):
     """What a horizon's closures read besides `(u, args)`; hashable, and free of arrays."""
 
     model: Held
-    controls: Any
+    controls: PiecewiseConstant
     cost: Callable
     path: Callable | None
     terminal: Callable | None
     n_path: int
     n_terminal: int
-    constraints: Any
+    constraints: Constraints | None
     save_times: tuple[float, ...]
-    solver: Any
-    adjoint: Any
+    solver: JIDA | JBDF | JNDF
+    adjoint: AbstractAdjoint | None
 
 
 class Horizon:
@@ -80,7 +84,7 @@ class Horizon:
         """The closure `name`, taking `args` last, equal across equal horizons."""
         return Derived(_call, self, name)
 
-    def built(self) -> dict[str, Callable]:
+    def built(self) -> Lowered:
         """The closures by name, built once per object."""
         if self._built is None:
             self._built = _build(self.configuration)
@@ -92,19 +96,14 @@ def _call(horizon: Horizon, name: str, *operands: Any) -> Any:
     return horizon.built()[name](*operands)
 
 
-def _identity(u: Any) -> Any:
-    """The decision vector as the view the `Constraints` on `u` take."""
-    return u
-
-
-def _build(configuration: Configuration) -> dict[str, Callable]:
+def _build(configuration: Configuration) -> Lowered:
     """The closures of a horizon configuration."""
     model, controls = configuration.model.value, configuration.controls
     n_terminal = configuration.n_terminal
     times = np.asarray(configuration.save_times, dtype=np.float64)
     n_path = configuration.n_path * times.size
     extra = configuration.constraints
-    lowered = None if extra is None else extra.lower(None, _identity)
+    lowered = None if extra is None else extra.lower(None, identity)
     n = controls.intervals
     modes = tuple(model.operational_modes())
     reverse = configuration.adjoint is not None
@@ -147,7 +146,7 @@ def _build(configuration: Configuration) -> dict[str, Callable]:
         if lowered is None:
             empty = jnp.zeros((0,), jnp.result_type(u))
             return empty, empty
-        return lowered.constraints(u, args)
+        return lowered["constraints"](u, args)
 
     def extra_rows_and_jacobians(u, args):
         if lowered is None:
@@ -156,7 +155,7 @@ def _build(configuration: Configuration) -> dict[str, Callable]:
                 jnp.zeros((0, n), jnp.result_type(u)),
             )
             return empty, empty, block, block
-        return lowered.constraints_and_jacobians(u, args)
+        return lowered["constraints_and_jacobians"](u, args)
 
     def joined(terminal, path, extra):
         return jnp.concatenate([terminal, extra[0]]), jnp.concatenate([path, extra[1]])
@@ -224,7 +223,7 @@ def _build(configuration: Configuration) -> dict[str, Callable]:
         horizon_part = jax.jacfwd(first(lambda x: weighted(x, lam_eq, lam_ineq, args, objective)))
         hessian = horizon_part(u)
         if lowered is not None:
-            hessian = hessian + lowered.lagrangian_hessian(
+            hessian = hessian + lowered["lagrangian_hessian"](
                 u, lam_eq[n_terminal:], lam_ineq[n_path:], args
             )
         return hessian

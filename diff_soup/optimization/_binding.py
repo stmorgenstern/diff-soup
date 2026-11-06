@@ -11,8 +11,13 @@ of one problem are equal and `filter_jit` reuses one compile, with no cache.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
+
+#: The closures a lowering (a `Constraints`, a control horizon) builds, by the names
+#: [OptimizationProblem.closure][diff_soup.optimization.OptimizationProblem.closure] takes,
+#: each taking `args` last.
+Lowered = Mapping[str, Callable]
 
 
 class Bound:
@@ -151,4 +156,4 @@ def hold(value: Any) -> Held:
     return value if isinstance(value, Held) else Held(value)
 
 
-__all__ = ["Bound", "Derived", "Held", "IgnoringArgs", "hold", "ignoring_args"]
+__all__ = ["Bound", "Derived", "Held", "IgnoringArgs", "Lowered", "hold", "ignoring_args"]

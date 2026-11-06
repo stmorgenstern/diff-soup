@@ -50,6 +50,7 @@ import numpy as np
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
+from diff_soup.optimization._derived import half_sum_of_squares
 from diff_soup.optimization.inference.engine._plan import n_padded, refuse_shared_storage
 from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
@@ -2102,8 +2103,7 @@ class _JointRegularizer:
 
     def penalty(self, x_joint: jax.Array) -> jax.Array:
         """``0.5·‖residual‖²`` of the stacked child regularizer rows."""
-        r = self.residual(x_joint)
-        return 0.5 * jnp.sum(r**2)
+        return half_sum_of_squares(self.residual(x_joint))
 
 
 # ---------------------------------------------------------------------------

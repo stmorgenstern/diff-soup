@@ -13,9 +13,9 @@ from collections.abc import Callable
 from typing import Any
 
 import jax
-import jax.numpy as jnp
 
 from diff_soup.optimization._binding import Derived, Held
+from diff_soup.optimization._derived import half_sum_of_squares
 
 
 def _penalty(held: Held, x: Any) -> Any:
@@ -63,7 +63,7 @@ def _gauss_newton(gauss_newton: Callable, held: Held, x: Any, args: Any) -> Any:
     value, gradient, matrix, failed = gauss_newton(x, args)
     rows, jacobian = _rows(held, x)
     return (
-        value + 0.5 * jnp.sum(rows * rows),
+        value + half_sum_of_squares(rows),
         gradient + jacobian.T @ rows,
         matrix + jacobian.T @ jacobian,
         failed,
@@ -103,6 +103,10 @@ _RULES = {
 }
 
 
+#: The closures of the objective, which the penalty folds into.
+FOLDED = tuple(_RULES)
+
+
 def penalized(name: str, closure: Callable, regularization: Held) -> Callable:
     """The closure `name` with the regularization's penalty folded in; unchanged when it has none.
 
@@ -120,4 +124,4 @@ def penalized(name: str, closure: Callable, regularization: Held) -> Callable:
     return Derived(rule, closure, regularization)
 
 
-__all__ = ["penalized"]
+__all__ = ["FOLDED", "penalized"]
