@@ -24,10 +24,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
+
+from diff_soup.timestepping.vsvo.common.backends import initialization_policy
+from diff_soup.timestepping.vsvo.common.weights import error_weight
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +59,50 @@ class EngineCapabilities:
     supports_global_constraints: bool
     supports_state_dependent_mass: bool
     supports_dense_output: bool
+
+
+def where_state(cond: jax.Array, a: Any, b: Any) -> Any:
+    """Select between two carried states leaf by leaf on a scalar predicate."""
+    return jax.tree_util.tree_map(lambda x, y: jnp.where(cond, x, y), a, b)
+
+
+#: Each engine's capability flags, every flag stated.
+ENGINE_CAPABILITIES = {
+    "ida": EngineCapabilities(
+        # The factored iteration matrix persists across attempts and is
+        # refactored only where a setup replaces it.
+        supports_factor_reuse=True,
+        supports_events=True,
+        supports_fully_implicit=True,
+        supports_global_constraints=True,
+        supports_state_dependent_mass=True,
+        supports_dense_output=True,
+    ),
+    "bdf": EngineCapabilities(
+        supports_factor_reuse=True,
+        supports_events=True,
+        # The mass-matrix ODE/DAE form (a correction-form residual built from
+        # the mass and right-hand side), not a truly implicit F(t, y, ydot).
+        supports_fully_implicit=False,
+        # The augmented Schur machinery handles bordered-global rows.
+        supports_global_constraints=True,
+        # The mass is evaluated as identity, constant, or purely
+        # time-dependent; a state-dependent mass is rejected before the solve.
+        supports_state_dependent_mass=False,
+        supports_dense_output=True,
+    ),
+    "ndf": EngineCapabilities(
+        supports_factor_reuse=True,
+        supports_events=True,
+        # The mass-matrix ODE/DAE form, not a truly implicit F(t, y, ydot).
+        supports_fully_implicit=False,
+        supports_global_constraints=True,
+        # The diagonal mass is re-evaluated at the current iterate inside the
+        # residual; a state-dependent mass is handled in weak (chord) form.
+        supports_state_dependent_mass=True,
+        supports_dense_output=True,
+    ),
+}
 
 
 def ic_gate_tolerance(atol: Any, ic_tol: Optional[float]) -> float:
@@ -263,11 +310,110 @@ def coerce_problem(problem: Any) -> Any:
     return _PROBLEM_COERCION(problem)
 
 
+class ConsistentStart(NamedTuple):
+    """The consistent state an engine starts from, with the weights of its first step.
+
+    Attributes:
+        u: The state rows.
+        lam: The bordered-global rows.
+        y: ``u`` and ``lam`` packed.
+        ydot: The packed slopes, zero on algebraic rows.
+        alg_norm: The residual norm initialization left.
+        atol_rows: The per-row absolute tolerance, or ``None`` for a scalar one.
+        ewt: The error weights at ``y``.
+    """
+
+    u: jax.Array
+    lam: jax.Array
+    y: jax.Array
+    ydot: jax.Array
+    alg_norm: jax.Array
+    atol_rows: Optional[jax.Array]
+    ewt: jax.Array
+
+
+def initialization_policies(problem: Any, precision: Any) -> tuple[Any, Any, Any]:
+    """The layout and the forward and reverse precisions of the initialization factor.
+
+    The projection factors the problem exactly as the corrector does, so it is
+    analysed with the lowered problem's placement and the accepted-root
+    sensitivity precision the solve declared for each derivative direction,
+    never the backend's defaults.
+    """
+    layout, forward = initialization_policy(problem, precision, mode="forward")
+    _, reverse = initialization_policy(problem, precision, mode="reverse")
+    return layout, forward, reverse
+
+
+def project_start(
+    engine: Any,
+    problem: Any,
+    t0: jax.Array,
+    u0: jax.Array,
+    lam0: jax.Array,
+    ydot0: jax.Array,
+    theta: Any,
+    control: Any,
+    policies: tuple[Any, Any, Any],
+    *,
+    max_iters: Optional[int] = None,
+) -> Any:
+    """The startup projection: the solver problem's consistent initialization at the engine's gate."""
+    layout, precision, reverse_precision = policies
+    budget = {} if max_iters is None else {"max_iters": max_iters}
+    return problem.consistent_initial_state(
+        t0,
+        pack_state(u0, lam0),
+        theta,
+        control,
+        ydot0=jnp.concatenate([ydot0, jnp.zeros(lam0.shape, dtype=ydot0.dtype)]),
+        tol=ic_gate_tolerance(engine.atol, engine.ic_tol),
+        rtol=ic_gate_rtol(engine.rtol, engine.ic_rtol, engine.ic_tol),
+        backend=engine.backend,
+        layout=layout,
+        precision=precision,
+        reverse_precision=reverse_precision,
+        **budget,
+    )
+
+
+def consistent_start(engine: Any, cfg: Any, ic: Any, n_u: int, dtype: Any) -> ConsistentStart:
+    """Unpack an initialization result into the state and weights an engine starts from.
+
+    A failed root is NaN-poisoned (see
+    [consume_consistent_init][diff_soup.timestepping.vsvo.common.contract.consume_consistent_init]).
+    The slopes cover every differential row, the differential globals of the
+    bordered partition included, and are consumed whole. A per-row absolute
+    tolerance arrives as a vector on the driver configuration and rides the
+    carry, so accepted-step weight refreshes keep consuming it.
+    """
+    ic_y, ic_ydot = consume_consistent_init(ic)
+    u = jnp.asarray(ic_y[:n_u], dtype=dtype)
+    lam = jnp.asarray(ic_y[n_u:], dtype=dtype)
+    y = pack_state(u, lam)
+    atol_rows = cfg.atol if getattr(cfg.atol, "ndim", 0) == 1 else None
+    return ConsistentStart(
+        u=u,
+        lam=lam,
+        y=y,
+        ydot=jnp.asarray(ic_ydot, dtype=dtype),
+        alg_norm=jnp.asarray(ic.residual_norm, dtype=dtype),
+        atol_rows=atol_rows,
+        ewt=error_weight(y, engine.rtol, engine.atol if atol_rows is None else atol_rows),
+    )
+
+
 __all__ = [
+    "ENGINE_CAPABILITIES",
+    "ConsistentStart",
     "EngineCapabilities",
-    "validate_requirements",
-    "register_problem_coercion",
     "coerce_problem",
+    "consistent_start",
+    "initialization_policies",
     "pack_state",
+    "project_start",
+    "register_problem_coercion",
     "unpack_state",
+    "validate_requirements",
+    "where_state",
 ]

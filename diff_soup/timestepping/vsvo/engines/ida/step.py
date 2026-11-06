@@ -61,16 +61,18 @@ from diff_soup.timestepping.vsvo.common.adaptive import (
 )
 from diff_soup.timestepping.vsvo.common.backends import (
     analyze_sensitivity,
-    initialization_policy,
     resolve_backend,
 )
 from diff_soup.timestepping.vsvo.common.contract import (
+    ENGINE_CAPABILITIES,
     EngineCapabilities,
     closure_moved,
-    consume_consistent_init,
-    ic_gate_rtol,
+    consistent_start,
     ic_gate_tolerance,
+    initialization_policies,
     pack_state,
+    project_start,
+    where_state,
 )
 from diff_soup.timestepping.vsvo.common.decisions import replay_decisions
 from diff_soup.timestepping.vsvo.common.driver import StepReport
@@ -138,31 +140,12 @@ class _ConsistentInitAdapter(NamedTuple):
     converged: jax.Array
 
 
-def _capabilities() -> EngineCapabilities:
-    """The IDA-tracking engine's capability flags (every flag stated)."""
-    return EngineCapabilities(
-        # The factored iteration matrix persists across attempts and is
-        # refactored only where a setup replaces it.
-        supports_factor_reuse=True,
-        supports_events=True,
-        supports_fully_implicit=True,
-        supports_global_constraints=True,
-        supports_state_dependent_mass=True,
-        supports_dense_output=True,
-    )
-
-
 def _pad_to(vec: jax.Array, length: int) -> jax.Array:
     """Right-pad (or truncate) ``vec`` to ``length`` along its single axis."""
     have = int(vec.shape[0])
     if have < length:
         return jnp.concatenate([vec, jnp.zeros((length - have,), vec.dtype)])
     return vec[:length]
-
-
-def _where_state(cond: jax.Array, a: IDAState, b: IDAState) -> IDAState:
-    """Select between two carried states leaf-by-leaf on a scalar predicate."""
-    return jax.tree_util.tree_map(lambda x, y: jnp.where(cond, x, y), a, b)
 
 
 def _advance_linearization_provenance(generations, *, setups, converged, correction):
@@ -616,12 +599,8 @@ class IDAEngine(eqx.Module):
                 "consistent_ic=False and ic_mode='assume_consistent' are "
                 "not supported for it. Enable consistent initialization."
             )
-        # The projection factors this problem exactly as the corrector does,
-        # so it is analyzed with the lowered problem's placement and the
-        # accepted-root sensitivity precision this solve declared for each
-        # derivative direction — never the backend's defaults.
-        ic_layout, ic_precision = initialization_policy(problem, self.precision, mode="forward")
-        _, ic_reverse_precision = initialization_policy(problem, self.precision, mode="reverse")
+        policies = initialization_policies(problem, self.precision)
+        ic_layout, ic_precision, _ = policies
         if self.ic_mode in ("ya_ydp_euler", "y_fixed_ydot"):
             gate_tol = ic_gate_tolerance(cfg.atol, self.ic_tol)
             mode = (
@@ -659,35 +638,9 @@ class IDAEngine(eqx.Module):
                 converged=converged,
             )
         else:
-            ic = problem.consistent_initial_state(
-                t0,
-                pack_state(u0, lam0),
-                theta,
-                control,
-                ydot0=jnp.concatenate([ydot0, jnp.zeros((n_lam,), dtype=dtype)]),
-                tol=ic_gate_tolerance(self.atol, self.ic_tol),
-                rtol=ic_gate_rtol(self.rtol, self.ic_rtol, self.ic_tol),
-                backend=self.backend,
-                layout=ic_layout,
-                precision=ic_precision,
-                reverse_precision=ic_reverse_precision,
-            )
-        ic_y, ic_ydot = consume_consistent_init(ic)
-        u_c = jnp.asarray(ic_y[:n_u], dtype=dtype)
-        lam_c = jnp.asarray(ic_y[n_u:], dtype=dtype)
-        alg_norm = jnp.asarray(ic.residual_norm, dtype=dtype)
-
-        y_aug0 = pack_state(u_c, lam_c)
-        # The consistent initialization computes derivatives for every
-        # differential row, including differential globals in the bordered
-        # partition; algebraic rows arrive as zeros. Consume it whole.
-        ydot_aug0 = jnp.asarray(ic_ydot, dtype=dtype)
-
-        # A per-row absolute tolerance arrives as a vector on the driver
-        # configuration; it rides the carry so accepted-step weight refreshes
-        # keep consuming it.
-        atol_rows = cfg.atol if getattr(cfg.atol, "ndim", 0) == 1 else None
-        ewt0 = error_weight(y_aug0, self.rtol, self.atol if atol_rows is None else atol_rows)
+            ic = project_start(self, problem, t0, u0, lam0, ydot0, theta, control, policies)
+        start = consistent_start(self, cfg, ic, n_u, dtype)
+        u_c, lam_c, y_aug0, ydot_aug0, alg_norm, atol_rows, ewt0 = start
 
         hmax = float(cfg.hmax)
         hmax_inv = jnp.asarray(1.0 / hmax if hmax > 0.0 else 0.0, dtype=dtype)
@@ -1227,7 +1180,7 @@ class IDAEngine(eqx.Module):
         result_fail = jnp.where(predict_again, _CODE_SUCCESS, kflag_to_result_code(kflag))
 
         # --- select the branch ---
-        new_state = _where_state(accept, new_state_acc, st_fail)
+        new_state = where_state(accept, new_state_acc, st_fail)
         if adaptive:
             # Attribute this attempt's promotion cause and advance the policy.
             none_cause = jnp.asarray(-1, jnp.int32)
@@ -1527,7 +1480,7 @@ def _build_ida_engine(
         ic_mode=str(ic_mode),
         loop_form=profile.nonlinear_mode,
         jacobian_policy=profile.jacobian_policy,
-        capabilities=_capabilities(),
+        capabilities=ENGINE_CAPABILITIES["ida"],
         controller_mode=profile.controller_mode,
         controller_law=profile.controller_law,
         newton_tol_factor=float(newton_tol_factor),
