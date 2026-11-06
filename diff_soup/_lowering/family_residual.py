@@ -33,6 +33,7 @@ This module lives under ``diff_soup/_lowering`` and imports both
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Mapping
 
 import jax
@@ -543,14 +544,11 @@ class _FamilyResidualBlock:
         """
         if not self._fam.member_equations:
             return
-        u_row, m_row, member_globals, gather_row = self._synthetic_member_inputs()
-        view = self._build_member_view(u_row, gather_row, member_globals)
-        m, ctx = _MemberView(m_row), _FamilyCtx(self._tag_ops)
         radius = int(self._fam.stencil_radius or 1)
         for eq in self._fam.member_equations:
             with recorded_stencil_reach() as calls:
                 try:
-                    jax.eval_shape(lambda fn=eq.rhs_fn: fn(view, ctx, m, jnp.asarray(0.0)))
+                    jax.eval_shape(functools.partial(self._evaluate_synthetic_member, eq.rhs_fn))
                 except Exception:  # noqa: BLE001 - reported where the solve evaluates it.
                     pass
             wide = [call for call in calls if call[0] > radius]
@@ -577,13 +575,20 @@ class _FamilyResidualBlock:
         """
         if not self._fam.member_equations:
             return
+        for eq, cell in self._member_form_cells():
+            capture_forms((cell,), functools.partial(self._evaluate_synthetic_member, eq.rhs_fn))
+        cells = [cell for _eq, cell in self._member_form_cells() if cell is not None]
+        if any(cell.get("captured") for cell in cells):
+            self._probe_member_form_state_deps(*self._synthetic_member_inputs())
+
+    def _evaluate_synthetic_member(self, rhs_fn):
+        """Evaluate one member equation at the synthetic member inputs.
+
+        The inputs are built inside the call, so a trace of it compiles nothing.
+        """
         u_row, m_row, member_globals, gather_row = self._synthetic_member_inputs()
         view = self._build_member_view(u_row, gather_row, member_globals)
-        m = _MemberView(m_row)
-        ctx = _FamilyCtx(self._tag_ops)
-        for eq, cell in self._member_form_cells():
-            capture_forms((cell,), lambda rhs_fn=eq.rhs_fn: rhs_fn(view, ctx, m, jnp.asarray(0.0)))
-        self._probe_member_form_state_deps(u_row, m_row, member_globals, gather_row)
+        return rhs_fn(view, _FamilyCtx(self._tag_ops), _MemberView(m_row), jnp.asarray(0.0))
 
     def _probe_member_form_state_deps(self, u_row, m_row, member_globals, gather_row):
         """Which member fields each captured form's coefficients read.
