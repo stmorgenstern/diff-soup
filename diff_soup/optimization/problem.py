@@ -14,7 +14,7 @@ class AbstractOptimizationProblem(eqx.Module):
     `InferenceProblem`, `ControlProblem` and `DesignProblem` are its subclasses. Each declares
     its decision variables in its own terms and lowers them, with its objective, constraints
     and bounds, to an [OptimizationProblem][diff_soup.optimization.OptimizationProblem] of
-    closures over one flat vector and `args`.
+    closures over one flat vector and `args`. `optsolve` takes any of them.
 
     Attributes:
         constraints: The [Constraints][diff_soup.optimization.Constraints] on the decision variables, or `None`.

@@ -1,4 +1,4 @@
-"""Abstract base classes for ``diff_soup.optimization.inference``.
+"""Abstract base classes for ``diff_soup.optimization``.
 
 This module defines the interfaces shared by the optimization solvers, the
 problems they solve, and the function-approximation bases:
@@ -6,7 +6,9 @@ problems they solve, and the function-approximation bases:
 - [OptimizationProblem][diff_soup.optimization._abc.OptimizationProblem]: the
   numerical problem a solver reads, a pytree whose ``structure`` names what
   it provides (a value and gradient, a Hessian, Gauss-Newton statistics, a
-  residual and Jacobian, constraints, the lanes of a lowered study).
+  residual and Jacobian, constraints with their Jacobians and Lagrangian
+  Hessians, the lanes of a lowered study). Every closure takes ``(x, args)``,
+  with ``args`` a leaf of the problem.
 - [LeastSquaresProblem][diff_soup.optimization._abc.LeastSquaresProblem]: an
   optimization problem whose objective is half the squared norm of a
   residual; ``LeastSquaresProblem.from_residual`` builds one from a plain
@@ -21,6 +23,7 @@ the package without creating import cycles.
 
 from __future__ import annotations
 
+import dataclasses
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
@@ -30,21 +33,27 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
+from diff_soup.optimization._binding import Bound, ignoring_args
 
 if TYPE_CHECKING:
     from diff_soup.optimization.inference.fitting.result import OptResult
 
 
 #: The structure an [OptimizationProblem][diff_soup.optimization._abc.OptimizationProblem]
-#: can provide, each key a set of methods it then answers:
+#: can provide, each key a set of closures it then holds, every one taking ``args`` last:
 #:
-#: - ``"value_gradient"``: ``value(x)`` and ``value_and_gradient(x)``.
-#: - ``"hessian"``: ``value_gradient_hessian(x)`` and ``hessian_vector(x, v)``.
-#: - ``"gauss_newton"``: ``gauss_newton(x) -> (cost, gradient, matrix, failed)``.
-#: - ``"residual_jacobian"``: ``residual(x)`` and ``residual_and_jacobian(x)``
+#: - ``"value_gradient"``: ``value(x, args)`` and ``value_and_gradient(x, args)``.
+#: - ``"hessian"``: ``value_gradient_hessian(x, args)`` and ``hessian_vector(x, v, args)``.
+#: - ``"gauss_newton"``: ``gauss_newton(x, args) -> (cost, gradient, matrix, failed)``.
+#: - ``"residual_jacobian"``: ``residual(x, args)`` and ``residual_and_jacobian(x, args)``
 #:   (a [LeastSquaresProblem][diff_soup.optimization._abc.LeastSquaresProblem]).
-#: - ``"constraints"``: ``constraints(x)`` returns at least one equality or
-#:   inequality row.
+#: - ``"constraints"``: ``constraints(x, args) -> (equality, inequality)`` returns at least
+#:   one row; an equality row holds at 0, an inequality row at or below 0.
+#: - ``"constraint_jacobian"``: ``constraints_and_jacobians(x, args) -> (eq, ineq, J_eq,
+#:   J_ineq)``, the dense Jacobians.
+#: - ``"lagrangian_hessian"``: ``lagrangian_hessian(x, lam_eq, lam_ineq, args)`` and
+#:   ``lagrangian_hessian_vector(x, lam_eq, lam_ineq, v, args)``, the exact second
+#:   derivatives of ``f + lam_eq . c_E + lam_ineq . c_I``.
 #: - ``"batched_lanes"``: the objective is evaluated by the lanes of a lowered
 #:   study; ``problem.lanes`` is that study and ``problem.joint_view()`` its
 #:   joint problem with the level structure.
@@ -55,6 +64,8 @@ STRUCTURE_KEYS = frozenset(
         "gauss_newton",
         "residual_jacobian",
         "constraints",
+        "constraint_jacobian",
+        "lagrangian_hessian",
         "batched_lanes",
     }
 )
@@ -100,15 +111,28 @@ class OptimizationProblem(eqx.Module):
     `OptSolver.solve`. `structure` names the functions it provides, and asking for any
     other raises `ConfigurationError`.
 
+    Every closure takes `args` last: `value(x, args)`, `constraints(x, args)`. The
+    properties return them bound to the problem's own `args`, so `problem.value(x)` works,
+    and a solver that compiles its loop takes the raw closure from `closure(name)` and
+    passes `args` itself. A batch of problems that differ only in `args` compiles once.
+
     Attributes:
         x0: The starting point, a 1-D array.
         structure: The names of the functions this problem provides, such as `"value_gradient"`, `"hessian"` or `"gauss_newton"`.
         bounds: The `(lower, upper)` arrays aligned with `x0`, or `None` when unbounded.
+        args: The pytree every closure takes last: limits, initial states, outer parameters. `None` for a problem whose closures read nothing else.
+        n_equality: The number of equality rows `constraints` returns.
+        n_inequality: The number of inequality rows `constraints` returns.
+        constraint_scales: `(equality_scales, inequality_scales)`, one positive scale per row, or `None` for the solver's own scaling.
     """
 
     x0: Any
     structure: frozenset = eqx.field(static=True)
     bounds: Any = None
+    args: Any = None
+    n_equality: int = eqx.field(static=True, default=0)
+    n_inequality: int = eqx.field(static=True, default=0)
+    constraint_scales: Any = None
     # The fitted model's reconstruction and the regularization can hold arrays; they are
     # held by identity, so the problem's static data stays hashable and array-free.
     _unflatten: Any = eqx.field(static=True, default=None, converter=_hold)
@@ -126,14 +150,38 @@ class OptimizationProblem(eqx.Module):
     _gauss_newton: Any = eqx.field(static=True, default=None)
     _is_valid: Any = eqx.field(static=True, default=None)
     _constraints: Any = eqx.field(static=True, default=None)
+    _constraints_and_jacobians: Any = eqx.field(static=True, default=None)
+    _lagrangian_hessian: Any = eqx.field(static=True, default=None)
+    _lagrangian_hessian_vector: Any = eqx.field(static=True, default=None)
     _joint_view: Any = eqx.field(static=True, default=None)
 
     def __post_init__(self):
-        """Derive a value from a value and gradient, a Hessian-vector product from a Hessian."""
+        """Derive what follows from what is given; a problem without rows gets empty ones.
+
+        A value from a value and gradient, a Hessian-vector product from a Hessian, the
+        constraint rows from the rows and Jacobians, and a Lagrangian Hessian-vector product
+        from the Lagrangian Hessian.
+        """
         if self._value is None and self._value_and_gradient is not None:
             self._value = _first_of(self._value_and_gradient)
         if self._hessian_vector is None and self._value_gradient_hessian is not None:
             self._hessian_vector = _hessian_times(self._value_gradient_hessian)
+        if self._constraints is None and self._constraints_and_jacobians is not None:
+            self._constraints = _rows_of(self._constraints_and_jacobians)
+        if self.n_equality == 0 and self.n_inequality == 0:
+            # No rows: the constraint closures are empty, and the Lagrangian is the objective.
+            if self._constraints is None:
+                self._constraints = _no_constraints
+            if self._constraints_and_jacobians is None:
+                self._constraints_and_jacobians = _no_constraint_jacobians
+            if self._lagrangian_hessian is None and self._value_gradient_hessian is not None:
+                self._lagrangian_hessian = _objective_hessian(self._value_gradient_hessian)
+            implied = {"constraint_jacobian"}
+            if self._lagrangian_hessian is not None:
+                implied.add("lagrangian_hessian")
+            self.structure = frozenset(self.structure) | implied
+        if self._lagrangian_hessian_vector is None and self._lagrangian_hessian is not None:
+            self._lagrangian_hessian_vector = _lagrangian_times(self._lagrangian_hessian)
 
     def __check_init__(self):
         """Refuse a structure key outside ``STRUCTURE_KEYS``, or a key without its closures."""
@@ -151,35 +199,122 @@ class OptimizationProblem(eqx.Module):
                         f"OptimizationProblem structure names {key!r}, which needs the "
                         f"closures {absent}; pass them or leave {key!r} out of structure."
                     )
+        rows = (self.n_equality, self.n_inequality)
+        if any(not isinstance(count, int) or count < 0 for count in rows):
+            raise ConfigurationError(
+                f"OptimizationProblem n_equality and n_inequality must be counts; got {rows}."
+            )
+        if self._constraints is None:
+            raise ConfigurationError(
+                f"OptimizationProblem declares {rows[0]} equality and {rows[1]} inequality "
+                "rows and no closure returning them; pass constraints or "
+                "constraints_and_jacobians."
+            )
 
-    def _closure(self, key: str, name: str, method: str) -> Callable:
-        """The stored closure ``name``, or the error naming ``method`` when ``key`` is absent."""
-        if key not in self.structure:
-            raise _missing(self, key, method)
-        return getattr(self, name)
+    def closure(self, name: str) -> Callable:
+        """The raw closure `name`, which takes `args` last, for a solver that passes `args` itself.
 
-    # The evaluation methods are properties returning the stored closures, so that
-    # ``jax.jit(problem.value_and_gradient)`` compiles a hashable function.
+        Args:
+            name: A property of this problem, such as `"value_and_gradient"` or `"constraints_and_jacobians"`.
+
+        Returns:
+            The stored closure, unbound.
+
+        Raises:
+            ConfigurationError: If the problem's structure does not provide `name`.
+        """
+        if name not in _KEY_OF:
+            raise ConfigurationError(
+                f"OptimizationProblem has no closure {name!r}; the closures are {sorted(_KEY_OF)}."
+            )
+        key = _KEY_OF[name]
+        stored = getattr(self, "_" + name)
+        if name == "is_valid":
+            return _valid_everywhere if stored is None else stored
+        if stored is None or (key not in self.structure and name not in _ALWAYS):
+            raise _missing(self, key, name)
+        return stored
+
+    def with_args(self, args: Any) -> OptimizationProblem:
+        """This problem with `args` replaced, as a lane of a batch holds it."""
+        return eqx.tree_at(lambda problem: problem.args, self, args, is_leaf=_is_none)
+
+    def with_constraints(
+        self, constraints: Any, *, unflatten: Callable | None = None
+    ) -> OptimizationProblem:
+        """This problem under `constraints`, lowered to closures with AD Jacobians and Lagrangian Hessians.
+
+        Args:
+            constraints: The [Constraints][diff_soup.optimization.Constraints], or `None` for this problem unchanged.
+            unflatten: The map from the flat vector to the view the constraint functions take; the flat vector itself when `None`.
+
+        Returns:
+            A problem whose structure adds `"constraints"`, `"constraint_jacobian"` and `"lagrangian_hessian"`.
+        """
+        if constraints is None:
+            return self
+        if self.n_equality or self.n_inequality:
+            raise ConfigurationError(
+                "OptimizationProblem.with_constraints: this problem has constraints already."
+            )
+        if "value_gradient" not in self.structure:
+            raise _missing(self, "value_gradient", "with_constraints")
+        # With the objective's own exact Hessian, only the constraint rows are differentiated
+        # twice; otherwise the whole Lagrangian is, forward over reverse.
+        own = "hessian" in self.structure
+        view = _identity if unflatten is None else unflatten
+        lowered = constraints.lower(None if own else self._value, view)
+        hessian, hessian_vector = lowered.lagrangian_hessian, lowered.lagrangian_hessian_vector
+        if own:
+            hessian = _plus_objective_hessian(hessian, self._value_gradient_hessian)
+            hessian_vector = _plus_objective_hessian_vector(hessian_vector, self._hessian_vector)
+        keys = {"constraint_jacobian", "lagrangian_hessian"}
+        if lowered.n_equality or lowered.n_inequality:
+            keys.add("constraints")
+        return dataclasses.replace(
+            self,
+            structure=frozenset(self.structure) | keys,
+            n_equality=lowered.n_equality,
+            n_inequality=lowered.n_inequality,
+            constraint_scales=constraints.scales,
+            _constraints=lowered.constraints,
+            _constraints_and_jacobians=lowered.constraints_and_jacobians,
+            _lagrangian_hessian=hessian,
+            _lagrangian_hessian_vector=hessian_vector,
+        )
+
+    def _bound(self, name: str) -> Callable:
+        """The closure `name` bound to this problem's `args`."""
+        return Bound(self.closure(name), self.args)
+
+    @property
+    def n(self) -> int:
+        """The number of decision variables, static."""
+        return int(jnp.shape(self.x0)[-1])
+
+    # The evaluation methods are properties returning the stored closures bound to
+    # ``args``; two reads of one property are equal, so ``jax.jit(problem.value)`` read
+    # twice traces once.
 
     @property
     def value(self) -> Callable:
         """The objective, a function `value(x)` returning a scalar."""
-        return self._closure("value_gradient", "_value", "value")
+        return self._bound("value")
 
     @property
     def value_and_gradient(self) -> Callable:
         """A function `value_and_gradient(x)` returning the objective and its gradient."""
-        return self._closure("value_gradient", "_value_and_gradient", "value_and_gradient")
+        return self._bound("value_and_gradient")
 
     @property
     def value_gradient_hessian(self) -> Callable:
         """``x -> (value, gradient, Hessian)`` of the objective (``"hessian"``)."""
-        return self._closure("hessian", "_value_gradient_hessian", "value_gradient_hessian")
+        return self._bound("value_gradient_hessian")
 
     @property
     def hessian_vector(self) -> Callable:
         """``(x, v) -> `` the Hessian of the objective at ``x`` times ``v`` (``"hessian"``)."""
-        return self._closure("hessian", "_hessian_vector", "hessian_vector")
+        return self._bound("hessian_vector")
 
     @property
     def gauss_newton(self) -> Callable:
@@ -187,7 +322,7 @@ class OptimizationProblem(eqx.Module):
 
         Available when `structure` holds `"gauss_newton"`.
         """
-        return self._closure("gauss_newton", "_gauss_newton", "gauss_newton")
+        return self._bound("gauss_newton")
 
     @property
     def is_valid(self) -> Callable:
@@ -196,7 +331,7 @@ class OptimizationProblem(eqx.Module):
         A scalar bool array; every point is valid for a problem without a
         trial predicate.
         """
-        return _always_valid if self._is_valid is None else self._is_valid
+        return _always_valid if self._is_valid is None else Bound(self._is_valid, self.args)
 
     @property
     def constraints(self) -> Callable:
@@ -205,11 +340,31 @@ class OptimizationProblem(eqx.Module):
         An equality row is satisfied at 0, an inequality row at or below 0.
         Both are empty for a problem without ``"constraints"``.
         """
-        return _no_constraints if self._constraints is None else self._constraints
+        return self._bound("constraints")
+
+    @property
+    def constraints_and_jacobians(self) -> Callable:
+        """``x -> (equality, inequality, J_eq, J_ineq)``, the rows and their dense Jacobians.
+
+        Empty rows and ``(0, n)`` Jacobians for a problem without constraints.
+        """
+        return self._bound("constraints_and_jacobians")
+
+    @property
+    def lagrangian_hessian(self) -> Callable:
+        """``(x, lam_eq, lam_ineq) -> `` the Hessian of ``f + lam_eq . c_E + lam_ineq . c_I`` (``"lagrangian_hessian"``)."""
+        return self._bound("lagrangian_hessian")
+
+    @property
+    def lagrangian_hessian_vector(self) -> Callable:
+        """``(x, lam_eq, lam_ineq, v) -> `` the Lagrangian Hessian times ``v`` (``"lagrangian_hessian"``)."""
+        return self._bound("lagrangian_hessian_vector")
 
     def joint_view(self) -> Any:
         """The joint problem of the lowered study, with its level structure (``"batched_lanes"``)."""
-        return self._closure("batched_lanes", "_joint_view", "joint_view")()
+        if "batched_lanes" not in self.structure:
+            raise _missing(self, "batched_lanes", "joint_view")
+        return self._joint_view()
 
     @property
     def unflatten(self) -> Any:
@@ -287,11 +442,11 @@ class OptimizationProblem(eqx.Module):
             _regularization=regularization,
             ad="reverse",
             hessian_composition="forward-over-reverse" if hessian else None,
-            _value=jax.jit(value),
-            _value_and_gradient=jax.jit(jax.value_and_grad(value)),
-            _value_gradient_hessian=value_gradient_hessian,
-            _hessian_vector=hessian_vector,
-            _is_valid=None if is_valid is None else jax.jit(is_valid),
+            _value=ignoring_args(jax.jit(value)),
+            _value_and_gradient=ignoring_args(jax.jit(jax.value_and_grad(value))),
+            _value_gradient_hessian=ignoring_args(value_gradient_hessian),
+            _hessian_vector=ignoring_args(hessian_vector),
+            _is_valid=None if is_valid is None else ignoring_args(jax.jit(is_valid)),
         )
 
 
@@ -300,8 +455,69 @@ _CLOSURES = {
     "value_gradient": ("_value", "_value_and_gradient"),
     "hessian": ("_value_gradient_hessian", "_hessian_vector"),
     "gauss_newton": ("_gauss_newton",),
+    "constraints": ("_constraints",),
+    "constraint_jacobian": ("_constraints_and_jacobians",),
+    "lagrangian_hessian": ("_lagrangian_hessian", "_lagrangian_hessian_vector"),
     "batched_lanes": ("_joint_view",),
 }
+
+#: The structure key each closure belongs to.
+_KEY_OF = {
+    "value": "value_gradient",
+    "value_and_gradient": "value_gradient",
+    "value_gradient_hessian": "hessian",
+    "hessian_vector": "hessian",
+    "gauss_newton": "gauss_newton",
+    "residual": "residual_jacobian",
+    "residual_and_jacobian": "residual_jacobian",
+    "is_valid": None,
+    "constraints": "constraints",
+    "constraints_and_jacobians": "constraint_jacobian",
+    "lagrangian_hessian": "lagrangian_hessian",
+    "lagrangian_hessian_vector": "lagrangian_hessian",
+}
+
+#: The closures every problem holds, with empty rows when it has no constraints.
+_ALWAYS = frozenset({"constraints", "constraints_and_jacobians"})
+
+
+def _identity(x: Any) -> Any:
+    """The flat vector as the view constraint functions take, for a problem without one."""
+    return x
+
+
+def _objective_hessian(value_gradient_hessian: Callable) -> Callable:
+    """The Lagrangian Hessian of a problem without constraints: the objective's."""
+
+    def lagrangian_hessian(x, lam_eq, lam_ineq, args):
+        return value_gradient_hessian(x, args)[2]
+
+    return lagrangian_hessian
+
+
+def _plus_objective_hessian(
+    constraint_part: Callable, value_gradient_hessian: Callable
+) -> Callable:
+    """The Lagrangian Hessian as the objective's own Hessian plus the constraint terms'."""
+
+    def lagrangian_hessian(x, lam_eq, lam_ineq, args):
+        return value_gradient_hessian(x, args)[2] + constraint_part(x, lam_eq, lam_ineq, args)
+
+    return lagrangian_hessian
+
+
+def _plus_objective_hessian_vector(constraint_part: Callable, hessian_vector: Callable) -> Callable:
+    """The Lagrangian Hessian-vector product as the objective's plus the constraint terms'."""
+
+    def lagrangian_hessian_vector(x, lam_eq, lam_ineq, v, args):
+        return hessian_vector(x, v, args) + constraint_part(x, lam_eq, lam_ineq, v, args)
+
+    return lagrangian_hessian_vector
+
+
+def _is_none(leaf: Any) -> bool:
+    """Whether a pytree node is ``None``, which ``eqx.tree_at`` must see as a leaf to replace."""
+    return leaf is None
 
 
 def _always_valid(x: Any) -> Any:
@@ -309,17 +525,39 @@ def _always_valid(x: Any) -> Any:
     return jnp.asarray(True)
 
 
-def _no_constraints(x: Any) -> tuple:
-    """The constraint function of a problem without constraints: two empty vectors."""
+def _valid_everywhere(x: Any, args: Any) -> Any:
+    """The raw validity closure of a problem without a predicate: every point is valid."""
+    return jnp.asarray(True)
+
+
+def _no_constraints(x: Any, args: Any) -> tuple:
+    """The constraint rows of a problem without constraints: two empty vectors."""
     empty = jnp.zeros((0,), dtype=jnp.result_type(x))
     return empty, empty
+
+
+def _no_constraint_jacobians(x: Any, args: Any) -> tuple:
+    """The rows and Jacobians of a problem without constraints: empty, with ``n`` columns."""
+    empty = jnp.zeros((0,), dtype=jnp.result_type(x))
+    jacobian = jnp.zeros((0, jnp.shape(x)[-1]), dtype=jnp.result_type(x))
+    return empty, empty, jacobian, jacobian
+
+
+def _rows_of(constraints_and_jacobians: Callable) -> Callable:
+    """The constraint rows derived from a rows-and-Jacobians closure."""
+
+    def constraints(x, args):
+        equality, inequality, _, _ = constraints_and_jacobians(x, args)
+        return equality, inequality
+
+    return constraints
 
 
 def _first_of(value_and_gradient: Callable) -> Callable:
     """The value function derived from a value-and-gradient closure."""
 
-    def value(x):
-        return value_and_gradient(x)[0]
+    def value(x, args):
+        return value_and_gradient(x, args)[0]
 
     return value
 
@@ -327,10 +565,19 @@ def _first_of(value_and_gradient: Callable) -> Callable:
 def _hessian_times(value_gradient_hessian: Callable) -> Callable:
     """The Hessian-vector product derived from a value-gradient-Hessian closure."""
 
-    def hessian_vector(x, v):
-        return value_gradient_hessian(x)[2] @ v
+    def hessian_vector(x, v, args):
+        return value_gradient_hessian(x, args)[2] @ v
 
     return hessian_vector
+
+
+def _lagrangian_times(lagrangian_hessian: Callable) -> Callable:
+    """The Lagrangian Hessian-vector product derived from the Lagrangian Hessian."""
+
+    def lagrangian_hessian_vector(x, lam_eq, lam_ineq, v, args):
+        return lagrangian_hessian(x, lam_eq, lam_ineq, args) @ v
+
+    return lagrangian_hessian_vector
 
 
 def _as_vector(x0: Any) -> Any:
@@ -364,8 +611,8 @@ def _as_bounds(bounds: Any, x0: Any) -> Any:
 def _half_squared(residual: Callable) -> Callable:
     """The least-squares value ``0.5 * sum(r**2)`` derived from a residual closure."""
 
-    def value(x):
-        r = residual(x)
+    def value(x, args):
+        r = residual(x, args)
         return 0.5 * jnp.sum(r * r)
 
     return value
@@ -374,8 +621,8 @@ def _half_squared(residual: Callable) -> Callable:
 def _gradient_of(residual_and_jacobian: Callable) -> Callable:
     """The value and gradient ``J^T r`` derived from a residual-and-Jacobian closure."""
 
-    def value_and_gradient(x):
-        r, jacobian = residual_and_jacobian(x)
+    def value_and_gradient(x, args):
+        r, jacobian = residual_and_jacobian(x, args)
         return 0.5 * jnp.sum(r * r), jacobian.T @ r
 
     return value_and_gradient
@@ -384,8 +631,8 @@ def _gradient_of(residual_and_jacobian: Callable) -> Callable:
 def _gauss_newton_of(residual_and_jacobian: Callable) -> Callable:
     """The Gauss-Newton statistics ``(value, J^T r, J^T J, 0)`` derived from a residual-and-Jacobian closure."""
 
-    def gauss_newton(x):
-        r, jacobian = residual_and_jacobian(x)
+    def gauss_newton(x, args):
+        r, jacobian = residual_and_jacobian(x, args)
         return 0.5 * jnp.sum(r * r), jacobian.T @ r, jacobian.T @ jacobian, 0
 
     return gauss_newton
@@ -401,7 +648,7 @@ class LeastSquaresProblem(OptimizationProblem):
 
     _residual: Any = eqx.field(static=True, default=None)
     _residual_and_jacobian: Any = eqx.field(static=True, default=None)
-    segment_fns: tuple = eqx.field(static=True, default=())
+    _segment_fns: tuple = eqx.field(static=True, default=())
     n_residuals: Any = eqx.field(static=True, default=None)
 
     def __post_init__(self):
@@ -414,8 +661,8 @@ class LeastSquaresProblem(OptimizationProblem):
                 self._gauss_newton = _gauss_newton_of(rj)
         if self._value is None and self._residual is not None:
             self._value = _half_squared(self._residual)
-        if not self.segment_fns and self._residual is not None:
-            self.segment_fns = (self._residual,)
+        if not self._segment_fns and self._residual is not None:
+            self._segment_fns = (self._residual,)
         super().__post_init__()
 
     def __check_init__(self):
@@ -434,12 +681,17 @@ class LeastSquaresProblem(OptimizationProblem):
     @property
     def residual(self) -> Callable:
         """The residual, a function `residual(x)` returning a 1-D array."""
-        return self._residual
+        return self._bound("residual")
 
     @property
     def residual_and_jacobian(self) -> Callable:
         """A function `residual_and_jacobian(x)` returning the residual and its Jacobian."""
-        return self._residual_and_jacobian
+        return self._bound("residual_and_jacobian")
+
+    @property
+    def segment_fns(self) -> tuple:
+        """The residual functions of `x` whose outputs concatenate to `residual(x)`."""
+        return tuple(Bound(fn, self.args) for fn in self._segment_fns)
 
     @classmethod
     def from_residual(
@@ -490,9 +742,16 @@ class LeastSquaresProblem(OptimizationProblem):
         else:
             residual_and_jacobian = jax.jit(lambda x: (residual(x), jacobian(x)))
 
-        objective = _half_squared(residual)
-        value_and_gradient = jax.jit(_gradient_of(residual_and_jacobian))
-        gauss_newton = jax.jit(_gauss_newton_of(residual_and_jacobian))
+        def objective(x):
+            r = residual(x)
+            return 0.5 * jnp.sum(r * r)
+
+        value_and_gradient = jax.jit(
+            lambda x: _gradient_of(ignoring_args(residual_and_jacobian))(x, None)
+        )
+        gauss_newton = jax.jit(
+            lambda x: _gauss_newton_of(ignoring_args(residual_and_jacobian))(x, None)
+        )
 
         structure = {"value_gradient", "residual_jacobian", "gauss_newton"}
         value_gradient_hessian = hessian_vector = None
@@ -517,15 +776,15 @@ class LeastSquaresProblem(OptimizationProblem):
             _regularization=regularization,
             ad="forward",
             hessian_composition="forward-over-reverse" if hessian else None,
-            _value=jax.jit(objective),
-            _value_and_gradient=value_and_gradient,
-            _value_gradient_hessian=value_gradient_hessian,
-            _hessian_vector=hessian_vector,
-            _gauss_newton=gauss_newton,
-            _is_valid=None if is_valid is None else jax.jit(is_valid),
-            _residual=residual_fn,
-            _residual_and_jacobian=residual_and_jacobian,
-            segment_fns=tuple(segment_fns) or (residual_fn,),
+            _value=ignoring_args(jax.jit(objective)),
+            _value_and_gradient=ignoring_args(value_and_gradient),
+            _value_gradient_hessian=ignoring_args(value_gradient_hessian),
+            _hessian_vector=ignoring_args(hessian_vector),
+            _gauss_newton=ignoring_args(gauss_newton),
+            _is_valid=None if is_valid is None else ignoring_args(jax.jit(is_valid)),
+            _residual=ignoring_args(residual_fn),
+            _residual_and_jacobian=ignoring_args(residual_and_jacobian),
+            _segment_fns=tuple(map(ignoring_args, segment_fns)) or (ignoring_args(residual_fn),),
         )
 
 
