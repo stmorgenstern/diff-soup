@@ -29,6 +29,7 @@ from diff_soup.optimization.inference.statistics.measurement import (
 )
 from diff_soup.optimization.inference.statistics.priors import compile_prior
 from diff_soup.optimization.inference.statistics.study import Study
+from diff_soup.optimization.problem import AbstractOptimizationProblem
 from diff_soup.optimization.solvers.tangent import value_and_jacfwd
 from diff_soup.problem._ir.lower import prior_digest
 from diff_soup.utils.ad_guards import reverse_linearization_observed
@@ -246,7 +247,7 @@ class _StructuredPriorRegularizer:
 
 
 @dataclasses.dataclass(frozen=True, init=False)
-class EstimationProblem:
+class EstimationProblem(AbstractOptimizationProblem):
     """A Study paired with MLE or physical-space MAP, consumable by ``optsolve``.
 
     Exact likelihood residuals and declared priors share the same optimization
@@ -272,8 +273,6 @@ class EstimationProblem:
     regularization: NoReg
     trial_predicate: Any
 
-    #: The constraints on the parameters (M7); ``None`` for an unconstrained fit.
-    constraints = None
     #: What the constraint functions take as ``args``.
     _args = None
 

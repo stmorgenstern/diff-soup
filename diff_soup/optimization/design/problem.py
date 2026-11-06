@@ -10,7 +10,7 @@ import equinox as eqx
 from diff_soup.optimization.problem import AbstractOptimizationProblem
 
 
-class DesignProblem(AbstractOptimizationProblem):
+class DesignProblem(AbstractOptimizationProblem, eqx.Module):
     """Choose a design that optimizes a criterion of the Fisher information, under constraints.
 
     A stub: the existing design code stays in `diff_soup.optimization.inference.design`, and
@@ -21,6 +21,8 @@ class DesignProblem(AbstractOptimizationProblem):
         criterion: `criterion(design, args) -> scalar` built from `inference.design`'s criteria, to minimize.
     """
 
+    constraints: Any = None
+    bounds: Any = None
     design: Any = None
     criterion: Callable | None = eqx.field(static=True, default=None)
 

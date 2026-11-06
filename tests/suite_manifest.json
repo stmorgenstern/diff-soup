@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 45,
-    "test_functions": 419,
-    "collected_tests": 633,
-    "source_lines": 15182
+    "test_functions": 420,
+    "collected_tests": 634,
+    "source_lines": 15204
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 19,
-      "functions": 175,
-      "collected": 268,
-      "lines": 5889
+      "functions": 176,
+      "collected": 269,
+      "lines": 5911
     },
     "performance_contracts": {
       "files": 2,
@@ -313,7 +313,7 @@
     },
     {
       "file": "tests/contracts/test_architecture.py",
-      "feature": "Architecture: layer direction, no static array annotations, bounded content caches, one adjoint identity, the engine never imports the statistics layer"
+      "feature": "Architecture: layer direction, no static array annotations, bounded content caches, one adjoint identity, the engine never imports the statistics layer, one array-free base of every problem with the module problems staying pytrees"
     },
     {
       "file": "tests/contracts/test_inference_problem.py",
