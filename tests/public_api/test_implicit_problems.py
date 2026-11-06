@@ -220,6 +220,44 @@ def test_a_start_at_the_rounding_floor_of_large_values_passes_the_relative_gate(
     assert bool(accepted.ok) and refused.result == ds.RESULT.INCONSISTENT_IC
 
 
+def _cubic():
+    """``x' = -x`` and ``0 = e^3 + e`` with ``e = z - x``, whose one root is ``z = x``."""
+
+    def rhs(t, y, theta, control):
+        e = y[1] - y[0]
+        return jnp.stack([-y[0], e**3 + e])
+
+    return ds.MassProblem(
+        rhs=rhs,
+        mass=ds.MassOperator.sparse(
+            [0],
+            [0],
+            lambda t, y, theta, control: jnp.ones((1,), y.dtype),
+            n=2,
+            dependencies=_CONSTANT,
+        ),
+        structure=ds.DAEStructure(differential_vars=np.array([True, False])),
+    )
+
+
+#: Requested tolerances (not asserted bounds), the JIDA review's run C.
+_CUT_TOLERANCES = {"tol": 1e-10, "rtol": 1e-3}
+
+
+def test_a_start_the_newton_budget_cuts_off_far_from_the_root_is_refused():
+    """From ``z = x + 100`` seven Newton steps leave the cubic's residual in the hundreds: the
+    relative gate, scaled by the residual's own terms at that iterate rather than by the
+    starting residual, refuses the start, and a budget with room to converge accepts it."""
+    view = ds.solver_view(_cubic())
+    cut, full = (
+        view.consistent_initial_state(
+            0.0, jnp.asarray([1.0, 101.0]), None, **_CUT_TOLERANCES, max_iters=budget
+        )
+        for budget in (7, 30)
+    )
+    assert not bool(cut.converged) and bool(full.converged)
+
+
 def _quadratic():
     """``x0' = -x0`` and the algebraic row ``0 = x1^2 - 4``."""
     return ds.MassProblem(

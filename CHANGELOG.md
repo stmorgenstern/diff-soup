@@ -9,7 +9,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Removed `diff_soup.problem.implicit.get_or_build_solver_view`. Use `ds.solver_view`, which returns the same cached view.
 - Removed `ds.inference.constrained_optsolve` and `ds.inference.InequalityConstraints`. Declare the constraints as `ds.optimization.Constraints` on an `InferenceProblem` and solve it with `ds.optimization.InteriorPoint` or `ds.optimization.AugmentedLagrangian`.
 - JIDA with algebraic rows out of the error test, its stock setting, now takes a second Newton iteration when a step's first correction exceeds weighted norm 1. Previously a stale convergence rate could accept it, leaving an algebraic state far off its constraint and its gradients wrong. Results on DAEs change at the level of the solver tolerance.
-- Consistent initialization now accepts a final residual within `ic_atol + ic_rtol` times the starting residual, plus a componentwise round-off term, after Newton has tried the absolute target. Previously a start at the rounding floor of large states failed with `INCONSISTENT_IC`. `ToleranceSpec(ic_rtol=0.0)` keeps the absolute gate, as does `ic_atol=` without `ic_rtol=`.
+- Consistent initialization now accepts a final residual within `ic_atol + ic_rtol * S`, with `S = ‖|F_y| |y| + |F_ydot| |ydot|‖` the size of the residual's terms at the final iterate, plus the rounding bound of its longest row, after Newton has tried the absolute target. Previously a start at the rounding floor of large states failed with `INCONSISTENT_IC`. `ToleranceSpec(ic_rtol=0.0)` keeps the absolute gate, as does `ic_atol=` without `ic_rtol=`, and so does an engine built with `ic_tol=` and no `ic_rtol=`, which previously took the step's `rtol`.
 
 ### Features
 
@@ -25,7 +25,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Bugfixes
 
-- Fixed consistent initialization of a family problem whose step backend is a `MemberBlock` over the full state, which raised a `ConfigurationError`. Initialization now solves its smaller system with Dense.
+- Fixed consistent initialization of a family problem whose step backend is a `MemberBlock` over the full state, which raised a `ConfigurationError`. Initialization now solves its smaller system on the backend `linear="auto"` chooses for its size.
 - Fixed `SaveAt(output="projected")` rows that came back `NaN` at a tight `atol`. Projected samples now pass the same gate as the solve's own initialization.
 - Fixed JIDA solves that stalled at a tight `atol` after a short step, where Newton's corrections are pure rounding. A correction within twice the rounding floor on a fresh matrix is now accepted as the root.
 - Fixed the derivative of consistent initialization with respect to the start time.
@@ -36,6 +36,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - A vmapped solve no longer keeps extra copies of its saved output, and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
 - JIDA does its whole-array work only on the path an attempt takes, with identical results.
 - Outside `vmap`, the branches of an implicit step (JIDA's history update, the Jacobian refreshes, the retries) compile to one conditional and are traced once. Under `vmap` a branch still runs only when some lane takes it, with one compiled copy of each branch.
+- Consistent initialization's derivative skips the start-time term when the start time is constant, and its relative gate evaluates the residual's scale only where the absolute target was missed, on the algebraic rows alone on the reduced route.
 - Member rows that read every site of their member are recovered by shared pullbacks instead of one color per site: an LFP half cell with 50 volumes of 10 particles needs 8 colors instead of 108.
 
 ### Other
