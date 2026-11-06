@@ -74,7 +74,7 @@ class InferenceProblem(EstimationProblem):
         regularization: A penalty on the parameters added to the objective, such as `Tikhonov`.
         trial_predicate: A function of the parameters returning whether a trial point may be evaluated.
         constraints: [Constraints][diff_soup.optimization.Constraints] whose functions take the fitted values, `values[handle]` as `InferenceProblem.values` reads them, and `args`.
-        args: What the constraint functions take as `args`, such as limits; a batch of fits differs only in it.
+        args: What the constraint functions take as `args`, such as limits: the numeric problem's `args` leaf, which `with_args` replaces without a new lowering.
     """
 
     def __init__(

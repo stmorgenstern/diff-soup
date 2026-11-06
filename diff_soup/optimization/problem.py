@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import abc
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from diff_soup.optimization._abc import OptimizationProblem, OptSolver
+    from diff_soup.optimization.constraints import Constraints
 
 
 class AbstractOptimizationProblem(abc.ABC):
@@ -16,19 +20,18 @@ class AbstractOptimizationProblem(abc.ABC):
 
     It is a plain abstract class, not an `eqx.Module`, because `InferenceProblem` and the
     lowered study are host objects that cannot subclass a Module. `ControlProblem` is a
-    Module through its second base; once `InferenceProblem` is one too,
-    this base can become a Module. It holds no state of its own.
+    Module through its second base. It holds no state of its own.
 
     Attributes:
         constraints: The [Constraints][diff_soup.optimization.Constraints] on the decision variables, or `None`.
         bounds: The `(lower, upper)` bounds in the problem's own parameterization, or `None`.
     """
 
-    constraints: Any = None
+    constraints: Constraints | None = None
     bounds: Any = None
 
     @abc.abstractmethod
-    def numeric_problem(self, optimizer: Any) -> Any:
+    def numeric_problem(self, optimizer: OptSolver) -> OptimizationProblem:
         """Lower to the numeric problem `optimizer` solves.
 
         Args:
