@@ -84,7 +84,7 @@ def _row_names(sources, n: int) -> list:
 def jacobian_nnz(problem) -> int:
     """Return the structural entry count of the solver's iteration matrix.
 
-    Reads the cached sparse topology without constructing a dense matrix.
+    Reads the pattern of the solver's linearization without constructing a dense matrix.
     Dense solver views report their full matrix size, including structural zeros.
 
     Args:
@@ -96,15 +96,16 @@ def jacobian_nnz(problem) -> int:
     from diff_soup.problem.implicit.solver_problem import solver_view
 
     view = solver_view(problem)
-    topology = view.full_topology
-    return int(view.n) ** 2 if topology is None else int(topology.rows.size)
+    linearization = view.plan.linearization
+    return int(view.n) ** 2 if linearization is None else linearization.pattern.nnz
 
 
 def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
     """Summarize the Jacobian sparsity pattern a problem presents to the solvers.
 
-    The color and pullback counts are those the solver's assembly uses. A problem
-    without a sparse pattern reports a dense one.
+    The pattern, color and pullback counts are those of the solver's linearization, so
+    the report builds no coloring of its own. A problem without a sparse pattern
+    reports a dense one.
 
     Args:
         problem: A [`LoweredProblem`][diff_soup.problem.LoweredProblem], [`MassProblem`][diff_soup.problem.MassProblem], or [`ImplicitProblem`][diff_soup.problem.ImplicitProblem].
@@ -119,17 +120,16 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
     solver_contract = coerce_problem(problem)
     view = solver_view(solver_contract)
     owner_sources = (problem, solver_contract, view.source)
-    topo = view.full_topology
-    if topo is None:
+    linearization = view.plan.linearization
+    if linearization is None:
         n = int(view.problem.n)
         degrees = np.full((n,), n, dtype=np.int64)
         rows = None
         nnz = n * n
     else:
-        n = int(topo.n_dofs)
-        rows = np.asarray(topo.rows)
-        degrees = np.bincount(rows, minlength=n).astype(np.int64)
-        nnz = int(rows.shape[0])
+        pattern = linearization.pattern
+        n, rows, nnz = pattern.shape[0], pattern.rows, pattern.nnz
+        degrees = pattern.row_degrees()
 
     names = _row_names(owner_sources, n)
     order = np.argsort(-degrees, kind="stable")[: max(int(top_k), 0)]
