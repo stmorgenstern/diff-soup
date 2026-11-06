@@ -7,7 +7,6 @@ A `ControlProblem` poses optimal control of a model's operational inputs over a 
       members:
         - numeric_problem
         - args
-        - closures
 
 ---
 

@@ -14,26 +14,14 @@ for one release.
 # The inference package loads first: its fitting stack and the host-loop solvers import
 # each other, in the order its own __init__ sets.
 from diff_soup.optimization import inference  # noqa: I001
-from diff_soup.optimization._abc import (
-    STRUCTURE_KEYS,
-    LeastSquaresProblem,
-    OptimizationProblem,
-    OptSolver,
-)
-from diff_soup.optimization.constraints import (
-    CONSTRAINT_JACOBIAN,
-    LAGRANGIAN_HESSIAN,
-    ConstraintClosures,
-    Constraints,
-)
-from diff_soup.optimization.kkt import DenseKKT, KKTSolve
+from diff_soup.optimization._abc import LeastSquaresProblem, OptimizationProblem
+from diff_soup.optimization.constraints import Constraints
 from diff_soup.optimization.lanes import lanes
 from diff_soup.optimization.problem import AbstractOptimizationProblem
 from diff_soup.optimization.solvers import (
     BFGS,
     SQP,
     AugmentedLagrangian,
-    CompiledSolver,
     GradientDescent,
     InteriorPoint,
     LevenbergMarquardt,
@@ -49,24 +37,16 @@ __all__ = [
     "AbstractOptimizationProblem",
     "AugmentedLagrangian",
     "BFGS",
-    "CONSTRAINT_JACOBIAN",
-    "CompiledSolver",
-    "ConstraintClosures",
     "Constraints",
-    "DenseKKT",
     "GradientDescent",
     "InteriorPoint",
-    "KKTSolve",
-    "LAGRANGIAN_HESSIAN",
     "LeastSquaresProblem",
     "LevenbergMarquardt",
     "NewtonTrustRegion",
     "OptResult",
-    "OptSolver",
     "Optax",
     "OptimizationProblem",
     "SQP",
-    "STRUCTURE_KEYS",
     "SolveRecord",
     "TerminationStatus",
     "control",

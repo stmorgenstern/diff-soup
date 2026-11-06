@@ -53,7 +53,7 @@ def lanes(
     the same full batch.
 
     Args:
-        solver: A [CompiledSolver][diff_soup.optimization.CompiledSolver].
+        solver: A [CompiledSolver][diff_soup.optimization.solvers.CompiledSolver].
         problem: The numeric problem every member of the batch solves.
         args_batch: The `args` of each problem, batched along the leading axis.
         x0_batch: The starting point of each problem, `(count, n)`.

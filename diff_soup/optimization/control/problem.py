@@ -153,7 +153,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         """Lower to closures over `u` and `args`; see [AbstractOptimizationProblem.numeric_problem][diff_soup.optimization.AbstractOptimizationProblem.numeric_problem]."""
         self._check()
         n = self.controls.intervals
-        closures = self.closures()
+        closures = self._closures()
         start = self.start
         if start is None:
             start = _middle(self.bounds, n)
@@ -184,7 +184,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         """`(initial_state, theta, limits)`, the leaves a batch varies."""
         return (self.initial_state, self.theta, self.limits)
 
-    def closures(self) -> Any:
+    def _closures(self) -> Any:
         """The `(u, args)` closures of the horizon, built once per problem and configuration.
 
         A second `ControlProblem` over the same model with the same functionals, controls,

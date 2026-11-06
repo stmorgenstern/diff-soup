@@ -136,7 +136,7 @@ class SQP(CompiledSolver):
         qp_tol: The scaled optimality error at which each QP solve ends, `1e-10` by default.
         qp_max_steps: The step budget of each QP solve, `50` by default.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
-        kkt: The [KKTSolve][diff_soup.optimization.KKTSolve] backend, `DenseKKT()` by default.
+        kkt: The [KKTSolve][diff_soup.optimization.solvers.KKTSolve] backend, `DenseKKT()` by default.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
@@ -440,7 +440,7 @@ class SQP(CompiledSolver):
         max_steps: int | None = None,
         warm_start: Any = None,
     ) -> tuple[Any, SolveRecord]:
-        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run] describes."""
+        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
         if self.hessian not in _hessian.MODES:
             raise ConfigurationError(f"hessian must be one of {_hessian.MODES}.")
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)

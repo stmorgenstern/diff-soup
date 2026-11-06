@@ -44,7 +44,7 @@ Every `run` returns the solution and a `SolveRecord`, whose `status` is a
 
     The details matter only when writing a compiled solver of your own.
 
-    ::: diff_soup.optimization.CompiledSolver
+    ::: diff_soup.optimization.solvers.CompiledSolver
         options:
           members:
             - init

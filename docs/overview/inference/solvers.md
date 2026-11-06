@@ -270,13 +270,13 @@ result.params   # array([3. , 1.3])
 
 ## Custom solvers
 
-A custom solver is a subclass of `ds.optimization.OptSolver` implementing
+A custom solver is a subclass of `ds.optimization.solvers.OptSolver` implementing
 `solve`. For example, gradient descent with a backtracking line search,
 taking the gradient from the reverse adjoint and projecting each step
 onto the bounds:
 
 ```python
-class LocalGradientDescent(ds.optimization.OptSolver):
+class LocalGradientDescent(ds.optimization.solvers.OptSolver):
     requires = frozenset({"value_gradient"})
     step: float = 1.0
     max_steps: int = 100
