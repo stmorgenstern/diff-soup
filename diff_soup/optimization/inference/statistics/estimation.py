@@ -274,6 +274,8 @@ class EstimationProblem:
 
     #: The constraints on the parameters (M7); ``None`` for an unconstrained fit.
     constraints = None
+    #: What the constraint functions take as ``args``.
+    _args = None
 
     def __init__(
         self,
@@ -603,8 +605,11 @@ class EstimationProblem:
         return lower_estimation(self, self, optimizer)
 
     def args(self) -> Any:
-        """The dynamic leaves of the numeric problem: ``None``, its closures hold their data."""
-        return None
+        """What the constraint functions take as ``args``, the numeric problem's ``args`` leaf.
+
+        The data residual closes over its measurements and reads no ``args``.
+        """
+        return self._args
 
     def count_failed(self, x_flat: Any) -> tuple[int, tuple[int, ...]]:
         """Delegate sentinel failure detection to the underlying PDE problem."""
@@ -753,7 +758,10 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
         lanes: The lowered study that evaluates the objective on its lanes,
             or ``None``.
     """
-    from diff_soup.optimization.inference.fitting.inference_problem import lower_residual_problem
+    from diff_soup.optimization.inference.fitting.inference_problem import (
+        lower_residual_problem,
+        parameter_values,
+    )
 
     gauss_newton = value = None
     if lanes is not None:
@@ -777,7 +785,14 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
         regularization=regularization,
         joint_view=lambda: problem.joint_view(),
     )
-    return numeric
+    if problem.constraints is None:
+        return numeric
+    # The constraint functions read the fitted values by parameter, and args.
+    schema = problem.parameter_schema
+    constrained = numeric.with_constraints(
+        problem.constraints, unflatten=lambda x: parameter_values(schema, x)
+    )
+    return constrained.with_args(problem.args())
 
 
 __all__ = ["MLE", "MAP", "EstimationProblem"]

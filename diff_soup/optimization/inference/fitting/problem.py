@@ -73,6 +73,8 @@ class InferenceProblem(EstimationProblem):
         trajectory: A `SingleShoot` or `Multishoot` applied to every experiment.
         regularization: A penalty on the parameters added to the objective, such as `Tikhonov`.
         trial_predicate: A function of the parameters returning whether a trial point may be evaluated.
+        constraints: [Constraints][diff_soup.optimization.Constraints] whose functions take the fitted values, `values[handle]` as `InferenceProblem.values` reads them, and `args`.
+        args: What the constraint functions take as `args`, such as limits; a batch of fits differs only in it.
     """
 
     def __init__(
@@ -86,6 +88,8 @@ class InferenceProblem(EstimationProblem):
         trajectory: Any = None,
         regularization: Any = None,
         trial_predicate: Any = None,
+        constraints: Any = None,
+        args: Any = None,
     ):
         """Compile experiments, handle ownership, and the chosen objective.
 
@@ -104,6 +108,8 @@ class InferenceProblem(EstimationProblem):
                 columns, per owner when it varies.
             trial_predicate: Optional JAX-traceable ``x -> bool`` over the
                 fitted vector; a trial the predicate rejects is never solved.
+            constraints: Optional ``Constraints`` on the fitted values.
+            args: What the constraint functions take as ``args``.
         """
         if isinstance(experiments, Study):
             if parameters is not None or clusters is not None:
@@ -142,6 +148,8 @@ class InferenceProblem(EstimationProblem):
             trial_predicate=trial_predicate,
         )
         object.__setattr__(self, "layout", layout)
+        object.__setattr__(self, "constraints", constraints)
+        object.__setattr__(self, "_args", args)
 
     @property
     def placement(self) -> dict:
