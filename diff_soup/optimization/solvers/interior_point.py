@@ -36,6 +36,7 @@ from diff_soup.optimization.solvers._closures import (
     trial,
     unit_scales,
 )
+from diff_soup.optimization.solvers._implicit import active_set, implicit_run
 from diff_soup.optimization.solvers._line_search import filter_line_search
 from diff_soup.optimization.solvers._optimality import constraint_violation, optimality_error
 from diff_soup.optimization.solvers._protocol import (
@@ -661,24 +662,36 @@ class InteriorPoint(CompiledSolver):
         max_steps: int | None = None,
         warm_start: Any = None,
     ) -> tuple[Any, SolveRecord]:
-        """The compiled loop; see [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run]."""
+        """The compiled loop; see [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run].
+
+        The derivative in `args` is the implicit one at the solution (`_implicit.py`).
+        """
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
-        state = solver.init(problem, x0, args, warm_start=warm_start)
-        _, closures, bounds = solver._prepare(problem, state.x)
+        return implicit_run(solver._run_primal, _raw, problem, x0, args, warm_start)
+
+    def _run_primal(self, problem: Any, x0: Any, args: Any, warm_start: Any):
+        """The loop itself, never differentiated."""
+        state = self.init(problem, x0, args, warm_start=warm_start)
+        _, closures, bounds = self._prepare(problem, state.x)
 
         def body(current):
-            new = solver._advance(closures, bounds, current, (args, current.scales))
+            new = self._advance(closures, bounds, current, (args, current.scales))
             return _select(current.done, current, new)
 
         state = lax.while_loop(lambda current: ~current.done, body, state)
-        return state.x, _record(state)
+        return state.x, _record(state, bounds)
 
 
-def _record(state: InteriorPointState) -> SolveRecord:
+def _raw(problem: Any, x: Any) -> tuple[Any, Any]:
+    """The raw closures and the bounds of `problem`, for the implicit derivative."""
+    return closures_of(problem), bounds_from(*bounds_of(problem, x))
+
+
+def _record(state: InteriorPointState, bounds: Any) -> SolveRecord:
     """The `SolveRecord` of a finished state, with the multipliers and slacks unscaled."""
     scales = state.scales
     objective = scales.objective
-    return SolveRecord(
+    record = SolveRecord(
         multipliers_equality=state.lam_e * scales.equality / objective,
         multipliers_inequality=state.lam_i * scales.inequality / objective,
         slacks=state.slacks / scales.inequality,
@@ -691,3 +704,5 @@ def _record(state: InteriorPointState) -> SolveRecord:
         status=state.status,
         degenerate=jnp.asarray(False),
     )
+    degenerate = active_set(state.x, record, bounds).degenerate
+    return eqx.tree_at(lambda r: r.degenerate, record, degenerate)
