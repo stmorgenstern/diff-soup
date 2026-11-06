@@ -20,10 +20,9 @@ from diff_soup.optimization.solvers._closures import (
     bounds_of,
     closures_of,
     evaluate,
-    gradient_scales,
+    problem_scales,
     scaled_closures,
     trial,
-    unit_scales,
 )
 from diff_soup.optimization.solvers._implicit import active_set, implicit_run
 from diff_soup.optimization.solvers._optimality import constraint_violation, optimality_error
@@ -175,18 +174,7 @@ class SQP(CompiledSolver):
             jnp.where(bounds.has_lower, bounds.lower, -jnp.inf),
             jnp.where(bounds.has_upper, bounds.upper, jnp.inf),
         )
-        objective = getattr(problem, "objective_scale", None)
-        rows = getattr(problem, "constraint_scales", None)
-        if objective is None and rows is None:
-            scales = gradient_scales(raw, x, args)
-        else:
-            unit = unit_scales(raw, dtype)
-            eq, ineq = (unit.equality, unit.inequality) if rows is None else rows
-            scales = Scales(
-                jnp.asarray(1.0 if objective is None else objective, dtype),
-                jnp.asarray(eq, dtype),
-                jnp.asarray(ineq, dtype),
-            )
+        scales = problem_scales(problem, raw, x, args)
         packed = (args, scales)
         evaluation = evaluate(
             closures, x, packed, _hessian.uses_gauss_newton(self.hessian, closures)

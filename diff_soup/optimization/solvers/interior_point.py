@@ -31,7 +31,7 @@ from diff_soup.optimization.solvers._closures import (
     bounds_of,
     closures_of,
     evaluate,
-    gradient_scales,
+    problem_scales,
     scaled_closures,
     trial,
     unit_scales,
@@ -190,20 +190,9 @@ class InteriorPoint(CompiledSolver):
 
     def _scales(self, problem: Any, raw: Any, x: Any, args: Any) -> Scales:
         """The problem's own scales, else the gradient-based ones, else 1."""
-        dtype = x.dtype
-        objective = getattr(problem, "objective_scale", None)
-        rows = getattr(problem, "constraint_scales", None)
         if self.scaling == "none":
-            return unit_scales(raw, dtype)
-        if objective is None and rows is None:
-            return gradient_scales(raw, x, args)
-        unit = unit_scales(raw, dtype)
-        equality, inequality = (unit.equality, unit.inequality) if rows is None else rows
-        return Scales(
-            jnp.asarray(1.0 if objective is None else objective, dtype),
-            jnp.asarray(equality, dtype),
-            jnp.asarray(inequality, dtype),
-        )
+            return unit_scales(raw, x.dtype)
+        return problem_scales(problem, raw, x, args)
 
     def _least_squares_multipliers(self, evaluation, z_lower, z_upper, v):
         """Ipopt's least-squares constraint multipliers, 0 when larger than `LAMBDA_MAX`."""

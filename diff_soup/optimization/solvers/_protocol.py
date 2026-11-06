@@ -20,7 +20,7 @@ class SolveStatus(enum.IntEnum):
     Attributes:
         KKT_TOL: The scaled optimality error fell below the tolerance.
         MAX_STEPS: The step budget ran out.
-        INFEASIBLE: The restoration phase converged to a point that still violates the constraints.
+        INFEASIBLE: The restoration phase converged, or the augmented Lagrangian's penalty reached its cap, at a point that still violates the constraints.
         RESTORATION_FAILED: The restoration phase ran out of its own budget.
         SOLVER_FAILED: Consecutive trial evaluations failed, a NaN or a DAE solve that did not finish.
         DIVERGED: An iterate or a multiplier left the finite range.
