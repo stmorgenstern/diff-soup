@@ -47,13 +47,11 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
 from diff_soup._precision import Precision
+from diff_soup.linear import SparseTopology
 from diff_soup.nonlinear.border_cache import initial_border_cache
 from diff_soup.nonlinear.generations import certify_exact_root, initial_generations
 from diff_soup.nonlinear.result import LinearizationDirective
-from diff_soup.timestepping.consistent_ic.pin_differential import (
-    _full_dense_topology,
-    _structure,
-)
+from diff_soup.problem.implicit.consistent_init.pinned import _structure
 from diff_soup.timestepping.vsvo.coefficients import cj_from_hinvgak
 from diff_soup.timestepping.vsvo.common.adaptive import (
     CAUSE_ESCALATION,
@@ -91,8 +89,8 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     state_block_size,
 )
 from diff_soup.timestepping.vsvo.common.trace import BDFTraceRecord, StepTraceHeader
-from diff_soup.timestepping.vsvo.common.weights import error_weight
 from diff_soup.utils.lanes import lane_cond
+from diff_soup.utils.weights import error_weight
 
 from .coeffs import bdf_set_coeffs
 from .complete_step import bdf_complete_step
@@ -795,7 +793,7 @@ class BDFEngine(eqx.Module):
         # analysis is problem-static.
         full_topology = problem.full_topology
         if full_topology is None:
-            full_topology = _full_dense_topology(int(problem.n))
+            full_topology = SparseTopology.full(int(problem.n))
         sens_analysis = analyze_sensitivity(
             backend,
             full_topology,

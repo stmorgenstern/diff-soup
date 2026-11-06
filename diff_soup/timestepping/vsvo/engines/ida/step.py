@@ -36,21 +36,13 @@ import jax.numpy as jnp
 from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
 from diff_soup._precision import Precision
+from diff_soup.linear import SparseTopology
 from diff_soup.linear._krylov import exact_backend
 from diff_soup.nonlinear.border_cache import initial_border_cache
 from diff_soup.nonlinear.generations import certify_exact_root, initial_generations
 from diff_soup.nonlinear.result import LinearizationDirective
-from diff_soup.timestepping.consistent_ic.api import (
-    ICRequest,
-    ICState,
-    InitMode,
-    consistent_init,
-)
-from diff_soup.timestepping.consistent_ic.pin_differential import (
-    ICConfig,
-    _full_dense_topology,
-    _structure,
-)
+from diff_soup.problem.implicit.consistent_init.euler_newton import euler_newton_ic
+from diff_soup.problem.implicit.consistent_init.pinned import ICConfig, ICMode, _structure
 from diff_soup.timestepping.vsvo.common.adaptive import (
     CAUSE_ESCALATION,
     CAUSE_FALSE_CONVERGENCE,
@@ -86,9 +78,9 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     state_block_size,
 )
 from diff_soup.timestepping.vsvo.common.trace import IDATraceRecord, StepTraceHeader
-from diff_soup.timestepping.vsvo.common.weights import error_weight, wrms_norm
 from diff_soup.utils import safe_div
 from diff_soup.utils.lanes import lane_cond, live_lane_cond
+from diff_soup.utils.weights import error_weight, wrms_norm
 
 from .coeffs import ida_set_coeffs
 from .complete_step import ACTION_UNSET, advance_phi, ida_complete_step
@@ -604,21 +596,19 @@ class IDAEngine(eqx.Module):
         if self.ic_mode in ("ya_ydp_euler", "y_fixed_ydot"):
             gate_tol = ic_gate_tolerance(cfg.atol, self.ic_tol)
             mode = (
-                InitMode.ALG_AND_YDOT
-                if self.ic_mode == "ya_ydp_euler"
-                else InitMode.ALL_Y_GIVEN_YDOT
+                ICMode.ALG_AND_YDOT if self.ic_mode == "ya_ydp_euler" else ICMode.ALL_Y_GIVEN_YDOT
             )
-            euler_ic = consistent_init(
+            euler_ic = euler_newton_ic(
                 problem,
-                ICState(y=u0, lam=lam0, ydot=ydot0),
+                u0,
+                ydot0,
+                lam0,
                 theta,
-                ICRequest(
-                    mode=mode,
-                    t0=t0,
-                    cfg=ICConfig(rtol=self.rtol, atol=gate_tol),
-                    t1=t1,
-                ),
-                exact_backend(self.backend),
+                mode,
+                ICConfig(rtol=self.rtol, atol=gate_tol),
+                t0,
+                t1=t1,
+                backend=exact_backend(self.backend),
                 layout=ic_layout,
                 precision=ic_precision,
             )
@@ -866,7 +856,7 @@ class IDAEngine(eqx.Module):
         # analysis is problem-static.
         full_topology = problem.full_topology
         if full_topology is None:
-            full_topology = _full_dense_topology(int(problem.n))
+            full_topology = SparseTopology.full(int(problem.n))
         sens_analysis = analyze_sensitivity(
             backend,
             full_topology,

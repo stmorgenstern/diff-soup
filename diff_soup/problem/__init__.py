@@ -54,7 +54,6 @@ from diff_soup.problem._spec import (
     lower,
     problem,
 )
-from diff_soup.problem.consistent_init import ConsistentInitProblem
 from diff_soup.problem.implicit import (
     DAEStructure,
     Dependencies,
@@ -66,6 +65,7 @@ from diff_soup.problem.implicit import (
     SolverView,
     solver_view,
 )
+from diff_soup.problem.implicit.consistent_init.pinned import ConsistentInitProblem
 from diff_soup.problem.implicit.topology_report import (
     RowOwner,
     TopologyReport,

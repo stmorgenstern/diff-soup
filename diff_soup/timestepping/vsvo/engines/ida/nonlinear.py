@@ -71,9 +71,9 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     linearize,
     refactor_held,
 )
-from diff_soup.timestepping.vsvo.common.weights import wrms_norm
 from diff_soup.utils import safe_div, safe_power
 from diff_soup.utils.lanes import live_lane_cond
+from diff_soup.utils.weights import wrms_norm
 
 from .state import DIRECT_TEST_TOL, NEWTON_CONV_COEFF
 

@@ -1,8 +1,8 @@
-"""The error-weight law and the weighted-RMS norm for the solver suite.
+"""The error-weight law and the weighted-RMS norm.
 
-Every engine weights errors with the tolerance-ratio law
-``ewt = 1/(rtol*|y| + atol)`` and compares normalized error norms to 1,
-refreshing the weights on accepted steps. ``wrms_norm`` consumes the weight
+Every engine and the Euler-Newton consistent initialization weight errors
+with the tolerance-ratio law ``ewt = 1/(rtol*|y| + atol)`` and compare
+normalized error norms to 1; the engines refresh the weights on accepted steps. ``wrms_norm`` consumes the weight
 vector; an optional differential/algebraic mask suppresses algebraic rows in
 error norms (never in Newton norms).
 """
@@ -14,7 +14,7 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 
-from diff_soup.utils import safe_sqrt
+from diff_soup.utils._safe_math import safe_sqrt
 
 
 def error_weight(y: jax.Array, rtol, atol) -> jax.Array:
@@ -39,7 +39,7 @@ def wrms_norm(x: jax.Array, w: jax.Array, mask: Optional[jax.Array] = None) -> j
     """Weighted RMS norm ``sqrt(mean((x*w)^2))``.
 
     ``w`` is a weight vector produced by
-    [error_weight][diff_soup.timestepping.vsvo.common.weights.error_weight]. ``mask`` (the id vector: 1 differential, 0 algebraic)
+    [error_weight][diff_soup.utils.weights.error_weight]. ``mask`` (the id vector: 1 differential, 0 algebraic)
     removes masked rows from the sum while the divisor stays the full vector
     length -- the standard masked weighted-RMS convention -- so algebraic rows can be
     suppressed from error norms. The root uses ``safe_sqrt`` so the gradient at

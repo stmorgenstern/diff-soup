@@ -43,13 +43,13 @@ from diff_soup.nonlinear.solver import (
     nonlinear_solve_primal,
 )
 from diff_soup.problem.implicit.consistent_init import resolve_backend_route
-from diff_soup.problem.implicit.problems import MassProblem
-from diff_soup.problem.implicit.solver_problem import solver_view
-from diff_soup.timestepping.consistent_ic.pin_differential import (
+from diff_soup.problem.implicit.consistent_init.pinned import (
     ContractOperator,
     PinnedOperator,
     _ic_topology,
 )
+from diff_soup.problem.implicit.problems import MassProblem
+from diff_soup.problem.implicit.solver_problem import solver_view
 
 
 class AlgebraicProjectionStatus(enum.IntEnum):

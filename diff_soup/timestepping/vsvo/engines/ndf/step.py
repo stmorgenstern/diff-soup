@@ -49,13 +49,11 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
 from diff_soup._precision import Precision
+from diff_soup.linear import SparseTopology
 from diff_soup.nonlinear.border_cache import initial_border_cache
 from diff_soup.nonlinear.generations import certify_exact_root, initial_generations
 from diff_soup.nonlinear.result import LinearizationDirective
-from diff_soup.timestepping.consistent_ic.pin_differential import (
-    _full_dense_topology,
-    _structure,
-)
+from diff_soup.problem.implicit.consistent_init.pinned import _structure
 from diff_soup.timestepping.vsvo.common.adaptive import (
     CAUSE_ESCALATION,
     CAUSE_FALSE_CONVERGENCE,
@@ -92,8 +90,8 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     state_block_size,
 )
 from diff_soup.timestepping.vsvo.common.trace import NDFTraceRecord, StepTraceHeader
-from diff_soup.timestepping.vsvo.common.weights import error_weight, wrms_norm
 from diff_soup.utils.lanes import lane_cond
+from diff_soup.utils.weights import error_weight, wrms_norm
 
 from ..bdf.dense import bdf_initial_step, bdf_slope_fn
 from .controller import accept_step_control, reject_step_control
@@ -695,7 +693,7 @@ class NDFEngine(eqx.Module):
         # analysis is problem-static.
         full_topology = problem.full_topology
         if full_topology is None:
-            full_topology = _full_dense_topology(int(problem.n))
+            full_topology = SparseTopology.full(int(problem.n))
         sens_analysis = analyze_sensitivity(
             backend,
             full_topology,
