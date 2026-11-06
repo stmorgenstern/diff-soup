@@ -246,6 +246,7 @@ __all__ = [
     "CALL_FENCE_ATTRIBUTE",
     "EMPTY_SLOT",
     "ORDER_DTYPE",
+    "SLOT_DTYPES",
     "cast_operand",
     "check_empty_handle",
     "empty_slot_handle",
@@ -254,6 +255,7 @@ __all__ = [
     "lower_jnp",
     "lower_slot_apply",
     "lower_slot_refactor",
+    "lower_split_apply",
     "lower_switch",
     "lowered_site_key",
     "pattern_matvec",
@@ -261,6 +263,8 @@ __all__ = [
     "phased_invalidate_p",
     "phased_refactor_p",
     "phased_solve_p",
+    "slot_dtype",
+    "slot_targets",
     "storage_key",
 ]
 
@@ -2012,6 +2016,103 @@ def lower_slot_apply(
 
     outs, order_out = lower_switch(ctx, index, order, [held, empty], results)
     return [*outs, order_out]
+
+
+#: The handler name suffix of each dtype a host slot backend factors (KLU, SuperLU).
+SLOT_DTYPES: dict[np.dtype, str] = {np.dtype(np.float64): "f64", np.dtype(np.complex128): "c128"}
+
+
+def slot_dtype(dtype: Any, backend: str, what: str = "values") -> np.dtype:
+    """The dtype a host slot backend's native calls take for operands of ``dtype``.
+
+    Args:
+        dtype: The dtype of the operand.
+        backend: The backend's name, for the error message.
+        what: What the operand is, for the error message.
+
+    Returns:
+        ``complex128`` for a complex dtype, ``float64`` for a real floating one.
+
+    Raises:
+        FactorContractError: If ``dtype`` is neither real nor complex floating point.
+    """
+    if jnp.issubdtype(dtype, jnp.complexfloating):
+        return np.dtype(np.complex128)
+    if jnp.issubdtype(dtype, jnp.floating):
+        return np.dtype(np.float64)
+    raise FactorContractError(
+        f"{backend} factors real and complex floating-point matrices; got {what} of dtype "
+        f"{jnp.dtype(dtype)}."
+    )
+
+
+def slot_targets(prefix: str, dtype: np.dtype) -> tuple[str, str, str]:
+    """The ``(factor, refactor, apply)`` FFI targets of a host slot backend for ``dtype``.
+
+    Args:
+        prefix: The targets' common prefix, for example ``"diffsoup_klu"``.
+        dtype: A key of [SLOT_DTYPES][diff_soup.linear._primitive.SLOT_DTYPES].
+
+    Returns:
+        The three target names.
+    """
+    suffix = SLOT_DTYPES[np.dtype(dtype)]
+    return (f"{prefix}_factor_{suffix}", f"{prefix}_refactor_{suffix}", f"{prefix}_apply_{suffix}")
+
+
+def lower_split_apply(
+    ctx: Any,
+    b: Any,
+    apply: Callable[[Any, Any], list],
+    *,
+    axis: int,
+    real_dtype: Any,
+) -> list:
+    """Lower a solve of a real factor with a complex right-hand side as one real solve.
+
+    The real and imaginary parts of ``b`` are stacked along its right-hand
+    side axis into one real block of twice the columns, ``apply`` solves the
+    block with the factor once, and the two halves are joined into the
+    complex solution. A failed factor gives ``nan`` in both parts.
+
+    Args:
+        ctx: The lowering rule context of the solve; ``b`` is its last operand.
+        b: The MLIR value of the complex right-hand side.
+        apply: Lowers the real solve: called with the rule context of the
+            real block and the block's MLIR value, it returns the MLIR values
+            of ``(x, status, order)``.
+        axis: The right-hand side axis of ``b``: ``0`` for ``(n,)`` or
+            ``(nrhs, n)``, ``1`` for a batched ``(lanes, n)`` or
+            ``(lanes, nrhs, n)``.
+        real_dtype: The dtype of the real block.
+
+    Returns:
+        The MLIR values of ``(x, status, order)``.
+    """
+    b_aval = ctx.avals_in[-1]
+    x_aval, status_aval, order_aval = ctx.avals_out
+    shape = tuple(b_aval.shape)
+    columns_shape = shape if len(shape) == axis + 2 else (*shape[:axis], 1, shape[-1])
+    columns = columns_shape[axis]
+    block = ShapedArray((*shape[:axis], 2 * columns, shape[-1]), np.dtype(real_dtype))
+
+    def stack(v: Any) -> list:
+        v = v.reshape(columns_shape)
+        return [jnp.concatenate([jnp.real(v), jnp.imag(v)], axis=axis).astype(block.dtype)]
+
+    def join(v: Any) -> list:
+        real, imag = jnp.split(v, 2, axis=axis)
+        return [jax.lax.complex(real, imag).reshape(x_aval.shape).astype(x_aval.dtype)]
+
+    (stacked,) = lower_jnp(ctx, stack, [b], [b_aval], [block])
+    real_ctx = dataclasses.replace(
+        ctx,
+        avals_in=[*ctx.avals_in[:-1], block],
+        avals_out=[block, status_aval, order_aval],
+    )
+    x_block, status, order = apply(real_ctx, stacked)
+    (x,) = lower_jnp(ctx, join, [x_block], [block], [x_aval])
+    return [x, status, order]
 
 
 # --------------------------------------------------------------------------- #
