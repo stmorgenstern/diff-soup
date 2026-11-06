@@ -66,6 +66,8 @@ def optimality_error(
     return jnp.maximum(jnp.maximum(dual, primal), _max_abs(*complementarity) / s_c)
 
 
-def constraint_violation(evaluation: Any) -> Any:
-    """The largest violation of the original constraints, without slacks."""
-    return jnp.maximum(_max_abs(evaluation.equality), jnp.max(evaluation.inequality, initial=0.0))
+def constraint_violation(evaluation: Any, scales: Any) -> Any:
+    """The largest violation of the original, unscaled constraints, without slacks."""
+    equality = evaluation.equality / scales.equality
+    inequality = evaluation.inequality / scales.inequality
+    return jnp.maximum(_max_abs(equality), jnp.max(inequality, initial=0.0))
