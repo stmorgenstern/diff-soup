@@ -37,6 +37,7 @@ from diff_soup._precision import Precision
 from diff_soup.linear import SparseTopology
 from diff_soup.problem._cache import BoundedContentCache
 from diff_soup.problem._ir.content_hash import _graph_callable_config_id
+from diff_soup.problem._spec.operating_modes import OPERATING_MODES
 from diff_soup.problem.implicit.consistent_init import (
     ConsistentInitPlan,
     consistent_initial_state,
@@ -386,16 +387,17 @@ class SolverView:
     def operational_seed_multipliers(self, t0, u0, lam0, theta, control):
         """Bordered-global seed with the operational algebraic-current slot resolved.
 
-        An explicit current seed always wins. Otherwise, when the active mode
-        is ``"power"``, the terminal voltage at the start state is probed
-        through the table's own voltage row; when its magnitude exceeds the
-        table's ``seed_voltage_threshold`` the current slot defaults to
-        ``target / V``. A nonzero power target at near-zero voltage with no
-        explicit seed fails here — before any Newton iteration — with a typed
-        error; under tracing (where no value is concrete) the guarded select
-        keeps the prior slot instead. Resistance defaults to ``V / target``;
-        a zero target without an explicit seed raises eagerly and keeps the
-        prior slot under tracing. Other modes write only an explicit seed.
+        An explicit current seed always wins. Otherwise the active mode's start
+        rule in the operating-mode table gives the slot from the terminal
+        voltage ``V`` at the start state, probed through the table's own
+        voltage row: ``target / V`` for power where ``|V|`` exceeds the
+        table's ``seed_voltage_threshold``, ``V / target`` for resistance
+        where the target is nonzero; current and voltage keep the prior slot,
+        as does a start the rule cannot use. A start the table refuses (power
+        at a nonzero target and a voltage at or below the threshold,
+        resistance at a zero target) raises here, before any Newton
+        iteration, when the values are concrete; under tracing it keeps the
+        prior slot.
         """
         from diff_soup._errors import ConfigurationError
 
@@ -440,54 +442,27 @@ class SolverView:
             isinstance(leaf, jax.core.Tracer)
             for leaf in (v0, target, mode, prior) + (() if seed is None else (seed,))
         )
-        if not traced:
-            has_seed = seed is not None and not bool(jnp.isnan(seed))
-            if has_seed:
-                slot = seed
-            elif modes[int(mode)] == "power":
-                if abs(float(v0)) > thr:
-                    slot = target / v0
-                elif float(target) != 0.0:
-                    raise ConfigurationError(
-                        f"operational control {table.name!r}: power mode with "
-                        f"target {float(target)!r} starts at terminal voltage "
-                        f"{float(v0)!r} (magnitude at or below the seed "
-                        f"threshold {thr!r}), so the current unknown has no "
-                        "usable default start; supply a current seed "
-                        "(ControlState.operating(current_seed=...)) or a "
-                        "physically valid nonzero voltage seed."
-                    )
-                else:
-                    slot = prior
-            elif modes[int(mode)] == "resistance":
-                if float(target) == 0.0:
-                    raise ConfigurationError(
-                        f"operational control {table.name!r}: resistance mode with "
-                        "zero target is a short circuit with no usable default "
-                        "current start; supply a current seed "
-                        "(ControlState.operating(current_seed=...))."
-                    )
-                slot = v0 / target
-            else:
-                slot = prior
-        else:
-            seed_arr = jnp.full((), jnp.nan, dtype=target.dtype) if seed is None else seed
-            has_seed = jnp.logical_not(jnp.isnan(seed_arr))
-            seed_val = jnp.where(has_seed, jnp.nan_to_num(seed_arr), jnp.zeros_like(seed_arr))
-            power_mask = jnp.asarray(np.array([m == "power" for m in modes]))
-            is_power = jnp.take(power_mask, mode)
-            ok_v = jnp.abs(v0) > thr
-            v_safe = jnp.where(ok_v, v0, jnp.ones_like(v0))
-            power_default = jnp.where(ok_v, target / v_safe, prior)
-            resistance_mask = jnp.asarray(np.array([m == "resistance" for m in modes]))
-            is_resistance = jnp.take(resistance_mask, mode)
-            ok_r = target != 0
-            r_safe = jnp.where(ok_r, target, jnp.ones_like(target))
-            resistance_default = jnp.where(ok_r, v0 / r_safe, prior)
-            default = jnp.where(
-                is_power, power_default, jnp.where(is_resistance, resistance_default, prior)
+        starts, usable, refused = [], [], []
+        for name in modes:
+            rule = OPERATING_MODES[name].start
+            value, ok, refuse = (prior, False, False) if rule is None else rule(v0, target, thr)
+            starts.append(jnp.asarray(value, dtype=lam0.dtype))
+            usable.append(jnp.asarray(ok))
+            refused.append(jnp.asarray(refuse))
+        start, start_usable, start_refused = (
+            jnp.take(jnp.stack(values), mode) for values in (starts, usable, refused)
+        )
+        seed_value = jnp.full((), jnp.nan, dtype=lam0.dtype) if seed is None else seed
+        has_seed = jnp.logical_not(jnp.isnan(seed_value))
+        if not traced and not bool(has_seed) and bool(start_refused):
+            raise ConfigurationError(
+                f"operational control {table.name!r}: {OPERATING_MODES[modes[int(mode)]].refusal} "
+                f"(target {float(target)!r}, terminal voltage {float(v0)!r}, seed threshold "
+                f"{thr!r}); supply a current seed (ControlState.operating(current_seed=...))."
             )
-            slot = jnp.where(has_seed, seed_val, default)
+        slot = jnp.where(
+            has_seed, jnp.nan_to_num(seed_value), jnp.where(start_usable, start, prior)
+        )
         return lam0.at[off].set(jnp.asarray(slot, dtype=lam0.dtype))
 
     def default_theta(self):

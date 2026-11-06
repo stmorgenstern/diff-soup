@@ -34,6 +34,7 @@ from jaxtyping import Array
 from diff_soup._errors import ConfigurationError
 from diff_soup._solution import RESULT
 from diff_soup.pdesolve import pdesolve
+from diff_soup.problem._spec.operating_modes import operating_mode_names
 from diff_soup.problem.implicit import solver_view
 from diff_soup.timestepping import ControlState, SaveAt
 from diff_soup.timestepping.event_records import TerminalRecord
@@ -48,7 +49,6 @@ __all__ = [
     "solve_schedule",
 ]
 
-_MODES = ("current", "voltage", "power", "resistance")
 _ARRAY_FIELDS = ("mode", "target", "duration", "active", "stop_kind", "stop_level", "carry_step")
 # A segment that does not run still executes one solve, because under ``vmap``
 # both sides of a choice execute. That solve spans this fraction of the whole
@@ -466,7 +466,8 @@ def schedule_arrays(
     names = None if isinstance(modes, str) else _mode_names(modes)
     if names is None:
         raise TypeError(
-            f"modes must be the model's tuple of mode names, such as {_MODES!r}; got {modes!r}."
+            f"modes must be the model's tuple of mode names, such as {operating_mode_names()!r}; "
+            f"got {modes!r}."
         )
     modes = names
     count = len(schedule)
