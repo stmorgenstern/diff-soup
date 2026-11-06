@@ -1,9 +1,10 @@
 """Deprecated: `diff_soup.inference` is now `diff_soup.optimization.inference`.
 
-This package is an alias kept for one release. `import diff_soup.inference` returns the
-module `diff_soup.optimization.inference` itself, and every submodule path under it
-resolves to the module at its new home, so classes and caches are shared: nothing is
-imported twice. `diff_soup.inference._abc` and `diff_soup.inference.solvers` resolve to
+This package is an alias kept for one release and removed in 1.3. The first import warns
+once with a `DeprecationWarning`. `import diff_soup.inference` returns the module
+`diff_soup.optimization.inference` itself, and every submodule path under it resolves to
+the module at its new home, so classes and caches are shared: nothing is imported twice.
+`diff_soup.inference._abc` and `diff_soup.inference.solvers` resolve to
 `diff_soup.optimization._abc` and `diff_soup.optimization.solvers`, where they moved.
 """
 
@@ -11,6 +12,14 @@ import importlib
 import importlib.abc
 import importlib.util
 import sys
+
+from diff_soup._warnings import warn_user
+
+warn_user(
+    "`diff_soup.inference` is deprecated and will be removed in diff-soup 1.3; use "
+    "`diff_soup.optimization.inference` instead.",
+    DeprecationWarning,
+)
 
 #: The old dotted prefixes and their new homes, the longest first.
 _MOVED = (

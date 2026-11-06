@@ -154,3 +154,16 @@ def test_static_public_configuration_is_hashable_and_equal_to_itself():
     ):
         first, second = build(), build()
         assert first == second and hash(first) == hash(second)
+
+
+def test_the_deprecated_inference_alias_warns_once_at_the_users_line(tmp_path):
+    """`import diff_soup.inference` and `ds.inference` return `diff_soup.optimization.inference`
+    itself and raise one DeprecationWarning between them, naming the user's script."""
+    body = (
+        "import diff_soup as ds\n"
+        "import diff_soup.optimization.inference as new\n"
+        "import diff_soup.inference as old\n"
+        "assert old is new and ds.inference is new\n"
+    )
+    script, sites = _warning_sites(tmp_path, body, r"diff_soup\.inference. is deprecated")
+    assert sites == [str(script)]

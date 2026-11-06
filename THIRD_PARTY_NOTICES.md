@@ -54,8 +54,8 @@ row 0), its minimum-step law (a small multiple of the floating-point
 spacing at the current time), and its factor-of-two step cut after a
 nonlinear-convergence failure.
 
-The bounded trust region of `ds.inference.TrustRegion`
-(`diff_soup/inference/hierarchical/_bounds.py`) reproduces the box-bound
+The bounded trust region of `ds.optimization.inference.TrustRegion`
+(`diff_soup/optimization/inference/hierarchical/_bounds.py`) reproduces the box-bound
 handling of SciPy's `least_squares` with `method="trf"`
 (`scipy/optimize/_lsq/common.py` and `trf.py`): the Coleman-Li scaling,
 `make_strictly_feasible`, `intersect_trust_region`, and `select_step`, under

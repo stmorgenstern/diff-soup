@@ -2,7 +2,7 @@
 
 Three layers with two public scientific namespaces:
 
-* Layer 1 (public):  ``domains``, ``inference``
+* Layer 1 (public):  ``domains``, ``optimization``
 * Layer 2 (problem): ``problem``
 * Layer 3 (private): ``timestepping``, ``nonlinear``, ``linear``
 
@@ -17,9 +17,9 @@ contract test ``tests/contracts/test_architecture.py`` and, for module-level
 imports between first-level packages, by ``.github/scripts/check_layers.py``.
 
 Design principles:
-- No long-lived deprecation shims or aliases.
+- A deprecated path warns with a ``DeprecationWarning`` and lasts one release.
 - No string-flag dispatch in the public signature.
-- One verb per job: ``pdesolve``, ``lower``, and ``inference.optsolve``.
+- One verb per job: ``pdesolve``, ``lower``, and ``optimization.optsolve``.
 - One AD entry per verb: ``pdesolve`` → solver's ``solve``, ``lower`` → IFT
   chain.
 - Underscore = private; the contract test walks the import surface.
@@ -308,18 +308,22 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Resolve inference and its learnable selector on first attribute access.
+    """Resolve optimization, the learnable selector and the deprecated inference alias.
 
     The inference package imports the whole fitting and statistics stack, so it
     is not loaded with ``import diff_soup``; ``ds.optimization.inference`` imports it on
-    demand and returns the package. Any other unknown attribute raises
-    ``AttributeError`` as usual.
+    demand and returns the package. ``ds.inference`` imports the deprecated alias
+    ``diff_soup.inference``, which warns once and binds itself here. Any other unknown
+    attribute raises ``AttributeError`` as usual.
     """
-    if name in ("inference", "learnables"):
+    if name == "inference":
+        import diff_soup.inference as inference
+
+        return inference
+    if name == "learnables":
         import importlib
 
-        inference = importlib.import_module("diff_soup.optimization.inference")
-        return inference if name == "inference" else inference.learnables
+        return importlib.import_module("diff_soup.optimization.inference").learnables
     if name == "optimization":
         import importlib
 
