@@ -72,8 +72,15 @@
 // allocation surfaces as an error of the FFI call.
 //
 // pdgstrf runs on every core the process may use (its CPU affinity, capped
-// by OMP_NUM_THREADS when that is set). One mutex serialises every call into
-// the library; the Python-facing functions release the GIL before taking it.
+// by OMP_NUM_THREADS when that is set). SuperLU_MT is built with the patches
+// in ../patches/ (build_superlu_mt.sh applies them): unpatched, its parallel
+// factorization returned a wrong L or U with info = 0 for a few factors in a
+// hundred on more than one thread, because fixupL compacted L's subscripts in
+// supernode order while threads allocate them in another order, and because a
+// parent panel read its children's columns while they were being written.
+// Patched, a factor on any number of threads equals one thread's bit for bit.
+// One mutex serialises every call into the library; the Python-facing
+// functions release the GIL before taking it.
 
 #include <sched.h>
 #include <omp.h>

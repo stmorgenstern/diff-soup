@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 48,
-    "test_functions": 444,
-    "collected_tests": 686,
-    "source_lines": 15904
+    "test_functions": 445,
+    "collected_tests": 687,
+    "source_lines": 15963
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 20,
-      "functions": 192,
-      "collected": 311,
-      "lines": 6221
+      "functions": 193,
+      "collected": 312,
+      "lines": 6280
     },
     "performance_contracts": {
       "files": 2,
@@ -280,7 +280,7 @@
     },
     {
       "file": "tests/contracts/test_linear_host.py",
-      "feature": "Linear contract, host backends (KLU, SuperLU_MT): refactor predicate, the order word, lane slots, native statistics, GPU-program refusal, settings, solves and projections by name"
+      "feature": "Linear contract, host backends (KLU, SuperLU_MT): refactor predicate, the order word, lane slots, native statistics, GPU-program refusal, settings, solves and projections by name, SuperLU's bits on several threads"
     },
     {
       "file": "tests/contracts/test_linear_structured.py",

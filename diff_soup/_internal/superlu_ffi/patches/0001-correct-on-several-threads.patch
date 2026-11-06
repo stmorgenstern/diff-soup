@@ -1,0 +1,112 @@
+SuperLU_MT 1e4bc160, OpenMP build: correct factors on several threads.
+
+Two faults in the parallel factorization returned a wrong L or U with info = 0 on more than one
+thread (measured with diff-soup's probe and a C driver of the same calls: 58 of 2000 solves of a
+24 x 24 system wrong at 5 threads and 38 at 32; 0 at one thread):
+
+1. util.c, fixupL: the in-place compaction of L's subscripts visited supernodes by number. A
+   thread takes a supernode's number (NewNsuper, NSUPER_LOCK) and its subscript storage
+   (Glu_alloc, LLOCK) in two critical sections, so supernode numbers need not follow storage
+   order, and the compaction overwrote a later-stored block before reading it. It now visits
+   the blocks in storage order.
+2. pxgstrf_scheduler.c: a parent panel was queued (CANPIPE) as soon as its last child started,
+   and read that busy child's columns while they were written. With fault 1 fixed, this still
+   gave 2 wrong solves in 2000 at 5 threads and 5 at 32 on a 400 x 400 random matrix, and
+   factors that differ in the last bits from one thread's. Parents now start when their last
+   child is done.
+
+With both, every factor-and-solve on 5 and 32 threads equals the one-thread result bit for bit.
+The pthread build has the same faults; its threads start staggered, which hid them.
+
+diff --git a/SRC/pxgstrf_scheduler.c b/SRC/pxgstrf_scheduler.c
+index 2034f56..4265b27 100644
+--- a/SRC/pxgstrf_scheduler.c
++++ b/SRC/pxgstrf_scheduler.c
+@@ -208,16 +208,13 @@ pxgstrf_scheduler(const int_t pnum, const int_t n, const int_t *etree,
+ 
+ 	    for (j = jcol; j < jcol+w; ++j) pxgstrf_shared->spin_locks[j] = 1;
+ 	    dad = DADPANEL (jcol);
+-	    if ( dad < n && pxgstrf_shared->pan_status[dad].ukids == 1 ) {
+-		STATE( dad ) = CANPIPE;
+-		/*>> j = Enqueue(taskq, dad);*/
+-		taskq->queue[taskq->tail++] = dad;
+-		++taskq->count;
+-#if ( DEBUGlevel>=1 )
+-		printf("(%d) Enqueue() %d's dad %d ->CANPIPE, Qcount %d\n",
+-		       pnum, jcol, dad, j);
+-#endif
+-	    }
++	    /* No pipelining: the parent panel is not queued as CANPIPE when its
++	     * last child starts. It starts when its last child is done, taken by
++	     * the thread that finished that child (above). A pipelined parent
++	     * reads its busy children's columns while they are being written,
++	     * which gave wrong factors with info = 0 on several threads, and it
++	     * applies their updates in an order that depends on the schedule,
++	     * so its factors differed in the last bits from one thread's. */
+ 
+ #ifdef PROFILE
+ 	    Gstat->procstat[pnum].panels++;
+diff --git a/SRC/util.c b/SRC/util.c
+index 71699af..553afc1 100644
+--- a/SRC/util.c
++++ b/SRC/util.c
+@@ -205,10 +205,18 @@ countnz(const int_t n, int_t *xprune, int_t *nnzL, int_t *nnzU, GlobalLU_t *Glu)
+  * storage for the adjancency lists of the pruned graph, and applies
+  * row permuation to the row subscripts of matrix $L$.
+  */
++/* Orders (start in lsub[], supernode) pairs by start, for fixupL. */
++static int fixupL_by_start(const void *a, const void *b)
++{
++    const int_t x = *(const int_t *) a, y = *(const int_t *) b;
++    return (x > y) - (x < y);
++}
++
+ void
+ fixupL(const int_t n, const int_t *perm_r, GlobalLU_t *Glu)
+ {
+-    register int_t nsuper, fsupc, nextl, i, j, jstrt;
++    register int_t nsuper, fsupc, nextl, i, j, k, jstrt;
++    int_t *order;
+     register int_t *xsup, *xsup_end, *lsub, *xlsub, *xlsub_end;
+ 
+     if ( n <= 1 ) return;
+@@ -221,11 +229,28 @@ fixupL(const int_t n, const int_t *perm_r, GlobalLU_t *Glu)
+     nsuper    = Glu->supno[n];
+     nextl     = 0;
+     
+-    /* 
+-     * For each supernode ...
++    /*
++     * For each supernode, in the order its subscripts lie in lsub[] ...
++     *
++     * The compaction is in place, so it must visit the blocks in storage
++     * order: then a block never moves forward and no block is overwritten
++     * before it is read. Supernode numbers do not give that order on several
++     * threads: a thread takes its supernode's number (NewNsuper, under
++     * NSUPER_LOCK) and its subscript storage (Glu_alloc, under LLOCK) in two
++     * critical sections, so another thread may number a supernode in between
++     * and allocate first. Visiting by number then overwrote the subscripts of
++     * a higher-numbered supernode stored after a lower-numbered one, and
++     * pdgstrf returned a wrong L with info = 0. On one thread the two orders
++     * agree.
+      */
++    order = intMalloc(2 * (nsuper + 1));
+     for (i = 0; i <= nsuper; i++) {
+-	fsupc = xsup[i];
++	order[2 * i] = xlsub[xsup[i]];
++	order[2 * i + 1] = i;
++    }
++    qsort(order, nsuper + 1, 2 * sizeof(int_t), fixupL_by_start);
++    for (k = 0; k <= nsuper; k++) {
++	fsupc = xsup[order[2 * k + 1]];
+ 	jstrt = xlsub[fsupc];
+ 	xlsub[fsupc] = nextl;
+ 	for (j = jstrt; j < xlsub_end[fsupc]; j++) {
+@@ -234,6 +259,7 @@ fixupL(const int_t n, const int_t *perm_r, GlobalLU_t *Glu)
+   	}
+ 	xlsub_end[fsupc] = nextl;
+     }
++    SUPERLU_FREE(order);
+     xlsub[n] = nextl;
+ 
+ #if ( PRNTlevel==1 )
