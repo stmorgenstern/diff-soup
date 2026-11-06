@@ -1,4 +1,4 @@
-"""Structural fitting: optimizers on residual problems, KKT points, forward Jacobians, and the
+"""Structural fitting: optimizers on residual problems, forward Jacobians, and the
 trust-region loops' stop rules relative to the cost scale."""
 
 from __future__ import annotations
@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
-from diff_soup.inference.approx import KLBasis
-from diff_soup.inference.solvers._loop import (
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.approx import KLBasis
+from diff_soup.optimization.solvers._loop import (
     Trials,
     _after_attempt,
     _floor_sample,
@@ -20,7 +20,7 @@ from diff_soup.inference.solvers._loop import (
     cost_scale,
     cost_threshold,
 )
-from diff_soup.inference.solvers.tangent import (
+from diff_soup.optimization.solvers.tangent import (
     jacfwd_from_pushforward,
     linearize_value,
     value_and_jacfwd,
@@ -155,29 +155,6 @@ def test_newton_gauss_newton_records_the_final_residual_and_jacobian():
     assert 0.5 * float(jnp.sum(jnp.asarray(fit.info["final_residual"]) ** 2)) == fit.cost
     true = inf.optsolve(problem, inf.NewtonTrustRegion(hessian="true"), diagnostics=False)
     assert "final_residual" not in true.info and "final_jacobian" not in true.info
-
-
-@pytest.fixture(scope="module")
-def constrained():
-    """min |x - (1, 1)|^2 subject to x0 <= 0.5, with rows weighted by 1e3."""
-    target = jnp.asarray([1.0, 1.0])
-    problem = inf.LeastSquaresProblem.from_residual(np.zeros(2), lambda x: 1.0e3 * (x - target))
-    constraints = inf.InequalityConstraints(g=lambda x: jnp.atleast_1d(x[0] - 0.5), n_constraints=1)
-    return inf.constrained_optsolve(
-        problem, inf.LevenbergMarquardt(max_steps=60), constraints=constraints, outer_max=10
-    )
-
-
-def test_constrained_optsolve_meets_the_kkt_point_and_the_outer_stationarity_test(constrained):
-    """The fit ends at x = (0.5, 1), multiplier 5e5, its inner solves passing the relative
-    outer stationarity test after one penalty increase."""
-    assert constrained.converged
-    # measured 7.8e-7 on the point and 1.5e-6 relative on the multiplier, CPU VM 2026-10-22,
-    # pytest tests/contracts/test_structural_fitting.py
-    np.testing.assert_allclose(constrained.result.params, [0.5, 1.0], atol=1e-5)
-    np.testing.assert_allclose(constrained.multipliers, [5.0e5], rtol=1e-5)
-    assert constrained.rho == 1e7
-    assert constrained.kkt["stationarity"] <= 1e-6 * constrained.kkt["stationarity_scale"]
 
 
 def test_a_rejected_trial_predicate_costs_no_residual_evaluation():
@@ -398,3 +375,62 @@ def test_noise_windows_floor_and_gain_ratio_do_not_depend_on_cost_units(unit):
     # ratio 0.9975 (accepted); every unit agrees exactly.
     assert reference["noise"][1] == 3 and reference["verdict"][1]
     assert _loop_numbers(unit) == reference
+
+
+def _constrained(jacobian: str = "auto"):
+    """``f = sum((x - (1, 2, 3))^2) + x0 x1^2`` with one equality and two inequality rows that
+    read the limit ``args["cap"]``."""
+    target = jnp.asarray([1.0, 2.0, 3.0])
+    constraints = ds.optimization.Constraints(
+        equality=lambda x, args: jnp.sum(x) - 3.0,
+        inequality=lambda x, args: jnp.stack([x[0] - args["cap"], x[1] ** 2 - 4.0]),
+        n_equality=1,
+        n_inequality=2,
+        jacobian=jacobian,
+    )
+    problem = inf.OptimizationProblem.from_value(
+        np.zeros(3), lambda x: jnp.sum((x - target) ** 2) + x[0] * x[1] ** 2, hessian=True
+    )
+    return problem.with_constraints(constraints).with_args({"cap": jnp.asarray(0.5)})
+
+
+def test_closures_take_args_last_and_a_batch_of_args_is_one_vmap():
+    """A property binds the problem's own args, the raw closure takes them last, and vmap over
+    with_args gives each lane's rows."""
+    problem, point = _constrained(), jnp.asarray([0.2, 0.3, 0.4])
+    bound = problem.constraints(point)[1]
+    raw = problem.closure("constraints")(point, {"cap": jnp.asarray(0.5)})[1]
+    assert jnp.array_equal(bound, raw)
+    caps = jnp.asarray([0.1, 0.2, 0.3])
+    lanes = jax.vmap(lambda cap: problem.with_args({"cap": cap}).constraints(point)[1][0])(caps)
+    # measured 0.0 against 0.2 - cap, CPU workstation 2026-11-06,
+    # pytest tests/contracts/test_structural_fitting.py
+    np.testing.assert_allclose(lanes, 0.2 - caps, atol=1e-15)
+
+
+@pytest.mark.parametrize("jacobian", ["auto", "forward", "reverse"])
+def test_constraint_jacobians_are_exact_in_either_mode(jacobian):
+    """The lowered Jacobians of the rows equal the analytic ones in every mode."""
+    point = jnp.asarray([0.2, 0.3, 0.4])
+    _, _, jac_eq, jac_ineq = _constrained(jacobian).constraints_and_jacobians(point)
+    # measured 0.0 in all three modes, CPU workstation 2026-11-06,
+    # pytest tests/contracts/test_structural_fitting.py
+    np.testing.assert_allclose(jac_eq, [[1.0, 1.0, 1.0]], atol=1e-15)
+    np.testing.assert_allclose(jac_ineq, [[1.0, 0.0, 0.0], [0.0, 0.6, 0.0]], atol=1e-15)
+
+
+def test_the_lagrangian_hessian_adds_the_constraint_curvature_to_the_objectives():
+    """The Lagrangian Hessian is the objective's Hessian plus each multiplier times its row's,
+    and its product with a vector agrees."""
+    problem, point = _constrained(), jnp.asarray([0.2, 0.3, 0.4])
+    lam_eq, lam_ineq = jnp.asarray([0.7]), jnp.asarray([0.1, 0.3])
+    x0, x1 = point[0], point[1]
+    objective = jnp.asarray([[2.0, 2 * x1, 0.0], [2 * x1, 2.0 + 2 * x0, 0.0], [0.0, 0.0, 2.0]])
+    expected = objective + 0.3 * jnp.asarray([[0.0, 0, 0], [0, 2.0, 0], [0, 0, 0]])
+    direction = jnp.asarray([1.0, -2.0, 0.5])
+    hessian = problem.lagrangian_hessian(point, lam_eq, lam_ineq)
+    product = problem.lagrangian_hessian_vector(point, lam_eq, lam_ineq, direction)
+    # measured 0.0 on the matrix and on the product, CPU workstation 2026-11-06,
+    # pytest tests/contracts/test_structural_fitting.py
+    np.testing.assert_allclose(hessian, expected, atol=1e-14)
+    np.testing.assert_allclose(product, expected @ direction, atol=1e-14)

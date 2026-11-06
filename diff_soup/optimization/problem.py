@@ -5,16 +5,19 @@ from __future__ import annotations
 import abc
 from typing import Any
 
-import equinox as eqx
 
-
-class AbstractOptimizationProblem(eqx.Module):
+class AbstractOptimizationProblem(abc.ABC):
     """A problem a user poses, which lowers to the numeric problem a solver takes.
 
     `InferenceProblem`, `ControlProblem` and `DesignProblem` are its subclasses. Each declares
     its decision variables in its own terms and lowers them, with its objective, constraints
     and bounds, to an [OptimizationProblem][diff_soup.optimization.OptimizationProblem] of
-    closures over one flat vector and `args`.
+    closures over one flat vector and `args`. `optsolve` takes any of them.
+
+    It is a plain abstract class, not an `eqx.Module`, because `InferenceProblem` and the
+    lowered study are host objects that cannot subclass a Module. `ControlProblem` and
+    `DesignProblem` are Modules through their second base; once `InferenceProblem` is one too,
+    this base can become a Module. It holds no state of its own.
 
     Attributes:
         constraints: The [Constraints][diff_soup.optimization.Constraints] on the decision variables, or `None`.

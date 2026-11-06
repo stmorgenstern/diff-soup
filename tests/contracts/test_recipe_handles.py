@@ -13,10 +13,13 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
-from diff_soup.inference.approx import PiecewiseLinear
-from diff_soup.inference.fitting.inference_problem import InferenceProblem, ParameterGroups
-from diff_soup.inference.fitting.series import Component, Series
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.approx import PiecewiseLinear
+from diff_soup.optimization.inference.fitting.inference_problem import (
+    InferenceProblem,
+    ParameterGroups,
+)
+from diff_soup.optimization.inference.fitting.series import Component, Series
 
 _SOLVER = ds.JNDF.stock(linear="dense")
 

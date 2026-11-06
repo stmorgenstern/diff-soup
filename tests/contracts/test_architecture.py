@@ -7,11 +7,14 @@ import importlib
 import importlib.util
 from pathlib import Path
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
 from diff_soup import timestepping
+from diff_soup.optimization import inference as inf
 from diff_soup.problem._cache import BoundedContentCache
 from tests.support.inference import decay_experiment, decay_recipe
 
@@ -36,12 +39,13 @@ def test_package_imports_follow_the_declared_layer_direction(layers):
 
 
 def test_the_fitting_engine_never_imports_the_statistics_layer(layers):
-    """No module of inference.fitting or inference.solvers but the facade imports statistics."""
-    facade = _PACKAGE_ROOT / "inference" / "fitting" / "problem.py"
-    statistics = "diff_soup.inference.statistics"
+    """No module of inference.fitting or optimization.solvers but the facade imports statistics."""
+    optimization = _PACKAGE_ROOT / "optimization"
+    facade = optimization / "inference" / "fitting" / "problem.py"
+    statistics = "diff_soup.optimization.inference.statistics"
     back_edges = []
-    for subpackage in ("fitting", "solvers"):
-        for path in sorted((_PACKAGE_ROOT / "inference" / subpackage).rglob("*.py")):
+    for subpackage in (optimization / "inference" / "fitting", optimization / "solvers"):
+        for path in sorted(subpackage.rglob("*.py")):
             if path == facade:
                 continue
             module, is_package = layers._module_name(path, _PACKAGE_ROOT)
@@ -100,3 +104,22 @@ def test_the_public_inference_problem_is_a_facade_over_a_numeric_leaf():
     leaf = problem.numeric_problem
     assert leaf is not None and not isinstance(leaf, inf.InferenceProblem)
     assert callable(inf.Study.compile_inference_problem)
+
+
+def test_every_problem_shares_one_array_free_base_and_the_module_problems_stay_pytrees():
+    """InferenceProblem and the control and design problems subclass one abstract base that holds
+    no state; a ControlProblem's leaves are its own arrays, so a batch of them is one
+    filter_vmap and filter_jit traces it."""
+    base = ds.optimization.AbstractOptimizationProblem
+    control = ds.optimization.control
+    assert issubclass(inf.InferenceProblem, base) and issubclass(inf.LoweredStudy, base)
+    assert issubclass(control.ControlProblem, base) and issubclass(
+        ds.optimization.design.DesignProblem, base
+    )
+    assert not issubclass(base, eqx.Module) and "__init__" not in vars(base)
+    batch = control.ControlProblem(initial_state=jnp.ones((3, 2)), theta=jnp.arange(3.0))
+    assert len(jax.tree.leaves(batch)) == 2
+    doubled = eqx.filter_vmap(lambda problem: problem.args()[0] * problem.args()[1])(batch)
+    assert jnp.array_equal(
+        eqx.filter_jit(lambda value: value)(doubled), jnp.ones((3, 2)) * jnp.arange(3.0)[:, None]
+    )

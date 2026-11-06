@@ -97,8 +97,8 @@ of the parameters. The null space describes the exact degeneracy of
 parameters.
 
 In diff-soup we calculate the Fisher information matrix and compute its
-condition number with `ds.inference.identifiability`, and we get a
-comprehensive diagnostic profile with `ds.inference.profile`, which fixes
+condition number with `ds.optimization.inference.identifiability`, and we get a
+comprehensive diagnostic profile with `ds.optimization.inference.profile`, which fixes
 the \(j\)-th parameter at each value of a grid, refits the likelihood
 over the other parameters, and reads the confidence interval off the
 values where the profiled negative log likelihood stays within
@@ -122,16 +122,16 @@ spec.bc.dirichlet("u", node_indices=np.array([n - 1]), value=1.0)
 problem = spec.build()
 y0 = spec.assemble_state({})
 
-measurement = ds.inference.Measurement("u", times=ts, values=data,
-                                       likelihood=ds.inference.Gaussian(sigma=1e-1))
-experiment = ds.inference.Experiment(model=problem, solver=solver, t_span=(0.0, 1.5),
+measurement = ds.optimization.inference.Measurement("u", times=ts, values=data,
+                                       likelihood=ds.optimization.inference.Gaussian(sigma=1e-1))
+experiment = ds.optimization.inference.Experiment(model=problem, solver=solver, t_span=(0.0, 1.5),
                                      initial_state=y0, measurements=(measurement,))
-est = ds.inference.InferenceProblem(experiment, parameters=(D, a))
-fit = ds.inference.optsolve(est, ds.inference.LevenbergMarquardt())                     # the maximum-likelihood fit
+est = ds.optimization.inference.InferenceProblem(experiment, parameters=(D, a))
+fit = ds.optimization.optsolve(est, ds.optimization.LevenbergMarquardt())                     # the maximum-likelihood fit
 
-ident = ds.inference.identifiability(est, fit)                                          # the information spectrum at the fit
+ident = ds.optimization.inference.identifiability(est, fit)                                          # the information spectrum at the fit
 ident.raw.condition_number                                                              # the ratio of the largest to the smallest eigenvalue
-prof = ds.inference.profile(est, fit, D, levels=(0.95,))                                # the profile likelihood of D
+prof = ds.optimization.inference.profile(est, fit, D, levels=(0.95,))                                # the profile likelihood of D
 prof.interval(0.95)                                                                     # the 95% confidence interval of D
 ```
 
@@ -144,13 +144,13 @@ fit.
 
 ### The information spectrum
 
-`ds.inference.identifiability(problem, fit, *, parameter_scales=None,
+`ds.optimization.inference.identifiability(problem, fit, *, parameter_scales=None,
 ridge=1e-10, null_tol=1e-10)` computes the information matrix at the fit
 and reports its spectrum. For a MAP fit the prior is left out, so that a
 prior cannot hide a direction the data leaves open.
 
 ```python
-ident = ds.inference.identifiability(est, fit)
+ident = ds.optimization.inference.identifiability(est, fit)
 ident.names                              # ("D", "a")
 ident.raw.condition_number               # the ratio of the largest to the smallest eigenvalue
 ident.raw.sensitivity_rank               # the number of directions the data determine
@@ -175,7 +175,7 @@ ident.scaled.eigenvalues                 # the spectrum after scaling each param
 
 ### The profile likelihood
 
-`ds.inference.profile(problem, fit, handle, *, owner=None,
+`ds.optimization.inference.profile(problem, fit, handle, *, owner=None,
 optimizer=None, levels=(0.95,), bounds=None, max_steps=24,
 multistart=0, multistart_scale=1.0)` walks one parameter away from the
 fit in both directions, refitting every other parameter at each step,
@@ -183,7 +183,7 @@ until the negative log likelihood has risen past the threshold of every
 level:
 
 ```python
-prof = ds.inference.profile(est, fit, D, levels=(0.95,), max_steps=24)
+prof = ds.optimization.inference.profile(est, fit, D, levels=(0.95,), max_steps=24)
 prof.interval(0.95)      # the lower and upper bounds of the 95% interval
 prof.threshold(0.95)     # half the chi-squared quantile with one degree of freedom
 prof.grid                # the values of D the walk visited
@@ -205,8 +205,8 @@ prof.open_directions     # the sides that never reached the threshold, empty her
   `multistart_scale=` the size of the perturbation. The default refits
   from the previous step.
 - `optimizer=` is the refitting algorithm. The default is
-  `ds.inference.LevenbergMarquardt()`. A hierarchical study also
-  accepts `ds.inference.TrustRegion()`
+  `ds.optimization.LevenbergMarquardt()`. A hierarchical study also
+  accepts `ds.optimization.inference.TrustRegion()`
   ([hierarchical fits](hierarchical.md)). Any other algorithm is refused.
 - A fit that did not converge is refused. A MAP fit profiles the
   posterior objective instead, and its intervals carry no coverage
@@ -217,13 +217,13 @@ prof.open_directions     # the sides that never reached the threshold, empty her
 ## Sensitivity runs
 
 The information matrix is built from the sensitivity \(S\) of the
-solution to the parameters. `ds.inference.sensitivity_solve(problem,
+solution to the parameters. `ds.optimization.inference.sensitivity_solve(problem,
 t_span, y0, *, wrt, saveat, solver=None)` computes it directly for a
 built problem, before any data exists, which is how an experiment is
 judged before it is run:
 
 ```python
-run = ds.inference.sensitivity_solve(problem, (0.0, 1.5), y0, wrt=(D, a),
+run = ds.optimization.inference.sensitivity_solve(problem, (0.0, 1.5), y0, wrt=(D, a),
                                      saveat=ds.SaveAt(ts=ts), solver=solver)
 S = run.sensitivities()      # the sensitivity of every saved value to D and to a
 run.x0                       # the parameter values the sensitivities are taken at
@@ -241,7 +241,7 @@ run.x0                       # the parameter values the sensitivities are taken 
 
 ## The practical identifiability report
 
-`ds.inference.practical_report(problem, fit, *, posterior=None,
+`ds.optimization.inference.practical_report(problem, fit, *, posterior=None,
 profiles=(), tolerances=None, report=None, experiment_id=None)` collects
 the evidence of this page in one object. It carries the information
 spectrum at the fit, a summary of each supplied profile, the standard
@@ -250,8 +250,8 @@ errors of a supplied Laplace approximation, and the residual report of
 no overall verdict:
 
 ```python
-posterior = ds.inference.laplace(est, fit)
-practical = ds.inference.practical_report(
+posterior = ds.optimization.inference.laplace(est, fit)
+practical = ds.optimization.inference.practical_report(
     est, fit, posterior=posterior, profiles=(prof,), tolerances={"D": 0.01, "a": 0.1})
 practical.local_sensitivity.raw.condition_number   # the spectrum at the fit
 practical.likelihood_geometry                   # one summary per supplied profile
@@ -276,7 +276,7 @@ A learnable function of
 [function approximation](function-approximation.md) is fitted through
 its coefficients, and its identifiability is a question about the
 function rather than about any one coefficient.
-`ds.inference.function_report(information, block, *, gram=None)` takes
+`ds.optimization.inference.function_report(information, block, *, gram=None)` takes
 the coefficients of one function out of an information matrix,
 eliminates the other parameters, and reports the eigenvalues against the
 function's own norm. For the Legendre diffusivity of
@@ -284,11 +284,11 @@ function's own norm. For the Legendre diffusivity of
 fitted as an inference problem `est_f` with the fit `fit_f`:
 
 ```python
-from diff_soup.inference.approx import Legendre
+from diff_soup.optimization.inference.approx import Legendre
 
-info_f = ds.inference.information(est_f, at=fit_f)
+info_f = ds.optimization.inference.information(est_f, at=fit_f)
 gram = Legendre(jnp.asarray(fit_f.params), interval=(0.0, 1.0)).gram()
-report_f = ds.inference.function_report(info_f, "D_of_x", gram=gram)
+report_f = ds.optimization.inference.function_report(info_f, "D_of_x", gram=gram)
 report_f.eigenvalues      # the information per unit of the function's squared norm, one per mode
 report_f.names
 ```

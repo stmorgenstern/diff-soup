@@ -19,8 +19,8 @@ from jax.sharding import AxisType
 from jax.sharding import PartitionSpec as P
 
 import diff_soup as ds
-from diff_soup import inference as inf
-from diff_soup.inference import design
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference import design
 from tests.support.inference import decay_recipe, decay_study
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -39,7 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import diff_soup as ds
-from diff_soup import inference as inf
+from diff_soup.optimization import inference as inf
 from tests.support.inference import (
     TIMES,
     decay_experiment,
