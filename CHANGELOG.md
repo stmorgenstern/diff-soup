@@ -47,6 +47,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Other
 
+- `ds.optimization.inference.approx.FluxNet` raises `AttributeError` like any other missing name. It raised a `TypeError` naming `eqx.nn.MLP` since its removal.
 - A diff-soup environment variable set to an empty string now counts as unset and takes its default; the variables and the changes `import diff_soup` makes are listed on the installation page. Previously an empty `DIFFSOUP_PROCESSES` or `DIFFSOUP_NODES` raised `ValueError`.
 - `diff_soup.inference` is now `diff_soup.optimization.inference`, and `optsolve`, `OptResult`, the optimization problems and the solvers are also at the top of `ds.optimization`. `ds.inference` and every `diff_soup.inference` import path still work for this release, return the same objects and warn once with a `DeprecationWarning`; they will be removed in 1.3.
 
