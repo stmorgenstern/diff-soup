@@ -486,5 +486,13 @@ def _record(state: SQPState, bounds: Any) -> SolveRecord:
         degenerate=jnp.asarray(False),
     )
     return eqx.tree_at(
-        lambda r: r.degenerate, record, active_set(state.x, record, bounds).degenerate
+        lambda r: r.degenerate,
+        record,
+        active_set(
+            state.x,
+            record,
+            bounds,
+            state.evaluation.jacobian_equality,
+            state.evaluation.jacobian_inequality,
+        ).degenerate,
     )
