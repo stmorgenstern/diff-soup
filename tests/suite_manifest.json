@@ -1,9 +1,9 @@
 {
   "budgets": {
-    "test_files": 49,
-    "test_functions": 454,
-    "collected_tests": 709,
-    "source_lines": 16241
+    "test_files": 50,
+    "test_functions": 458,
+    "collected_tests": 735,
+    "source_lines": 16360
   },
   "tier_budgets": {
     "public_api": {
@@ -13,10 +13,10 @@
       "lines": 6403
     },
     "contracts": {
-      "files": 20,
-      "functions": 196,
-      "collected": 316,
-      "lines": 6355
+      "files": 21,
+      "functions": 200,
+      "collected": 342,
+      "lines": 6474
     },
     "performance_contracts": {
       "files": 2,
@@ -73,7 +73,8 @@
     "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
     "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference.hierarchical",
-    "tests/contracts/test_lane_select.py": "diff_soup.utils.lanes"
+    "tests/contracts/test_lane_select.py": "diff_soup.utils.lanes",
+    "tests/contracts/test_jacobian_pattern.py": "diff_soup.utils.lanes"
   },
   "support_data": [
     "tests/support/battery_jacobian.json"
@@ -138,7 +139,8 @@
     "tests/public_api/test_optimization_solvers.py",
     "tests/multi_device/test_optimization_lanes.py",
     "tests/support/optimization.py",
-    "tests/public_api/test_control.py"
+    "tests/public_api/test_control.py",
+    "tests/contracts/test_jacobian_pattern.py"
   ],
   "test_files": [
     "tests/public_api/test_recipe_build.py",
@@ -189,7 +191,8 @@
     "tests/contracts/test_compiled_solvers.py",
     "tests/public_api/test_optimization_solvers.py",
     "tests/multi_device/test_optimization_lanes.py",
-    "tests/public_api/test_control.py"
+    "tests/public_api/test_control.py",
+    "tests/contracts/test_jacobian_pattern.py"
   ],
   "feature_contracts": [
     {
@@ -387,6 +390,10 @@
     {
       "file": "tests/public_api/test_control.py",
       "feature": "Control: control problems over a schedule solve, their numeric problems and compiles, the receding horizon under scan and from the host, the estimators"
+    },
+    {
+      "file": "tests/contracts/test_jacobian_pattern.py",
+      "feature": "Jacobian patterns from a tangent map: each rule against jax.jacfwd, branches and loops of unknown outcome, the fallback warning, the within bound"
     }
   ]
 }

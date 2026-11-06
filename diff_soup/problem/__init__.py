@@ -27,6 +27,7 @@ Public exports
 """
 
 from diff_soup.domains.boundary_set import BoundarySet, tags
+from diff_soup.problem._ad.tangent_pattern import jacobian_pattern
 from diff_soup.problem._consistency import InconsistentInitializationError
 from diff_soup.problem._ir import (
     BoundaryIntegralConstraint,
@@ -190,6 +191,7 @@ __all__ = [
     # Iteration-matrix structure diagnostics
     "topology_report",
     "jacobian_nnz",
+    "jacobian_pattern",
     "solver_view",
     "SolverView",
     "TopologyReport",

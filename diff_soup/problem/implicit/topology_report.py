@@ -36,7 +36,8 @@ class TopologyReport(NamedTuple):
         nnz: Number of structural nonzeros.
         max_row_degree: Largest number of nonzeros in one row.
         mean_row_degree: Mean number of nonzeros per row.
-        color_count: Colors needed to compute the Jacobian by automatic differentiation, or `None` for a dense pattern.
+        color_count: Tangents the solver evaluates to assemble the Jacobian, one per color, or `None` for a dense pattern.
+        pullback_count: Residual pullbacks the solver evaluates for the rows it holds out of the coloring.
         widest_rows: [`RowOwner`][diff_soup.problem.RowOwner] records of the rows with the most nonzeros, widest first.
         per_variable_nnz: Nonzeros per field or global name, empty when the rows carry no names.
     """
@@ -48,6 +49,7 @@ class TopologyReport(NamedTuple):
     color_count: Optional[int]
     widest_rows: tuple
     per_variable_nnz: dict
+    pullback_count: int = 0
 
 
 def _row_names(sources, n: int) -> list:
@@ -101,7 +103,8 @@ def jacobian_nnz(problem) -> int:
 def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
     """Summarize the Jacobian sparsity pattern a problem presents to the solvers.
 
-    A problem without a sparse pattern reports a dense one.
+    The color and pullback counts are those the solver's assembly uses. A problem
+    without a sparse pattern reports a dense one.
 
     Args:
         problem: A [`LoweredProblem`][diff_soup.problem.LoweredProblem], [`MassProblem`][diff_soup.problem.MassProblem], or [`ImplicitProblem`][diff_soup.problem.ImplicitProblem].
@@ -110,7 +113,6 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
     Returns:
         A [`TopologyReport`][diff_soup.problem.TopologyReport].
     """
-    from diff_soup.problem._ad.sparse_jac import SparseJacobian
     from diff_soup.problem.implicit.solver_problem import solver_view
     from diff_soup.timestepping.vsvo.common.contract import coerce_problem
 
@@ -123,22 +125,11 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
         degrees = np.full((n,), n, dtype=np.int64)
         rows = None
         nnz = n * n
-        color_count: Optional[int] = None
     else:
         n = int(topo.n_dofs)
         rows = np.asarray(topo.rows)
-        cols = np.asarray(topo.cols)
         degrees = np.bincount(rows, minlength=n).astype(np.int64)
         nnz = int(rows.shape[0])
-        # memory-bounded-report: a full row makes every pair of columns
-        # adjacent, so the exact coloring needs n colors. Do not materialize
-        # its n-by-n adjacency or padded color arrays just to count them.
-        if np.any(degrees == n):
-            color_count = n
-        else:
-            color_count = int(
-                SparseJacobian.from_coo(rows.astype(np.int32), cols.astype(np.int32), n).n_colors
-            )
 
     names = _row_names(owner_sources, n)
     order = np.argsort(-degrees, kind="stable")[: max(int(top_k), 0)]
@@ -155,7 +146,8 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
         nnz=nnz,
         max_row_degree=int(degrees.max()) if n else 0,
         mean_row_degree=float(degrees.mean()) if n else 0.0,
-        color_count=color_count,
+        color_count=view.plan.color_count,
         widest_rows=widest,
         per_variable_nnz=per_variable_nnz,
+        pullback_count=view.plan.pullback_count,
     )

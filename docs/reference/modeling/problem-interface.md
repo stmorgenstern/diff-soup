@@ -65,6 +65,8 @@ compiles it.
 
 ::: diff_soup.problem.jacobian_nnz
 
+::: diff_soup.problem.jacobian_pattern
+
 ::: diff_soup.problem.solver_view
 
 ::: diff_soup.problem.SolverView

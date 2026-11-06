@@ -27,9 +27,9 @@ There is no `linear/` tier. Timeouts apply when `pytest-timeout` is installed.
 
 | scope | files | test functions | collected items | source lines |
 |---|---|---|---|---|
-| whole suite | 49 | 454 | 709 | 16,241 |
+| whole suite | 50 | 458 | 735 | 16,360 |
 | `public_api` | 21 | 198 | 320 | 6,403 |
-| `contracts` | 20 | 196 | 316 | 6,355 |
+| `contracts` | 21 | 200 | 342 | 6,474 |
 | `performance_contracts` | 2 | 14 | 31 | 550 |
 | `multi_device` | 3 | 31 | 36 | 1,034 |
 | `integration` | 2 | 11 | 32 | 680 |
