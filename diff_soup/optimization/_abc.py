@@ -91,14 +91,6 @@ def _missing(problem: Any, key: str, method: str) -> ConfigurationError:
     )
 
 
-def _derived(build: Callable) -> Callable:
-    """Memoize a closure deriver by its input closures, so a problem lowered twice derives one closure.
-
-    The closures are static fields; equal ones let `filter_jit` reuse a compile across lowerings.
-    """
-    return functools.lru_cache(maxsize=256)(build)
-
-
 class OptimizationProblem(eqx.Module):
     """The objective an optimizer minimizes, with its starting point, bounds and derivatives.
 
@@ -484,20 +476,10 @@ class OptimizationProblem(eqx.Module):
             An `OptimizationProblem` with the `"value_gradient"` structure, and `"hessian"` when requested.
         """
         x0 = _as_vector(x0)
+        value = ignoring_args(value)
         structure = {"value_gradient"}
-        value_gradient_hessian = hessian_vector = None
         if hessian:
             structure.add("hessian")
-
-            @jax.jit
-            def value_gradient_hessian(x):
-                cost, gradient = jax.value_and_grad(value)(x)
-                return cost, gradient, jax.hessian(value)(x)
-
-            @jax.jit
-            def hessian_vector(x, v):
-                return jax.jvp(jax.grad(value), (x,), (v,))[1]
-
         return cls(
             x0=x0,
             structure=frozenset(structure),
@@ -507,11 +489,11 @@ class OptimizationProblem(eqx.Module):
             _regularization=regularization,
             ad="reverse",
             hessian_composition="forward-over-reverse" if hessian else None,
-            _value=ignoring_args(jax.jit(value)),
-            _value_and_gradient=ignoring_args(jax.jit(jax.value_and_grad(value))),
-            _value_gradient_hessian=ignoring_args(value_gradient_hessian),
-            _hessian_vector=ignoring_args(hessian_vector),
-            _is_valid=None if is_valid is None else ignoring_args(jax.jit(is_valid)),
+            _value=_jit(value),
+            _value_and_gradient=_jit(Derived(_value_and_grad_rule, value)),
+            _value_gradient_hessian=_jit(_hessian_of(value)) if hessian else None,
+            _hessian_vector=_jit(_hessian_vector_of(value)) if hessian else None,
+            _is_valid=_jit(ignoring_args(is_valid)),
         )
 
 
@@ -568,14 +550,13 @@ def _identity(x: Any) -> Any:
     return x
 
 
-@_derived
 def _objective_hessian(value_gradient_hessian: Callable) -> Callable:
     """The Lagrangian Hessian of a problem without constraints: the objective's."""
+    return Derived(_objective_hessian_rule, value_gradient_hessian)
 
-    def lagrangian_hessian(x, lam_eq, lam_ineq, args):
-        return value_gradient_hessian(x, args)[2]
 
-    return lagrangian_hessian
+def _objective_hessian_rule(value_gradient_hessian, x, lam_eq, lam_ineq, args):
+    return value_gradient_hessian(x, args)[2]
 
 
 def _plus_objective_hessian(
@@ -675,67 +656,60 @@ def _no_constraint_jacobians(x: Any, args: Any) -> tuple:
     return empty, empty, jacobian, jacobian
 
 
-@_derived
 def _evaluate_of(value: Callable, constraints: Callable) -> Callable:
     """``(x, args) -> (f, eq, ineq)`` from the objective and the constraint rows."""
-
-    def evaluate(x, args):
-        return (value(x, args), *constraints(x, args))
-
-    return evaluate
+    return Derived(_evaluate_rule, value, constraints)
 
 
-@_derived
+def _evaluate_rule(value, constraints, x, args):
+    return (value(x, args), *constraints(x, args))
+
+
 def _evaluate_with_derivatives_of(
     value_and_gradient: Callable, constraints_and_jacobians: Callable
 ) -> Callable:
     """``(x, args) -> (f, g, eq, ineq, J_eq, J_ineq)`` from the two first-order closures."""
-
-    def evaluate_with_derivatives(x, args):
-        return (*value_and_gradient(x, args), *constraints_and_jacobians(x, args))
-
-    return evaluate_with_derivatives
+    return Derived(_evaluate_with_derivatives_rule, value_and_gradient, constraints_and_jacobians)
 
 
-@_derived
+def _evaluate_with_derivatives_rule(value_and_gradient, constraints_and_jacobians, x, args):
+    return (*value_and_gradient(x, args), *constraints_and_jacobians(x, args))
+
+
 def _rows_of(constraints_and_jacobians: Callable) -> Callable:
     """The constraint rows derived from a rows-and-Jacobians closure."""
-
-    def constraints(x, args):
-        equality, inequality, _, _ = constraints_and_jacobians(x, args)
-        return equality, inequality
-
-    return constraints
+    return Derived(_rows_rule, constraints_and_jacobians)
 
 
-@_derived
+def _rows_rule(constraints_and_jacobians, x, args):
+    return constraints_and_jacobians(x, args)[:2]
+
+
 def _first_of(value_and_gradient: Callable) -> Callable:
     """The value function derived from a value-and-gradient closure."""
-
-    def value(x, args):
-        return value_and_gradient(x, args)[0]
-
-    return value
+    return Derived(_first_rule, value_and_gradient)
 
 
-@_derived
+def _first_rule(value_and_gradient, x, args):
+    return value_and_gradient(x, args)[0]
+
+
 def _hessian_times(value_gradient_hessian: Callable) -> Callable:
     """The Hessian-vector product derived from a value-gradient-Hessian closure."""
-
-    def hessian_vector(x, v, args):
-        return value_gradient_hessian(x, args)[2] @ v
-
-    return hessian_vector
+    return Derived(_hessian_times_rule, value_gradient_hessian)
 
 
-@_derived
+def _hessian_times_rule(value_gradient_hessian, x, v, args):
+    return value_gradient_hessian(x, args)[2] @ v
+
+
 def _lagrangian_times(lagrangian_hessian: Callable) -> Callable:
     """The Lagrangian Hessian-vector product derived from the Lagrangian Hessian."""
+    return Derived(_lagrangian_times_rule, lagrangian_hessian)
 
-    def lagrangian_hessian_vector(x, lam_eq, lam_ineq, v, args):
-        return lagrangian_hessian(x, lam_eq, lam_ineq, args) @ v
 
-    return lagrangian_hessian_vector
+def _lagrangian_times_rule(lagrangian_hessian, x, lam_eq, lam_ineq, v, args):
+    return lagrangian_hessian(x, lam_eq, lam_ineq, args) @ v
 
 
 def _as_vector(x0: Any) -> Any:
@@ -766,37 +740,38 @@ def _as_bounds(bounds: Any, x0: Any) -> Any:
     return lower, upper
 
 
-@_derived
 def _half_squared(residual: Callable) -> Callable:
     """The least-squares value ``0.5 * sum(r**2)`` derived from a residual closure."""
-
-    def value(x, args):
-        r = residual(x, args)
-        return 0.5 * jnp.sum(r * r)
-
-    return value
+    return Derived(_half_squared_rule, residual)
 
 
-@_derived
+def _half_squared_rule(residual, x, args):
+    return _half_sum_of_squares(residual(x, args))
+
+
+def _half_sum_of_squares(r: Any) -> Any:
+    """``0.5 * sum(r**2)``, the least-squares value of the residual ``r``."""
+    return 0.5 * jnp.sum(r * r)
+
+
 def _gradient_of(residual_and_jacobian: Callable) -> Callable:
     """The value and gradient ``J^T r`` derived from a residual-and-Jacobian closure."""
-
-    def value_and_gradient(x, args):
-        r, jacobian = residual_and_jacobian(x, args)
-        return 0.5 * jnp.sum(r * r), jacobian.T @ r
-
-    return value_and_gradient
+    return Derived(_gradient_rule, residual_and_jacobian)
 
 
-@_derived
+def _gradient_rule(residual_and_jacobian, x, args):
+    r, jacobian = residual_and_jacobian(x, args)
+    return _half_sum_of_squares(r), jacobian.T @ r
+
+
 def _gauss_newton_of(residual_and_jacobian: Callable) -> Callable:
     """The Gauss-Newton statistics ``(value, J^T r, J^T J, 0)`` derived from a residual-and-Jacobian closure."""
+    return Derived(_gauss_newton_rule, residual_and_jacobian)
 
-    def gauss_newton(x, args):
-        r, jacobian = residual_and_jacobian(x, args)
-        return 0.5 * jnp.sum(r * r), jacobian.T @ r, jacobian.T @ jacobian, 0
 
-    return gauss_newton
+def _gauss_newton_rule(residual_and_jacobian, x, args):
+    r, jacobian = residual_and_jacobian(x, args)
+    return _half_sum_of_squares(r), jacobian.T @ r, jacobian.T @ jacobian, 0
 
 
 class LeastSquaresProblem(OptimizationProblem):
@@ -860,6 +835,7 @@ class LeastSquaresProblem(OptimizationProblem):
         x0: Any,
         residual: Callable,
         *,
+        args: Any = None,
         jacobian: Callable | None = None,
         regularization: Any = None,
         bounds: Any = None,
@@ -871,10 +847,14 @@ class LeastSquaresProblem(OptimizationProblem):
     ) -> LeastSquaresProblem:
         """Pose a least-squares problem from a residual function of a 1-D array.
 
+        Posed again from the same functions, the problem has equal closures, so a compiled
+        solver reuses its compile.
+
         Args:
             x0: The starting point, a 1-D array.
-            residual: A JAX-traceable function `residual(x)` returning the residual vector.
-            jacobian: A function `jacobian(x)` returning the Jacobian of `residual`, or `None` to compute it with `jax.jacfwd`.
+            residual: A JAX-traceable function `residual(x)` returning the residual vector, or `residual(x, args)` when `args` is given.
+            args: The pytree `residual`, `jacobian`, `is_valid` and `segment_fns` take last, held as the problem's `args` leaf; `None` when they take `x` alone.
+            jacobian: A function `jacobian(x)` (or `jacobian(x, args)`) returning the Jacobian of `residual`, or `None` to compute it with `jax.jacfwd`.
             regularization: A penalty the solver adds to the objective, such as `Tikhonov`, or `None`.
             bounds: A `(lower, upper)` pair aligned with `x0`, where `None` on either side leaves it unbounded.
             is_valid: A function `is_valid(x)` returning whether a trial point may be evaluated.
@@ -897,56 +877,57 @@ class LeastSquaresProblem(OptimizationProblem):
             ```
         """
         x0 = _as_vector(x0)
-        residual_fn = jax.jit(residual)
-        if jacobian is None:
-            residual_and_jacobian = jax.jit(lambda x: (residual(x), jax.jacfwd(residual)(x)))
-        else:
-            residual_and_jacobian = jax.jit(lambda x: (residual(x), jacobian(x)))
+        takes_args = args is not None
 
-        def objective(x):
-            r = residual(x)
-            return 0.5 * jnp.sum(r * r)
+        def closure(fn):
+            return fn if takes_args or fn is None else ignoring_args(fn)
 
-        value_and_gradient = jax.jit(
-            lambda x: _gradient_of(ignoring_args(residual_and_jacobian))(x, None)
-        )
-        gauss_newton = jax.jit(
-            lambda x: _gauss_newton_of(ignoring_args(residual_and_jacobian))(x, None)
-        )
-
+        residual = closure(residual)
+        residual_and_jacobian = Derived(_residual_jacobian_rule, residual, closure(jacobian))
+        value = _half_squared(residual)
         structure = {"value_gradient", "residual_jacobian", "gauss_newton"}
-        value_gradient_hessian = hessian_vector = None
         if hessian:
             structure.add("hessian")
-
-            @jax.jit
-            def value_gradient_hessian(x):
-                value, gradient = jax.value_and_grad(objective)(x)
-                return value, gradient, jax.hessian(objective)(x)
-
-            @jax.jit
-            def hessian_vector(x, v):
-                return jax.jvp(jax.grad(objective), (x,), (v,))[1]
-
         return cls(
             x0=x0,
             structure=frozenset(structure),
+            args=args,
             _unflatten=unflatten,
             _static=static,
             bounds=_as_bounds(bounds, x0),
             _regularization=regularization,
             ad="forward",
             hessian_composition="forward-over-reverse" if hessian else None,
-            _value=ignoring_args(jax.jit(objective)),
-            _value_and_gradient=ignoring_args(value_and_gradient),
-            _value_gradient_hessian=ignoring_args(value_gradient_hessian),
-            _hessian_vector=ignoring_args(hessian_vector),
-            _gauss_newton=ignoring_args(gauss_newton),
-            _is_valid=None if is_valid is None else ignoring_args(jax.jit(is_valid)),
-            _residual=ignoring_args(residual_fn),
-            _residual_and_jacobian=ignoring_args(residual_and_jacobian),
-            _segment_fns=tuple(map(ignoring_args, segment_fns)) or (ignoring_args(residual_fn),),
+            _value=_jit(value),
+            _value_and_gradient=_jit(_gradient_of(residual_and_jacobian)),
+            _value_gradient_hessian=_jit(_hessian_of(value)) if hessian else None,
+            _hessian_vector=_jit(_hessian_vector_of(value)) if hessian else None,
+            _gauss_newton=_jit(_gauss_newton_of(residual_and_jacobian)),
+            _is_valid=_jit(closure(is_valid)),
+            _residual=_jit(residual),
+            _residual_and_jacobian=_jit(residual_and_jacobian),
+            _segment_fns=tuple(_jit(closure(fn)) for fn in segment_fns) or (_jit(residual),),
         )
+
+
+def _residual_jacobian_rule(residual, jacobian, x, args):
+    if jacobian is None:
+        return jax.jacfwd(lambda y: (residual(y, args),) * 2, has_aux=True)(x)[::-1]
+    return residual(x, args), jacobian(x, args)
+
+
+def _value_and_grad_rule(value, x, args):
+    return jax.value_and_grad(value)(x, args)
+
+
+@functools.partial(jax.jit, static_argnums=0)
+def _compiled(fn, *operands):
+    return fn(*operands)
+
+
+def _jit(fn: Callable | None) -> Callable | None:
+    """``fn`` compiled when called on its own: one program per closure, shared by equal ones."""
+    return None if fn is None else Derived(_compiled, fn)
 
 
 class OptSolver(eqx.Module):

@@ -46,6 +46,8 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision, cast_to_compute_dtype, compute_dtype_of
 from diff_soup._warnings import warn_user
+from diff_soup.optimization._abc import LeastSquaresProblem
+from diff_soup.optimization._binding import ignoring_args
 from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
     GroupedThetaSelection,
@@ -69,7 +71,7 @@ from diff_soup.optimization.inference.fitting._windows_dv import (
     boundaries_from_windows,
     warn_if_over_ceiling,
 )
-from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.bounds import Bounds, resolve_decision_bounds
 from diff_soup.optimization.inference.fitting.learnables import (
     LearnableSelector,
     has_declared_learnables,
@@ -1135,10 +1137,6 @@ def lower_residual_problem(
         joint_view: ``() -> `` the joint problem with its level structure,
             for ``"batched_lanes"``.
     """
-    from diff_soup.optimization._abc import LeastSquaresProblem
-    from diff_soup.optimization._binding import ignoring_args
-    from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
-
     evaluator = problem if evaluator is None else evaluator
     requires = frozenset(getattr(optimizer, "requires", ()))
     asked = getattr(optimizer, "composition", "auto")

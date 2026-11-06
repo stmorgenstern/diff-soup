@@ -169,9 +169,7 @@ def _compile_prior_blocks(schema: Any, objective: Any) -> tuple:
                     "so its prior is unknown. Fit a problem whose schema records the "
                     "declarations (a Study, an InferenceProblem or a joint problem)."
                 )
-            declarations = tuple(
-                {id(item): item for item in occurrence.declarations}.values()
-            )
+            declarations = tuple({id(item): item for item in occurrence.declarations}.values())
             declared = [getattr(item, "prior", None) is not None for item in declarations]
             if not any(declared):
                 missing.add(entry.handle.name)
@@ -611,8 +609,25 @@ class EstimationProblem(AbstractOptimizationProblem):
         statistics reduced across the mesh. The bounds are resolved once;
         ``regularization`` is this problem's, or, for a solver that requires
         ``"batched_lanes"``, the prior rows with their columns.
+
+        The lowering is kept on this problem, one per kind of solver (its
+        ``requires``, ``ad`` and ``composition``), so a compiled solver given
+        it again reuses its compile; what varies between solves is ``args``.
         """
-        return lower_estimation(self, self, optimizer)
+        key = (
+            frozenset(getattr(optimizer, "requires", ())),
+            getattr(optimizer, "ad", None),
+            getattr(optimizer, "composition", "auto"),
+        )
+        held = self.__dict__.get("_lowerings")
+        if held is None or held[0] is not self:
+            # A copy of this problem (a joint view) lowers afresh.
+            held = (self, {})
+            object.__setattr__(self, "_lowerings", held)
+        lowered = held[1].get(key)
+        if lowered is None:
+            lowered = held[1][key] = lower_estimation(self, self, optimizer)
+        return lowered
 
     def args(self) -> Any:
         """What the constraint functions take as ``args``, the numeric problem's ``args`` leaf.
