@@ -36,6 +36,18 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 **Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.2.0
 
+## 1.1.1 (unreleased)
+
+A bugfix release: each build of a recipe template is now fitted under its own priors.
+
+### Bugfixes
+
+- Fixed MAP fits of a `@ds.recipe` template, which took every prior from the template's first build in the process, so a later build with another prior was fitted under the first one's without a word. Each fit now takes each prior from its own experiments' builds (per owner for a parameter that varies by owner), and a `GaussianCoefficientPrior` centers on its own build's coefficients. Results change only where one process built a template with different priors.
+- Builds that differ only in a prior now return two problems. Previously they returned one problem, whose declarations followed the latest build.
+- A MAP fit now refuses a parameter shared by experiments whose builds declare different priors. Previously it used the first build's prior.
+
+**Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.1.1
+
 ## 1.1.0 (2026-10-29)
 
 New [tutorials](https://stmorgenstern.github.io/diff-soup/tutorials/) and [worked examples](https://stmorgenstern.github.io/diff-soup/examples/), and the fixes and features found and added while writing them.
