@@ -75,6 +75,7 @@ from diff_soup.timestepping.events import (
 )
 from diff_soup.timestepping.saveat import _build_save_plan, default_output_plan, output_emitter
 from diff_soup.utils.lanes import lane_cond, lane_where
+from diff_soup.utils.weights import wrms_norm
 
 from ..interpolation import CubicHermiteInterpolation
 from ..solution import (
@@ -112,7 +113,6 @@ from .trace import (
     write_trace,
     zero_record,
 )
-from .weights import wrms_norm
 
 # Integer termination codes in the space result_from_code maps (see
 # diff_soup._solution.result_from_code): 0 unknown, 1 success, 2 step collapse,

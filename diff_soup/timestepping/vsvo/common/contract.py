@@ -17,7 +17,7 @@ differential/local-algebraic unknowns and ``lam`` the bordered global unknowns.
 between the split
 and concatenated views. Tolerances live on this (problem) side; the error-weight
 *law* is engine-owned and lives in
-[diff_soup.timestepping.vsvo.common.weights][].
+[diff_soup.utils.weights][].
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import jax
 import jax.numpy as jnp
 
 from diff_soup.timestepping.vsvo.common.backends import initialization_policy
-from diff_soup.timestepping.vsvo.common.weights import error_weight
+from diff_soup.utils.weights import error_weight
 
 
 # ---------------------------------------------------------------------------
