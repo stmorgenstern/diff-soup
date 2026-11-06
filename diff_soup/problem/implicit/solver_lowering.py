@@ -17,7 +17,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup.linear import SparseTopology
-from diff_soup.problem._ad.pattern import outside_compile_time_eval
 from diff_soup.problem._ad.tangent_pattern import tangent_pattern
 from diff_soup.problem._cache import BoundedContentCache
 from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
@@ -657,9 +656,7 @@ def _build_solver_problem(problem, source_static):
             )
 
     if problem._exact_sparsity:
-        rhs_sparsity = outside_compile_time_eval(
-            lambda: _exact_rhs_sparsity(problem, rhs, n, _has_operational)
-        )
+        rhs_sparsity = _exact_rhs_sparsity(problem, rhs, n, _has_operational)
     else:
         rhs_sparsity = augmented_rhs_sparsity(problem._topo, n_u, n_lam)
     with jax.ensure_compile_time_eval():

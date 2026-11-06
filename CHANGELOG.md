@@ -36,7 +36,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 - A vmapped solve no longer keeps extra copies of its saved output, and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
 - JIDA does its whole-array work only on the path an attempt takes, with identical results.
-- `spec.build(exact_sparsity=True)` reads its pattern without compiling a constant subexpression of the residual, and neither build colors the declared pattern unless `physics_jacobian_blocks` is called.
+- `spec.build(exact_sparsity=True)` reads its pattern with one compiled program instead of one per operation, 0.85 s instead of 3.6 s at 18 families, and neither build colors the declared pattern unless `physics_jacobian_blocks` is called. Loops, cumulative sums, convolutions and linear solves in a residual keep their pattern instead of filling it.
 - Member rows that read every site of their member are recovered by shared pullbacks instead of one color per site: an LFP half cell with 50 volumes of 10 particles needs 8 colors instead of 108.
 
 ### Other
