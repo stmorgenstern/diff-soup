@@ -141,19 +141,19 @@ def _error(evaluation, x, estimate_e, estimate_i, z_lower, z_upper, bounds) -> A
 class AugmentedLagrangian(CompiledSolver):
     """Powell-Hestenes-Rockafellar multipliers with the LANCELOT update rules.
 
-    Each outer step minimizes the augmented Lagrangian under the bounds with a compiled
-    projected Newton trust region, then updates the multipliers or raises the penalty. It is
-    the fallback for degenerate constraints and replaces `constrained_optsolve`.
+    Each outer step minimizes the augmented Lagrangian under the bounds with a projected Newton
+    trust region, then updates the multipliers or raises the penalty. It is the fallback for
+    degenerate constraints.
 
     Args:
-        tol: The scaled optimality error at which the run ends.
-        feasibility_tol: The constraint violation at which the run ends.
-        max_steps: The outer step budget.
-        rho_init: The first penalty.
-        rho_factor: The factor the penalty grows by when the violation did not fall enough.
-        inner_max_steps: The step budget of each inner minimization.
-        hessian: `"auto"`, `"bfgs"`, `"exact"` or `"gauss-newton"` for the inner Newton.
-        max_failed_evaluations: Consecutive failed trial evaluations before the run ends with `SOLVER_FAILED`.
+        tol: The scaled optimality error at which the run ends, `1e-8` by default.
+        feasibility_tol: The constraint violation at which the run ends, `1e-8` by default.
+        max_steps: The outer step budget, `50` by default.
+        rho_init: The first penalty, `10.0` by default.
+        rho_factor: The factor the penalty grows by when the violation did not fall enough, `10.0` by default.
+        inner_max_steps: The step budget of each inner minimization, `200` by default.
+        hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`, as for `InteriorPoint`.
+        max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
@@ -406,10 +406,7 @@ class AugmentedLagrangian(CompiledSolver):
         max_steps: int | None = None,
         warm_start: Any = None,
     ) -> tuple[Any, SolveRecord]:
-        """The compiled loop; see [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run].
-
-        The derivative in `args` is the implicit one at the solution (`_implicit.py`).
-        """
+        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run] describes."""
         if self.hessian not in _hessian.MODES:
             raise ConfigurationError(f"hessian must be one of {_hessian.MODES}.")
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)

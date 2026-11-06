@@ -137,23 +137,27 @@ def _select(pred: Any, new: Any, old: Any) -> Any:
 
 
 class InteriorPoint(CompiledSolver):
-    """Interior point with slacks on the inequalities, the barrier on the slacks and the bounds, and Ipopt's filter line search.
+    """A primal-dual interior point with Ipopt's filter line search, after Wächter and Biegler (2006).
+
+    The inequalities take slacks, and the slacks and the bounds of `x` take the log barrier. A
+    failed line search starts Ipopt's feasibility restoration phase. `hessian="auto"` is
+    Gauss-Newton plus damped BFGS on a least-squares objective, and damped BFGS otherwise.
 
     Args:
-        tol: The scaled optimality error at which the run ends.
-        max_steps: The step budget.
-        mu_init: The first barrier parameter; a warm start takes a smaller one from the given point's complementarity.
-        mu_min: The barrier parameter is never reduced below this.
-        kappa_mu: The linear factor of the monotone barrier update.
-        theta_mu: The superlinear exponent of the monotone barrier update.
-        tau_min: The least fraction to the boundary.
-        bound_push: How far inside its bounds the start point is pushed, absolute.
-        bound_frac: How far inside its bounds the start point is pushed, relative to the bound width.
-        hessian: `"auto"`, `"bfgs"`, `"exact"` or `"gauss-newton"`.
-        scaling: `"gradient"` for Ipopt's gradient-based scaling at the start point, `"none"` for the problem's own.
-        restoration: Whether the feasibility restoration phase runs when the line search fails.
-        max_failed_evaluations: Consecutive failed trial evaluations before the run ends with `SOLVER_FAILED`.
-        kkt: The [KKTSolve][diff_soup.optimization.KKTSolve] backend.
+        tol: The scaled optimality error at which the run ends, `1e-8` by default.
+        max_steps: The step budget, `300` by default.
+        mu_init: The first barrier parameter, `0.1` by default, or smaller from a warm start.
+        mu_min: The least barrier parameter, `1e-11` by default.
+        kappa_mu: The linear factor of the monotone barrier update, `0.2` by default.
+        theta_mu: The superlinear exponent of the monotone barrier update, `1.5` by default.
+        tau_min: The least fraction to the boundary, `0.99` by default.
+        bound_push: How far inside its bounds the start point moves, absolute, `0.01` by default.
+        bound_frac: How far inside its bounds the start point moves, relative to their width, `0.01` by default.
+        hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`.
+        scaling: `"gradient"` (default) uses the problem's own scales or else Ipopt's gradient-based ones, and `"none"` solves unscaled.
+        restoration: Whether a failed line search starts the restoration phase, `True` by default.
+        max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
+        kkt: The [KKTSolve][diff_soup.optimization.KKTSolve] backend, `DenseKKT()` by default.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
@@ -296,9 +300,8 @@ class InteriorPoint(CompiledSolver):
     def init(self, problem: Any, x0: Any, args: Any, *, warm_start: Any = None) -> SolverState:
         """Push `x0` inside its bounds, set the slacks from the inequalities, estimate the multipliers.
 
-        A `warm_start` record supplies the multipliers instead: the point is pushed only
-        `WARM_PUSH` inside its bounds, the bound multipliers at least `WARM_PUSH` above 0, and
-        `mu` starts from the point's complementarity.
+        A `warm_start` record supplies the multipliers instead. The point is then pushed only
+        `WARM_PUSH` inside its bounds, and `mu` starts from the point's complementarity.
         """
         x0 = jnp.asarray(x0)
         raw, closures, bounds = self._prepare(problem, x0)
@@ -651,10 +654,7 @@ class InteriorPoint(CompiledSolver):
         max_steps: int | None = None,
         warm_start: Any = None,
     ) -> tuple[Any, SolveRecord]:
-        """The compiled loop; see [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run].
-
-        The derivative in `args` is the implicit one at the solution (`_implicit.py`).
-        """
+        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run] describes."""
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
         return implicit_run(solver._run_primal, _raw, problem, x0, args, warm_start)
 
