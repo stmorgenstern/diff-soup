@@ -2422,9 +2422,9 @@ class InferenceProblem:
     def theta_names(self) -> tuple:
         """Stable flat order of learnable θ scalars.
 
-        This is the scalar order used by ``x0`` and by
-        [InequalityConstraints][diff_soup.optimization.inference.fitting.constrained.InequalityConstraints].
-        It is suitable for naming constraint coordinates without relying on
+        This is the scalar order used by ``x0`` and by the flat vector a
+        [Constraints][diff_soup.optimization.Constraints] lowers onto. It is
+        suitable for naming constraint coordinates without relying on
         undocumented pytree leaf order.
         """
         return self._seam.theta_names

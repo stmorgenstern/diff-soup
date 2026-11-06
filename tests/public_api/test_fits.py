@@ -1,4 +1,4 @@
-"""Fits: optsolve and constrained_optsolve on single, joint and lowered-study problems."""
+"""Fits: optsolve on single, joint and lowered-study problems."""
 
 from __future__ import annotations
 
@@ -109,22 +109,6 @@ def test_optax_reports_cost_and_gradient_at_the_returned_parameters(single):
     # measured 0.0 relative difference for both, CPU VM 2026-10-22, pytest tests/public_api/test_fits.py
     np.testing.assert_allclose(fit.cost, float(cost), rtol=1e-12)
     np.testing.assert_allclose(fit.grad_norm, float(np.linalg.norm(projected)), rtol=1e-12)
-
-
-def test_constrained_optsolve_meets_an_active_constraint_on_weighted_rows(single):
-    """The default penalty reaches the constrained optimum of rows weighted by 1/sigma = 50."""
-    _, problem = single
-    result = inf.constrained_optsolve(
-        problem,
-        inf.LevenbergMarquardt(max_steps=40),
-        constraints=inf.InequalityConstraints(
-            g=lambda theta: jnp.atleast_1d(jax.tree_util.tree_leaves(theta)[0] - 0.5),
-            n_constraints=1,
-        ),
-    )
-    assert result.converged
-    # measured 4.5e-7 off the active bound, CPU VM 2026-10-22, pytest tests/public_api/test_fits.py
-    np.testing.assert_allclose(result.result.params, [0.5], atol=5e-6)
 
 
 @pytest.fixture(scope="module")

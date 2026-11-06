@@ -1,22 +1,22 @@
 {
   "budgets": {
     "test_files": 45,
-    "test_functions": 418,
-    "collected_tests": 628,
-    "source_lines": 15162
+    "test_functions": 416,
+    "collected_tests": 626,
+    "source_lines": 15123
   },
   "tier_budgets": {
     "public_api": {
       "files": 19,
-      "functions": 189,
-      "collected": 295,
-      "lines": 6143
+      "functions": 188,
+      "collected": 294,
+      "lines": 6127
     },
     "contracts": {
       "files": 19,
-      "functions": 173,
-      "collected": 264,
-      "lines": 5853
+      "functions": 172,
+      "collected": 263,
+      "lines": 5830
     },
     "performance_contracts": {
       "files": 2,
@@ -225,7 +225,7 @@
     },
     {
       "file": "tests/public_api/test_fits.py",
-      "feature": "Fits: single, joint and lowered-study fits through optsolve and constrained_optsolve with every public optimizer, bounds, the result contract"
+      "feature": "Fits: single, joint and lowered-study fits through optsolve with every public optimizer, bounds, the result contract"
     },
     {
       "file": "tests/public_api/test_optimizer_stops.py",
@@ -325,7 +325,7 @@
     },
     {
       "file": "tests/contracts/test_structural_fitting.py",
-      "feature": "Structural fitting: analytical optima and KKT points, inner solves meeting the outer stationarity test, a rejected trial costing no residual evaluation, jit, vmap and dtype safety of value_and_jacfwd, tiled forward Jacobians and one solve loop per forward Jacobian, byte-stable KL bases, stop rules relative to the cost scale"
+      "feature": "Structural fitting: analytical optima, a rejected trial costing no residual evaluation, jit, vmap and dtype safety of value_and_jacfwd, tiled forward Jacobians and one solve loop per forward Jacobian, byte-stable KL bases, stop rules relative to the cost scale"
     },
     {
       "file": "tests/contracts/test_study_fingerprint.py",

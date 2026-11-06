@@ -1,4 +1,4 @@
-"""Structural fitting: optimizers on residual problems, KKT points, forward Jacobians, and the
+"""Structural fitting: optimizers on residual problems, forward Jacobians, and the
 trust-region loops' stop rules relative to the cost scale."""
 
 from __future__ import annotations
@@ -155,29 +155,6 @@ def test_newton_gauss_newton_records_the_final_residual_and_jacobian():
     assert 0.5 * float(jnp.sum(jnp.asarray(fit.info["final_residual"]) ** 2)) == fit.cost
     true = inf.optsolve(problem, inf.NewtonTrustRegion(hessian="true"), diagnostics=False)
     assert "final_residual" not in true.info and "final_jacobian" not in true.info
-
-
-@pytest.fixture(scope="module")
-def constrained():
-    """min |x - (1, 1)|^2 subject to x0 <= 0.5, with rows weighted by 1e3."""
-    target = jnp.asarray([1.0, 1.0])
-    problem = inf.LeastSquaresProblem.from_residual(np.zeros(2), lambda x: 1.0e3 * (x - target))
-    constraints = inf.InequalityConstraints(g=lambda x: jnp.atleast_1d(x[0] - 0.5), n_constraints=1)
-    return inf.constrained_optsolve(
-        problem, inf.LevenbergMarquardt(max_steps=60), constraints=constraints, outer_max=10
-    )
-
-
-def test_constrained_optsolve_meets_the_kkt_point_and_the_outer_stationarity_test(constrained):
-    """The fit ends at x = (0.5, 1), multiplier 5e5, its inner solves passing the relative
-    outer stationarity test after one penalty increase."""
-    assert constrained.converged
-    # measured 7.8e-7 on the point and 1.5e-6 relative on the multiplier, CPU VM 2026-10-22,
-    # pytest tests/contracts/test_structural_fitting.py
-    np.testing.assert_allclose(constrained.result.params, [0.5, 1.0], atol=1e-5)
-    np.testing.assert_allclose(constrained.multipliers, [5.0e5], rtol=1e-5)
-    assert constrained.rho == 1e7
-    assert constrained.kkt["stationarity"] <= 1e-6 * constrained.kkt["stationarity_scale"]
 
 
 def test_a_rejected_trial_predicate_costs_no_residual_evaluation():

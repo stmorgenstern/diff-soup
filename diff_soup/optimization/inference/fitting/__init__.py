@@ -8,11 +8,6 @@ implementation modules.
 from diff_soup.optimization.inference.fitting._optsolve import optsolve
 from diff_soup.optimization.inference.fitting.bounds import Bounds
 from diff_soup.optimization.inference.fitting.callbacks import Callback, LogCallback
-from diff_soup.optimization.inference.fitting.constrained import (
-    ConstrainedOptResult,
-    InequalityConstraints,
-    constrained_optsolve,
-)
 from diff_soup.optimization.inference.fitting.diagnostics import (
     IdentifiabilityWarning,
     OptDiagnostics,
@@ -69,11 +64,8 @@ __all__ = [
     "Regularizer",
     "Tikhonov",
     "NoReg",
-    # Composer, constrained variant, results, diagnostics
+    # Composer, results, diagnostics
     "optsolve",
-    "constrained_optsolve",
-    "InequalityConstraints",
-    "ConstrainedOptResult",
     "OptResult",
     "OptInfo",
     "TrustRegionReport",
