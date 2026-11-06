@@ -11,6 +11,7 @@ numbers of the fit are leaves, everything else is static.
 from __future__ import annotations
 
 import enum
+import operator
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -20,45 +21,73 @@ import equinox as eqx
 import numpy as np
 
 
-class TerminationStatus(enum.Enum):
+class TerminationStatus(int, enum.Enum):
     """How an optimizer run ended, at `result.status`.
 
-    `status.converged` is `True` for `SUCCESS`, `GRAD_TOL`, `STEP_TOL`, `COST_TOL`,
-    `DERIVATIVE_ACCURACY` and `KKT_TOL`.
+    Each status is also its integer code, `int(status)`, so a compiled solver carries it under
+    `jit` as an integer array ([SolveRecord][diff_soup.optimization.SolveRecord]`.status`) and
+    compares it with a status directly. `TerminationStatus(code)` reads a code back, and
+    `TerminationStatus(value)` a string value. `status.converged` is `True` for `SUCCESS`,
+    `GRAD_TOL`, `STEP_TOL`, `COST_TOL`, `DERIVATIVE_ACCURACY` and `KKT_TOL`.
 
     Attributes:
+        KKT_TOL: A constrained solver's scaled optimality error fell below its tolerance.
+        MAX_STEPS: The step or evaluation budget ran out.
+        INFEASIBLE: A constrained solver's restoration phase converged, or the augmented
+            Lagrangian's penalty reached its cap, at a point that still violates the
+            constraints.
+        RESTORATION_FAILED: A constrained solver's line search failed, and its restoration
+            phase, where there is one, did not recover.
+        SOLVER_FAILED: A time-stepping solve at the solution did not reach the end of its
+            span, or a constrained solver met consecutive failed trial evaluations (a NaN or
+            an unfinished DAE solve).
+        DIVERGED: `BFGS` met an objective or gradient that is not finite, or a constrained
+            solver's iterate or multiplier left the finite range.
         SUCCESS: Convergence without a named test, which no built-in solver reports.
         GRAD_TOL: The gradient norm fell below its tolerance.
         STEP_TOL: The step fell below its tolerance.
         COST_TOL: The change in the objective fell below its tolerance.
         ACCEPTED_STEPS: `TrustRegion` reached its `target_accepted_steps`.
-        MAX_STEPS: The step or evaluation budget ran out.
-        SOLVER_FAILED: A time-stepping solve at the solution did not reach the end of its span.
-        DIVERGED: `BFGS` met an objective or gradient that is not finite.
         STOPPED: A callback raised `StopFit`.
         UNKNOWN: The status before any run.
         STALLED: The fit stopped without converging: `TrustRegion` after failed trials in a row or while its model still predicted a decrease, and `NewtonTrustRegion` or `LevenbergMarquardt` when a step or cost test passed on a step the trust radius or damping held short.
         DERIVATIVE_ACCURACY: `TrustRegion` converged to the accuracy of its derivatives, which a tighter solver `rtol` improves.
-        KKT_TOL: A constrained solver's scaled optimality error fell below its tolerance.
-        INFEASIBLE: A constrained solver's restoration phase ended at a point that still violates the constraints.
-        RESTORATION_FAILED: A constrained solver's restoration phase ran out of its budget.
     """
 
-    SUCCESS = "success"
-    GRAD_TOL = "gradient_tolerance"
-    STEP_TOL = "step_tolerance"
-    COST_TOL = "cost_tolerance"
-    ACCEPTED_STEPS = "accepted_steps_reached"
-    MAX_STEPS = "max_steps_reached"
-    SOLVER_FAILED = "pde_solver_failed"
-    DIVERGED = "optimizer_diverged"
-    STOPPED = "stopped_by_callback"
-    UNKNOWN = "unknown"
-    STALLED = "stalled"
-    DERIVATIVE_ACCURACY = "derivative_accuracy"
-    KKT_TOL = "kkt_tolerance"
-    INFEASIBLE = "infeasible"
-    RESTORATION_FAILED = "restoration_failed"
+    def __new__(cls, code: int, value: str) -> TerminationStatus:
+        """A status that is the integer `code` and has the string `value`."""
+        member = int.__new__(cls, code)
+        member._value_ = value
+        return member
+
+    KKT_TOL = 0, "kkt_tolerance"
+    MAX_STEPS = 1, "max_steps_reached"
+    INFEASIBLE = 2, "infeasible"
+    RESTORATION_FAILED = 3, "restoration_failed"
+    SOLVER_FAILED = 4, "pde_solver_failed"
+    DIVERGED = 5, "optimizer_diverged"
+    SUCCESS = 6, "success"
+    GRAD_TOL = 7, "gradient_tolerance"
+    STEP_TOL = 8, "step_tolerance"
+    COST_TOL = 9, "cost_tolerance"
+    ACCEPTED_STEPS = 10, "accepted_steps_reached"
+    STOPPED = 11, "stopped_by_callback"
+    UNKNOWN = 12, "unknown"
+    STALLED = 13, "stalled"
+    DERIVATIVE_ACCURACY = 14, "derivative_accuracy"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Optional[TerminationStatus]:
+        """The status whose integer code is `value`, as a compiled run's record carries it."""
+        try:
+            code = operator.index(value)
+        except TypeError:
+            return None
+        return next((member for member in cls if int(member) == code), None)
+
+    def __repr__(self) -> str:
+        """`<TerminationStatus.NAME: 'value'>`, as a plain enum shows its members."""
+        return f"<{type(self).__name__}.{self.name}: {self.value!r}>"
 
     @property
     def converged(self) -> bool:

@@ -27,6 +27,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from diff_soup._errors import ConfigurationError
+from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.solvers import _hessian, _projected_newton
 from diff_soup.optimization.solvers._barrier import bounds_from
 from diff_soup.optimization.solvers._closures import (
@@ -45,7 +46,6 @@ from diff_soup.optimization.solvers._protocol import (
     CompiledSolver,
     SolveRecord,
     SolverState,
-    SolveStatus,
 )
 from diff_soup.optimization.solvers.interior_point import DIVERGED_X, _int, _raw, _select
 
@@ -206,7 +206,9 @@ class AugmentedLagrangian(CompiledSolver):
             x=x,
             step=_int(0),
             done=~valid,
-            status=_int(jnp.where(valid, SolveStatus.MAX_STEPS, SolveStatus.SOLVER_FAILED)),
+            status=_int(
+                jnp.where(valid, TerminationStatus.MAX_STEPS, TerminationStatus.SOLVER_FAILED)
+            ),
             lam_e=lam_e,
             lam_i=lam_i,
             estimate_e=lam_e,
@@ -334,7 +336,9 @@ class AugmentedLagrangian(CompiledSolver):
         stuck = ~update & (rho >= RHO_MAX)
         omega_floor = self._omega_floor
         exhausted = end.consecutive_failed >= self.max_failed_evaluations
-        failure = jnp.where(exhausted, SolveStatus.SOLVER_FAILED, SolveStatus.INFEASIBLE)
+        failure = jnp.where(
+            exhausted, TerminationStatus.SOLVER_FAILED, TerminationStatus.INFEASIBLE
+        )
         ended = exhausted | stuck
         return eqx.tree_at(
             lambda s: (
@@ -391,8 +395,8 @@ class AugmentedLagrangian(CompiledSolver):
             state.status,
             jnp.where(
                 converged,
-                SolveStatus.KKT_TOL,
-                jnp.where(diverged, SolveStatus.DIVERGED, SolveStatus.MAX_STEPS),
+                TerminationStatus.KKT_TOL,
+                jnp.where(diverged, TerminationStatus.DIVERGED, TerminationStatus.MAX_STEPS),
             ),
         )
         return state.done | converged | diverged | over, _int(status)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import abc
-import enum
 import time
 from typing import Any, ClassVar
 
@@ -12,26 +11,7 @@ import jax
 import numpy as np
 
 from diff_soup.optimization._abc import OptSolver
-
-
-class SolveStatus(enum.IntEnum):
-    """How a compiled run ended, as the integer `SolveRecord.status` carries under `jit`.
-
-    Attributes:
-        KKT_TOL: The scaled optimality error fell below the tolerance.
-        MAX_STEPS: The step budget ran out.
-        INFEASIBLE: The restoration phase converged, or the augmented Lagrangian's penalty reached its cap, at a point that still violates the constraints.
-        RESTORATION_FAILED: The line search failed, and the restoration phase, where there is one, did not recover.
-        SOLVER_FAILED: Consecutive trial evaluations failed, a NaN or a DAE solve that did not finish.
-        DIVERGED: An iterate or a multiplier left the finite range.
-    """
-
-    KKT_TOL = 0
-    MAX_STEPS = 1
-    INFEASIBLE = 2
-    RESTORATION_FAILED = 3
-    SOLVER_FAILED = 4
-    DIVERGED = 5
+from diff_soup.optimization.inference.fitting.result import TerminationStatus
 
 
 class SolverState(eqx.Module):
@@ -41,7 +21,7 @@ class SolverState(eqx.Module):
         x: The current point, `(n,)`.
         step: The number of steps taken.
         done: Whether this problem's run has ended.
-        status: The [SolveStatus][diff_soup.optimization.SolveStatus] as an integer array.
+        status: The [TerminationStatus][diff_soup.optimization.TerminationStatus] code as an integer array.
     """
 
     x: Any
@@ -63,7 +43,7 @@ class SolveRecord(eqx.Module):
         failed_evaluations: The number of trial evaluations that failed.
         kkt_error: The scaled optimality error at the solution.
         constraint_violation: The largest constraint violation at the solution.
-        status: The [SolveStatus][diff_soup.optimization.SolveStatus] as an integer array.
+        status: The [TerminationStatus][diff_soup.optimization.TerminationStatus] code as an integer array.
         degenerate: Whether a multiplier and its slack are both zero or the active rows are dependent, which makes the derivative the barrier solution's at `mu`.
     """
 
@@ -102,7 +82,7 @@ class CompiledSolver(OptSolver):
 
     @abc.abstractmethod
     def terminate(self, problem: Any, state: SolverState, args: Any) -> tuple[Any, Any]:
-        """Whether the loop ends at `state`, and with which `SolveStatus`, both scalar arrays."""
+        """Whether the loop ends at `state`, and with which `TerminationStatus` code, both scalar arrays."""
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -149,7 +129,7 @@ class CompiledSolver(OptSolver):
         x, record = eqx.filter_jit(self.run)(problem, x0, args)
         x = jax.block_until_ready(x)
         wall = time.perf_counter() - start
-        status = _termination_status(int(record.status))
+        status = TerminationStatus(int(record.status))
         cost = float(_problem_value(problem)(x, args))
         info = StepInfo(
             step=int(record.steps),
@@ -169,7 +149,7 @@ class CompiledSolver(OptSolver):
             cost=cost,
             grad_norm=float(record.kkt_error),
             status=status,
-            message=SolveStatus(int(record.status)).name.lower(),
+            message=status.name.lower(),
             n_steps=int(record.steps),
             max_steps=int(getattr(self, "max_steps", 0)),
             n_accepted=int(record.steps),
@@ -179,13 +159,6 @@ class CompiledSolver(OptSolver):
         for callback in callbacks:
             callback.on_end(result)
         return result
-
-
-def _termination_status(code: int) -> Any:
-    """The `TerminationStatus` of a `SolveStatus` code, by name."""
-    from diff_soup.optimization.inference.fitting.result import TerminationStatus
-
-    return TerminationStatus[SolveStatus(code).name]
 
 
 def _problem_value(problem: Any) -> Any:

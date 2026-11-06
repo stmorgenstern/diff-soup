@@ -33,7 +33,7 @@ def test_solve_returns_the_solution_and_its_record(solver):
     exact = np.asarray(TOY.solution(TOY.problem.args)[0])
     record = result.info["record"]
     assert np.max(np.abs(result.params - exact)) <= _SOLUTION and (
-        int(record.status) == ds.optimization.SolveStatus.KKT_TOL
+        int(record.status) == ds.optimization.TerminationStatus.KKT_TOL
     )
 
 

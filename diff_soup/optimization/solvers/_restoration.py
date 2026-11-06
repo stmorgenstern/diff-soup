@@ -22,10 +22,10 @@ import equinox as eqx
 import jax.numpy as jnp
 from jax import lax
 
+from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.solvers import _filter
 from diff_soup.optimization.solvers._barrier import Bounds, barrier_value
 from diff_soup.optimization.solvers._closures import Closures
-from diff_soup.optimization.solvers._protocol import SolveStatus
 
 RHO = 1000.0
 KAPPA_RESTO = 0.9
@@ -268,7 +268,7 @@ def restore(
     end, ok = lax.while_loop(cond, body, (start, jnp.asarray(False)))
     xr, sr, pr, qr = _split(end.x, n, n_ineq, m)
     theta_end = jnp.sum(jnp.abs(end.evaluation.equality + pr - qr))
-    converged = end.status == SolveStatus.KKT_TOL
+    converged = end.status == TerminationStatus.KKT_TOL
     return Outcome(
         ok=run & ok,
         infeasible=run & ~ok & converged & (theta_end > inner.tol),

@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from diff_soup._errors import ConfigurationError
+from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.kkt import DenseKKT
 from diff_soup.optimization.solvers import _filter, _hessian
 from diff_soup.optimization.solvers._barrier import bounds_from
@@ -30,7 +31,6 @@ from diff_soup.optimization.solvers._protocol import (
     CompiledSolver,
     SolveRecord,
     SolverState,
-    SolveStatus,
 )
 from diff_soup.optimization.solvers.interior_point import InteriorPoint, _int, _raw, _select
 
@@ -200,7 +200,9 @@ class SQP(CompiledSolver):
             x=x,
             step=_int(0),
             done=~valid,
-            status=_int(jnp.where(valid, SolveStatus.MAX_STEPS, SolveStatus.SOLVER_FAILED)),
+            status=_int(
+                jnp.where(valid, TerminationStatus.MAX_STEPS, TerminationStatus.SOLVER_FAILED)
+            ),
             lam_e=lam_e,
             lam_i=lam_i,
             z_lower=z_lower,
@@ -277,7 +279,7 @@ class SQP(CompiledSolver):
         end = lax.while_loop(
             lambda s: ~s.done, lambda s: inner._advance(qp, qp_bounds, s, qp_args), start
         )
-        ok = end.status == SolveStatus.KKT_TOL
+        ok = end.status == TerminationStatus.KKT_TOL
         return end.x, end.lam_e, end.lam_i, end.z_lower, end.z_upper, end.step, ok
 
     def _iterate(self, closures, bounds, state: SQPState, args, bounded=True) -> SQPState:
@@ -393,7 +395,9 @@ class SQP(CompiledSolver):
         consecutive = jnp.where(accepted & ~ev_new.finite, consecutive + 1, consecutive)
         exhausted = consecutive >= self.max_failed_evaluations
         failed_now = ~moved & (~accepted | exhausted)
-        failure = jnp.where(exhausted, SolveStatus.SOLVER_FAILED, SolveStatus.RESTORATION_FAILED)
+        failure = jnp.where(
+            exhausted, TerminationStatus.SOLVER_FAILED, TerminationStatus.RESTORATION_FAILED
+        )
         del n_eq, qp_ok
         return eqx.tree_at(
             lambda t: (

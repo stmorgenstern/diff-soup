@@ -20,6 +20,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.problem.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - Under `jax.default_device`, `linear="auto"` and consistent initialization choose their backend by that device's platform, and native factors are kept per device, so one process can run lanes on a GPU and on CPUs. `checkpointed_map(device_groups=)` accepts groups of another platform than the default backend's.
 - `KLU.native_stats` reports `live_lu_entries`.
+- `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.
 
 ### Bugfixes
 

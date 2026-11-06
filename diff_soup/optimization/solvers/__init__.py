@@ -14,7 +14,6 @@ from diff_soup.optimization.solvers._protocol import (
     CompiledSolver,
     SolveRecord,
     SolverState,
-    SolveStatus,
 )
 from diff_soup.optimization.solvers.augmented_lagrangian import AugmentedLagrangian
 from diff_soup.optimization.solvers.bfgs import BFGS
@@ -42,7 +41,6 @@ __all__ = [
     "OptSolver",
     "SQP",
     "SolveRecord",
-    "SolveStatus",
     "SolverState",
     "normalize_tangent_tile",
     "value_and_jacfwd",
