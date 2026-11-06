@@ -20,8 +20,10 @@ immediately rather than silently falling back.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import threading
+import weakref
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar, Optional
 
@@ -774,8 +776,24 @@ def _missing_hook_message(cls: type, hook: str) -> str:
 # --------------------------------------------------------------------------- #
 # The analyze / factor / solve API, with refactor and solve_checked
 # --------------------------------------------------------------------------- #
-_ANALYSES: dict[tuple, Analysis] = {}
+#: Every live analysis by its content, so equal arguments return the one a caller holds.
+_ANALYSES: weakref.WeakValueDictionary[tuple, Analysis] = weakref.WeakValueDictionary()
+#: The most recent analyses, kept alive for callers that analyze again without holding one.
+_RECENT: collections.OrderedDict[tuple, Analysis] = collections.OrderedDict()
+#: The capacity of ``_RECENT`` (ours): it bounds the native analyses and patterns no caller
+#: holds, while a study's systems (its iteration, mass, sensitivity and initialization
+#: patterns per experiment) stay analysed once.
+_RECENT_ANALYSES = 64
 _ANALYSES_LOCK = threading.Lock()
+
+
+def _remember(key: tuple, analysis: Analysis) -> Analysis:
+    """Make ``analysis`` the most recent of the memo; call it holding the lock."""
+    _RECENT[key] = analysis
+    _RECENT.move_to_end(key)
+    while len(_RECENT) > _RECENT_ANALYSES:
+        _RECENT.popitem(last=False)
+    return analysis
 
 
 def _clear_analyses() -> None:
@@ -790,6 +808,7 @@ def _clear_analyses() -> None:
     """
     with _ANALYSES_LOCK:
         _ANALYSES.clear()
+        _RECENT.clear()
     _compiled.cache_clear()
 
 
@@ -818,8 +837,9 @@ def analyze(
 ) -> Analysis:
     """Analyze a sparsity pattern for one backend, before any values are factored.
 
-    Equal arguments return the same `Analysis`, so the work runs once per pattern. A request
-    the backend cannot serve raises here, before anything is traced.
+    Equal arguments return the same `Analysis` while it is held or among the 64 most recent, so
+    the work runs once per pattern. A request the backend cannot serve raises here, before
+    anything is traced.
 
     Args:
         topology: The `SparseTopology` of the matrix.
@@ -908,8 +928,8 @@ def analyze(
     key = (topology, backend, frozen, layout, precision, symmetric, spd)
     with _ANALYSES_LOCK:
         memoised = _ANALYSES.get(key)
-    if memoised is not None:
-        return memoised
+        if memoised is not None:
+            return _remember(key, memoised)
     _check_dirichlet_diagonal(topology)
     built = Analysis(
         topology,
@@ -922,7 +942,7 @@ def analyze(
         backend_analysis=backend._analyze(topology, frozen, layout, precision),
     )
     with _ANALYSES_LOCK:
-        return _ANALYSES.setdefault(key, built)
+        return _remember(key, _ANALYSES.setdefault(key, built))
 
 
 def _check_dirichlet_diagonal(topology: SparseTopology) -> None:
