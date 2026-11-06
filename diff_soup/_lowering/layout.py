@@ -24,7 +24,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import jax
-import jax.numpy as jnp
 
 from diff_soup.problem._ir.equation_set import EquationSet
 
@@ -66,7 +65,7 @@ class _BlockLayout:
         """Split the flat state ``u`` into a ``{(owner, var): array}`` view.
 
         Component (and single-field family) entries are contiguous slices.
-        A multi-field family entry gathers the member-major stride: member
+        A multi-field family entry slices the member-major stride: member
         ``m``'s field block starts at ``off + m * member_state`` (``off``
         already includes the field's ``var_local_off``).
         """
@@ -77,12 +76,13 @@ class _BlockLayout:
                 # Component (or single-field family) entry: contiguous slice.
                 out[key] = u[off : off + size].reshape(shape)
             else:
-                # Multi-field family entry: gather the member-major stride.
-                member_state, _var_local_off, member_field_size = stride
+                # Multi-field family entry: the field's band of every member's slab.
+                member_state, var_local_off, member_field_size = stride
                 count = shape[0]
-                base = off + jnp.arange(count) * member_state  # (count,)
-                idx = base[:, None] + jnp.arange(member_field_size)[None, :]
-                out[key] = u[idx.reshape(-1)].reshape(shape)
+                start = off - var_local_off
+                slabs = u[start : start + count * member_state].reshape(count, member_state)
+                band = slice(var_local_off, var_local_off + member_field_size)
+                out[key] = slabs[:, band].reshape(shape)
         return out
 
 
@@ -113,7 +113,7 @@ def _layout(eqset: EquationSet) -> _BlockLayout:
             shape = (fam.count, *var.shape)
             entries.append((key, fam_base + var_local_off, size, shape))
             if multi_field:
-                # Member-major interleave needs a strided gather in unpack.
+                # Member-major interleave needs a strided slice in unpack.
                 member_strides[key] = (member_state_size, var_local_off, var.size)
             var_local_off += var.size
         off += fam.count * member_state_size
