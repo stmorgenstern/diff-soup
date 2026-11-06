@@ -1,5 +1,6 @@
 """Recipe API: family recipes, per-member parameters, member boundary flux and its clock,
-surface projection, declared stencil radius, scalar member fields and family graphs."""
+surface projection, declared stencil radius, scalar member fields, member rows as wide as their
+member, and family graphs."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.domains import rectangle_mesh
+from diff_soup.utils import build_sparse_jvp_groups
 
 # measured 0.0 between the sparse and dense member Jacobians, CPU VM 2026-10-22,
 # pytest tests/public_api/test_recipe_families.py::test_a_declared_stencil_radius_widens_the_member_tile_to_the_composed_stencil;
@@ -225,6 +227,62 @@ def test_a_scalar_algebraic_member_field_solves_and_projects_to_its_closed_form(
     # measured 3.6e-9 relative at rtol 1e-9, CPU VM 2026-10-22,
     # pytest tests/public_api/test_recipe_families.py::test_a_scalar_algebraic_member_field_solves_and_projects_to_its_closed_form
     np.testing.assert_allclose(got, expected, rtol=1e-7)
+
+
+def _wide_member_rows(sites):
+    """Six members of ``sites`` cells; each closes a scalar ``j`` on the mean of ``c^2`` over
+    its own cells, a row as wide as the member, among diffusion rows three cells wide."""
+    spec = _cell(f"wide_member_rows_{sites}", cells=1)
+    spec.equation(writes="m", reads=("m",))(lambda q: -q.m)
+    members = spec.family(
+        "particles",
+        count=6,
+        domain=_GRID(sites, 0.0, 1.0, method="fvm"),
+        params={"rate": np.linspace(1.0, 2.0, 6)},
+        scale={"c": 1.0, "j": 1.0},
+        residual_scale={"c": 1.0, "j": 1.0},
+    )
+    members.field_decl("c", mass="differential")
+    members.field_decl("j", mass="algebraic", shape=(1,))
+    members.equation(writes="c", reads=("c", "j"))(
+        lambda q, member: 0.05 * q.ops.laplacian(q.c) - member.rate * q.c * q.j
+    )
+    members.equation(writes="j", reads=("c", "j"))(lambda q, member: q.j - jnp.mean(q.c**2))
+    return spec.build()
+
+
+def test_member_rows_reading_every_site_are_recovered_by_pullback_not_by_a_color_per_site():
+    """A member row reading all of its member's cells makes the pattern need one color per cell
+    (9 at 8 cells, 17 at 16), yet the solver holds the six such rows, one per member, out of its
+    coloring for a pullback and colors the rest with 4 colors at either size."""
+    counts = []
+    for sites in (8, 16):
+        problem = _wide_member_rows(sites)
+        view = ds.solver_view(problem)
+        rows, cols = view.full_topology.rows, view.full_topology.cols
+        colored = ~np.isin(rows, view.plan.held_out_rows)
+        colors = build_sparse_jvp_groups(rows[colored], cols[colored], view.n)[0]
+        counts.append(
+            (ds.topology_report(problem).color_count, view.plan.held_out_rows.size, len(colors))
+        )
+    assert counts == [(9, 6, 4), (17, 6, 4)]
+
+
+def test_the_iteration_matrix_of_wide_member_rows_is_the_dense_jacobian():
+    """The iteration matrix ``F_y + cj F_ydot`` the solver assembles for wide member rows, from
+    its colors and its pullback, equals bitwise the one ``jax.jacfwd`` gives at a random
+    state."""
+    problem = _wide_member_rows(8)
+    view, theta = ds.solver_view(problem), ds.default_theta(problem)
+    state, rate = jax.random.uniform(jax.random.PRNGKey(3), (2, view.n), minval=0.5, maxval=1.5)
+    t, cj = jnp.asarray(0.2), jnp.asarray(7.0)
+    values = view.iteration_matrix_values(t, state, rate, theta, cj)
+    assembled = np.zeros((view.n, view.n))
+    np.add.at(assembled, (view.full_topology.rows, view.full_topology.cols), np.asarray(values))
+    dense = jax.jacfwd(lambda y: view.residual(t, y, rate, theta))(state) + cj * jax.jacfwd(
+        lambda ydot: view.residual(t, state, ydot, theta)
+    )(rate)
+    np.testing.assert_array_equal(assembled, dense)
 
 
 def _graph_recipe(name="family_graph", **graph):
