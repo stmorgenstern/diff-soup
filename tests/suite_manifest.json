@@ -1,9 +1,9 @@
 {
   "budgets": {
-    "test_files": 44,
-    "test_functions": 408,
-    "collected_tests": 617,
-    "source_lines": 14815
+    "test_files": 45,
+    "test_functions": 411,
+    "collected_tests": 620,
+    "source_lines": 14884
   },
   "tier_budgets": {
     "public_api": {
@@ -13,10 +13,10 @@
       "lines": 5988
     },
     "contracts": {
-      "files": 18,
-      "functions": 167,
-      "collected": 258,
-      "lines": 5690
+      "files": 19,
+      "functions": 170,
+      "collected": 261,
+      "lines": 5759
     },
     "performance_contracts": {
       "files": 2,
@@ -70,7 +70,8 @@
     "tests/contracts/test_linear_structured.py": "diff_soup.problem._ir._low_rank",
     "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
-    "tests/contracts/test_lowered_study.py": "diff_soup.inference.hierarchical"
+    "tests/contracts/test_lowered_study.py": "diff_soup.inference.hierarchical",
+    "tests/contracts/test_lane_select.py": "diff_soup.utils.lanes"
   },
   "support_data": [
     "tests/support/battery_jacobian.json"
@@ -115,6 +116,7 @@
     "tests/contracts/test_linear_cudss.py",
     "tests/contracts/test_linear_ad.py",
     "tests/contracts/test_linear_complex.py",
+    "tests/contracts/test_lane_select.py",
     "tests/contracts/test_second_order_ad.py",
     "tests/contracts/test_second_order_ad_precision.py",
     "tests/contracts/test_architecture.py",
@@ -161,6 +163,7 @@
     "tests/contracts/test_linear_cudss.py",
     "tests/contracts/test_linear_ad.py",
     "tests/contracts/test_linear_complex.py",
+    "tests/contracts/test_lane_select.py",
     "tests/contracts/test_second_order_ad.py",
     "tests/contracts/test_second_order_ad_precision.py",
     "tests/contracts/test_architecture.py",
@@ -293,6 +296,10 @@
     {
       "file": "tests/contracts/test_linear_complex.py",
       "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a battery impedance operator, the plain transpose, real factors with complex right-hand sides, value lanes, empty factors refactored in a loop, jvp and vjp against central differences, and the bytes a KLU factor holds"
+    },
+    {
+      "file": "tests/contracts/test_lane_select.py",
+      "feature": "Lane selects: the taken operand unbatched, the per-lane choice under vmap and nested vmap, its tangent and transpose"
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",
