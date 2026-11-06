@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from diff_soup._errors import ConfigurationError
 
 MODES = ("auto", "bfgs", "exact", "gauss-newton")
+#: Powell's damping threshold (Nocedal and Wright, Procedure 18.2).
 _DAMPING = 0.2
 
 
@@ -104,7 +105,6 @@ def update(
     """
     if not uses_quasi_newton(mode):
         return matrix, updates
-    tiny = jnp.finfo(matrix.dtype).tiny
     secant = gradient_change
     if uses_gauss_newton(mode, closures):
         secant = secant - evaluation.gauss_newton @ step
@@ -113,6 +113,16 @@ def update(
         initial = (secant @ secant) / jnp.where(curvature > 0.0, curvature, 1.0)
         first = (updates == 0) & (curvature > 0.0)
         matrix = jnp.where(first, initial * jnp.eye(matrix.shape[0], dtype=matrix.dtype), matrix)
+    return damped_update(matrix, updates, step, secant)
+
+
+def damped_update(matrix, updates, step, secant):
+    """Powell's damped BFGS update of `matrix` on the pair `(step, secant)`, from where it stands.
+
+    Returns:
+        `(matrix, updates)`; a step of zeros or a secant that is not finite leaves both.
+    """
+    tiny = jnp.finfo(matrix.dtype).tiny
     matrix_step = matrix @ step
     quadratic = step @ matrix_step
     curvature = step @ secant

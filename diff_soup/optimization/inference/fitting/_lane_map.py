@@ -103,29 +103,51 @@ def lane_map(
             out_tree.append(tree)
         return out_leaves
 
-    outs = _lane_map_p.bind(*leaves, kernel=_Kernel(flat_kernel), axes=tuple(axes))
+    outs = _lane_map_p.bind(*leaves, kernel=_Kernel(flat_kernel), axes=tuple(axes), reverse=False)
     return jax.tree_util.tree_unflatten(out_tree[0], outs)
+
+
+#: Ours: the abstract evaluations a kernel keeps. One kernel meets a handful of shapes: its
+#: lanes, an enclosing batch folded into them, the directional derivative's directions.
+_ABSTRACT_CAPACITY = 16
 
 
 class _Kernel:
     """A lane kernel carried as a primitive parameter (hashed by identity).
 
-    ``reverse`` marks the primal map of a reverse-mode derivative's forward pass. Its
-    own forward derivative (second order through a reverse sweep) goes through the
-    kernel's linearization, as JAX differentiates a ``custom_vjp`` inside a ``vjp``,
-    so a kernel that solves under ``CheckpointAdjoint`` is never pushed forward
-    directly.
+    It keeps its own abstract evaluations, so binding the map, its directional derivative and
+    its transpose on one set of shapes traces the kernel once, and its linearization, so
+    differentiating a reverse derivative's forward pass builds one.
     """
 
-    __slots__ = ("fn", "reverse", "__weakref__")
+    __slots__ = ("fn", "_abstract", "_linearized", "__weakref__")
 
-    def __init__(self, fn: Callable, reverse: bool = False):
+    def __init__(self, fn: Callable):
         """Hold ``fn``, the kernel on flat leaves."""
         self.fn = fn
-        self.reverse = reverse
+        self._abstract: dict = {}
+        self._linearized: Optional[_Kernel] = None
 
     def __call__(self, *args):
         return self.fn(*args)
+
+    def abstract(self, avals: Sequence[Any], axes: tuple) -> tuple[list, Any]:
+        """The output shapes and effects of the plain map on ``avals``, traced once per shape."""
+        key = (tuple((a.shape, a.dtype) for a in avals), axes)
+        if key not in self._abstract:
+            shapes = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in avals]
+            traced = jax.make_jaxpr(lambda *a: _map_plain(*a, kernel=self, axes=axes))(*shapes)
+            outs = [jax.core.ShapedArray(o.shape, o.dtype) for o in traced.out_avals]
+            if len(self._abstract) >= _ABSTRACT_CAPACITY:
+                self._abstract.pop(next(iter(self._abstract)))
+            self._abstract[key] = (outs, traced.effects)
+        return self._abstract[key]
+
+    def linearized(self) -> _Kernel:
+        """The kernel's primal through ``jax.vjp`` (see [_through_linearization][]), built once."""
+        if self._linearized is None:
+            self._linearized = _through_linearization(self)
+        return self._linearized
 
 
 def _through_linearization(kernel: _Kernel) -> _Kernel:
@@ -164,8 +186,12 @@ def _is_differentiable(value: Any) -> bool:
     return jnp.issubdtype(jnp.result_type(value), jnp.inexact)
 
 
-def _map_plain(*leaves, kernel, axes):
-    """The lane map itself: ``jax.vmap(kernel, in_axes=axes)`` on flat leaves."""
+def _map_plain(*leaves, kernel, axes, reverse=False):
+    """The lane map itself: ``jax.vmap(kernel, in_axes=axes)`` on flat leaves.
+
+    ``reverse`` marks the primal map of a reverse-mode derivative's forward pass, whose own
+    forward derivative goes through the kernel's linearization; evaluation ignores it.
+    """
     return list(jax.vmap(kernel, in_axes=axes)(*leaves))
 
 
@@ -191,25 +217,16 @@ def _jvp_plain(*leaves, kernel, axes, differentiable):
     return list(out) + list(d_out)
 
 
-def _abstract(fn: Callable) -> Callable:
-    """Abstract evaluation of a plain evaluation: its output shapes and its effects.
+def _map_abstract(*avals, kernel, axes, reverse=False):
+    """Abstract evaluation of the map: the kernel's output shapes and effects, cached on it.
 
-    The plain evaluation is traced on shapes. The effects of the traced
-    kernel become the equation's effects, as the effects of a ``lax.scan``
-    body become the scan's: a kernel with an ordered effect (a host callback
-    that keeps its order) makes the enclosing program thread that effect's
-    token into the lane map's lowering. The linear-solver operations a
-    kernel runs carry no effect: they are ordered by the data they pass on
-    inside the kernel.
+    The effects of the traced kernel become the equation's effects, as the effects of a
+    ``lax.scan`` body become the scan's: a kernel with an ordered effect (a host callback
+    that keeps its order) makes the enclosing program thread that effect's token into the
+    lane map's lowering. The linear-solver operations a kernel runs carry no effect: they
+    are ordered by the data they pass on inside the kernel.
     """
-
-    def rule(*avals, **params):
-        shapes = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in avals]
-        traced = jax.make_jaxpr(lambda *a: fn(*a, **params))(*shapes)
-        avals_out = [jax.core.ShapedArray(o.shape, o.dtype) for o in traced.out_avals]
-        return avals_out, traced.effects
-
-    return rule
+    return kernel.abstract(avals, axes)
 
 
 def _n_primal_outputs(res: Sequence[Any]) -> int:
@@ -287,7 +304,7 @@ def _batch_size(args, dims) -> int:
 _lane_map_p = Primitive("diffsoup_lane_map")
 _lane_map_p.multiple_results = True
 _lane_map_p.def_impl(_map_plain)
-_lane_map_p.def_effectful_abstract_eval(_abstract(_map_plain))
+_lane_map_p.def_effectful_abstract_eval(_map_abstract)
 # ``mlir.lower_fun`` lowers the traced kernel on the tokens of the ordered
 # effects the abstract evaluation declares, if any (``ctx.tokens_in``), and
 # makes the tokens the kernel leaves the map's output tokens
@@ -295,7 +312,7 @@ _lane_map_p.def_effectful_abstract_eval(_abstract(_map_plain))
 mlir.register_lowering(_lane_map_p, mlir.lower_fun(_map_plain, multiple_results=True))
 
 
-def _lane_map_batching(args, dims, *, kernel, axes):
+def _lane_map_batching(args, dims, *, kernel, axes, reverse):
     """Fold the enclosing batch into the lane axis and map once."""
     args = _front(args, dims)
     n = _batch_size(args, dims)
@@ -308,26 +325,26 @@ def _lane_map_batching(args, dims, *, kernel, axes):
         else:
             new_args.append(leaf)
             new_axes.append(None)
-    outs = _lane_map_p.bind(*new_args, kernel=kernel, axes=tuple(new_axes))
+    outs = _lane_map_p.bind(*new_args, kernel=kernel, axes=tuple(new_axes), reverse=reverse)
     return [_unfold_leaf(o, n, lanes) for o in outs], [0] * len(outs)
 
 
-def _lane_map_jvp(primals, tangents, *, kernel, axes):
+def _lane_map_jvp(primals, tangents, *, kernel, axes, reverse):
     """Forward rule: one fused primal-and-tangent evaluation of the lanes.
 
     Arguments with a symbolically zero tangent (data, masks, anything the
     differentiated input does not reach) are held constant, as ``jax.jvp`` of
     the plain map would. The forward pass of a reverse derivative pushes its
-    kernel forward through the kernel's linearization (``_Kernel.reverse``).
+    kernel forward through the kernel's linearization (``reverse``).
     """
     differentiable = tuple(
         bool(_is_differentiable(p)) and type(t) is not ad.Zero for p, t in zip(primals, tangents)
     )
     if not any(differentiable):
-        outs = _lane_map_p.bind(*primals, kernel=kernel, axes=axes)
+        outs = _lane_map_p.bind(*primals, kernel=kernel, axes=axes, reverse=reverse)
         return outs, [_zero_tangent(o) for o in outs]
     directions = [t[None] for t, d in zip(tangents, differentiable) if d]
-    pushed = _through_linearization(kernel) if kernel.reverse else kernel
+    pushed = kernel.linearized() if reverse else kernel
     res = _lane_jvp_p.bind(
         *primals, *directions, kernel=pushed, axes=axes, differentiable=differentiable
     )
@@ -354,16 +371,14 @@ def _jvp_abstract(*avals, kernel, axes, differentiable):
     derivative is only ever transposed, as under ``jax.grad``.
     """
     n = len(axes)
-    shapes = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a in avals[:n]]
-    traced = jax.make_jaxpr(lambda *a: _map_plain(*a, kernel=kernel, axes=axes))(*shapes)
-    outs = [jax.core.ShapedArray(o.shape, o.dtype) for o in traced.out_avals]
+    outs, effects = kernel.abstract(avals[:n], axes)
     directions = int(avals[n].shape[0])
     tangents = [
         jax.core.ShapedArray((directions,) + o.shape, o.dtype)
         for o in outs
         if _is_differentiable(o)
     ]
-    return outs + tangents, traced.effects
+    return outs + tangents, effects
 
 
 _lane_jvp_p = Primitive("diffsoup_lane_map_jvp")
@@ -436,7 +451,7 @@ def _lane_jvp_partial_eval(trace, *tracers, kernel, axes, differentiable):
     known = [t.pval.get_known() for t in tracers]
     if all(k is not None for k in known) or any(k is None for k in known[:n_p]):
         return trace.default_process_primitive(_lane_jvp_p, tracers, params)
-    outs = _lane_map_p.bind(*known[:n_p], kernel=_Kernel(kernel.fn, reverse=True), axes=axes)
+    outs = _lane_map_p.bind(*known[:n_p], kernel=kernel, axes=axes, reverse=True)
     staged = trace.default_process_primitive(_lane_jvp_p, tracers, params)
     return [trace.new_const(o) for o in outs] + list(staged[len(outs) :])
 
@@ -465,7 +480,7 @@ def _lane_jvp_transpose(cts, *args, kernel, axes, differentiable):
     if any(ad.is_undefined_primal(p) for p in primals):
         raise NotImplementedError("lane_map transposes only in its directions.")
     index = [i for i, d in enumerate(differentiable) if d]
-    out_avals = jax.eval_shape(lambda *a: _map_plain(*a, kernel=kernel, axes=axes), *primals)
+    out_avals, _ = kernel.abstract([jax.typeof(p) for p in primals], axes)
     n_out = len(out_avals)
     inexact = [i for i, o in enumerate(out_avals) if _is_differentiable(o)]
     ct_tangents = [ad.instantiate_zeros(ct) for ct in cts[n_out:]]
@@ -489,6 +504,7 @@ def _lane_jvp_transpose(cts, *args, kernel, axes, differentiable):
             *lane_cts,
             kernel=_Kernel(lane_vjp),
             axes=tuple(axes) + (0,) * len(lane_cts),
+            reverse=False,
         )
         return [m if axes[i] == 0 else jnp.sum(m, axis=0) for m, i in zip(mapped, index)]
 

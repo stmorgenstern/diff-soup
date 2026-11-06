@@ -15,6 +15,7 @@ import jax.numpy as jnp
 
 from diff_soup.optimization.solvers._barrier import Bounds, distances
 
+#: Ipopt's `s_max`: the multiplier size past which the dual and complementarity errors shrink.
 S_MAX = 100.0
 
 
@@ -33,6 +34,22 @@ def dual_residuals(evaluation: Any, lam_e: Any, lam_i: Any, z_lower: Any, z_uppe
         + z_upper
     )
     return r_x, lam_i - v
+
+
+def scaled_error(
+    dual: tuple,
+    primal: tuple,
+    complementarity: tuple,
+    lam_norm: Array,
+    n_lam: int,
+    z_norm: Array,
+    n_z: Array,
+) -> Array:
+    """`E_mu` from its parts: the dual and complementarity residuals scaled by `s_d` and `s_c`."""
+    s_d = jnp.maximum(S_MAX, (lam_norm + z_norm) / jnp.maximum(n_lam + n_z, 1)) / S_MAX
+    s_c = jnp.maximum(S_MAX, z_norm / jnp.maximum(n_z, 1)) / S_MAX
+    error = jnp.maximum(_max_abs(*dual) / s_d, _max_abs(*primal))
+    return jnp.maximum(error, _max_abs(*complementarity) / s_c)
 
 
 def optimality_error(
@@ -56,14 +73,17 @@ def optimality_error(
         s * v - mu,
     )
     n_z = jnp.sum(bounds.has_lower) + jnp.sum(bounds.has_upper) + s.shape[0]
-    n_lam = lam_e.shape[0] + lam_i.shape[0]
     z_norm = jnp.sum(jnp.abs(z_lower)) + jnp.sum(jnp.abs(z_upper)) + jnp.sum(jnp.abs(v))
     lam_norm = jnp.sum(jnp.abs(lam_e)) + jnp.sum(jnp.abs(lam_i))
-    s_d = jnp.maximum(S_MAX, (lam_norm + z_norm) / jnp.maximum(n_lam + n_z, 1)) / S_MAX
-    s_c = jnp.maximum(S_MAX, z_norm / jnp.maximum(n_z, 1)) / S_MAX
-    dual = _max_abs(r_x, r_s) / s_d
-    primal = _max_abs(evaluation.equality, evaluation.inequality + s)
-    return jnp.maximum(jnp.maximum(dual, primal), _max_abs(*complementarity) / s_c)
+    return scaled_error(
+        (r_x, r_s),
+        (evaluation.equality, evaluation.inequality + s),
+        complementarity,
+        lam_norm,
+        lam_e.shape[0] + lam_i.shape[0],
+        z_norm,
+        n_z,
+    )
 
 
 def constraint_violation(evaluation: Any, scales: Any) -> Any:

@@ -207,24 +207,8 @@ def _next_start(control_problem, numeric, solution, record, warm_start):
 
 def _zero_record(numeric: Any) -> SolveRecord:
     """A record of zeros sized for `numeric`, which the warm path starts the first horizon from."""
-    dtype = jnp.result_type(numeric.x0)
-    n, n_eq, n_ineq = numeric.n, numeric.n_equality, numeric.n_inequality
-
-    def zeros(*shape, kind=dtype):
-        return jnp.zeros(shape, kind)
-
-    return SolveRecord(
-        multipliers_equality=zeros(n_eq),
-        multipliers_inequality=zeros(n_ineq),
-        slacks=zeros(n_ineq),
-        bound_multipliers=(zeros(n), zeros(n)),
-        mu=zeros(),
-        steps=zeros(kind=jnp.int32),
-        failed_evaluations=zeros(kind=jnp.int32),
-        kkt_error=zeros(),
-        constraint_violation=zeros(),
-        status=zeros(kind=jnp.int32),
-        degenerate=zeros(kind=bool),
+    return SolveRecord.zeros(
+        numeric.n, numeric.n_equality, numeric.n_inequality, dtype=jnp.result_type(numeric.x0)
     )
 
 
