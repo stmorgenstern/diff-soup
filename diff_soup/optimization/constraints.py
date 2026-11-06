@@ -81,7 +81,7 @@ class Constraints(eqx.Module):
     jacobian: str = eqx.field(static=True, default="auto")
     scales: Any = None
 
-    def lower(self, objective: Callable, unflatten: Callable) -> ConstraintClosures:
+    def lower(self, objective: Callable | None, unflatten: Callable) -> ConstraintClosures:
         """Lower to closures on the flat vector, with Jacobians and Lagrangian Hessians by AD.
 
         Args:
