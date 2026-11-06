@@ -62,6 +62,30 @@ def test_levenberg_marquardt_recovers_the_rate_of_a_single_experiment(single, lm
     np.testing.assert_allclose(tiled.params, whole.params, rtol=0.0, atol=1e-12)
 
 
+def test_an_interior_point_fit_under_a_rate_ceiling_ends_on_the_ceiling(single):
+    """A constraint on an `InferenceProblem`'s values, its limit in `args`, binds at the
+    interior point's solution when the data's rate lies above it."""
+    decay, _ = single
+    ceiling = ds.optimization.Constraints(
+        inequality=lambda values, args: values[decay.rate] - args["rate_max"], n_inequality=1
+    )
+    problem = inf.InferenceProblem(
+        decay_experiment(decay),
+        parameters=decay.rate,
+        constraints=ceiling,
+        args={"rate_max": jnp.asarray(0.3)},
+    )
+    fit = ds.optimization.optsolve(
+        # measured at 1e-12 off the ceiling below, workstation CPU 2026-11-06
+        problem,
+        ds.optimization.InteriorPoint(tol=1e-12),
+        diagnostics=False,
+    )
+    # measured 1e-12 off the ceiling 0.3 (rate at 0.3 to 12 digits), workstation CPU 2026-11-06,
+    # pytest tests/public_api/test_fits.py
+    np.testing.assert_allclose(fit.params, [0.3], rtol=0, atol=1e-10)
+
+
 def test_the_result_reports_point_status_steps_handle_values_and_final_rows(single, lm_fit):
     """An OptResult carries its point, status, steps, handle lookup and the final rows."""
     decay, problem = single

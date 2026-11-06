@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
+from jaxtyping import PyTree
 
 from diff_soup.optimization.problem import AbstractOptimizationProblem
 
@@ -27,7 +28,7 @@ class DesignProblem(AbstractOptimizationProblem, eqx.Module):
 
     constraints: Constraints | None = None
     bounds: Any = None
-    design: Any = None
+    design: PyTree = None
     criterion: Callable | None = eqx.field(static=True, default=None)
 
     def numeric_problem(self, optimizer: OptSolver) -> OptimizationProblem:

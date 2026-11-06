@@ -3,6 +3,7 @@ trust-region loops' stop rules relative to the cost scale."""
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -436,6 +437,19 @@ def test_the_lagrangian_hessian_adds_the_constraint_curvature_to_the_objectives(
     np.testing.assert_allclose(product, expected @ direction, atol=1e-14)
 
 
+def test_an_unconstrained_problems_lagrangian_hessian_is_its_objectives():
+    """Without constraints the Lagrangian Hessian is the objective's Hessian, whatever the
+    multipliers' (empty) values."""
+    problem = ds.optimization.OptimizationProblem.from_value(
+        np.asarray([1.0, 2.0]), lambda x: jnp.sum(x**4), hessian=True
+    )
+    empty = jnp.zeros((0,))
+    np.testing.assert_array_equal(
+        problem.lagrangian_hessian(problem.x0, empty, empty),
+        problem.value_gradient_hessian(problem.x0)[2],
+    )
+
+
 @pytest.mark.parametrize("solver", ["InteriorPoint", "SQP"])
 def test_a_compiled_solver_minimizes_the_regularized_objective(solver):
     """A compiled solver reads the regularization's penalty in the problem's closures: (x - 1)^2
@@ -450,3 +464,42 @@ def test_a_compiled_solver_minimizes_the_regularized_objective(solver):
     # measured 0.0 from 0.5 with InteriorPoint and SQP, workstation 2026-11-06,
     # pytest tests/contracts/test_structural_fitting.py
     np.testing.assert_allclose(result.params, [0.5], atol=1e-12)
+
+
+def test_a_problem_lowered_twice_compiles_once():
+    """Two numeric problems over the same closures have equal static parts, so one compile serves both."""
+
+    def value_and_gradient(x, args):
+        return jnp.sum(x**2), 2.0 * x
+
+    traces = []
+
+    @eqx.filter_jit
+    def value(problem, x):
+        traces.append(None)
+        return problem.value(x)
+
+    for _ in range(2):
+        problem = ds.optimization.OptimizationProblem(
+            x0=np.zeros(3),
+            structure=frozenset({"value_gradient"}),
+            _value_and_gradient=value_and_gradient,
+        )
+        value(problem, jnp.ones(3))
+    assert len(traces) == 1
+
+
+def test_a_control_grid_is_static_and_its_targets_are_traced():
+    """`PiecewiseConstant` holds its grid as Python floats and lowers `u` to the targets `scale * u`."""
+    PiecewiseConstant = ds.optimization.control.PiecewiseConstant
+    controls = PiecewiseConstant(
+        mode="current", intervals=2, duration=np.array([1.0, 3.0]), scale=np.float64(-2.0)
+    )
+    arrays = jax.jit(lambda u: controls.segments(u, ("current", "voltage")))(jnp.array([0.5, 1.0]))
+    np.testing.assert_array_equal(arrays.target, [-1.0, -2.0])
+    np.testing.assert_array_equal(arrays.duration, [1.0, 3.0])
+    assert controls.horizon == 4.0 and hash(controls) == hash(
+        PiecewiseConstant(mode="current", intervals=2, duration=(1.0, 3.0), scale=-2.0)
+    )
+    with pytest.raises(ds.ConfigurationError):
+        _ = controls.interval

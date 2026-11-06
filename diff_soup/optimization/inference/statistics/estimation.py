@@ -12,6 +12,7 @@ import numpy as np
 
 from diff_soup._precision import cast_floating_leaves
 from diff_soup.optimization._binding import Derived, Held
+from diff_soup.optimization._derived import half_sum_of_squares
 from diff_soup.optimization.inference.fitting._layout import resolve_point
 from diff_soup.optimization.inference.fitting.inference_problem import (
     _MemoryCheckedHessian,
@@ -231,7 +232,7 @@ class _StructuredPriorRegularizer:
     def penalty(self, x: Any) -> Any:
         """Return half the squared norm of all prior residual rows."""
         return self.extra.penalty(x) + sum(
-            0.5 * jnp.sum(prior.residual(x[columns]) ** 2) for columns, prior in self.blocks
+            half_sum_of_squares(prior.residual(x[columns])) for columns, prior in self.blocks
         )
 
     def block_rows(self, x: Any) -> tuple:
@@ -413,8 +414,7 @@ class EstimationProblem(AbstractOptimizationProblem):
         x = jnp.asarray(x)
         total = jnp.zeros((), dtype=x.dtype)
         for columns, prior in self._prior_blocks:
-            rows = prior.residual(x[columns])
-            total = total + 0.5 * jnp.sum(rows * rows)
+            total = total + half_sum_of_squares(prior.residual(x[columns]))
         return total
 
     @property
@@ -757,7 +757,7 @@ def _reduced_gauss_newton(problem: EstimationProblem) -> Any:
         if blocks:
             rows = prior_rows(x)
             jacobian = jax.jacfwd(prior_rows)(x)
-            cost = cost + 0.5 * jnp.sum(rows * rows)
+            cost = cost + half_sum_of_squares(rows)
             gradient = gradient + jacobian.T @ rows
             matrix = matrix + jacobian.T @ jacobian
         return cost, gradient, matrix, failed

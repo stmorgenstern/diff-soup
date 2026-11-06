@@ -1,28 +1,28 @@
 {
   "budgets": {
     "test_files": 50,
-    "test_functions": 458,
-    "collected_tests": 735,
-    "source_lines": 16360
+    "test_functions": 466,
+    "collected_tests": 744,
+    "source_lines": 16580
   },
   "tier_budgets": {
     "public_api": {
       "files": 21,
-      "functions": 198,
-      "collected": 320,
-      "lines": 6403
+      "functions": 205,
+      "collected": 328,
+      "lines": 6610
     },
     "contracts": {
       "files": 21,
-      "functions": 200,
-      "collected": 342,
-      "lines": 6474
+      "functions": 203,
+      "collected": 345,
+      "lines": 6527
     },
     "performance_contracts": {
       "files": 2,
-      "functions": 14,
-      "collected": 31,
-      "lines": 550
+      "functions": 12,
+      "collected": 29,
+      "lines": 510
     },
     "multi_device": {
       "files": 3,
@@ -337,7 +337,7 @@
     },
     {
       "file": "tests/contracts/test_structural_fitting.py",
-      "feature": "Structural fitting: analytical optima, closures taking args last with a batch of args as one vmap, exact constraint Jacobians and Lagrangian Hessians, a rejected trial costing no residual evaluation, jit, vmap and dtype safety of value_and_jacfwd, tiled forward Jacobians and one solve loop per forward Jacobian, byte-stable KL bases, stop rules relative to the cost scale"
+      "feature": "Structural fitting: analytical optima, closures taking args last with a batch of args as one vmap, exact constraint Jacobians and Lagrangian Hessians, a rejected trial costing no residual evaluation, jit, vmap and dtype safety of value_and_jacfwd, tiled forward Jacobians and one solve loop per forward Jacobian, byte-stable KL bases, stop rules relative to the cost scale, equal static parts of a problem lowered twice, a control grid static and hashable"
     },
     {
       "file": "tests/contracts/test_study_fingerprint.py",
