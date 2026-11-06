@@ -350,3 +350,45 @@ def test_a_float32_periodic_problem_solves_in_float32_and_conserves_its_mean():
     assert single.dtype == jnp.float32
     np.testing.assert_allclose(single, double, rtol=0.0, atol=_PERIODIC_BOUND)
     np.testing.assert_allclose(np.mean(single), np.mean(start), rtol=0.0, atol=_PERIODIC_BOUND)
+
+
+def _tracking_dae():
+    """``x' = -x`` and the algebraic ``z^3 + z = theta * x``, whose Jacobian in ``z`` moves with
+    the state, so a held iteration matrix ages as the solve proceeds."""
+
+    def rhs(t, y, theta, control):
+        x, z = y
+        return jnp.stack((-x, z**3 + z - theta * x))
+
+    unit = ds.Dependencies(time=False, state=False, parameters=False, control=False)
+    return ds.MassProblem(
+        rhs=rhs,
+        mass=ds.MassOperator.sparse(
+            [0], [0], lambda t, y, th, c: jnp.ones((1,), y.dtype), n=2, dependencies=unit
+        ),
+        structure=ds.DAEStructure(differential_vars=np.asarray([True, False])),
+    )
+
+
+# measured 5.7e-7 (2.9e-3 when a large first correction may pass on a carried rate) at rtol
+# 1e-6, workstation 2026-11-05,
+# pytest tests/public_api/test_time_stepping.py::test_with_algebraic_rows_unchecked_every_accepted_step_meets_its_constraint
+_CONSTRAINT_BOUND = 1e-5
+#: Solver settings of the constraint-tracking solve (requested tolerances, not asserted bounds).
+_TRACKING_TOLERANCES = {"rtol": 1e-6, "atol": 1e-10}
+
+
+def test_with_algebraic_rows_unchecked_every_accepted_step_meets_its_constraint():
+    """With the algebraic rows out of the error test (the stock JIDA), the algebraic state at
+    every accepted step solves its constraint to the requested relative tolerance: the
+    corrector does not accept a large first correction on a held matrix's carried rate."""
+    theta, z0 = jnp.asarray(1e3), 9.966666790534978  # z0^3 + z0 = 1e3 to 1.4e-12
+    solver = ds.JIDA.stock(linear="dense", **_TRACKING_TOLERANCES)
+    solution = ds.pdesolve(
+        _tracking_dae(), solver, (0.0, 3.0), jnp.asarray([1.0, z0]), theta=theta,
+        saveat=ds.SaveAt(steps=True), max_steps=400,
+    )  # fmt: skip
+    x, z = np.asarray(solution.ys[solution.valid_mask]).T
+    # The constraint residual over its z-derivative is the root error to first order.
+    error = np.abs(z**3 + z - float(theta) * x) / ((3.0 * z**2 + 1.0) * np.abs(z))
+    assert solution.result == ds.RESULT.SUCCESS and error.max() <= _CONSTRAINT_BOUND
