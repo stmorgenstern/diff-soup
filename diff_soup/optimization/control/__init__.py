@@ -4,6 +4,7 @@ from diff_soup.optimization.control.estimators import (
     Estimator,
     ExtendedKalmanFilter,
     FullState,
+    KalmanEstimate,
     MovingHorizonEstimator,
     PlantEstimate,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "ExtendedKalmanFilter",
     "FullState",
     "HostLoop",
+    "KalmanEstimate",
     "MovingHorizonEstimator",
     "PiecewiseConstant",
     "PlantEstimate",
