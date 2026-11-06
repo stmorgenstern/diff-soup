@@ -108,6 +108,11 @@ class SQP(ConstrainedSolver):
     max_failed_evaluations: int = eqx.field(static=True, default=10)
     kkt: KKTSolve = eqx.field(static=True, default_factory=DenseKKT)
 
+    @property
+    def _kkt(self) -> KKTSolve:
+        """The backend of the implicit derivative's KKT system: `kkt`."""
+        return self.kkt
+
     def _place(self, x0: Float[Array, "n"], bounds: Bounds, warm: bool) -> Float[Array, "n"]:
         """`x0` clipped into its bounds."""
         return jnp.clip(

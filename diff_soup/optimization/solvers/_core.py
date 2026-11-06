@@ -21,6 +21,7 @@ from jaxtyping import Array, ArrayLike, Bool, Float, Int, PyTree
 
 from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.inference.fitting.result import TerminationStatus
+from diff_soup.optimization.kkt import DenseKKT, KKTSolve
 from diff_soup.optimization.solvers import _hessian
 from diff_soup.optimization.solvers._barrier import Bounds, bounds_from
 from diff_soup.optimization.solvers._closures import (
@@ -208,6 +209,11 @@ class ConstrainedSolver(CompiledSolver):
         """One step on prepared closures, ending the run on a failure but not testing convergence."""
         raise NotImplementedError
 
+    @property
+    def _kkt(self) -> KKTSolve:
+        """The backend of the implicit derivative's KKT system."""
+        return DenseKKT()
+
     def _check(self, raw: Closures) -> None:
         """Refuse options the problem cannot serve, before anything is traced."""
         _hessian.check_mode(self.hessian, raw)
@@ -319,7 +325,7 @@ class ConstrainedSolver(CompiledSolver):
     ) -> tuple[Float[Array, "n"], SolveRecord]:
         """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
-        return implicit_run(solver._run_primal, _raw, problem, x0, args, warm_start)
+        return implicit_run(solver._run_primal, _raw, self._kkt, problem, x0, args, warm_start)
 
     def _run_primal(
         self,
