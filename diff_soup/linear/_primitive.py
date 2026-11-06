@@ -571,18 +571,42 @@ def storage_key(storage: Optional[str]) -> np.int64:
 _SITE_ORDINALS = object()
 
 
-def _lowered_device() -> tuple:
-    """The id of the device under ``jax.default_device``, as key text; empty for the first device.
+def _lowered_device(ctx: Any, kind: str) -> tuple:
+    """The platform and id of the device a native call runs on, as key text.
 
-    A site's slots are keyed by context and lane, and a cuDSS slot lives on the
-    device that created it. One program under ``jax.default_device`` is traced
-    and lowered once per device, so it takes one site per device. JAX lowers a
-    program with committed inputs once for every device, and that stays one
-    site. The first device keeps the plain key, so a program on one device
+    A site's slots are keyed by context and lane, and a cuDSS slot lives on
+    the device that created it, so a site belongs to one device. JAX keys its
+    trace on ``jax.default_device`` and lowers one program text for any
+    single device, so the device is the default device, or, in a
+    ``shard_map`` body, the one device of this process on the mesh. A cuDSS
+    slot used from another device (inputs committed elsewhere) refuses the
+    call. This process's first device keeps the plain key, so a program on it
     reads as it always did.
+
+    Raises:
+        FactorContractError: If the program runs the call on several devices
+            of this process, which would share the site's native storage.
     """
-    device = getattr(jax.config.jax_default_device, "id", 0)
-    return () if device == 0 else (f"device {device}",)
+    axis_context = ctx.module_context.axis_context
+    mesh = getattr(axis_context, "mesh", None)
+    if mesh is not None:
+        here = jax.process_index()
+        devices = [device for device in mesh.devices.flat if device.process_index == here]
+        device = devices[0] if len(devices) == 1 else None
+    else:
+        devices = range(int(getattr(axis_context, "num_devices", 1)))
+        device = jax.config.jax_default_device
+    if len(devices) > 1:
+        raise FactorContractError(
+            f"A native {kind} call is lowered into a program over {len(devices)} devices of this "
+            "process, and its factor storage does not tell devices apart. Run the call on one "
+            "device per process, or factor with diff_soup.linear.Dense, whose factors are arrays."
+        )
+    if isinstance(device, str):
+        device = jax.local_devices(backend=device)[0]
+    if device is None or device == jax.local_devices()[0]:
+        return ()
+    return (f"device {device.platform} {device.id}",)
 
 
 def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
@@ -596,8 +620,9 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
     give the same keys and the same program text (so JAX's persistent compile
     cache recognises the program), and the native handlers create a site on the
     first call that carries an unknown key; the calls of one program, and of
-    distinct programs, get distinct keys, as do lowerings under different
-    default devices ([_lowered_device][diff_soup.linear._primitive._lowered_device]).
+    distinct programs, get distinct keys, as do lowerings for different
+    devices, told apart by platform and id
+    ([_lowered_device][diff_soup.linear._primitive._lowered_device]).
     The key has bit 62 set, so it never equals an id the extensions number their
     sites with by themselves.
 
@@ -608,7 +633,11 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
 
     Returns:
         The key, a positive ``int64``.
+
+    Raises:
+        FactorContractError: If the program spans several devices of this process.
     """
+    device = _lowered_device(ctx, kind)
     module = ctx.module_context
     counters = module.cached_primitive_lowerings
     ordinal = counters.get(_SITE_ORDINALS, 0)
@@ -617,9 +646,7 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
         name = ir.StringAttr(module.module.operation.attributes["sym_name"]).value
     except Exception:  # noqa: BLE001 - a module without a name keys on the rest
         name = ""
-    text = "|".join(
-        str(part) for part in (name, ctx.name_stack, ordinal, kind, *parts, *_lowered_device())
-    )
+    text = "|".join(str(part) for part in (name, ctx.name_stack, ordinal, kind, *parts, *device))
     digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest()
     return np.int64((int.from_bytes(digest, "little") & ((1 << 62) - 1)) | (1 << 62))
 

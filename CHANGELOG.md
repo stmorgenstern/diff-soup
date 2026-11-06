@@ -30,6 +30,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Fixed JIDA solves that stalled at a tight `atol` after a short step, where Newton's corrections are pure rounding. A correction within twice the rounding floor on a fresh matrix is now accepted as the root.
 - Fixed the derivative of consistent initialization with respect to the start time.
 - Fixed `SolveContext.resident_bytes` on `KLU`, which read uninitialized memory for any factor with a singleton block.
+- A `KLU`, `SuperLU` or `CuDSS` factor lowered into a program over several devices of one process now raises `FactorContractError`. Previously XLA failed with an internal error, or, in a `shard_map` body, the devices shared one native factor.
 
 ### Performance
 
