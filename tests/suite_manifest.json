@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 45,
-    "test_functions": 414,
-    "collected_tests": 623,
-    "source_lines": 14984
+    "test_functions": 417,
+    "collected_tests": 626,
+    "source_lines": 15074
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 19,
-      "functions": 170,
-      "collected": 261,
-      "lines": 5759
+      "functions": 173,
+      "collected": 264,
+      "lines": 5849
     },
     "performance_contracts": {
       "files": 2,
@@ -327,7 +327,7 @@
     },
     {
       "file": "tests/contracts/test_study_fingerprint.py",
-      "feature": "Study fingerprints and lanes: fingerprints by axes not devices, memo safety under address reuse, window likelihood separability, the lane map over factorizations, lanes placed over the devices of a mesh with one program per mode and the fit of one device"
+      "feature": "Study fingerprints and lanes: fingerprints by axes not devices, memo safety under address reuse, window likelihood separability, the lane map over factorizations, lanes placed over the devices of a mesh with one program per mode and the fit of one device, the platform, backend and factor sites a default device selects"
     },
     {
       "file": "tests/contracts/test_packaging.py",
