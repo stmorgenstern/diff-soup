@@ -1,9 +1,9 @@
 {
   "budgets": {
-    "test_files": 50,
-    "test_functions": 474,
-    "collected_tests": 766,
-    "source_lines": 16739
+    "test_files": 51,
+    "test_functions": 478,
+    "collected_tests": 822,
+    "source_lines": 16888
   },
   "tier_budgets": {
     "public_api": {
@@ -13,10 +13,10 @@
       "lines": 6630
     },
     "contracts": {
-      "files": 21,
-      "functions": 210,
-      "collected": 362,
-      "lines": 6654
+      "files": 22,
+      "functions": 214,
+      "collected": 418,
+      "lines": 6803
     },
     "performance_contracts": {
       "files": 2,
@@ -74,7 +74,8 @@
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
     "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference.hierarchical",
     "tests/contracts/test_lane_select.py": "diff_soup.utils.lanes",
-    "tests/contracts/test_jacobian_pattern.py": "diff_soup.utils.lanes"
+    "tests/contracts/test_jacobian_pattern.py": "diff_soup.utils.lanes",
+    "tests/contracts/test_coloring.py": "diff_soup.problem._ad.coloring"
   },
   "support_data": [
     "tests/support/battery_jacobian.json"
@@ -140,7 +141,8 @@
     "tests/multi_device/test_optimization_lanes.py",
     "tests/support/optimization.py",
     "tests/public_api/test_control.py",
-    "tests/contracts/test_jacobian_pattern.py"
+    "tests/contracts/test_jacobian_pattern.py",
+    "tests/contracts/test_coloring.py"
   ],
   "test_files": [
     "tests/public_api/test_recipe_build.py",
@@ -192,7 +194,8 @@
     "tests/public_api/test_optimization_solvers.py",
     "tests/multi_device/test_optimization_lanes.py",
     "tests/public_api/test_control.py",
-    "tests/contracts/test_jacobian_pattern.py"
+    "tests/contracts/test_jacobian_pattern.py",
+    "tests/contracts/test_coloring.py"
   ],
   "feature_contracts": [
     {
@@ -394,6 +397,10 @@
     {
       "file": "tests/contracts/test_jacobian_pattern.py",
       "feature": "Jacobian patterns from a tangent map: each rule against jax.jacfwd, branches and loops of unknown outcome, the fallback warning, the within bound"
+    },
+    {
+      "file": "tests/contracts/test_coloring.py",
+      "feature": "Sparse-matrix colorings: every kind and order decompresses its exact products, structural validity, refused patterns, seeded recovery"
     }
   ]
 }
