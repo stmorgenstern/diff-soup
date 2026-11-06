@@ -39,7 +39,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Other
 
-- `diff_soup.inference` is now `diff_soup.optimization.inference`, and `optsolve`, `OptResult`, the optimization problems and the solvers are also at the top of `ds.optimization`. `ds.inference` and every `diff_soup.inference` import path still work for this release and return the same objects; they will be removed in the next one.
+- `diff_soup.inference` is now `diff_soup.optimization.inference`, and `optsolve`, `OptResult`, the optimization problems and the solvers are also at the top of `ds.optimization`. `ds.inference` and every `diff_soup.inference` import path still work for this release, return the same objects and warn once with a `DeprecationWarning`; they will be removed in 1.3.
 
 **Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.2.0
 
