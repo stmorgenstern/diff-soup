@@ -30,6 +30,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Fixed JIDA solves that stalled at a tight `atol` after a short step, where Newton's corrections are pure rounding. A correction within twice the rounding floor on a fresh matrix is now accepted as the root.
 - Fixed the derivative of consistent initialization with respect to the start time.
 - Fixed `SolveContext.resident_bytes` on `KLU`, which read uninitialized memory for any factor with a singleton block.
+- Fixed a MAP fit of a joint problem, which read every shared parameter's prior from one handle. Each occurrence now takes its prior from the declarations of the experiments behind it, and a MAP refuses an occurrence whose schema records none.
 
 ### Performance
 

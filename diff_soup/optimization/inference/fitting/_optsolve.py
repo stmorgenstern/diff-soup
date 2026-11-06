@@ -37,6 +37,7 @@ from diff_soup.optimization._abc import RESUME, OptimizationProblem
 from diff_soup.optimization.inference.fitting._protocols import StatisticalInferenceProblem
 from diff_soup.optimization.inference.fitting.result import OptResult, TerminationStatus
 from diff_soup.optimization.problem import AbstractOptimizationProblem
+from diff_soup.optimization.solvers._protocol import CompiledSolver
 
 #: The built-in solvers and the structure each requires, in the order a refusal lists them.
 _BUILT_IN = (
@@ -75,9 +76,16 @@ def _numeric_problem(problem: Any, optimizer: Any) -> Any:
 
 
 def _refuse_unmet(numeric: Any, optimizer: Any) -> None:
-    """Refuse ``optimizer`` when ``numeric`` lacks structure the optimizer requires."""
+    """Refuse ``optimizer`` when ``numeric`` lacks structure it requires, or has rows it would drop."""
     structure = frozenset(numeric.structure)
-    missing = (frozenset(getattr(optimizer, "requires", ())) - {RESUME}) - structure
+    requires = frozenset(getattr(optimizer, "requires", ()))
+    rows = int(getattr(numeric, "n_equality", 0)) + int(getattr(numeric, "n_inequality", 0))
+    if rows and "constraint_jacobian" not in requires:
+        raise ConfigurationError(
+            f"{type(optimizer).__name__} does not take constraints, and this problem has {rows} "
+            "constraint rows; solve it with InteriorPoint, SQP or AugmentedLagrangian."
+        )
+    missing = (requires - {RESUME}) - structure
     if not missing:
         return
     suited = [name for name, needed in _BUILT_IN if needed <= structure]
@@ -89,8 +97,14 @@ def _refuse_unmet(numeric: Any, optimizer: Any) -> None:
 
 
 def _solve(optimizer: Any, numeric: Any, callbacks: tuple, state: Any = None):
-    """``optimizer.solve`` on ``numeric`` after the structure check; ``state=`` when it resumes."""
+    """``optimizer.solve`` on ``numeric`` after the structure check; ``state=`` when it resumes.
+
+    A compiled solver reads the problem's closures alone, so it is handed them with the
+    regularization's penalty folded in.
+    """
     _refuse_unmet(numeric, optimizer)
+    if isinstance(optimizer, CompiledSolver) and isinstance(numeric, OptimizationProblem):
+        numeric = numeric._penalty_folded()
     if RESUME in frozenset(getattr(optimizer, "requires", ())):
         return optimizer.solve(numeric, callbacks=callbacks, state=state)
     return optimizer.solve(numeric, callbacks=callbacks)
