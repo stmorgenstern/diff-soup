@@ -73,6 +73,7 @@ from diff_soup.timestepping.vsvo.common.contract import (
     EngineCapabilities,
     closure_moved,
     consume_consistent_init,
+    ic_gate_rtol,
     ic_gate_tolerance,
     pack_state,
 )
@@ -491,7 +492,7 @@ class NDFEngine(eqx.Module):
             control,
             ydot0=jnp.concatenate([ydot0, jnp.zeros((n_lam,), dtype=dtype)]),
             tol=ic_gate_tolerance(self.atol, self.ic_tol),
-            rtol=self.rtol if self.ic_rtol is None else self.ic_rtol,
+            rtol=ic_gate_rtol(self.rtol, self.ic_rtol, self.ic_tol),
             max_iters=self.ic_max_newton_iters,
             backend=self.backend,
             layout=ic_layout,
