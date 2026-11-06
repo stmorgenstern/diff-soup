@@ -192,6 +192,7 @@ def test_one_program_under_two_default_devices_factors_at_one_site_per_device():
     assert _two_device_report(_SITES_WORKER) == {"slots": [1, 1], "same": True}
 
 
+@pytest.mark.requires_cuda
 def test_a_program_staged_under_a_cpu_default_device_reads_the_cpu_platform():
     """Under ``jax.default_device`` set to a CPU device, ``array_platform`` names ``"cpu"`` for an
     array ``jax.jit`` stages and for no array at all, whatever backend the process defaults to."""
