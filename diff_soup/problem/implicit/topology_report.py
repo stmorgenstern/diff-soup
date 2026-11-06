@@ -91,9 +91,9 @@ def jacobian_nnz(problem) -> int:
     Returns:
         Number of stored entries in ``F_y + cj * F_ydot``, including globals.
     """
-    from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
+    from diff_soup.problem.implicit.solver_problem import solver_view
 
-    view = get_or_build_solver_view(problem)
+    view = solver_view(problem)
     topology = view.full_topology
     return int(view.n) ** 2 if topology is None else int(topology.rows.size)
 
@@ -111,11 +111,11 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
         A [`TopologyReport`][diff_soup.problem.TopologyReport].
     """
     from diff_soup.problem._ad.sparse_jac import SparseJacobian
-    from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
+    from diff_soup.problem.implicit.solver_problem import solver_view
     from diff_soup.timestepping.vsvo.common.contract import coerce_problem
 
     solver_contract = coerce_problem(problem)
-    view = get_or_build_solver_view(solver_contract)
+    view = solver_view(solver_contract)
     owner_sources = (problem, solver_contract, view.source)
     topo = view.full_topology
     if topo is None:

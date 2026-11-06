@@ -6,6 +6,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Breaking changes
 
+- Removed `diff_soup.problem.implicit.get_or_build_solver_view`. Use `ds.solver_view`, which returns the same cached view.
 - Removed `ds.inference.constrained_optsolve` and `ds.inference.InequalityConstraints`. Declare the constraints as `ds.optimization.Constraints` on an `InferenceProblem` and solve it with `ds.optimization.InteriorPoint` or `ds.optimization.AugmentedLagrangian`.
 - JIDA with algebraic rows out of the error test, its stock setting, now takes a second Newton iteration when a step's first correction exceeds weighted norm 1. Previously a stale convergence rate could accept it, leaving an algebraic state far off its constraint and its gradients wrong. Results on DAEs change at the level of the solver tolerance.
 - Consistent initialization now accepts a final residual within `ic_atol + ic_rtol` times the starting residual, plus a componentwise round-off term, after Newton has tried the absolute target. Previously a start at the rounding floor of large states failed with `INCONSISTENT_IC`. `ToleranceSpec(ic_rtol=0.0)` keeps the absolute gate, as does `ic_atol=` without `ic_rtol=`.
@@ -17,7 +18,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added a `"resistance"` row to `spec.control.operational` and `Segment(resistance=)`, which hold `voltage = target * current`.
 - `Event` conditions now receive the solve's `theta` as `args`, so a condition can read and differentiate a parameter. Previously `args` was `None`.
 - Added `spec.build(exact_sparsity=True)`, which declares only the Jacobian entries a tangent can reach. A default build is unchanged.
-- Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.problem.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
+- Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - Under `jax.default_device`, `linear="auto"` and consistent initialization choose their backend by that device's platform, and native factors are kept per device, so one process can run lanes on a GPU and on CPUs. `checkpointed_map(device_groups=)` accepts groups of another platform than the default backend's.
 - `KLU.native_stats` reports `live_lu_entries`.
 - `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.

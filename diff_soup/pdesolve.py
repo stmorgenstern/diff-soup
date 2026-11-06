@@ -60,9 +60,9 @@ def _coerce_problem(problem: Any) -> Any:
     Returns:
         The cached solver view.
     """
-    from diff_soup.problem.implicit import get_or_build_solver_view
+    from diff_soup.problem.implicit import solver_view
 
-    return get_or_build_solver_view(problem)
+    return solver_view(problem)
 
 
 def _check_theta_structure(problem: Any, theta: Any) -> None:

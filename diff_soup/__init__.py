@@ -113,6 +113,7 @@ from diff_soup.problem import (
     ResidualSparsity,
     RowOwner,
     Scales,
+    SolverView,
     TopologyReport,
     TransferOp,
     VarRef,
@@ -251,6 +252,7 @@ __all__ = [
     "topology_report",
     "jacobian_nnz",
     "solver_view",
+    "SolverView",
     "TopologyReport",
     "RowOwner",
     # ---- forward-simulation entry point ----

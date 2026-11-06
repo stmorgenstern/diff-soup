@@ -88,9 +88,9 @@ def coerce_forward_problem(problem: Any) -> Any:
     Raises:
         TypeError: If ``problem`` supplies no solver problem.
     """
-    from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
+    from diff_soup.problem.implicit.solver_problem import solver_view
 
-    return get_or_build_solver_view(problem)
+    return solver_view(problem)
 
 
 # ---------------------------------------------------------------------------

@@ -1074,9 +1074,9 @@ def _solver_problem_and_theta(problem, theta):
     if isinstance(problem, (MassProblem, ImplicitProblem)):
         default_theta = getattr(problem, "default_theta", None)
         return problem, default_theta() if theta is None and callable(default_theta) else theta
-    from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
+    from diff_soup.problem.implicit.solver_problem import solver_view
 
-    view = get_or_build_solver_view(problem)
+    view = solver_view(problem)
     return view.problem, view.default_theta() if theta is None else theta
 
 

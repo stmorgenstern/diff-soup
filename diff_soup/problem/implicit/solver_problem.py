@@ -56,7 +56,6 @@ __all__ = [
     "SolverView",
     "StructureSignature",
     "ThetaCodec",
-    "get_or_build_solver_view",
     "solver_view",
 ]
 
@@ -1088,46 +1087,31 @@ def _build_solver_view(problem, source_key: Hashable) -> SolverView:
 
 
 def solver_view(problem) -> SolverView:
-    """Return the view the solvers take of ``problem``.
+    """Return the view the solvers take of ``problem``, building it once.
 
     The view is what ``pdesolve`` and the implicit-layer verbs read: the
     residual ``F(t, y, ydot, theta, control)`` as ``residual``, the state size
     ``n`` and its local block ``n_u``, the differential rows ``id_mask``, the
     iteration matrix's sparse pattern ``full_topology`` and the linearization
-    ``plan`` its values follow. It is built once per model and cached, so a
-    rebuilt problem equal in content gets the same view.
+    ``plan`` its values follow. It is built once per model and cached: a
+    problem equal in content to one already presented (a rebuilt problem, or
+    a lowered problem with the same structure and values) gets the same view,
+    and the key of a recently presented object is kept with the object, so
+    repeated calls with one object compute its content or value digest once.
 
     Args:
         problem: A lowered problem, a ``MassProblem`` or ``ImplicitProblem``,
-            or a view, which is returned unchanged.
+            a problem with a callable ``solver_problem()`` hook, or a view,
+            which is returned unchanged.
 
     Returns:
         The problem's [SolverView][diff_soup.problem.SolverView].
 
     Raises:
-        TypeError: If ``problem`` supplies no solver problem.
-    """
-    return get_or_build_solver_view(problem)
-
-
-def get_or_build_solver_view(problem) -> SolverView:
-    """Return the cached engine-facing view of ``problem``, building it once.
-
-    [solver_view][diff_soup.problem.solver_view] is the public name.
-
-    Accepts a solver problem ([MassProblem][] / [ImplicitProblem][]),
-    a problem with a callable ``solver_problem()`` hook, or an already-built
-    view (returned unchanged). Other objects are rejected before any JAX
-    callback is traced. A problem equal in content to one already presented
-    (a rebuilt problem, or a lowered problem with the same structure and
-    values) is served the same view. The key of a recently presented object
-    is kept with the object, so repeated calls with one object compute its
-    content or value digest once.
-
-    Raises:
-        TypeError: If the object supplies no solver problem, or if
-            ``solver_problem()`` returns anything other than a
-            ``MassProblem`` or ``ImplicitProblem``.
+        TypeError: If ``problem`` supplies no solver problem, or its
+            ``solver_problem()`` returns anything other than a ``MassProblem``
+            or ``ImplicitProblem``. Other objects are rejected before any JAX
+            callback is traced.
     """
     if isinstance(problem, SolverView):
         return problem

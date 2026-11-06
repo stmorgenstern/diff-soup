@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import AbstractMesh, Mesh, PartitionSpec
 
-from diff_soup.problem.implicit import get_or_build_solver_view
+from diff_soup.problem.implicit import solver_view
 
 
 class UnstableFingerprintError(TypeError):
@@ -390,7 +390,7 @@ def _solver_model_record(recorder: _Recorder, model: Any, *, path: str) -> dict[
     callable wrappers while still distinguishing value changes that leave the
     compile structure unchanged.
     """
-    view = get_or_build_solver_view(model)
+    view = solver_view(model)
     codec = view.theta_codec()
     return {
         "structural_signature": recorder.record(

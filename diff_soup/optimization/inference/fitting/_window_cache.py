@@ -26,7 +26,7 @@ import jax
 import numpy as np
 
 from diff_soup.optimization.inference.fitting.windows import WindowInitialization
-from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
+from diff_soup.problem.implicit.solver_problem import solver_view
 
 _SUBDIRECTORY = "window-initialization"
 
@@ -67,7 +67,7 @@ def window_initialization_key(
     project_windows: bool,
 ) -> str:
     """The content key of one window-initialization sweep."""
-    view = get_or_build_solver_view(seam.problem)
+    view = solver_view(seam.problem)
     signature = view.structural_signature
     # A ``content`` model key is a digest of the problem's values and code, so
     # it is stable across processes and tells apart two authored problems that
