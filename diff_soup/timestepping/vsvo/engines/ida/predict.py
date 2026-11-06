@@ -44,13 +44,18 @@ def ida_predict(phi: jax.Array, gamma: jax.Array, kk: jax.Array) -> tuple[jax.Ar
 
 
 def _sum_rows(rows: jax.Array) -> jax.Array:
-    """Add the history rows in one elementwise loop.
+    """Add the history rows as one elementwise expression, fused with the masks that feed it.
 
-    ``jnp.sum(rows, axis=0)`` is the same sum, grouped as here, but it runs row
-    by row through a library kernel with a thread-pool wait, about five times
-    slower on a long state.
+    The rows are added in groups of four, then the groups in order.
     """
-    return (rows[0] + rows[1] + rows[2] + rows[3]) + (rows[4] + rows[5])
+    groups = [rows[j] for j in range(0, MXORDP1, 4)]
+    for j in range(MXORDP1):
+        if j % 4:
+            groups[j // 4] = groups[j // 4] + rows[j]
+    total = groups[0]
+    for group in groups[1:]:
+        total = total + group
+    return total
 
 
 __all__ = ["ida_predict"]

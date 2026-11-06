@@ -286,9 +286,10 @@ def test_an_undifferentiated_checkpoint_solve_keeps_its_compiled_temporaries():
 
 
 def test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory():
-    """The compiled temporaries of a jitted JNDF solve of forty cells grow by at most three state
-    rows per save time added (from 250 to 450 times): the branches that fill the save buffers
-    do not each keep a copy of the whole trajectory."""
+    """The compiled temporaries of a jitted JNDF solve of forty cells grow by at most two and a
+    half state rows per save time added (from 250 to 450 times): the conditionals that fill the
+    save buffers select work, not whole buffers, so no branch keeps its own copy of the
+    trajectory."""
     spec = reaction_diffusion_recipe(name="saved_copies", n=40)
     problem, y0 = spec.build(), spec.assemble_state({})
     solver = ds.JNDF.stock(linear="dense", **_FINE)
@@ -302,10 +303,10 @@ def test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory():
         return jax.jit(run).lower(jnp.asarray(1.0)).compile().memory_analysis().temp_size_in_bytes
 
     rows = (temporaries(450) - temporaries(250)) / (200 * 8 * y0.size)
-    # measured 2.0 state rows per added save time (5.0 while each fill branch selected whole
-    # output buffers), workstation 2026-11-05,
-    # pytest tests/performance_contracts/test_compile_cache.py::test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory
-    assert rows <= 3.0
+    # measured 2.01 state rows per added save time, 3.00 with one fill branch selecting whole
+    # buffers and 5.01 with two (the JIDA review's run C), workstation 2026-11-06,
+    # .ports/run_c_solves.py and the review's run_c.out
+    assert rows <= 2.5
 
 
 def test_a_problem_lowered_twice_compiles_once():

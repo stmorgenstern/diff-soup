@@ -482,9 +482,15 @@ def _select_adjoint(adjoint: Any) -> Any:
 
 
 def _accuracy_guard_runs(engine, dtype) -> bool:
-    """Whether the accuracy-limit guard can fire, so that each attempt must form its norm."""
+    """Whether the accuracy-limit guard can fire, so that each attempt must form its norm.
+
+    With weights ``1/(rtol |y| + atol)`` at the same ``y``, every row of the
+    weighted state is at most ``1/rtol``, so the factor ``u ‖y‖_wrms`` is at most
+    ``u (1 + δ) / rtol``, ``δ < 1`` the rounding of the norm. It can pass 1, the
+    guard's threshold, only when ``rtol < 2 u``.
+    """
     rtol = getattr(engine, "rtol", None)
-    return not isinstance(rtol, float) or rtol < 1e3 * float(jnp.finfo(dtype).eps)
+    return not isinstance(rtol, float) or rtol < 2.0 * float(jnp.finfo(dtype).eps)
 
 
 def _tolerance_scale(engine, problem, y, lam, ewt, dtype) -> jax.Array:

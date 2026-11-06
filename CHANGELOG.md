@@ -33,7 +33,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Performance
 
-- A vmapped solve no longer keeps extra copies of its saved output, and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
+- A vmapped solve keeps fewer copies of its saved output (two state rows per save time, from five), and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
 - JIDA does its whole-array work only on the path an attempt takes, with identical results.
 - Outside `vmap`, the branches of an implicit step (JIDA's history update, the Jacobian refreshes, the retries) compile to one conditional and are traced once. Under `vmap` a branch still runs only when some lane takes it, with one compiled copy of each branch.
 - Consistent initialization's derivative skips the start-time term when the start time is constant, and its relative gate evaluates the residual's scale only where the absolute target was missed, on the algebraic rows alone on the reduced route.
