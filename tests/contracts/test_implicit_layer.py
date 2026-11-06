@@ -14,8 +14,8 @@ import diff_soup as ds
 from diff_soup.problem.implicit import (
     IterationMatrixCertificate,
     consistent_initial_state,
-    get_or_build_solver_view,
     implicit_step_root,
+    solver_view,
 )
 from tests.support.problems import DecayODE
 
@@ -67,7 +67,7 @@ def _step_problem(rhs=None, parametric_mass=True):
 
 
 _PROBLEM = _step_problem()
-_PLAN = get_or_build_solver_view(_PROBLEM).plan
+_PLAN = solver_view(_PROBLEM).plan
 # The residual and its parameter partials overflow once y[0] passes about 709, as the iterate
 # of a diverged corrector can.
 _OVERFLOWING = _step_problem(
@@ -108,7 +108,7 @@ def _root(primal, theta=_THETA, t=_T, cj=_CJ, q=_Q, guess=_GUESS, ok=_OK, proble
             valid,
             {},
         )
-    plan = get_or_build_solver_view(problem).plan
+    plan = solver_view(problem).plan
     head = (plan, None, None, _ENTRIES[primal], None, t, cj, q, theta, None, guess, ok)
     return implicit_step_root(*head)[0]
 
@@ -377,15 +377,11 @@ def test_the_solver_view_cache_is_keyed_on_content_and_bounded():
     """A rebuilt equal problem is served the same view and one with another captured constant
     is not; viewing many distinct problems evicts the oldest view, whose rebuild compares equal
     to it, while the latest view stays cached, and ``ds.solver_view`` serves it too."""
-    rebuilt = get_or_build_solver_view(DecayODE().problem) is get_or_build_solver_view(
-        DecayODE().problem
-    )
-    changed = get_or_build_solver_view(_scaled_decay(2.0)) is get_or_build_solver_view(
-        _scaled_decay(3.0)
-    )
+    rebuilt = solver_view(DecayODE().problem) is solver_view(DecayODE().problem)
+    changed = solver_view(_scaled_decay(2.0)) is solver_view(_scaled_decay(3.0))
     problems = [_scaled_decay(float(k)) for k in range(300)]
-    first = get_or_build_solver_view(problems[0])
-    views = [get_or_build_solver_view(problem) for problem in problems]
-    again = get_or_build_solver_view(problems[0])
+    first = solver_view(problems[0])
+    views = [solver_view(problem) for problem in problems]
+    again = solver_view(problems[0])
     assert (rebuilt, changed, again is first, again == first) == (True, False, False, True)
-    assert get_or_build_solver_view(problems[-1]) is views[-1] is ds.solver_view(problems[-1])
+    assert solver_view(problems[-1]) is views[-1] is ds.solver_view(problems[-1])

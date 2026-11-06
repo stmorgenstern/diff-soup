@@ -175,10 +175,10 @@ def _declared_precision(problem: Any) -> Precision:
     declared = getattr(problem, "precision", None)
     if isinstance(declared, Precision):
         return declared
-    from diff_soup.problem.implicit import get_or_build_solver_view
+    from diff_soup.problem.implicit import solver_view
 
     try:
-        view = get_or_build_solver_view(problem)
+        view = solver_view(problem)
     except TypeError:
         return Precision()
     return getattr(view, "precision", None) or Precision()

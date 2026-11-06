@@ -33,7 +33,7 @@ from jaxtyping import Array
 from diff_soup._errors import ConfigurationError
 from diff_soup._solution import RESULT
 from diff_soup.pdesolve import pdesolve
-from diff_soup.problem.implicit import get_or_build_solver_view
+from diff_soup.problem.implicit import solver_view
 from diff_soup.timestepping import ControlState, SaveAt
 from diff_soup.timestepping.event_records import TerminalRecord
 from diff_soup.timestepping.vsvo.solution import Solution, SolveHistory
@@ -829,7 +829,7 @@ def _segment_solve_jvp(primals, tangents):
     dproblem, dsolver, dspan, dstate, dtimes, dtheta, dcontrol, doptions = tangents
     if all(value is None for value in dspan):
         return eqx.filter_jvp(_segment_solve_impl, primals, tangents)
-    view = get_or_build_solver_view(problem)
+    view = solver_view(problem)
     units = _field_units(view)
     dstart, dend = dspan
     start_slope = None
@@ -1027,7 +1027,7 @@ def solve_schedule(
         )
     count = _segment_count(schedule)
     _refuse_stop_conditions(schedule)
-    view = get_or_build_solver_view(problem)
+    view = solver_view(problem)
     table = getattr(view, "operational_table", None)
     if table is None:
         raise ConfigurationError(

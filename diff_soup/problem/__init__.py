@@ -64,7 +64,6 @@ from diff_soup.problem.implicit import (
     ResidualLinearization,
     ResidualSparsity,
     SolverView,
-    get_or_build_solver_view,
     solver_view,
 )
 from diff_soup.problem.implicit.topology_report import (
@@ -101,7 +100,7 @@ def default_theta(problem, values=None):
     if callable(own):
         theta = own()
     else:
-        surface = get_or_build_solver_view(problem).default_theta
+        surface = solver_view(problem).default_theta
         theta = surface() if callable(surface) else surface
     if values is None:
         return theta
@@ -217,4 +216,4 @@ __all__ = [
 # Wire the scalar solver suite's problem-coercion seam so direct engine calls
 # and the top-level entry resolve the same solver problem. Registering at
 # problem-layer import time keeps the import direction problem -> timestepping.
-register_problem_coercion(get_or_build_solver_view)
+register_problem_coercion(solver_view)
