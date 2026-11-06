@@ -29,6 +29,7 @@ paths.
 from __future__ import annotations
 
 import dataclasses
+import functools
 from typing import Any, NamedTuple, Optional
 
 import jax
@@ -41,6 +42,7 @@ from diff_soup.domains.grid.core import _METRIC_DIMENSION
 from diff_soup.domains.mesh.fem._boundary import facet_average, facet_shares
 from diff_soup.domains.operators.dispatch import dispatch_lumped_mass, finalize_residual
 from diff_soup.linear import SparseTopology
+from diff_soup.problem._ad.pattern import dedup_coo
 from diff_soup.problem._ad.sparse_jac import SparseJacobian
 from diff_soup.problem._ir.constraint import (
     OperationalControlConstraint,
@@ -66,8 +68,6 @@ from .mass import _mass_diagonal as _mass_diagonal_full
 from .operator_resolve import resolve_operator
 from .sparsity import _sparsity as _sparsity_full
 from .stencil_infer import _infer_stencil_offsets
-
-_MAX_DENSE_FALLBACK_NNZ = 1_000_000
 
 
 def _check_multi_equation_return(eq: MultiEquation, r) -> None:
@@ -226,132 +226,6 @@ def _mass_diagonal(eqset: EquationSet) -> jax.Array:
     scales = getattr(eqset, "scales", None)
     time_ref = float(getattr(scales, "time_ref", 1.0)) if scales is not None else 1.0
     return jnp.concatenate(parts) / time_ref
-
-
-def _sparsity(eqset: EquationSet, offset_of: dict, total: int, stencil_offsets=None):
-    """Per-equation ``(out_var, inp_var)`` node-field block pattern + diagonal.
-
-    Same-domain node fields tile the domain's ``sparsity_pattern`` stencil;
-    multi-dim variables fall back to a dense local block (subject to the cap).
-    Globals are skipped (they feed the dense Schur ``B`` block, absent on the
-    slim path).  The mandatory diagonal completion guarantees the implicit-mass
-    / BC-identity term has a slot.
-
-    ``stencil_offsets`` carries the probe-inferred stencils (see
-    [_infer_stencil_offsets][diff_soup._lowering.stencil_infer._infer_stencil_offsets]): a
-    ``(comp, write, read)`` entry replaces that block's default radius-1
-    pattern with the measured offset set, or with the dense block when the
-    measured dependency is not a local stencil.  Blocks without an entry keep
-    the domain's default radius-1 pattern.
-    """
-    comp = eqset.components[0]
-    num_nodes_attr = getattr(comp.domain, "num_nodes", None)
-    num_nodes = int(num_nodes_attr) if num_nodes_attr is not None else None
-    has_sparsity = hasattr(comp.domain, "sparsity_pattern")
-    all_rows: list = []
-    all_cols: list = []
-    for eq in comp.equations:
-        output_vars = eq.vars if isinstance(eq, MultiEquation) else (eq.var,)
-        for out_var in output_vars:
-            row_offset = offset_of[(comp.name, out_var.name)]
-            row_size = out_var.size
-            for inp in eq.inputs:
-                if isinstance(inp, GlobalVariable):
-                    continue
-                col_offset = offset_of[(comp.name, inp.name)]
-                col_size = inp.size
-                out_d = _node_components(out_var, num_nodes) if has_sparsity else None
-                inp_d = _node_components(inp, num_nodes) if has_sparsity else None
-                key = (comp.name, out_var.name, inp.name)
-                if out_d is not None and inp_d is not None:
-                    if stencil_offsets and key in stencil_offsets:
-                        block_offsets = stencil_offsets[key]
-                        if block_offsets is None:
-                            r_local, c_local = _dense_fallback_block(
-                                row_size, col_size, eq.name, inp.name
-                            )
-                        else:
-                            r_local, c_local = _node_field_block(
-                                comp.domain, out_d, inp_d, block_offsets=block_offsets
-                            )
-                    else:
-                        r_local, c_local = _node_field_block(comp.domain, out_d, inp_d)
-                else:
-                    r_local, c_local = _dense_fallback_block(row_size, col_size, eq.name, inp.name)
-                all_rows.append(r_local + row_offset)
-                all_cols.append(c_local + col_offset)
-    diag = np.arange(total, dtype=np.int64)
-    all_rows.append(diag)
-    all_cols.append(diag)
-    rows = np.concatenate(all_rows)
-    cols = np.concatenate(all_cols)
-    # Canonicalise row-major + dedup.
-    pair_key = rows.astype(np.int64) * np.int64(total) + cols.astype(np.int64)
-    _uniq, uniq_idx = np.unique(pair_key, return_index=True)
-    order = np.sort(uniq_idx)
-    return rows[order].astype(np.int32), cols[order].astype(np.int32)
-
-
-def _node_components(var, num_nodes) -> Optional[int]:
-    """Per-node component count if ``var`` is a node field, else ``None``.
-
-    1-D ``(n,)`` -> 1 component; 2-D ``(n, d)`` -> ``d``; otherwise ``None``
-    (dense fallback).
-    """
-    if num_nodes is None:
-        return None
-    s = var.shape
-    if len(s) == 1 and s[0] == num_nodes:
-        return 1
-    if len(s) == 2 and s[0] == num_nodes:
-        return int(s[1])
-    return None
-
-
-def _node_field_block(domain, d_out: int, d_in: int, block_offsets=None):
-    """Kronecker tiling of the domain node-pair stencil across components.
-
-    Node-major DOF layout: ``d*node + comp``.  When ``block_offsets`` is
-    given (a probe-inferred ``(n_offsets, ndim)`` stencil offset set), the
-    node-pair stencil is generated from those offsets instead of the domain's
-    default radius-1 pattern.
-    """
-    if block_offsets is not None:
-        from diff_soup.domains.grid.core import stencil_sparsity_nd  # noqa: PLC0415
-
-        from .stencil_infer import _grid_shape  # noqa: PLC0415
-
-        r1, c1 = stencil_sparsity_nd(_grid_shape(domain), block_offsets)
-    else:
-        r1, c1 = domain.sparsity_pattern(n_vars=1)
-    r1 = np.asarray(r1, dtype=np.int64)
-    c1 = np.asarray(c1, dtype=np.int64)
-    a = np.arange(d_out, dtype=np.int64)
-    b = np.arange(d_in, dtype=np.int64)
-    rows = d_out * r1[:, None, None] + a[None, :, None]
-    cols = d_in * c1[:, None, None] + b[None, None, :]
-    rows = np.broadcast_to(rows, (r1.size, d_out, d_in)).reshape(-1)
-    cols = np.broadcast_to(cols, (c1.size, d_out, d_in)).reshape(-1)
-    return rows, cols
-
-
-def _dense_fallback_block(row_size: int, col_size: int, eq_name: str, inp_name: str):
-    """Dense ``(row_size, col_size)`` local block for a non-stencil equation.
-
-    Raises:
-        ValueError: when the dense block exceeds ``_MAX_DENSE_FALLBACK_NNZ``.
-    """
-    dense_nnz = int(row_size) * int(col_size)
-    if dense_nnz > _MAX_DENSE_FALLBACK_NNZ:
-        raise ValueError(
-            "lower(): refusing to materialize a dense fallback sparsity block "
-            f"with {dense_nnz} entries for equation {eq_name!r} input "
-            f"{inp_name!r}. Provide an explicit local sparsity path or split "
-            "the coupling through a GlobalVariable/Constraint."
-        )
-    r_local = np.repeat(np.arange(row_size, dtype=np.int64), col_size)
-    c_local = np.tile(np.arange(col_size, dtype=np.int64), row_size)
-    return r_local, c_local
 
 
 def _assembly_dtype(state_dtype, compute_dtype):
@@ -557,6 +431,15 @@ def _build_residual_fn(eqset: EquationSet, offset_of: dict, total: int, compute_
     return physics_residual_fn
 
 
+def _lazy_coloring(topo: SparseTopology):
+    """The coloring of ``topo``, built at the kernel's first call.
+
+    The solvers color the plan's pattern instead, so a build colors this one only
+    when ``physics_jacobian_blocks`` is called.
+    """
+    return functools.cache(lambda: SparseJacobian.from_topology(topo))
+
+
 def _build_jac_blocks_fn(residual_fn, topo: SparseTopology, total: int):
     """Build the static same-domain KKT-Jacobian kernel ``(Avals, B, C, D, topo)``.
 
@@ -564,7 +447,7 @@ def _build_jac_blocks_fn(residual_fn, topo: SparseTopology, total: int):
     (AD of ``residual_fn``).  On the slim path there are no constraints, so
     ``B``/``C``/``D`` are empty.
     """
-    sparse_jac = SparseJacobian.from_topology(topo)
+    sparse_jac = _lazy_coloring(topo)
 
     def physics_jac_blocks_fn(
         equations,
@@ -599,7 +482,7 @@ def _build_jac_blocks_fn(residual_fn, topo: SparseTopology, total: int):
             )
             return f
 
-        Avals = sparse_jac.evaluate(f_of_u, u)
+        Avals = sparse_jac().evaluate(f_of_u, u)
         return (
             Avals,
             jnp.zeros((total, 0), dtype=u.dtype),
@@ -1940,7 +1823,7 @@ def _build_full_jac_blocks_fn(
     and ``constraint_border_probe``
     (a [_ConstraintBorderProbe][diff_soup._lowering.provider._ConstraintBorderProbe]).
     """
-    sparse_jac = SparseJacobian.from_topology(topo)
+    sparse_jac = _lazy_coloring(topo)
     n_c = int(sum(int(c.dim) for c in eqset.constraints))
     n_s = int(total)
 
@@ -2146,7 +2029,7 @@ def _build_full_jac_blocks_fn(
             )
             return f
 
-        Avals = sparse_jac.evaluate(f_of_u, u)
+        Avals = sparse_jac().evaluate(f_of_u, u)
         if n_c == 0:
             return (
                 Avals,
@@ -2627,13 +2510,12 @@ def _analyze_family_layer(
     bc_pair_rows = np.concatenate([rb_rows, sym_rows, *callback_rows])
     bc_pair_cols = np.concatenate([rb_cols, sym_cols, *callback_cols])
     if bc_pair_rows.size:
-        rows = np.concatenate([rows, bc_pair_rows.astype(np.int32)])
-        cols = np.concatenate([cols, bc_pair_cols.astype(np.int32)])
-        pair_key = rows.astype(np.int64) * np.int64(total) + cols.astype(np.int64)
-        _uniq, uniq_idx = np.unique(pair_key, return_index=True)
-        order = np.sort(uniq_idx)
-        rows = rows[order].astype(np.int32)
-        cols = cols[order].astype(np.int32)
+        rows, cols, _ = dedup_coo(
+            np.concatenate([rows, bc_pair_rows]),
+            np.concatenate([cols, bc_pair_cols]),
+            total,
+            first_seen=True,
+        )
     bc_indices = None
     identity_pins = [d.dof_indices for d in bcs.dirichlet if d.callback_geometry is None]
     if identity_pins:
@@ -2746,7 +2628,7 @@ def analyze(
             compute_dtype,
         )
     _capture_component_forms(eqset, _probe_f, total, 0, compute_dtype)
-    rows, cols = _sparsity(eqset, offset_of, total, stencil_offsets=stencil_offsets)
+    rows, cols = _sparsity_full(eqset, _layout(eqset), stencil_offsets=stencil_offsets)
     topo = SparseTopology(rows=rows, cols=cols, n_dofs=total, bc_indices=None)
     mass = _mass_diagonal(eqset)
     jac_fn = _build_jac_blocks_fn(residual_fn, topo, total)

@@ -21,6 +21,8 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - Under `jax.default_device`, `linear="auto"` and consistent initialization choose their backend by that device's platform, and native factors are kept per device, so one process can run lanes on a GPU and on CPUs. `checkpointed_map(device_groups=)` accepts groups of another platform than the default backend's.
 - `KLU.native_stats` reports `live_lu_entries`.
+- Added `ds.jacobian_pattern(fn, y, *args, within=None)`, the entries of a Jacobian that can be nonzero, read from the function's tangent map without evaluating it. Rules cover loops, branches, gathers and scatters at known indices, cumulative sums, convolutions and linear solves; an operation without one falls back to every entry with a warning, bounded by `within`. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
+- `ds.topology_report` adds `pullback_count`, and its `color_count` is now the solver's own: the colors of the rows the solver colors, with the rows it holds out recovered by pullback. Previously it colored the whole pattern.
 - `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.
 
 ### Bugfixes
@@ -40,6 +42,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - JIDA does its whole-array work only on the path an attempt takes, with identical results.
 - Outside `vmap`, the branches of an implicit step (JIDA's history update, the Jacobian refreshes, the retries) compile to one conditional and are traced once. Under `vmap` a branch still runs only when some lane takes it, with one compiled copy of each branch.
 - Consistent initialization's derivative skips the start-time term when the start time is constant, and its relative gate evaluates the residual's scale only where the absolute target was missed, on the algebraic rows alone on the reduced route.
+- `spec.build(exact_sparsity=True)` reads its pattern with one compiled program instead of one per operation, 0.85 s instead of 3.6 s at 18 families, and neither build colors the declared pattern unless `physics_jacobian_blocks` is called. Loops, cumulative sums, convolutions and linear solves in a residual keep their pattern instead of filling it.
 - Member rows that read every site of their member are recovered by shared pullbacks instead of one color per site: an LFP half cell with 50 volumes of 10 particles needs 8 colors instead of 108.
 
 ### Other
