@@ -9,7 +9,7 @@ Each interior point and SQP step solves one KKT system, and the backend is what 
 
 ### Backends
 
-::: diff_soup.optimization.DenseKKT
+::: diff_soup.optimization.solvers.DenseKKT
     options:
       members: false
 
@@ -19,7 +19,7 @@ Each interior point and SQP step solves one KKT system, and the backend is what 
 
     The details matter only when writing a KKT backend of your own.
 
-    ::: diff_soup.optimization.KKTSolve
+    ::: diff_soup.optimization.solvers.KKTSolve
         options:
           members:
             - factor

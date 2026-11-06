@@ -410,7 +410,7 @@ class AugmentedLagrangian(CompiledSolver):
         max_steps: int | None = None,
         warm_start: Any = None,
     ) -> tuple[Any, SolveRecord]:
-        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run] describes."""
+        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
         if self.hessian not in _hessian.MODES:
             raise ConfigurationError(f"hessian must be one of {_hessian.MODES}.")
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)

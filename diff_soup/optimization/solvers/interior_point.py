@@ -157,7 +157,7 @@ class InteriorPoint(CompiledSolver):
         scaling: `"gradient"` (default) uses the problem's own scales or else Ipopt's gradient-based ones, and `"none"` solves unscaled.
         restoration: Whether a failed line search starts the restoration phase, `True` by default.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
-        kkt: The [KKTSolve][diff_soup.optimization.KKTSolve] backend, `DenseKKT()` by default.
+        kkt: The [KKTSolve][diff_soup.optimization.solvers.KKTSolve] backend, `DenseKKT()` by default.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
@@ -660,7 +660,7 @@ class InteriorPoint(CompiledSolver):
         max_steps: int | None = None,
         warm_start: Any = None,
     ) -> tuple[Any, SolveRecord]:
-        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.CompiledSolver.run] describes."""
+        """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
         return implicit_run(solver._run_primal, _raw, problem, x0, args, warm_start)
 

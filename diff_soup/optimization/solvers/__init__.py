@@ -1,15 +1,16 @@
 """The optimizers `optsolve` runs: the host-loop solvers and the compiled constrained ones.
 
-Every solver is an [OptSolver][diff_soup.optimization.OptSolver] that `optsolve` drives
+Every solver is an [OptSolver][diff_soup.optimization.solvers.OptSolver] that `optsolve` drives
 through `solver.solve(problem, callbacks=...)`. `NewtonTrustRegion`,
 `LevenbergMarquardt`, `BFGS`, `GradientDescent` and `Optax` loop on the host;
 `InteriorPoint`, `SQP` and `AugmentedLagrangian` are
-[CompiledSolver][diff_soup.optimization.CompiledSolver]s whose whole loop compiles.
+[CompiledSolver][diff_soup.optimization.solvers.CompiledSolver]s whose whole loop compiles.
 `value_and_jacfwd` and its tiled variants in `tangent` are the forward-mode Jacobian
 building blocks the host-loop solvers share.
 """
 
-from diff_soup.optimization._abc import OptSolver
+from diff_soup.optimization._abc import STRUCTURE_KEYS, OptSolver
+from diff_soup.optimization.kkt import DenseKKT, KKTSolve
 from diff_soup.optimization.solvers._protocol import (
     CompiledSolver,
     SolveRecord,
@@ -33,13 +34,16 @@ __all__ = [
     "AugmentedLagrangian",
     "BFGS",
     "CompiledSolver",
+    "DenseKKT",
     "GradientDescent",
     "InteriorPoint",
+    "KKTSolve",
     "LevenbergMarquardt",
     "NewtonTrustRegion",
     "Optax",
     "OptSolver",
     "SQP",
+    "STRUCTURE_KEYS",
     "SolveRecord",
     "SolverState",
     "normalize_tangent_tile",

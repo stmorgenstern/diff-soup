@@ -89,7 +89,7 @@ class Constraints(eqx.Module):
             unflatten: The map from the flat vector to the parameter view the functions take.
 
         Returns:
-            The [ConstraintClosures][diff_soup.optimization.ConstraintClosures].
+            The `ConstraintClosures`.
         """
         if self.jacobian not in ("auto", "forward", "reverse"):
             raise ConfigurationError(

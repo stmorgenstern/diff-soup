@@ -18,10 +18,10 @@ That block and its Schur complement both factor exactly when the KKT matrix has 
 curvature, as Ipopt's inertia correction does.
 
 A solver factors once per step with
-[KKTSolve.factor_regularized][diff_soup.optimization.KKTSolve.factor_regularized], which runs
+[KKTSolve.factor_regularized][diff_soup.optimization.solvers.KKTSolve.factor_regularized], which runs
 Ipopt's inertia correction, and solves every right-hand side of that step (the step, its
 second-order corrections) with
-[KKTSolve.solve_factored][diff_soup.optimization.KKTSolve.solve_factored].
+[KKTSolve.solve_factored][diff_soup.optimization.solvers.KKTSolve.solve_factored].
 """
 
 from __future__ import annotations
@@ -321,7 +321,7 @@ class DenseKKT(KKTSolve):
         rhs_primal: Any,
         rhs_dual: Any,
     ) -> tuple[Any, Any, Any]:
-        """Solve by the condensed route, as [KKTSolve.solve][diff_soup.optimization.KKTSolve.solve] describes."""
+        """Solve by the condensed route, as [KKTSolve.solve][diff_soup.optimization.solvers.KKTSolve.solve] describes."""
         return super().solve(
             primal_block, constraint_jacobian, delta_w, delta_c, rhs_primal, rhs_dual
         )

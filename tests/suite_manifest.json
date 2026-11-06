@@ -2,14 +2,14 @@
   "budgets": {
     "test_files": 48,
     "test_functions": 436,
-    "collected_tests": 666,
+    "collected_tests": 667,
     "source_lines": 15712
   },
   "tier_budgets": {
     "public_api": {
       "files": 20,
       "functions": 191,
-      "collected": 300,
+      "collected": 301,
       "lines": 6188
     },
     "contracts": {
@@ -46,6 +46,7 @@
   "public_namespaces": [
     "diff_soup",
     "diff_soup.optimization",
+    "diff_soup.optimization.solvers",
     "diff_soup.optimization.inference",
     "diff_soup.optimization.inference.approx",
     "diff_soup.optimization.inference.design",

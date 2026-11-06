@@ -24,7 +24,7 @@ Every problem `ds.optimization.optsolve` takes lowers to an `OptimizationProblem
 
     The numeric layer matters only when writing a solver or posing a problem by hand.
 
-    ::: diff_soup.optimization.OptSolver
+    ::: diff_soup.optimization.solvers.OptSolver
         options:
           members:
             - requires
