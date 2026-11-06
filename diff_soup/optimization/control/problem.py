@@ -4,19 +4,28 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import Array, ArrayLike, Float, PyTree
 
 from diff_soup._errors import ConfigurationError
-from diff_soup._schedule import Schedule, Segment, schedule_arrays
-from diff_soup.optimization._abc import OptimizationProblem, _as_bounds
+from diff_soup._schedule import Schedule, ScheduleArrays, Segment, schedule_arrays
 from diff_soup.optimization._binding import Held, hold
+from diff_soup.optimization._derived import as_bounds
+from diff_soup.optimization._numeric import OptimizationProblem
+from diff_soup.optimization.constraints import Constraints
 from diff_soup.optimization.control._horizon import Configuration, Horizon
 from diff_soup.optimization.problem import AbstractOptimizationProblem
+
+if TYPE_CHECKING:
+    from diff_soup._adjoints import AbstractAdjoint
+    from diff_soup._layout import Layout
+    from diff_soup.optimization._abc import OptSolver
+    from diff_soup.timestepping.vsvo.classes import JBDF, JIDA, JNDF
 
 #: How far above the horizon a save time may lie and still be its end: Higham's bound on
 #: the rounding error of a sum of `n` positive terms added in order, `(n - 1) * u * sum`
@@ -90,7 +99,7 @@ class PiecewiseConstant(eqx.Module):
         """The parameterization of one interval of this grid, keeping its mode, scale and step carry."""
         return dataclasses.replace(self, intervals=1, duration=self.interval)
 
-    def segments(self, u: Any, modes: tuple) -> Any:
+    def segments(self, u: ArrayLike, modes: tuple[str, ...]) -> ScheduleArrays:
         """The schedule arrays of the horizon for the decision vector `u`, traced, never retraced for a new `u`.
 
         Args:
@@ -168,10 +177,10 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         layout: The placement of a batch of horizons.
     """
 
-    constraints: Any = None
-    bounds: Any = None
+    constraints: Constraints | None = None
+    bounds: tuple[ArrayLike | None, ArrayLike | None] | None = None
     problem: Held = eqx.field(static=True, default=None, converter=hold)
-    controls: Any = eqx.field(static=True, default=None)
+    controls: PiecewiseConstant | None = eqx.field(static=True, default=None)
     cost: Callable | None = eqx.field(static=True, default=None)
     path: Callable | None = eqx.field(static=True, default=None)
     terminal: Callable | None = eqx.field(static=True, default=None)
@@ -180,13 +189,13 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
     save_times: tuple[float, ...] | None = eqx.field(
         static=True, default=None, converter=_static_times
     )
-    initial_state: Any = None
-    theta: Any = None
-    limits: Any = None
+    initial_state: Float[ArrayLike, "*batch n_states"] | None = None
+    theta: PyTree = None
+    limits: PyTree = None
     start: tuple[float, ...] | None = eqx.field(static=True, default=None, converter=_static_start)
-    solver: Any = eqx.field(static=True, default=None)
-    adjoint: Any = eqx.field(static=True, default=None)
-    layout: Any = eqx.field(static=True, default=None)
+    solver: JIDA | JBDF | JNDF | None = eqx.field(static=True, default=None)
+    adjoint: AbstractAdjoint | None = eqx.field(static=True, default=None)
+    layout: Layout | None = eqx.field(static=True, default=None)
 
     def __post_init__(self) -> None:
         """Take a last save time within the rounding of the horizon's sum as its end."""
@@ -202,7 +211,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         """The built diff-soup problem, held by identity."""
         return self.problem.value
 
-    def numeric_problem(self, optimizer: Any) -> OptimizationProblem:
+    def numeric_problem(self, optimizer: OptSolver) -> OptimizationProblem:
         """Lower to closures over `u` and `args`; see [AbstractOptimizationProblem.numeric_problem][diff_soup.optimization.AbstractOptimizationProblem.numeric_problem]."""
         horizon = self._closures()
         n = self.controls.intervals
@@ -221,7 +230,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         return OptimizationProblem(
             x0=x0,
             structure=frozenset(structure),
-            bounds=_as_bounds(self.bounds, x0),
+            bounds=as_bounds(self.bounds, x0),
             args=self.args(),
             n_equality=n_equality,
             n_inequality=n_inequality,
@@ -238,7 +247,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
             _evaluate_with_derivatives=horizon.closure("evaluate_with_derivatives"),
         )
 
-    def args(self) -> tuple[Any, Any, Any]:
+    def args(self) -> tuple[PyTree, PyTree, PyTree]:
         """`(initial_state, theta, limits)`, the leaves a batch varies."""
         return (self.initial_state, self.theta, self.limits)
 
@@ -269,7 +278,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
             )
         )
 
-    def _row_scales(self) -> tuple[Any, Any] | None:
+    def _row_scales(self) -> tuple[Float[Array, " n_eq"], Float[Array, " n_ineq"]] | None:
         """The scales of the `Constraints` on `u`, after ones for the terminal and path rows."""
         scales = None if self.constraints is None else self.constraints.row_scales()
         if scales is None:
@@ -307,7 +316,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
             )
 
 
-def _middle(bounds: Any, n: int) -> Any:
+def _middle(bounds: tuple[ArrayLike | None, ArrayLike | None] | None, n: int) -> Float[Array, " n"]:
     """The middle of finite bounds, the finite bound where one side is open, zero where both are."""
     if bounds is None:
         return jnp.zeros((n,))

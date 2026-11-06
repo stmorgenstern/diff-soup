@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
+from jaxtyping import Array, ArrayLike, Float, Int, PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._schedule import solve_schedule
@@ -21,6 +22,10 @@ from diff_soup.optimization.solvers.sqp import SQP
 if TYPE_CHECKING:
     from diff_soup.optimization.control.problem import ControlProblem, PiecewiseConstant
     from diff_soup.optimization.solvers import CompiledSolver
+    from diff_soup.timestepping.vsvo.classes import JBDF, JIDA, JNDF
+
+#: The `args` of a control problem: the initial state, `theta` and the limits.
+ControlArgs = tuple[PyTree, PyTree, PyTree]
 
 
 class PlantEstimate(eqx.Module):
@@ -30,19 +35,21 @@ class PlantEstimate(eqx.Module):
         plant: The plant state estimate.
     """
 
-    plant: Any
+    plant: Float[ArrayLike, " n_states"]
 
 
 class Estimator(eqx.Module):
     """The estimator's slot in the loop: from its state, the last control and a measurement to its next state."""
 
     @abc.abstractmethod
-    def init(self, args: Any) -> Any:
+    def init(self, args: ControlArgs) -> eqx.Module:
         """The estimator's state before the first interval, from the control problem's `args`."""
         raise NotImplementedError
 
     @abc.abstractmethod
-    def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> Any:
+    def estimate(
+        self, state: eqx.Module, u_prev: ArrayLike, measurement: ArrayLike, args: ControlArgs
+    ) -> eqx.Module:
         """The next estimator state; `state.plant` is the plant state estimate the horizon starts from."""
         raise NotImplementedError
 
@@ -50,11 +57,13 @@ class Estimator(eqx.Module):
 class FullState(Estimator):
     """Full-state feedback: the measurement is the plant state, and the estimate is the measurement."""
 
-    def init(self, args: Any) -> PlantEstimate:
+    def init(self, args: ControlArgs) -> PlantEstimate:
         """The initial state of the control problem."""
         return PlantEstimate(plant=args[0])
 
-    def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> PlantEstimate:
+    def estimate(
+        self, state: PlantEstimate, u_prev: ArrayLike, measurement: ArrayLike, args: ControlArgs
+    ) -> PlantEstimate:
         """Return the measured plant state."""
         return PlantEstimate(plant=measurement)
 
@@ -67,8 +76,8 @@ class KalmanEstimate(eqx.Module):
         covariance: Its covariance, `(n_states, n_states)`.
     """
 
-    plant: Any
-    covariance: Any
+    plant: Float[Array, " n_states"]
+    covariance: Float[Array, "n_states n_states"]
 
 
 def _require(owner: str, module: eqx.Module, names: tuple[str, ...]) -> None:
@@ -93,9 +102,9 @@ class ExtendedKalmanFilter(Estimator):
 
     problem: ControlProblem | None = None
     measured: Callable | None = eqx.field(static=True, default=None)
-    process_covariance: Any = None
-    measurement_covariance: Any = None
-    initial_covariance: Any = None
+    process_covariance: ArrayLike | None = None
+    measurement_covariance: ArrayLike | None = None
+    initial_covariance: ArrayLike | None = None
 
     def __check_init__(self) -> None:
         """Refuse a filter without its problem, measurement map or covariances."""
@@ -105,7 +114,7 @@ class ExtendedKalmanFilter(Estimator):
             ("problem", "measured", "process_covariance", "measurement_covariance"),
         )
 
-    def init(self, args: Any) -> KalmanEstimate:
+    def init(self, args: ControlArgs) -> KalmanEstimate:
         """The initial estimate and its covariance."""
         plant = jnp.asarray(args[0])
         covariance = (
@@ -113,7 +122,9 @@ class ExtendedKalmanFilter(Estimator):
         )
         return KalmanEstimate(plant=plant, covariance=_matrix(covariance, plant.shape[0]))
 
-    def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> KalmanEstimate:
+    def estimate(
+        self, state: KalmanEstimate, u_prev: ArrayLike, measurement: ArrayLike, args: ControlArgs
+    ) -> KalmanEstimate:
         """Predict through one interval, then correct with the measurement."""
         theta = args[1]
         n = state.plant.shape[0]
@@ -136,7 +147,12 @@ class ExtendedKalmanFilter(Estimator):
         return KalmanEstimate(plant=plant, covariance=0.5 * (covariance + covariance.T))
 
 
-def one_interval(control_problem: ControlProblem, state: Any, u: Any, theta: Any) -> Any:
+def one_interval(
+    control_problem: ControlProblem,
+    state: Float[ArrayLike, " n_states"],
+    u: ArrayLike,
+    theta: PyTree,
+) -> Float[Array, " n_states"]:
     """The state after one interval of `control_problem`'s controls held at `u`, from `state`.
 
     Args:
@@ -158,7 +174,14 @@ def one_interval(control_problem: ControlProblem, state: Any, u: Any, theta: Any
     )
 
 
-def _advance(model: Held, solver: Any, controls: PiecewiseConstant, state, u, theta) -> Any:
+def _advance(
+    model: Held,
+    solver: JIDA | JBDF | JNDF,
+    controls: PiecewiseConstant,
+    state: Float[ArrayLike, " n_states"],
+    u: ArrayLike,
+    theta: PyTree,
+) -> Float[Array, " n_states"]:
     """One interval of `controls` held at `u` from `state`; NaN when the solve fails."""
     duration = controls.horizon
     solution, _ = solve_schedule(
@@ -176,7 +199,7 @@ def _advance(model: Held, solver: Any, controls: PiecewiseConstant, state, u, th
     return jnp.where(solution.ok, end, jnp.nan)
 
 
-def _matrix(covariance: Any, n: int) -> Any:
+def _matrix(covariance: ArrayLike, n: int) -> Float[Array, "n n"]:
     """`covariance` as an `(n, n)` matrix: a diagonal vector or a scalar is spread on the diagonal."""
     covariance = jnp.asarray(covariance)
     if covariance.ndim == 2:
@@ -197,34 +220,34 @@ class MovingHorizonEstimate(eqx.Module):
         status: The last window fit's [TerminationStatus][diff_soup.optimization.TerminationStatus] code.
     """
 
-    plant: Any
-    start: Any
-    correction: Any
-    controls: Any
-    measurements: Any
-    count: Any
-    status: Any
+    plant: Float[Array, " n_states"]
+    start: Float[Array, " n_states"]
+    correction: Float[Array, " n_basis"]
+    controls: Float[Array, " window"]
+    measurements: Float[Array, "window n_measured"]
+    count: Int[Array, ""]
+    status: Int[Array, ""]
 
 
 class _Window(NamedTuple):
     """The `args` of a window fit: the prior, the window's data and the whitening factors."""
 
-    start: Any
-    controls: Any
-    measurements: Any
-    count: Any
-    theta: Any
-    basis: Any
-    noise: Any
-    arrival: Any
+    start: Float[Array, " n_states"]
+    controls: Float[Array, " window"]
+    measurements: Float[Array, "window n_measured"]
+    count: Int[Array, ""]
+    theta: PyTree
+    basis: Float[Array, "n_states n_basis"]
+    noise: Float[Array, "n_measured n_measured"]
+    arrival: Float[Array, "n_basis n_basis"]
 
 
 class _Configuration(NamedTuple):
     """What a window fit's residual reads besides `(z, args)`; hashable, free of arrays."""
 
     model: Held
-    solver: Any
-    controls: Any
+    solver: JIDA | JBDF | JNDF
+    controls: PiecewiseConstant
     measured: Callable
     window: int
 
@@ -255,9 +278,9 @@ class MovingHorizonEstimator(Estimator):
     measured: Callable | None = eqx.field(static=True, default=None)
     window: int | None = eqx.field(static=True, default=None)
     solver: CompiledSolver | None = eqx.field(static=True, default=None)
-    arrival_covariance: Any = None
-    measurement_covariance: Any = None
-    basis: Any = None
+    arrival_covariance: ArrayLike | None = None
+    measurement_covariance: ArrayLike | None = None
+    basis: Float[ArrayLike, "n_states n_basis"] | None = None
 
     def __check_init__(self) -> None:
         """Refuse an estimator without its problem, measurement map, window or covariances."""
@@ -267,7 +290,7 @@ class MovingHorizonEstimator(Estimator):
             ("problem", "measured", "window", "arrival_covariance", "measurement_covariance"),
         )
 
-    def init(self, args: Any) -> MovingHorizonEstimate:
+    def init(self, args: ControlArgs) -> MovingHorizonEstimate:
         """An empty window whose start prior is the control problem's initial state."""
         plant = jnp.asarray(args[0])
         shape = jax.eval_shape(lambda y: jnp.atleast_1d(self.measured(y, args[1])), plant)
@@ -282,7 +305,11 @@ class MovingHorizonEstimator(Estimator):
         )
 
     def estimate(
-        self, state: Any, u_prev: Any, measurement: Any, args: Any
+        self,
+        state: MovingHorizonEstimate,
+        u_prev: ArrayLike,
+        measurement: ArrayLike,
+        args: ControlArgs,
     ) -> MovingHorizonEstimate:
         """Push the interval into the window, refit the start state, and run it to the window's end."""
         controls = jnp.concatenate([state.controls[1:], jnp.reshape(u_prev, (1,))])
@@ -330,19 +357,23 @@ class MovingHorizonEstimator(Estimator):
             status=jnp.asarray(record.status, jnp.int32),
         )
 
-    def _basis(self, plant: Any) -> Any:
+    def _basis(self, plant: Float[Array, " n_states"]) -> Float[Array, "n_states n_basis"]:
         """The correction directions, the identity when none are given."""
         if self.basis is None:
             return jnp.eye(plant.shape[0], dtype=plant.dtype)
         return jnp.asarray(self.basis, plant.dtype)
 
 
-def _window_residual(configuration: _Configuration, z: Any, data: _Window) -> Any:
+def _window_residual(
+    configuration: _Configuration, z: Float[Array, " n_basis"], data: _Window
+) -> Float[Array, " n_rows"]:
     """The whitened window residual of the correction `z`."""
     return _window(configuration, z, data)[0]
 
 
-def _window(configuration: _Configuration, z: Any, data: _Window) -> tuple[Any, Any]:
+def _window(
+    configuration: _Configuration, z: Float[Array, " n_basis"], data: _Window
+) -> tuple[Float[Array, " n_rows"], tuple[Float[Array, " n_states"], Float[Array, " n_states"]]]:
     """The whitened window residual, the state after the window's first filled interval, and its end.
 
     The slots before the window fills are skipped behind a conditional, so the model is never

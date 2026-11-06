@@ -19,20 +19,9 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float
 
 from diff_soup._errors import ConfigurationError
-from diff_soup.optimization._binding import Derived
+from diff_soup.optimization._binding import Derived, Lowered
 
 _MODES = ("auto", "forward", "reverse")
-
-
-class _Lowered(NamedTuple):
-    """The closures a `Constraints` lowers to, each taking `(x, args)` on the flat vector."""
-
-    constraints: Callable
-    constraints_and_jacobians: Callable
-    lagrangian_hessian: Callable
-    lagrangian_hessian_vector: Callable
-    n_equality: int
-    n_inequality: int
 
 
 class _Spec(NamedTuple):
@@ -115,7 +104,7 @@ class Constraints(eqx.Module):
         """The scales, one per row, or `None` for the solver's own scaling."""
         return self.scales
 
-    def lower(self, objective: Callable | None, unflatten: Callable) -> _Lowered:
+    def lower(self, objective: Callable | None, unflatten: Callable) -> Lowered:
         """Lower to closures on the flat vector, with Jacobians and Lagrangian Hessians by AD.
 
         Lowering the same `Constraints` again, with the same `objective` and `unflatten`, gives
@@ -126,21 +115,19 @@ class Constraints(eqx.Module):
             unflatten: The map from the flat vector to the parameter view the functions take.
 
         Returns:
-            The closures `constraints`, `constraints_and_jacobians`, `lagrangian_hessian` and `lagrangian_hessian_vector`, with the row counts `n_equality` and `n_inequality`.
+            The closures `constraints`, `constraints_and_jacobians`, `lagrangian_hessian` and `lagrangian_hessian_vector` by name, each taking `args` last.
         """
         spec = _Spec(
             self.equality, self.inequality, self.n_equality, self.n_inequality, self.jacobian
         )
-        return _Lowered(
-            constraints=Derived(_rows, spec, unflatten),
-            constraints_and_jacobians=Derived(_rows_and_jacobians, spec, unflatten),
-            lagrangian_hessian=Derived(_lagrangian_hessian, spec, unflatten, objective),
-            lagrangian_hessian_vector=Derived(
+        return {
+            "constraints": Derived(_rows, spec, unflatten),
+            "constraints_and_jacobians": Derived(_rows_and_jacobians, spec, unflatten),
+            "lagrangian_hessian": Derived(_lagrangian_hessian, spec, unflatten, objective),
+            "lagrangian_hessian_vector": Derived(
                 _lagrangian_hessian_vector, spec, unflatten, objective
             ),
-            n_equality=self.n_equality,
-            n_inequality=self.n_inequality,
-        )
+        }
 
 
 def _side_scales(scales: Any, count: int, name: str) -> Any:
