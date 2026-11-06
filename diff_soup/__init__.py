@@ -119,6 +119,7 @@ from diff_soup.problem import (
     VarRef,
     default_theta,
     jacobian_nnz,
+    jacobian_pattern,
     lower,
     parameter_gradient,
     solver_view,
@@ -251,6 +252,7 @@ __all__ = [
     # ---- iteration-matrix structure diagnostics ----
     "topology_report",
     "jacobian_nnz",
+    "jacobian_pattern",
     "solver_view",
     "SolverView",
     "TopologyReport",

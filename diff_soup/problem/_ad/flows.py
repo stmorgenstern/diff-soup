@@ -54,6 +54,12 @@ def anywhere(flows, sizes, seeds: int):
     return outputs
 
 
+def column(rows: int, seed: int, seeds: int):
+    """A flow of ``rows`` elements, each reached by the one column ``seed``."""
+    data = np.ones(rows, dtype=bool)
+    return sparse.csr_matrix((data, (np.arange(rows), np.full(rows, seed))), shape=(rows, seeds))
+
+
 def broadcast_flow(flow, shape, out_shape):
     """``flow`` of an array of ``shape``, broadcast to ``out_shape`` as a lax operation does."""
     if tuple(shape) == tuple(out_shape):

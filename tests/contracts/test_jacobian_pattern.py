@@ -1,6 +1,7 @@
 """Jacobian patterns read from a tangent map: each rule holds exactly the entries ``jax.jacfwd``
 finds nonzero at random states, a branch or loop of unknown outcome holds every one of them,
-and an operation no rule covers falls back to every entry with a warning."""
+an operation no rule covers falls back to every entry with a warning, and ``within`` bounds
+the rows a fallback reaches."""
 
 from __future__ import annotations
 
@@ -9,7 +10,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from diff_soup.problem._ad.tangent_pattern import tangent_pattern
+import diff_soup as ds
+from diff_soup.utils.lanes import lane_where
 
 _N = 12
 _KNOWN = jnp.eye(_N) * 2.0 + jnp.diag(jnp.ones(_N - 1), 1)
@@ -28,7 +30,7 @@ def _reached(fn):
 
 def _pattern(fn, shape):
     """The walk's pattern as a boolean matrix."""
-    rows, cols = tangent_pattern(fn, jnp.zeros(_N))
+    rows, cols = ds.jacobian_pattern(fn, jnp.zeros(_N))
     pattern = np.zeros(shape, dtype=bool)
     pattern[rows, cols] = True
     return pattern
@@ -62,6 +64,7 @@ _EXACT = {
     ),
     "scan": _scan,
     "custom_linear_solve": lambda y: jnp.linalg.solve(_KNOWN, y**2),
+    "diffsoup_lane_where": lambda y: lane_where(y[0] > 1.0, y**2, jnp.roll(y, 1)),
     "conv_general_dilated": lambda y: jnp.convolve(
         y**2, jnp.asarray([1.0, -2.0, 1.0]), mode="same"
     ),
@@ -98,6 +101,18 @@ def test_a_fallback_warns_and_holds_every_entry_jacfwd_finds(name):
     """An index the state sets and a primitive with no rule warn, and the pattern holds every
     entry ``jax.jacfwd`` finds nonzero."""
     reached = _reached(_FALLBACK[name])
-    with pytest.warns(UserWarning, match="tangent_pattern"):
+    with pytest.warns(UserWarning, match="jacobian_pattern"):
         pattern = _pattern(_FALLBACK[name], reached.shape)
     assert not np.any(reached & ~pattern)
+
+
+def test_within_bounds_only_the_rows_a_fallback_reaches():
+    """Sorting the state makes its six rows read all twelve columns; with ``within`` the
+    six keep the first six columns, and the six squared rows keep their diagonal."""
+    within = (np.repeat(np.arange(6), 6), np.tile(np.arange(6), 6))
+    with pytest.warns(UserWarning, match="jacobian_pattern"):
+        rows, cols = ds.jacobian_pattern(
+            lambda y: jnp.concatenate([jnp.sort(y)[:6], y[6:] ** 2]), jnp.zeros(_N), within=within
+        )
+    expected = sorted([*zip(*within), *((row, row) for row in range(6, _N))])
+    assert list(zip(rows.tolist(), cols.tolist())) == expected

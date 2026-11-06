@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 49,
-    "test_functions": 440,
-    "collected_tests": 691,
-    "source_lines": 15826
+    "test_functions": 441,
+    "collected_tests": 693,
+    "source_lines": 15841
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 21,
-      "functions": 188,
-      "collected": 316,
-      "lines": 6143
+      "functions": 189,
+      "collected": 318,
+      "lines": 6158
     },
     "performance_contracts": {
       "files": 2,
@@ -74,7 +74,7 @@
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
     "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference.hierarchical",
     "tests/contracts/test_lane_select.py": "diff_soup.utils.lanes",
-    "tests/contracts/test_jacobian_pattern.py": "diff_soup.problem._ad.tangent_pattern"
+    "tests/contracts/test_jacobian_pattern.py": "diff_soup.utils.lanes"
   },
   "support_data": [
     "tests/support/battery_jacobian.json"
@@ -387,7 +387,7 @@
     },
     {
       "file": "tests/contracts/test_jacobian_pattern.py",
-      "feature": "Jacobian patterns from a tangent map: each rule against jax.jacfwd, branches and loops of unknown outcome, the fallback warning"
+      "feature": "Jacobian patterns from a tangent map: each rule against jax.jacfwd, branches and loops of unknown outcome, the fallback warning, the within bound"
     }
   ]
 }

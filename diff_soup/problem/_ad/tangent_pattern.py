@@ -39,22 +39,25 @@ def _host_device():
         return None
 
 
-def tangent_flow(fn, y, *args):
+def tangent_flow(fn, y, *args, taint: bool = False):
     """Return the flow of ``d fn(y, *args) / dy``: a boolean CSR matrix of its reachable entries.
 
     Args:
         fn: Function of ``y`` and ``args`` returning one array.
         y: Array, read only for its shape and dtype.
         *args: Pytrees standing for any value of their shapes and dtypes.
+        taint: Add a last column, set on each row a fallback decided.
 
     Returns:
-        A boolean ``scipy.sparse.csr_matrix`` of shape ``(fn(y).size, y.size)``.
+        A boolean ``scipy.sparse.csr_matrix`` of shape ``(fn(y).size, y.size)``, one column
+        more with ``taint``.
 
     The function is traced, and its known part compiled, outside any trace or
     ``jax.ensure_compile_time_eval`` of the caller's (see
     [outside_compile_time_eval][diff_soup.problem._ad.pattern.outside_compile_time_eval]).
     """
     size = int(np.size(y))
+    seeds = size + 1 if taint else size
 
     def tangent(dy, value, rest):
         return jax.jvp(lambda current: fn(current, *rest), (value,), (dy,))[1]
@@ -65,25 +68,55 @@ def tangent_flow(fn, y, *args):
             return closed, Program(closed)
 
     closed, program = outside_compile_time_eval(lowered)
-    walk = Walk(program, size)
-    seeds = sparse.identity(size, dtype=bool, format="csr")
-    inputs = [seeds] + [None] * (len(program.top.invars) - 1)
+    walk = Walk(program, seeds, size if taint else None)
+    identity = sparse.eye(size, seeds, dtype=bool, format="csr")
+    inputs = [identity] + [None] * (len(program.top.invars) - 1)
     output = walk.block(program.top, inputs)[0]
     rows = int(np.prod(closed.out_avals[0].shape, dtype=np.int64))
-    return sparse.csr_matrix((rows, size), dtype=bool) if output is None else output
+    return sparse.csr_matrix((rows, seeds), dtype=bool) if output is None else output
+
+
+def jacobian_pattern(fn, y, *args, within=None):
+    """Return the entries of `d fn(y, *args) / dy` that can be nonzero.
+
+    The pattern is read from the tangent map of `fn` (`jax.jvp`), with no evaluation of
+    `fn`: a state or a parameter stands for any value, so both sides of a branch on the
+    state count, and only a value that holds whatever the inputs are, such as a literal, a
+    closed-over array or an index computed from them, rules an entry out. An operation no
+    rule covers, an index the inputs set, and a loop whose reach does not settle make
+    each output they reach read every input that reaches them, and warn.
+
+    ```python
+    rows, cols = ds.jacobian_pattern(residual, y, theta)
+    ```
+
+    Args:
+        fn: Function of `y` and `args` returning one array, read as flat.
+        y: One-dimensional array, read only for its shape and dtype.
+        *args: Pytrees standing for any value of their shapes and dtypes. A value `fn`
+            closes over counts as fixed.
+        within: `(rows, cols)` holding every entry that can be nonzero. Each row a
+            fallback reaches keeps only its entries in `within`.
+
+    Returns:
+        `(rows, cols)`, two `int32` arrays sorted row-major.
+    """
+    size = int(np.size(y))
+    flow = tangent_flow(fn, y, *args, taint=within is not None).tocoo()
+    rows, cols = flow.row, flow.col
+    if within is not None:
+        tainted = np.zeros(flow.shape[0], dtype=bool)
+        tainted[rows[cols == size]] = True
+        bound = dedup_coo(*within, size)
+        allowed = np.isin(
+            rows.astype(np.int64) * size + cols,
+            bound.rows.astype(np.int64) * size + bound.cols,
+        )
+        keep = (cols < size) & (~tainted[rows] | allowed)
+        rows, cols = rows[keep], cols[keep]
+    return dedup_coo(rows, cols, size)[:2]
 
 
 def tangent_pattern(fn, y, *args):
-    """Return the entries of ``d fn(y, *args) / dy`` that can ever be nonzero.
-
-    Args:
-        fn: Function of ``y`` and ``args`` returning a one-dimensional array. A value it
-            closes over counts as fixed; anything that may vary goes in ``args``.
-        y: One-dimensional array, read only for its shape and dtype.
-        *args: Pytrees standing for any value of their shapes and dtypes.
-
-    Returns:
-        ``(rows, cols)``, sorted row-major.
-    """
-    coo = tangent_flow(fn, y, *args).tocoo()
-    return dedup_coo(coo.row, coo.col, coo.shape[1])[:2]
+    """Return [jacobian_pattern][diff_soup.problem.jacobian_pattern] with no bound."""
+    return jacobian_pattern(fn, y, *args)
