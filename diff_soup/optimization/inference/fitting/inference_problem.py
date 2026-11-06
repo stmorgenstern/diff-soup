@@ -1134,6 +1134,7 @@ def lower_residual_problem(
             for ``"batched_lanes"``.
     """
     from diff_soup.optimization._abc import LeastSquaresProblem
+    from diff_soup.optimization._binding import ignoring_args
     from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
 
     evaluator = problem if evaluator is None else evaluator
@@ -1217,16 +1218,18 @@ def lower_residual_problem(
         hessian_composition=composition,
         n_segments=int(getattr(problem, "n_segments", 1) or 1),
         reduced_gauss_newton=reduced,
-        _value=value,
-        _value_and_gradient=value_and_gradient,
-        _value_gradient_hessian=value_gradient_hessian,
-        _hessian_vector=hessian_vector,
-        _gauss_newton=gauss_newton,
-        _is_valid=is_valid,
+        # The closures read no args: an inference problem's lanes differ in their data,
+        # which the lowering closes over.
+        _value=ignoring_args(value),
+        _value_and_gradient=ignoring_args(value_and_gradient),
+        _value_gradient_hessian=ignoring_args(value_gradient_hessian),
+        _hessian_vector=ignoring_args(hessian_vector),
+        _gauss_newton=ignoring_args(gauss_newton),
+        _is_valid=ignoring_args(is_valid),
         _joint_view=joint_view,
-        _residual=residual,
-        _residual_and_jacobian=residual_and_jacobian,
-        segment_fns=segment_fns,
+        _residual=ignoring_args(residual),
+        _residual_and_jacobian=ignoring_args(residual_and_jacobian),
+        _segment_fns=tuple(map(ignoring_args, segment_fns)),
         n_residuals=None if n_residuals is None else int(n_residuals),
     )
 

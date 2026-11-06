@@ -4,7 +4,9 @@
 point for parameter estimation:
 
 * ``problem`` is an ``InferenceProblem`` (an experiment or study paired with
-  an MLE or MAP objective), a lowered study (``ds.lower(study)``), or an
+  an MLE or MAP objective), a lowered study (``ds.lower(study)``), any other
+  [AbstractOptimizationProblem][diff_soup.optimization.AbstractOptimizationProblem]
+  such as a ``ControlProblem``, or an
   [OptimizationProblem][diff_soup.optimization.OptimizationProblem]; the start
   point is the problem's, there is no positional ``x0`` argument.
 * ``optimizer`` defaults to ``NewtonTrustRegion()``, so the minimal call is
@@ -31,9 +33,10 @@ from diff_soup._distributed import assert_decision_value, local_value
 from diff_soup._errors import ConfigurationError
 from diff_soup._logging import log as logger
 from diff_soup._warnings import warn_user
-from diff_soup.optimization._abc import RESUME
+from diff_soup.optimization._abc import RESUME, OptimizationProblem
 from diff_soup.optimization.inference.fitting._protocols import StatisticalInferenceProblem
 from diff_soup.optimization.inference.fitting.result import OptResult, TerminationStatus
+from diff_soup.optimization.problem import AbstractOptimizationProblem
 
 #: The built-in solvers and the structure each requires, in the order a refusal lists them.
 _BUILT_IN = (
@@ -50,14 +53,14 @@ _BUILT_IN = (
 def _numeric_problem(problem: Any, optimizer: Any) -> Any:
     """The optimization problem ``optimizer`` solves for the declared ``problem``.
 
-    A statistical problem (an ``InferenceProblem`` or a lowered study) lowers
-    itself; an object with a ``structure`` is an optimization problem already;
-    a residual problem (one with ``segment_fns``) lowers to a
+    A problem of the hierarchy (an ``InferenceProblem``, a lowered study, a
+    ``ControlProblem``) lowers itself; an ``OptimizationProblem`` is solved as
+    it is; a residual problem (one with ``segment_fns``) lowers to a
     ``LeastSquaresProblem``.
     """
-    if isinstance(problem, StatisticalInferenceProblem):
+    if isinstance(problem, (AbstractOptimizationProblem, StatisticalInferenceProblem)):
         return problem.numeric_problem(optimizer)
-    if getattr(problem, "structure", None) is not None:
+    if isinstance(problem, OptimizationProblem):
         return problem
     if getattr(problem, "segment_fns", None) is not None:
         from diff_soup.optimization.inference.fitting.inference_problem import (
@@ -66,8 +69,8 @@ def _numeric_problem(problem: Any, optimizer: Any) -> Any:
 
         return lower_residual_problem(problem, optimizer)
     raise TypeError(
-        f"optsolve takes an InferenceProblem, a lowered study (ds.lower(study)) or an "
-        f"OptimizationProblem; got {type(problem).__name__}."
+        f"optsolve takes an InferenceProblem, a lowered study (ds.lower(study)), a "
+        f"ControlProblem or an OptimizationProblem; got {type(problem).__name__}."
     )
 
 
@@ -458,6 +461,17 @@ def _offers_gauss_newton(problem: Any) -> bool:
     return getattr(problem, "segment_fns", None) is not None
 
 
+def _has_data_rows(problem: Any) -> bool:
+    """Whether ``problem`` fits data, so the end-of-fit diagnostics apply to it.
+
+    A statistical problem, an optimization problem and a residual problem do; a
+    control or design problem has no data rows.
+    """
+    return isinstance(problem, StatisticalInferenceProblem) or not isinstance(
+        problem, AbstractOptimizationProblem
+    )
+
+
 def _resolved_optimizer(problem: Any, optimizer: Any) -> Any:
     """``optimizer`` with its ``"auto"`` curvature resolved for ``problem``.
 
@@ -487,8 +501,8 @@ def optsolve(
 ) -> OptResult:
     """Fit a problem with an optimizer and return the result.
 
-    `problem` is an `InferenceProblem`, a study lowered with `ds.lower(study)`, or an
-    `OptimizationProblem`. When a time-stepping solve at the solution fails, the result has
+    `problem` is an `InferenceProblem`, a study lowered with `ds.lower(study)`, a
+    `ControlProblem`, or an `OptimizationProblem`. When a time-stepping solve at the solution fails, the result has
     status `SOLVER_FAILED` and a warning is raised.
 
     Args:
@@ -557,7 +571,7 @@ def optsolve(
     result = _attach_final_data_rows(result, problem)
     result = _surface_failures(result, problem)
     result = _attach_joint_children(result, problem)
-    if diagnostics:
+    if diagnostics and _has_data_rows(declared_problem):
         result = _attach_diagnostics(result, declared_problem)
 
     if statistical_problem is not None:

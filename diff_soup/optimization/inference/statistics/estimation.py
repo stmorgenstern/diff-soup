@@ -272,6 +272,9 @@ class EstimationProblem:
     regularization: NoReg
     trial_predicate: Any
 
+    #: The constraints on the parameters (M7); ``None`` for an unconstrained fit.
+    constraints = None
+
     def __init__(
         self,
         study: Study,
@@ -599,6 +602,10 @@ class EstimationProblem:
         """
         return lower_estimation(self, self, optimizer)
 
+    def args(self) -> Any:
+        """The dynamic leaves of the numeric problem: ``None``, its closures hold their data."""
+        return None
+
     def count_failed(self, x_flat: Any) -> tuple[int, tuple[int, ...]]:
         """Delegate sentinel failure detection to the underlying PDE problem."""
         count = getattr(self._inference_problem, "count_failed", None)
@@ -760,7 +767,7 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
         isinstance(problem.objective, MAP) or not isinstance(regularization, NoReg)
     ):
         regularization = _StructuredPriorRegularizer(problem._prior_blocks, regularization)
-    return lower_residual_problem(
+    numeric = lower_residual_problem(
         problem,
         optimizer,
         evaluator=evaluator,
@@ -770,6 +777,7 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
         regularization=regularization,
         joint_view=lambda: problem.joint_view(),
     )
+    return numeric
 
 
 __all__ = ["MLE", "MAP", "EstimationProblem"]
