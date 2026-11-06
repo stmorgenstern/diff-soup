@@ -249,7 +249,6 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         save times, solver and adjoint have equal closures, so a solver compiled for one
         serves the next without retracing.
         """
-        self._check()
         constraints = self.constraints
         if constraints is not None:
             # The scales are arrays the solver reads from the numeric problem, not the closures.
@@ -282,8 +281,8 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
             jnp.concatenate([jnp.ones((path,), inequality.dtype), inequality]),
         )
 
-    def _check(self) -> None:
-        """Refuse a control problem missing what its lowering needs."""
+    def __check_init__(self) -> None:
+        """Refuse a control problem missing what its lowering needs, or with save times off its horizon."""
         missing = [
             name
             for name in ("controls", "cost", "save_times", "initial_state", "solver")

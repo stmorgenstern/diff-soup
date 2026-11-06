@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import abc
-import dataclasses
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 
+from diff_soup._errors import ConfigurationError
 from diff_soup._schedule import solve_schedule
+from diff_soup.optimization._abc import LeastSquaresProblem
+from diff_soup.optimization._binding import Derived, Held
+from diff_soup.optimization.inference.fitting.result import TerminationStatus
+from diff_soup.optimization.solvers.sqp import SQP
+
+if TYPE_CHECKING:
+    from diff_soup.optimization.control.problem import ControlProblem, PiecewiseConstant
+    from diff_soup.optimization.solvers import CompiledSolver
 
 
 class PlantEstimate(eqx.Module):
@@ -41,11 +50,11 @@ class Estimator(eqx.Module):
 class FullState(Estimator):
     """Full-state feedback: the measurement is the plant state, and the estimate is the measurement."""
 
-    def init(self, args: Any) -> Any:
+    def init(self, args: Any) -> PlantEstimate:
         """The initial state of the control problem."""
         return PlantEstimate(plant=args[0])
 
-    def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> Any:
+    def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> PlantEstimate:
         """Return the measured plant state."""
         return PlantEstimate(plant=measurement)
 
@@ -62,8 +71,17 @@ class KalmanEstimate(eqx.Module):
     covariance: Any
 
 
+def _require(owner: str, module: eqx.Module, names: tuple[str, ...]) -> None:
+    """Refuse `module` when any of the fields `names` is `None`."""
+    missing = [name for name in names if getattr(module, name) is None]
+    if missing:
+        raise ConfigurationError(f"{owner} needs {', '.join(missing)}.")
+
+
 class ExtendedKalmanFilter(Estimator):
     """An EKF whose one-interval transition and measurement maps are linearized by forward-mode AD through the schedule solve.
+
+    A failed interval solve makes the estimate NaN, so the next horizon is a rejected trial.
 
     Args:
         problem: The [ControlProblem][diff_soup.optimization.control.ControlProblem] whose model, solver and interval the plant follows.
@@ -73,14 +91,21 @@ class ExtendedKalmanFilter(Estimator):
         initial_covariance: The covariance of the initial state, `Q` when `None`.
     """
 
-    # The control problem holds the model's arrays, so it is a leaf, not static.
-    problem: Any = None
-    measured: Any = eqx.field(static=True, default=None)
+    problem: ControlProblem | None = None
+    measured: Callable | None = eqx.field(static=True, default=None)
     process_covariance: Any = None
     measurement_covariance: Any = None
     initial_covariance: Any = None
 
-    def init(self, args: Any) -> Any:
+    def __check_init__(self) -> None:
+        """Refuse a filter without its problem, measurement map or covariances."""
+        _require(
+            "ExtendedKalmanFilter",
+            self,
+            ("problem", "measured", "process_covariance", "measurement_covariance"),
+        )
+
+    def init(self, args: Any) -> KalmanEstimate:
         """The initial estimate and its covariance."""
         plant = jnp.asarray(args[0])
         covariance = (
@@ -88,7 +113,7 @@ class ExtendedKalmanFilter(Estimator):
         )
         return KalmanEstimate(plant=plant, covariance=_matrix(covariance, plant.shape[0]))
 
-    def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> Any:
+    def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> KalmanEstimate:
         """Predict through one interval, then correct with the measurement."""
         theta = args[1]
         n = state.plant.shape[0]
@@ -111,7 +136,7 @@ class ExtendedKalmanFilter(Estimator):
         return KalmanEstimate(plant=plant, covariance=0.5 * (covariance + covariance.T))
 
 
-def one_interval(control_problem: Any, state: Any, u: Any, theta: Any) -> Any:
+def one_interval(control_problem: ControlProblem, state: Any, u: Any, theta: Any) -> Any:
     """The state after one interval of `control_problem`'s controls held at `u`, from `state`.
 
     Args:
@@ -121,16 +146,25 @@ def one_interval(control_problem: Any, state: Any, u: Any, theta: Any) -> Any:
         theta: The model parameters.
 
     Returns:
-        The state at the interval's end, in the same layout.
+        The state at the interval's end, in the same layout; NaN when the interval's solve fails.
     """
-    controls = control_problem.controls
-    model = control_problem.model
-    duration = controls.interval
-    interval = dataclasses.replace(controls, intervals=1, duration=duration)
-    solution, _ = solve_schedule(
-        model,
+    return _advance(
+        control_problem.problem,
         control_problem.solver,
-        interval.segments(jnp.atleast_1d(u), tuple(model.operational_modes())),
+        control_problem.controls.interval_controls(),
+        state,
+        u,
+        theta,
+    )
+
+
+def _advance(model: Held, solver: Any, controls: PiecewiseConstant, state, u, theta) -> Any:
+    """One interval of `controls` held at `u` from `state`; NaN when the solve fails."""
+    duration = controls.horizon
+    solution, _ = solve_schedule(
+        model.value,
+        solver,
+        controls.segments(jnp.atleast_1d(u), tuple(model.value.operational_modes())),
         state,
         t0=0.0,
         t_end=duration,
@@ -138,9 +172,8 @@ def one_interval(control_problem: Any, state: Any, u: Any, theta: Any) -> Any:
         theta=theta,
     )
     terminal = solution.terminal
-    if terminal.lam is None:
-        return terminal.y
-    return jnp.concatenate([terminal.y, terminal.lam])
+    end = terminal.y if terminal.lam is None else jnp.concatenate([terminal.y, terminal.lam])
+    return jnp.where(solution.ok, end, jnp.nan)
 
 
 def _matrix(covariance: Any, n: int) -> Any:
@@ -155,12 +188,13 @@ class MovingHorizonEstimate(eqx.Module):
     """The state of `MovingHorizonEstimator`: the estimate, the window's prior, and the window.
 
     Attributes:
-        plant: The state estimate at the window's end, which the next horizon starts from.
+        plant: The state estimate at the window's end, which the next horizon starts from; NaN after a failed fit.
         start: The prior of the state at the window's start, the arrival cost's centre.
         correction: The last fit's correction of `start`, along the estimator's basis.
         controls: The applied controls of the window, oldest first, `(window,)`.
         measurements: The measurement after each of them, `(window, n_measured)`.
         count: How many entries of the window are filled, at most `window`.
+        status: The last window fit's [TerminationStatus][diff_soup.optimization.TerminationStatus] code.
     """
 
     plant: Any
@@ -169,6 +203,30 @@ class MovingHorizonEstimate(eqx.Module):
     controls: Any
     measurements: Any
     count: Any
+    status: Any
+
+
+class _Window(NamedTuple):
+    """The `args` of a window fit: the prior, the window's data and the whitening factors."""
+
+    start: Any
+    controls: Any
+    measurements: Any
+    count: Any
+    theta: Any
+    basis: Any
+    noise: Any
+    arrival: Any
+
+
+class _Configuration(NamedTuple):
+    """What a window fit's residual reads besides `(z, args)`; hashable, free of arrays."""
+
+    model: Held
+    solver: Any
+    controls: Any
+    measured: Callable
+    window: int
 
 
 class MovingHorizonEstimator(Estimator):
@@ -177,31 +235,39 @@ class MovingHorizonEstimator(Estimator):
     After each interval the window takes the applied control and the measurement, and the
     start state `start + basis @ z` is fitted: the residual is every measurement in the window
     against the model run from that state through the window's controls, whitened by the
-    measurement covariance, then the arrival cost `z` whitened by its covariance. The fit is a
-    `LeastSquaresProblem` whose `args` hold the window, solved by `solver` from the last
-    correction, so it runs inside the loop's `lax.scan`. Once the window is full it slides:
-    the next start's prior is the fitted start advanced one interval.
+    measurement covariance, then the arrival cost `z` whitened by its covariance. The fit is
+    one `LeastSquaresProblem` whose `args` hold the window, solved by `solver` from the last
+    correction inside the loop's `lax.scan`. Once the window is full it slides: the next
+    start's prior is the fitted start advanced one interval. A fit that fails (a status from
+    `INFEASIBLE` on) makes the estimate NaN; its status is carried in the state.
 
     Args:
         problem: The [ControlProblem][diff_soup.optimization.control.ControlProblem] whose model, solver and interval the plant follows.
         measured: `measured(state, theta) -> measurement` as a JAX function.
         window: The number of intervals in the window.
-        solver: The `CompiledSolver` of the window fit, as the horizon's.
+        solver: The `CompiledSolver` of the window fit; `SQP()` when `None`.
         arrival_covariance: The covariance of `z`, `(k, k)`, a diagonal or a scalar.
         measurement_covariance: The covariance of one measurement, `(n_measured, n_measured)`, a diagonal or a scalar.
         basis: The directions `(n_states, k)` the start state is corrected along; every state when `None`.
     """
 
-    # The control problem holds the model's arrays, so it is a leaf, not static.
-    problem: Any = None
-    measured: Any = eqx.field(static=True, default=None)
-    window: int = eqx.field(static=True, default=5)
-    solver: Any = eqx.field(static=True, default=None)
+    problem: ControlProblem | None = None
+    measured: Callable | None = eqx.field(static=True, default=None)
+    window: int | None = eqx.field(static=True, default=None)
+    solver: CompiledSolver | None = eqx.field(static=True, default=None)
     arrival_covariance: Any = None
     measurement_covariance: Any = None
     basis: Any = None
 
-    def init(self, args: Any) -> Any:
+    def __check_init__(self) -> None:
+        """Refuse an estimator without its problem, measurement map, window or covariances."""
+        _require(
+            "MovingHorizonEstimator",
+            self,
+            ("problem", "measured", "window", "arrival_covariance", "measurement_covariance"),
+        )
+
+    def init(self, args: Any) -> MovingHorizonEstimate:
         """An empty window whose start prior is the control problem's initial state."""
         plant = jnp.asarray(args[0])
         shape = jax.eval_shape(lambda y: jnp.atleast_1d(self.measured(y, args[1])), plant)
@@ -212,55 +278,56 @@ class MovingHorizonEstimator(Estimator):
             controls=jnp.zeros((self.window,), plant.dtype),
             measurements=jnp.zeros((self.window, shape.shape[0]), plant.dtype),
             count=jnp.zeros((), jnp.int32),
+            status=jnp.zeros((), jnp.int32),
         )
 
-    def estimate(self, state: Any, u_prev: Any, measurement: Any, args: Any) -> Any:
+    def estimate(
+        self, state: Any, u_prev: Any, measurement: Any, args: Any
+    ) -> MovingHorizonEstimate:
         """Push the interval into the window, refit the start state, and run it to the window's end."""
-        from diff_soup.optimization._abc import LeastSquaresProblem
-
-        theta = args[1]
         controls = jnp.concatenate([state.controls[1:], jnp.reshape(u_prev, (1,))])
         measured = jnp.atleast_1d(measurement)[None, :].astype(state.measurements.dtype)
         measurements = jnp.concatenate([state.measurements[1:], measured])
         count = jnp.minimum(state.count + 1, self.window)
         basis = self._basis(state.plant)
-        k = basis.shape[1]
-        noise = jnp.linalg.cholesky(_matrix(self.measurement_covariance, measured.shape[1]))
-        arrival = jnp.linalg.cholesky(_matrix(self.arrival_covariance, k))
-        data = (state.start, controls, measurements, count, theta)
-
-        def residual(z, data):
-            return self._residual(z, data, basis, noise, arrival)[0]
-
-        def residual_and_jacobian(z, data):
-            jacobian, value = jax.jacfwd(lambda x: (residual(x, data),) * 2, has_aux=True)(z)
-            return value, jacobian
-
-        fit = LeastSquaresProblem(
-            x0=jnp.zeros((k,), state.plant.dtype),
-            structure=frozenset({"value_gradient", "residual_jacobian", "gauss_newton"}),
-            args=data,
-            ad="forward",
-            _residual=residual,
-            _residual_and_jacobian=residual_and_jacobian,
+        data = _Window(
+            start=state.start,
+            controls=controls,
+            measurements=measurements,
+            count=count,
+            theta=args[1],
+            basis=basis,
+            noise=jnp.linalg.cholesky(_matrix(self.measurement_covariance, measured.shape[1])),
+            arrival=jnp.linalg.cholesky(_matrix(self.arrival_covariance, basis.shape[1])),
         )
-        solver = self.solver
-        if solver is None:
-            from diff_soup.optimization.solvers.sqp import SQP
-
-            solver = SQP()
-        z, _ = solver.run(fit, state.correction, data)
-        _, (first, end) = self._residual(z, data, basis, noise, arrival)
+        configuration = _Configuration(
+            model=self.problem.problem,
+            solver=self.problem.solver,
+            controls=self.problem.controls.interval_controls(),
+            measured=self.measured,
+            window=self.window,
+        )
+        fit = LeastSquaresProblem.from_residual(
+            jnp.zeros_like(state.correction),
+            Derived(_window_residual, configuration),
+            args=data,
+            hessian=False,
+        )
+        solver = SQP() if self.solver is None else self.solver
+        z, record = solver.run(fit, state.correction, data)
+        _, (first, end) = _window(configuration, z, data)
+        failed = record.status >= int(TerminationStatus.INFEASIBLE)
         # A full window slides at the next interval: its start's prior is the fitted start
         # advanced one interval, about which the next correction starts from zero.
         full = count == self.window
         return MovingHorizonEstimate(
-            plant=end,
+            plant=jnp.where(failed, jnp.nan, end),
             start=jnp.where(full, first, state.start),
             correction=jnp.where(full, jnp.zeros_like(z), z),
             controls=controls,
             measurements=measurements,
             count=count,
+            status=jnp.asarray(record.status, jnp.int32),
         )
 
     def _basis(self, plant: Any) -> Any:
@@ -269,21 +336,40 @@ class MovingHorizonEstimator(Estimator):
             return jnp.eye(plant.shape[0], dtype=plant.dtype)
         return jnp.asarray(self.basis, plant.dtype)
 
-    def _residual(self, z, data, basis, noise, arrival):
-        """The whitened window residual, the state after the window's first filled interval, and its end."""
-        start, controls, measurements, count, theta = data
-        offset = self.window - count
 
-        def interval(carry, k):
-            x, first = carry
-            on = k >= offset
-            x = jnp.where(on, one_interval(self.problem, x, controls[k], theta), x)
-            first = jnp.where(k == offset, x, first)
-            error = jnp.atleast_1d(self.measured(x, theta)) - measurements[k]
-            row = jax.scipy.linalg.solve_triangular(noise, error, lower=True)
-            return (x, first), jnp.where(on, row, 0.0)
+def _window_residual(configuration: _Configuration, z: Any, data: _Window) -> Any:
+    """The whitened window residual of the correction `z`."""
+    return _window(configuration, z, data)[0]
 
-        x0 = start + basis @ z
-        (end, first), rows = jax.lax.scan(interval, (x0, x0), jnp.arange(self.window))
-        prior = jax.scipy.linalg.solve_triangular(arrival, z, lower=True)
-        return jnp.concatenate([rows.ravel(), prior]), (first, end)
+
+def _window(configuration: _Configuration, z: Any, data: _Window) -> tuple[Any, Any]:
+    """The whitened window residual, the state after the window's first filled interval, and its end.
+
+    The slots before the window fills are skipped behind a conditional, so the model is never
+    run on them.
+    """
+    offset = configuration.window - data.count
+
+    def advance(x, k):
+        return _advance(
+            configuration.model,
+            configuration.solver,
+            configuration.controls,
+            x,
+            data.controls[k],
+            data.theta,
+        )
+
+    def interval(carry, k):
+        x, first = carry
+        on = k >= offset
+        x = jax.lax.cond(on, advance, lambda x, k: x, x, k)
+        first = jnp.where(k == offset, x, first)
+        error = jnp.atleast_1d(configuration.measured(x, data.theta)) - data.measurements[k]
+        row = jsl.solve_triangular(data.noise, error, lower=True)
+        return (x, first), jnp.where(on, row, 0.0)
+
+    x0 = data.start + data.basis @ z
+    (end, first), rows = jax.lax.scan(interval, (x0, x0), jnp.arange(configuration.window))
+    prior = jsl.solve_triangular(data.arrival, z, lower=True)
+    return jnp.concatenate([rows.ravel(), prior]), (first, end)
