@@ -27,13 +27,12 @@ second-order corrections) with
 from __future__ import annotations
 
 import abc
-from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jaxtyping import Array, Bool, Float
+from jaxtyping import Array, ArrayLike, Bool, Float, PyTree
 
 # Ipopt's inertia-correction constants (Wächter and Biegler 2006, Algorithm IC).
 _FIRST_GROWTH = 100.0
@@ -83,7 +82,7 @@ class KKTFactor(eqx.Module):
     schur_ok: Bool[Array, ""]
 
     @property
-    def ok(self) -> Any:
+    def ok(self) -> Bool[Array, ""]:
         """Whether the factorization certified the inertia `(n, m, 0)`."""
         return self.primal_ok & self.schur_ok
 
@@ -102,12 +101,12 @@ class KKTSolve(eqx.Module):
     @abc.abstractmethod
     def factor(
         self,
-        primal_block: Any,
-        constraint_jacobian: Any,
-        delta_w: Any,
-        delta_c: Any,
-        augmented: Any = False,
-    ) -> Any:
+        primal_block: Float[Array, "n n"],
+        constraint_jacobian: Float[Array, "m n"],
+        delta_w: Float[ArrayLike, ""],
+        delta_c: Float[ArrayLike, ""] | Float[Array, " m"],
+        augmented: bool | Bool[Array, ""] = False,
+    ) -> PyTree:
         """Factor the KKT matrix at one regularization.
 
         Args:
@@ -119,24 +118,26 @@ class KKTSolve(eqx.Module):
                 certifies the inertia of a nonconvex block.
 
         Returns:
-            The backend's factor, with an `ok` flag.
+            The backend's factor, a pytree with an `ok` flag.
         """
         raise NotImplementedError
 
     @abc.abstractmethod
-    def solve_factored(self, factor: Any, rhs_primal: Any, rhs_dual: Any) -> tuple[Any, Any]:
+    def solve_factored(
+        self, factor: PyTree, rhs_primal: Float[Array, " n"], rhs_dual: Float[Array, " m"]
+    ) -> tuple[Float[Array, " n"], Float[Array, " m"]]:
         """Solve with a factor from `factor`, returning `(dx, dlam)`."""
         raise NotImplementedError
 
     def solve(
         self,
-        primal_block: Any,
-        constraint_jacobian: Any,
-        delta_w: Any,
-        delta_c: Any,
-        rhs_primal: Any,
-        rhs_dual: Any,
-    ) -> tuple[Any, Any, Any]:
+        primal_block: Float[Array, "n n"],
+        constraint_jacobian: Float[Array, "m n"],
+        delta_w: Float[ArrayLike, ""],
+        delta_c: Float[ArrayLike, ""] | Float[Array, " m"],
+        rhs_primal: Float[Array, " n"],
+        rhs_dual: Float[Array, " m"],
+    ) -> tuple[Float[Array, " n"], Float[Array, " m"], Bool[Array, ""]]:
         """Solve the KKT system at the given regularization: the plain route, else the augmented one.
 
         Args:
@@ -162,12 +163,12 @@ class KKTSolve(eqx.Module):
 
     def factor_regularized(
         self,
-        primal_block: Any,
-        constraint_jacobian: Any,
-        delta_c: Any,
-        delta_c_singular: Any,
-        delta_w_last: Any,
-    ) -> tuple[Any, Any]:
+        primal_block: Float[Array, "n n"],
+        constraint_jacobian: Float[Array, "m n"],
+        delta_c: Float[Array, " m"],
+        delta_c_singular: Float[ArrayLike, ""],
+        delta_w_last: Float[ArrayLike, ""],
+    ) -> tuple[PyTree, Float[Array, ""]]:
         """Factor with Ipopt's inertia correction.
 
         The first attempt is the plain route at `delta_w = 0`, the second the augmented route.
@@ -224,7 +225,7 @@ class KKTSolve(eqx.Module):
         return factor, delta_w
 
 
-def cholesky(matrix: Any) -> tuple[Any, Any]:
+def cholesky(matrix: Float[Array, "n n"]) -> tuple[Float[Array, "n n"], Bool[Array, ""]]:
     """The lower Cholesky factor of `matrix` and whether it certifies positive definiteness."""
     size = matrix.shape[-1]
     if size == 0:
@@ -237,7 +238,9 @@ def cholesky(matrix: Any) -> tuple[Any, Any]:
     return jnp.where(ok, lower, identity), ok
 
 
-def _row_weights(primal: Any, jacobian: Any, dual: Any) -> tuple[Any, Any]:
+def _row_weights(
+    primal: Float[Array, "n n"], jacobian: Float[Array, "m n"], dual: Float[Array, " m"]
+) -> tuple[Float[Array, " m"], Float[Array, " m"]]:
     """`(W, E)` of the augmented route: each row weighted past the block's curvature along it."""
     tiny = jnp.finfo(primal.dtype).tiny
     norms = jnp.sum(jacobian * jacobian, axis=1)
@@ -268,11 +271,11 @@ class DenseKKT(KKTSolve):
 
     def factor(
         self,
-        primal_block: Any,
-        constraint_jacobian: Any,
-        delta_w: Any,
-        delta_c: Any,
-        augmented: Any = False,
+        primal_block: Float[Array, "n n"],
+        constraint_jacobian: Float[Array, "m n"],
+        delta_w: Float[ArrayLike, ""],
+        delta_c: Float[ArrayLike, ""] | Float[Array, " m"],
+        augmented: bool | Bool[Array, ""] = False,
     ) -> KKTFactor:
         """Cholesky of the (augmented) primal block, then of the Schur complement."""
         size = primal_block.shape[-1]
@@ -304,7 +307,9 @@ class DenseKKT(KKTSolve):
             schur_ok,
         )
 
-    def _solve_once(self, factor: KKTFactor, rhs_primal: Any, rhs_dual: Any) -> tuple[Any, Any]:
+    def _solve_once(
+        self, factor: KKTFactor, rhs_primal: Float[Array, " n"], rhs_dual: Float[Array, " m"]
+    ) -> tuple[Float[Array, " n"], Float[Array, " m"]]:
         """One pass through the factors, without refinement."""
         lower, half, schur = factor.lower_primal, factor.half_jacobian, factor.lower_schur
         rhs = rhs_primal + factor.jacobian.T @ (factor.weight * rhs_dual)
@@ -316,7 +321,9 @@ class DenseKKT(KKTSolve):
         dx = jax.scipy.linalg.solve_triangular(lower.T, first - half @ dmu, lower=False)
         return dx, dmu / factor.scale
 
-    def solve_factored(self, factor: KKTFactor, rhs_primal: Any, rhs_dual: Any) -> tuple[Any, Any]:
+    def solve_factored(
+        self, factor: KKTFactor, rhs_primal: Float[Array, " n"], rhs_dual: Float[Array, " m"]
+    ) -> tuple[Float[Array, " n"], Float[Array, " m"]]:
         """Solve by the condensed route with one step of iterative refinement on the original system."""
         dx, dlam = self._solve_once(factor, rhs_primal, rhs_dual)
         residual_primal = rhs_primal - factor.primal @ dx - factor.jacobian.T @ dlam

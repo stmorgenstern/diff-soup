@@ -10,11 +10,10 @@ of slots, so its shape is static under `jit`.
 
 from __future__ import annotations
 
-from typing import Any
-
 import equinox as eqx
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jax.typing import DTypeLike
+from jaxtyping import Array, ArrayLike, Bool, Float
 
 # Ipopt's defaults (Wächter and Biegler 2006, section 3.2): `gamma_theta`, `gamma_phi`,
 # `eta_phi`, `delta`, `s_theta`, `s_phi`, `alpha_min_frac`, and `theta_max_fact`,
@@ -43,18 +42,18 @@ class Filter(eqx.Module):
     phi: Float[Array, "capacity"]
 
 
-def empty_filter(dtype: Any) -> Filter:
+def empty_filter(dtype: DTypeLike) -> Filter:
     """A filter with every slot free."""
     free = jnp.full((CAPACITY,), jnp.inf, dtype=dtype)
     return Filter(free, free)
 
 
-def blocks(filt: Filter, theta: Any, phi: Any) -> Any:
+def blocks(filt: Filter, theta: Float[ArrayLike, ""], phi: Float[ArrayLike, ""]) -> Bool[Array, ""]:
     """Whether an entry of the filter dominates the trial `(theta, phi)`."""
     return jnp.any((theta >= filt.theta) & (phi >= filt.phi))
 
 
-def augment(filt: Filter, theta: Any, phi: Any) -> Filter:
+def augment(filt: Filter, theta: Float[ArrayLike, ""], phi: Float[ArrayLike, ""]) -> Filter:
     """The filter with `(theta, phi)` added and the entries it dominates removed.
 
     A full filter overwrites the entry of largest `theta`, the one that blocks the least.
@@ -67,13 +66,17 @@ def augment(filt: Filter, theta: Any, phi: Any) -> Filter:
     return Filter(theta_kept.at[slot].set(theta), phi_kept.at[slot].set(phi))
 
 
-def _less_equal(lhs: Any, rhs: Any, reference: Any) -> Any:
+def _less_equal(
+    lhs: Float[ArrayLike, ""], rhs: Float[ArrayLike, ""], reference: Float[ArrayLike, ""]
+) -> Bool[Array, ""]:
     """`lhs <= rhs` up to ten machine epsilons of `reference`, as Ipopt compares."""
     eps = jnp.finfo(jnp.result_type(lhs)).eps
     return lhs - rhs <= 10.0 * eps * jnp.abs(reference)
 
 
-def switching(alpha: Any, theta: Any, slope: Any) -> Any:
+def switching(
+    alpha: Float[ArrayLike, ""], theta: Float[ArrayLike, ""], slope: Float[ArrayLike, ""]
+) -> Bool[Array, ""]:
     """Whether the step decreases `phi` enough relative to `theta` to be held to Armijo."""
     descent = jnp.maximum(-slope, 0.0)
     return (slope < 0.0) & (alpha * descent**S_PHI > DELTA * theta**S_THETA)
@@ -81,15 +84,15 @@ def switching(alpha: Any, theta: Any, slope: Any) -> Any:
 
 def acceptable(
     filt: Filter,
-    theta_trial: Any,
-    phi_trial: Any,
-    alpha: Any,
-    theta: Any,
-    phi: Any,
-    slope: Any,
-    theta_min: Any,
-    theta_max: Any,
-) -> tuple[Any, Any]:
+    theta_trial: Float[ArrayLike, ""],
+    phi_trial: Float[ArrayLike, ""],
+    alpha: Float[ArrayLike, ""],
+    theta: Float[ArrayLike, ""],
+    phi: Float[ArrayLike, ""],
+    slope: Float[ArrayLike, ""],
+    theta_min: Float[ArrayLike, ""],
+    theta_max: Float[ArrayLike, ""],
+) -> tuple[Bool[Array, ""], Bool[Array, ""]]:
     """Whether a trial is accepted, and whether it is an `f`-type step that leaves the filter alone.
 
     Args:
@@ -121,7 +124,9 @@ def acceptable(
     return accepted, f_type
 
 
-def minimum_step(theta: Any, slope: Any, theta_min: Any) -> Any:
+def minimum_step(
+    theta: Float[ArrayLike, ""], slope: Float[ArrayLike, ""], theta_min: Float[ArrayLike, ""]
+) -> Float[Array, ""]:
     """The step length below which the line search gives up (Wächter and Biegler, eq. 23)."""
     descent = jnp.maximum(-slope, jnp.finfo(jnp.result_type(slope)).tiny)
     by_phi = GAMMA_PHI * theta / descent

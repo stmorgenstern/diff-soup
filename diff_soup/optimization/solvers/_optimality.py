@@ -9,22 +9,29 @@ problem; the run ends when it falls below `tol`, and the barrier parameter is re
 
 from __future__ import annotations
 
-from typing import Any
-
 import jax.numpy as jnp
+from jaxtyping import Array, ArrayLike, Float, Int
 
 from diff_soup.optimization.solvers._barrier import Bounds, distances
+from diff_soup.optimization.solvers._closures import Evaluation, Scales
 
 #: Ipopt's `s_max`: the multiplier size past which the dual and complementarity errors shrink.
 S_MAX = 100.0
 
 
-def _max_abs(*parts: Any) -> Any:
+def _max_abs(*parts: Float[Array, "..."]) -> Float[Array, ""]:
     """The infinity norm over several vectors, 0 when all are empty."""
     return jnp.max(jnp.concatenate([jnp.abs(p).ravel() for p in parts]), initial=0.0)
 
 
-def dual_residuals(evaluation: Any, lam_e: Any, lam_i: Any, z_lower: Any, z_upper: Any, v: Any):
+def dual_residuals(
+    evaluation: Evaluation,
+    lam_e: Float[Array, " n_eq"],
+    lam_i: Float[Array, " n_ineq"],
+    z_lower: Float[Array, " n"],
+    z_upper: Float[Array, " n"],
+    v: Float[Array, " n_ineq"],
+) -> tuple[Float[Array, " n"], Float[Array, " n_ineq"]]:
     """`(r_x, r_s)`: the gradient of the Lagrangian in `x` and in the slacks."""
     r_x = (
         evaluation.gradient
@@ -37,14 +44,14 @@ def dual_residuals(evaluation: Any, lam_e: Any, lam_i: Any, z_lower: Any, z_uppe
 
 
 def scaled_error(
-    dual: tuple,
-    primal: tuple,
-    complementarity: tuple,
-    lam_norm: Array,
+    dual: tuple[Float[Array, "..."], ...],
+    primal: tuple[Float[Array, "..."], ...],
+    complementarity: tuple[Float[Array, "..."], ...],
+    lam_norm: Float[Array, ""],
     n_lam: int,
-    z_norm: Array,
-    n_z: Array,
-) -> Array:
+    z_norm: Float[Array, ""],
+    n_z: Int[Array, ""],
+) -> Float[Array, ""]:
     """`E_mu` from its parts: the dual and complementarity residuals scaled by `s_d` and `s_c`."""
     s_d = jnp.maximum(S_MAX, (lam_norm + z_norm) / jnp.maximum(n_lam + n_z, 1)) / S_MAX
     s_c = jnp.maximum(S_MAX, z_norm / jnp.maximum(n_z, 1)) / S_MAX
@@ -53,17 +60,17 @@ def scaled_error(
 
 
 def optimality_error(
-    evaluation: Any,
-    x: Any,
-    s: Any,
-    lam_e: Any,
-    lam_i: Any,
-    z_lower: Any,
-    z_upper: Any,
-    v: Any,
-    mu: Any,
+    evaluation: Evaluation,
+    x: Float[Array, " n"],
+    s: Float[Array, " n_ineq"],
+    lam_e: Float[Array, " n_eq"],
+    lam_i: Float[Array, " n_ineq"],
+    z_lower: Float[Array, " n"],
+    z_upper: Float[Array, " n"],
+    v: Float[Array, " n_ineq"],
+    mu: Float[ArrayLike, ""],
     bounds: Bounds,
-) -> Any:
+) -> Float[Array, ""]:
     """The scaled optimality error `E_mu` at one primal-dual point."""
     r_x, r_s = dual_residuals(evaluation, lam_e, lam_i, z_lower, z_upper, v)
     below, above = distances(x, bounds)
@@ -86,7 +93,7 @@ def optimality_error(
     )
 
 
-def constraint_violation(evaluation: Any, scales: Any) -> Any:
+def constraint_violation(evaluation: Evaluation, scales: Scales) -> Float[Array, ""]:
     """The largest violation of the original, unscaled constraints, without slacks."""
     equality = evaluation.equality / scales.equality
     inequality = evaluation.inequality / scales.inequality
