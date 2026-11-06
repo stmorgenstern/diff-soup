@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from diff_soup._errors import ConfigurationError
 
 MODES = ("auto", "bfgs", "exact", "gauss-newton")
+#: Powell's damping threshold (Nocedal and Wright, Procedure 18.2).
 _DAMPING = 0.2
 
 
