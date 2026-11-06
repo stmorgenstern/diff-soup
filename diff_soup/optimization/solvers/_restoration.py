@@ -74,17 +74,14 @@ def restoration_closures(closures: Closures, n: int) -> Closures:
         )
         return value, gradient
 
-    def value(y, packed):
-        return value_and_gradient(y, packed)[0]
-
-    def residual(y, args, equality, inequality):
+    def residual(y, equality, inequality):
         _, s, p, q = _split(y, n, n_ineq, m)
         return jnp.concatenate([equality, inequality + s]) - p + q
 
-    def constraints(y, packed):
-        args, _ = packed
-        equality, inequality = closures.constraints(y[:n], args)
-        return residual(y, args, equality, inequality), jnp.zeros((0,), y.dtype)
+    def evaluate(y, packed):
+        _, equality, inequality = closures.evaluate(y[:n], packed[0])
+        value, _ = value_and_gradient(y, packed)
+        return value, residual(y, equality, inequality), jnp.zeros((0,), y.dtype)
 
     def constraints_and_jacobians(y, packed):
         args, _ = packed
@@ -97,11 +94,15 @@ def restoration_closures(closures: Closures, n: int) -> Closures:
             [jnp.concatenate([jac_eq, jac_ineq]), slack_columns, -identity, identity], axis=1
         )
         return (
-            residual(y, args, equality, inequality),
+            residual(y, equality, inequality),
             jnp.zeros((0,), y.dtype),
             jacobian,
             jnp.zeros((0, y.shape[0]), y.dtype),
         )
+
+    def evaluate_with_derivatives(y, packed):
+        value, gradient = value_and_gradient(y, packed)
+        return (value, gradient, *constraints_and_jacobians(y, packed))
 
     def proximity_hessian(y, reference):
         diagonal = jnp.concatenate(
@@ -127,15 +128,16 @@ def restoration_closures(closures: Closures, n: int) -> Closures:
         return closures.is_valid(y[:n], packed[0])
 
     return Closures(
-        value=value,
-        value_and_gradient=value_and_gradient,
-        constraints=constraints,
+        evaluate=evaluate,
+        evaluate_with_derivatives=evaluate_with_derivatives,
         constraints_and_jacobians=constraints_and_jacobians,
         lagrangian_hessian=None if closures.lagrangian_hessian is None else lagrangian_hessian,
+        constraint_hessian=None,
         gauss_newton=gauss_newton,
-        is_valid=None if closures.is_valid is None else is_valid,
+        is_valid=is_valid,
         n_equality=m,
         n_inequality=0,
+        bounded=True,
     )
 
 
@@ -235,21 +237,20 @@ def restore(
         resto,
         resto_bounds,
         y0,
-        args=resto_args,
+        resto_args,
         lam_e=jnp.zeros((m,), dtype),
         lam_i=jnp.zeros((0,), dtype),
         z_lower=z_lower,
         z_upper=z_upper,
         v=jnp.zeros((0,), dtype),
         mu=mu_r,
-        scales=None,
     )
 
     def accepted(current):
         xr, sr, pr, qr = _split(current.x, n, n_ineq, m)
         constraint = current.evaluation.equality + pr - qr
         theta_r = jnp.sum(jnp.abs(constraint))
-        phi_r = closures.value(xr, args) + barrier_value(xr, sr, mu, bounds)
+        phi_r = closures.evaluate(xr, args)[0] + barrier_value(xr, sr, mu, bounds)
         return (
             jnp.isfinite(phi_r)
             & ~_filter.blocks(filt, theta_r, phi_r)
