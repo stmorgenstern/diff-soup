@@ -55,6 +55,7 @@ from diff_soup.problem._spec.derivative_expr import (
     current_slopes,
     slope_context_includes_residual,
 )
+from diff_soup.problem._spec.operating_modes import constant_current_slope
 
 from .constraints import _eval_constraint_residual
 from .couplings import _read_through_alias_owner, _resolve_family_couplings
@@ -2025,7 +2026,7 @@ def _build_full_jac_blocks_fn(
             row_lo = layout.offset_of((owner_comp.name, field_var.name))
             row_hi = row_lo + int(field_var.size)
             fallback_names.append(c.name)
-            if not {"power", "resistance"}.intersection(c.modes) and _field_eq_is_fully_declared(
+            if constant_current_slope(c.modes) and _field_eq_is_fully_declared(
                 owner_comp, field_var, _residual_bank(owner_comp), threaded_globals
             ):
                 # The current enters its row linearly, so the row's derivative

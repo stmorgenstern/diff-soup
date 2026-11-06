@@ -28,6 +28,7 @@ from diff_soup.problem._ir.constraint import (
     OperationalControlConstraint,
     ReduceResidualConstraint,
 )
+from diff_soup.problem._spec.operating_modes import OPERATING_MODES
 
 from .bcs import _FaceView
 
@@ -105,13 +106,7 @@ def _eval_constraint_residual(
         if getattr(control, "target_terms", None) is not None:
             # A target that varies in time, at the residual's own time.
             tgt = control.target_at(t)
-        forms = {
-            "current": i_obs - tgt,
-            "voltage": v_obs - tgt,
-            "power": v_obs * i_obs - tgt,
-            "resistance": v_obs - tgt * i_obs,
-        }
-        rows = jnp.stack([forms[m] for m in constraint.modes])
+        rows = jnp.stack([OPERATING_MODES[m].row(i_obs, v_obs, tgt) for m in constraint.modes])
         mode_idx = jnp.asarray(mode, dtype=jnp.int32)
         selected = jnp.take(rows, mode_idx)
         # A negative mode is the initialization path's internal terminal-

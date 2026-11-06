@@ -1,7 +1,8 @@
 """Adjoints: reverse-mode gradients through an affect, forward and checkpoint parity, the
 checkpoint record, second order through an event solve, the compositions of jax.jvp,
-jax.grad, jax.jit and jax.vmap over a checkpointed solve, a scheduled solve's tangent in a
-segment duration, and an event condition differentiated through the solve's parameters."""
+jax.grad, jax.jit and jax.vmap over a checkpointed solve, a scheduled solve's first and second
+tangents in its durations and targets, and an event condition differentiated through the solve's
+parameters."""
 
 from __future__ import annotations
 
@@ -296,35 +297,45 @@ def test_the_gradient_of_a_projected_dae_event_time_is_the_closed_form():
 _DURATION_BOUND = 1e-6
 #: The central-difference step in the first segment's duration.
 _DURATION_STEP = 1e-4
+#: Two holds of ``u' = -u + I`` from ``u = 2``: ``I1`` for ``d1``, then ``I2`` for ``0.4``.
+_HOLDS = jnp.asarray([0.5, 1.5])
+_HELD_FOR = jnp.asarray([0.3, 0.4])
 
 
-def test_a_scheduled_sample_differentiates_through_a_segment_duration():
-    """``u' = -u + I`` held at ``I1 = 0.5`` for ``d1 = 0.3`` and then at ``I2 = 1.5`` has, at
-    the sample ``t = 0.5`` of the second hold, ``du/dd1 = (I1 - I2) e^{-(0.5 - d1)}``: jax.jvp
-    through solve_schedule gives it, and so do central differences."""
+@pytest.fixture(scope="module")
+def held_sample():
+    """``u`` at ``t = 0.5``, in the second hold, as a jitted function of the durations and the
+    currents of the two holds."""
     problem = operational_cell().build()
-    first, second, d1 = 0.5, 1.5, 0.3
     holds = ds.schedule_arrays(
-        ds.Schedule(
-            [ds.Segment(current=first, duration=d1), ds.Segment(current=second, duration=0.4)]
-        ),
+        ds.Schedule([ds.Segment(current=0.5, duration=0.3), ds.Segment(current=1.5, duration=0.4)]),
         problem.operational_modes(),
     )
-    initial = jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))])
 
     @jax.jit
-    def sample(duration):
-        schedule = dataclasses.replace(holds, duration=jnp.stack([duration, jnp.asarray(0.4)]))
+    def sample(durations, currents):
         solution, _ = ds.solve_schedule(
             problem,
             ds.JIDA(linear="dense", **_VERY_TIGHT),
-            schedule,
-            initial,
+            dataclasses.replace(holds, duration=durations, target=currents),
+            jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))]),
             t0=0.0,
             t_end=0.7,
             times=jnp.asarray([0.5, 0.7]),
         )
         return solution.ys[0, 0]
+
+    return sample
+
+
+def test_a_scheduled_sample_differentiates_through_a_segment_duration(held_sample):
+    """``u' = -u + I`` held at ``I1 = 0.5`` for ``d1 = 0.3`` and then at ``I2 = 1.5`` has, at
+    the sample ``t = 0.5`` of the second hold, ``du/dd1 = (I1 - I2) e^{-(0.5 - d1)}``: jax.jvp
+    through solve_schedule gives it, and so do central differences."""
+    first, second, d1 = 0.5, 1.5, 0.3
+
+    def sample(duration):
+        return held_sample(jnp.stack([duration, _HELD_FOR[1]]), _HOLDS)
 
     duration = jnp.asarray(d1)
     tangent = jax.jvp(sample, (duration,), (jnp.ones_like(duration),))[1]
@@ -332,6 +343,128 @@ def test_a_scheduled_sample_differentiates_through_a_segment_duration():
     central = (sample(duration + step) - sample(duration - step)) / (2.0 * step)
     expected = (first - second) * np.exp(-(0.5 - d1))
     np.testing.assert_allclose([tangent, central], expected, rtol=_DURATION_BOUND)
+
+
+#: Three holds of ``u' = -u + I`` from ``u = 2``, sampled in each, run inside ``t_end = 2``.
+_THREE_CURRENTS = jnp.asarray([0.5, 1.5, -0.5])
+_THREE_DURATIONS = jnp.asarray([0.3, 0.4, 0.3])
+# measured 1.9e-6 for the tangents and the gradient, workstation 2026-11-06,
+# pytest tests/public_api/test_adjoints.py::test_a_schedule_tangent_in_each_duration_matches_central_differences
+_TANGENT_BOUND = 1e-5
+# measured 1.0e-5 and 8.4e-7 for the two pairs, workstation 2026-11-06,
+# pytest tests/public_api/test_adjoints.py::test_a_second_tangent_through_a_schedule_matches_central_differences
+_SECOND_BOUND = 5e-5
+
+
+@pytest.fixture(scope="module")
+def three_holds():
+    """The outputs of the three holds as a function of the durations and the currents, with
+    their tangent in the durations and their values compiled once."""
+    problem = operational_cell().build()
+    holds = ds.schedule_arrays(
+        ds.Schedule(
+            [ds.Segment(current=c, duration=d) for c, d in zip((0.5, 1.5, -0.5), (0.3, 0.4, 0.3))]
+        ),
+        problem.operational_modes(),
+    )
+
+    def outputs(durations, currents, adjoint=None):
+        solution, _ = ds.solve_schedule(
+            problem,
+            ds.JIDA(linear="dense", **_VERY_TIGHT),
+            dataclasses.replace(holds, duration=durations, target=currents),
+            jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))]),
+            t0=0.0,
+            t_end=2.0,
+            times=jnp.asarray([0.2, 0.45, 0.65, 0.95]),
+            adjoint=adjoint,
+        )
+        terminal = solution.terminal
+        return {
+            "ys": solution.ys,
+            "lambdas": solution.lambdas,
+            "terminal.y": terminal.y,
+            "terminal.t": terminal.t,
+        }
+
+    values = jax.jit(lambda d: outputs(d, _THREE_CURRENTS))
+    tangents = jax.jit(lambda d, v: jax.jvp(lambda x: outputs(x, _THREE_CURRENTS), (d,), (v,))[1])
+    return outputs, values, tangents
+
+
+@pytest.mark.parametrize("output", ["ys", "lambdas", "terminal.y", "terminal.t"])
+@pytest.mark.parametrize("segment", [0, 1, 2])
+def test_a_schedule_tangent_in_each_duration_matches_central_differences(
+    three_holds, segment, output
+):
+    """jax.jvp through solve_schedule in one segment's duration gives each output's central
+    difference: the samples, the bordered global, the terminal state and the terminal time."""
+    _, values, tangents = three_holds
+    direction, step = jnp.eye(3)[segment], _DURATION_STEP
+    tangent = tangents(_THREE_DURATIONS, direction)[output]
+    central = (
+        values(_THREE_DURATIONS + step * direction)[output]
+        - values(_THREE_DURATIONS - step * direction)[output]
+    ) / (2.0 * step)
+    np.testing.assert_allclose(tangent, central, atol=_TANGENT_BOUND)
+
+
+def test_a_checkpointed_gradient_in_the_durations_matches_central_differences(three_holds):
+    """jax.grad of the summed samples through solve_schedule under CheckpointAdjoint gives the
+    central differences in the three durations."""
+    outputs, values, _ = three_holds
+
+    def summed(durations):
+        return jnp.sum(outputs(durations, _THREE_CURRENTS, ds.CheckpointAdjoint())["ys"][:, 0])
+
+    gradient = jax.jit(jax.grad(summed))(_THREE_DURATIONS)
+    step = _DURATION_STEP
+    central = [
+        jnp.sum(
+            values(_THREE_DURATIONS + step * e)["ys"][:, 0]
+            - values(_THREE_DURATIONS - step * e)["ys"][:, 0]
+        )
+        / (2.0 * step)
+        for e in jnp.eye(3)
+    ]
+    np.testing.assert_allclose(gradient, central, atol=_TANGENT_BOUND)
+
+
+@pytest.mark.parametrize("inner, outer", [("durations", "durations"), ("currents", "durations")])
+def test_a_second_tangent_through_a_schedule_matches_central_differences(three_holds, inner, outer):
+    """jax.jvp of a tangent of the summed squared samples, each in the durations or the
+    currents, gives the central difference of that tangent."""
+    outputs, _, _ = three_holds
+    point = {"durations": _THREE_DURATIONS, "currents": _THREE_CURRENTS}
+    v, w = jnp.asarray([0.3, -1.1, 0.7]), jnp.asarray([-0.6, 0.4, 0.9])
+
+    def loss(args):
+        return jnp.sum(outputs(args["durations"], args["currents"])["ys"][:, 0] ** 2)
+
+    @jax.jit
+    def tangent(args):
+        return jax.jvp(lambda x: loss({**args, inner: x}), (args[inner],), (v,))[1]
+
+    second = jax.jvp(lambda x: tangent({**point, outer: x}), (point[outer],), (w,))[1]
+    step = _DURATION_STEP
+    moved = [{**point, outer: point[outer] + sign * step * w} for sign in (1.0, -1.0)]
+    central = (tangent(moved[0]) - tangent(moved[1])) / (2.0 * step)
+    np.testing.assert_allclose(second, central, atol=_SECOND_BOUND)
+
+
+def test_a_third_tangent_through_a_segment_duration_is_refused(held_sample):
+    """A third jax.jvp in the segment durations raises: a moving segment end enters the
+    tangent rule as a second-order Taylor shift."""
+    direction = jnp.asarray([1.0, -0.5])
+
+    def tangent(durations):
+        return jax.jvp(lambda d: held_sample(d, _HOLDS), (durations,), (direction,))[1]
+
+    def second(durations):
+        return jax.jvp(tangent, (durations,), (direction,))[1]
+
+    with pytest.raises(NotImplementedError, match="no third derivative"):
+        jax.jvp(second, (_HELD_FOR,), (direction,))
 
 
 def _level_stop(time, state, args, **kwargs):
