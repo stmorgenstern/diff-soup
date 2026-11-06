@@ -58,7 +58,7 @@ def _numeric_problem(problem: Any, optimizer: Any) -> Any:
     it is; a residual problem (one with ``segment_fns``) lowers to a
     ``LeastSquaresProblem``.
     """
-    if isinstance(problem, (AbstractOptimizationProblem, StatisticalInferenceProblem)):
+    if isinstance(problem, AbstractOptimizationProblem):
         return problem.numeric_problem(optimizer)
     if isinstance(problem, OptimizationProblem):
         return problem

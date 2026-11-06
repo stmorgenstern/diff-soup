@@ -64,7 +64,7 @@ class PiecewiseConstant(eqx.Module):
         return dataclasses.replace(template, target=u)
 
 
-class ControlProblem(AbstractOptimizationProblem):
+class ControlProblem(AbstractOptimizationProblem, eqx.Module):
     """Minimize a cost over the controls of a model under path and terminal constraints.
 
     The horizon runs through `ds.solve_schedule` with the segment targets as traced arrays of
@@ -92,6 +92,8 @@ class ControlProblem(AbstractOptimizationProblem):
         layout: The placement of a batch of horizons.
     """
 
+    constraints: Any = None
+    bounds: Any = None
     # The model holds arrays, so it is a leaf, not static; the closures are keyed by its identity.
     problem: Any = None
     controls: Any = eqx.field(static=True, default=None)
