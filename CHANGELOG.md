@@ -24,6 +24,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `ds.jacobian_pattern(fn, y, *args, within=None)`, the entries of a Jacobian that can be nonzero, read from the function's tangent map without evaluating it. Rules cover loops, branches, gathers and scatters at known indices, cumulative sums, convolutions and linear solves; an operation without one falls back to every entry with a warning, bounded by `within`. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - `ds.topology_report` adds `pullback_count`, and its `color_count` is now the solver's own: the colors of the rows the solver colors, with the rows it holds out recovered by pullback. Previously it colored the whole pattern.
 - `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.
+- Added `hessian_composition=` to `OptimizationProblem.from_value` and `LeastSquaresProblem.from_residual`. Under `"forward-over-forward"` the gradient, the Hessians and the Lagrangian Hessians `with_constraints` adds are all forward mode, so `InteriorPoint`, `SQP`, `AugmentedLagrangian` and their implicit derivative take an objective whose inner solve supports forward mode only, such as a DAE solve under `ForwardAdjoint`. The default, `"forward-over-reverse"`, is unchanged.
 
 ### Bugfixes
 
