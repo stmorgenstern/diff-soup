@@ -108,7 +108,6 @@ handlers stays harmless until the contract route is asked for.
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import threading
 import weakref
@@ -132,7 +131,7 @@ from diff_soup.linear._primitive import (
     CALL_FENCE_ATTRIBUTE,
     empty_slot_handle,
     lower_ffi_call,
-    lower_jnp,
+    lower_split_apply,
     lowered_site_key,
     storage_key,
 )
@@ -1263,12 +1262,13 @@ def _record(analysis: Analysis) -> _CuDSSContractAnalysis:
 _TAKEN = tuple(np.dtype(t) for t in (np.float32, np.float64, np.complex64, np.complex128))
 
 
-def _check_real(dtype: Any, precision: str, what: str = "values") -> bool:
-    """Refuse values or right-hand sides that are not float32, float64, complex64 or complex128.
+def _is_complex(dtype: Any, precision: str, what: str = "values") -> bool:
+    """Whether values or right-hand sides of ``dtype`` are complex, refusing a dtype not taken.
 
     The native handlers assemble real values as the rung's real dtype and
     complex values as its complex dtype (casting to the rung's width);
-    half-precision and integer arrays are not taken.
+    float32, float64, complex64 and complex128 are taken, half-precision and
+    integer arrays are not.
 
     Returns:
         Whether the dtype is complex.
@@ -1283,6 +1283,34 @@ def _check_real(dtype: Any, precision: str, what: str = "values") -> bool:
             "the call."
         )
     return bool(np.issubdtype(np.dtype(dtype), np.complexfloating))
+
+
+def _check_complex_options(analysis: Analysis, dtype: Any, precision: str) -> None:
+    """Refuse the float64 precision options on complex values, which the handlers ignore.
+
+    ``downcast_factors`` and ``emulation_mantissa_bits`` act on float64
+    factors only; a complex factor would silently keep its full width.
+
+    Raises:
+        FactorContractError: If the values are complex and the analysis sets either option.
+    """
+    if not _is_complex(dtype, precision):
+        return
+    options = dict(analysis.options)
+    named = [
+        name
+        for name, unset in (
+            ("downcast_factors", (None, False)),
+            ("emulation_mantissa_bits", (None,)),
+        )
+        if options.get(name) not in unset
+    ]
+    if named:
+        raise FactorContractError(
+            f"cuDSS applies {' and '.join(named)} to float64 factors only, and these values are "
+            f"{np.dtype(dtype).name}; analyze the complex operator without "
+            f"{' and '.join(named)}."
+        )
 
 
 def _rung(precision: str, complex_: bool = False) -> tuple[str, np.dtype]:
@@ -1301,10 +1329,11 @@ def factor_avals(
     """The handle: three ``int32`` scalars, the context id, the slot and its generation.
 
     Raises:
-        FactorContractError: If the values are not real.
+        FactorContractError: If cuDSS does not take the values' dtype, or complex values
+            meet a float64 precision option.
     """
-    del analysis, orientation, tol
-    _check_real(values_aval.dtype, precision)
+    del orientation, tol
+    _check_complex_options(analysis, values_aval.dtype, precision)
     scalar = ShapedArray((), jnp.int32)
     return (scalar, scalar, scalar)
 
@@ -1321,10 +1350,11 @@ def empty_handle(
     """The handle of an empty factor: ``(context id, -1, -1)``, slot ``-1`` holding nothing.
 
     Raises:
-        FactorContractError: If the values are not real.
+        FactorContractError: If cuDSS does not take the values' dtype, or complex values
+            meet a float64 precision option.
     """
-    del analysis, orientation, tol
-    _check_real(values_aval.dtype, precision)
+    del orientation, tol
+    _check_complex_options(analysis, values_aval.dtype, precision)
     return empty_slot_handle(context_id, leaves=3)
 
 
@@ -1365,7 +1395,7 @@ def lower_factor(
     """
     del tol
     record = _record(analysis)
-    suffix, _ = _rung(precision, _check_real(ctx.avals_in[0].dtype, precision))
+    suffix, _ = _rung(precision, _is_complex(ctx.avals_in[0].dtype, precision))
     _native()
     transposed = orientation == "AT"
     site = lowered_site_key(
@@ -1435,7 +1465,9 @@ def lower_apply(
     Complex values solve with the complex handler, ``b`` and ``x`` in the
     rung's complex dtype; a complex ``b`` on real values is solved by the
     real handler as one real block of its real and imaginary parts
-    ([_lower_split_apply][]).
+    ([lower_split_apply][diff_soup.linear._primitive.lower_split_apply]), stacked
+    along the right-hand side axis: ``(2 nrhs, n)``, or ``(lanes, 2 nrhs, n)``
+    for a batched handle.
 
     Returns:
         The MLIR values of ``(x, status, order)``.
@@ -1444,21 +1476,30 @@ def lower_apply(
         FactorContractError: If the values or ``b`` are of a dtype cuDSS does not take.
     """
     del n_handle, orientation, tol
-    complex_values = _check_real(ctx.avals_in[0].dtype, precision)
-    complex_b = _check_real(ctx.avals_in[-1].dtype, precision, "right-hand sides")
+    complex_values = _is_complex(ctx.avals_in[0].dtype, precision)
+    complex_b = _is_complex(ctx.avals_in[-1].dtype, precision, "right-hand sides")
     if complex_b and not complex_values:
-        return _lower_split_apply(
+        return lower_split_apply(
             ctx,
-            values,
-            held_context,
-            slot,
-            generation,
-            order,
             b,
-            analysis=analysis,
-            transpose=transpose,
-            precision=precision,
-            storage=storage,
+            lambda real_ctx, block: lower_apply(
+                real_ctx,
+                values,
+                held_context,
+                slot,
+                generation,
+                order,
+                block,
+                n_handle=3,
+                analysis=analysis,
+                orientation="A",
+                transpose=transpose,
+                precision=precision,
+                tol=None,
+                storage=storage,
+            ),
+            axis=1 if ctx.avals_in[1].shape else 0,
+            real_dtype=_rung(precision)[1],
         )
     record = _record(analysis)
     suffix, _ = _rung(precision, complex_values)
@@ -1478,74 +1519,6 @@ def lower_apply(
         **_storage_attributes(None if transpose else storage, held_context),
     )
     return [*results, order]
-
-
-def _lower_split_apply(
-    ctx: Any,
-    values: Any,
-    held_context: Any,
-    slot: Any,
-    generation: Any,
-    order: Any,
-    b: Any,
-    *,
-    analysis: Analysis,
-    transpose: bool,
-    precision: str,
-    storage: Optional[str],
-) -> list:
-    """Lower a solve of real values with a complex ``b`` as one real solve.
-
-    The real and imaginary parts of ``b`` are stacked along its right-hand
-    side axis into one real block of twice the columns (``(2 nrhs, n)``, or
-    ``(lanes, 2 nrhs, n)`` for a batched handle), the real handler solves the
-    block once, and the two halves are joined into the complex solution. A
-    failed factor gives ``nan`` in both parts.
-
-    Returns:
-        The MLIR values of ``(x, status, order)``.
-    """
-    avals = list(ctx.avals_in)
-    b_aval = avals[-1]
-    x_aval, status_aval, order_aval = ctx.avals_out
-    batched = len(avals[1].shape) > 0
-    axis = 1 if batched else 0
-    shape = tuple(b_aval.shape)
-    columns_shape = shape if len(shape) == axis + 2 else (*shape[:axis], 1, shape[-1])
-    columns = columns_shape[axis]
-    real = _rung(precision)[1]
-    block = ShapedArray((*shape[:axis], 2 * columns, shape[-1]), real)
-
-    def stack(v):
-        v = v.reshape(columns_shape)
-        return [jnp.concatenate([jnp.real(v), jnp.imag(v)], axis=axis).astype(real)]
-
-    def join(v):
-        parts = jnp.split(v, 2, axis=axis)
-        return [jax.lax.complex(parts[0], parts[1]).reshape(x_aval.shape).astype(x_aval.dtype)]
-
-    (stacked,) = lower_jnp(ctx, stack, [b], [b_aval], [block])
-    real_ctx = dataclasses.replace(
-        ctx, avals_in=[*avals[:-1], block], avals_out=[block, status_aval, order_aval]
-    )
-    x_block, status, order = lower_apply(
-        real_ctx,
-        values,
-        held_context,
-        slot,
-        generation,
-        order,
-        stacked,
-        n_handle=3,
-        analysis=analysis,
-        orientation="A",
-        transpose=transpose,
-        precision=precision,
-        tol=None,
-        storage=storage,
-    )
-    (x,) = lower_jnp(ctx, join, [x_block], [block], [x_aval])
-    return [x, status, order]
 
 
 def lower_refactor(
@@ -1609,7 +1582,7 @@ def lower_refactor(
     """
     del n_handle, tol
     record = _record(analysis)
-    suffix, _ = _rung(precision, _check_real(ctx.avals_in[0].dtype, precision))
+    suffix, _ = _rung(precision, _is_complex(ctx.avals_in[0].dtype, precision))
     _native()
     transposed = orientation == "AT"
     resolved = handle_path(held_context, held_slot, held_generation, analysis_id=record.native_id)
@@ -1622,6 +1595,7 @@ def lower_refactor(
         _call_shapes(ctx),
         bool(adopt),
         storage,
+        per_device=storage is not None,
     )
     results, order = lower_ffi_call(
         ctx,

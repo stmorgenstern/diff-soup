@@ -246,6 +246,7 @@ __all__ = [
     "CALL_FENCE_ATTRIBUTE",
     "EMPTY_SLOT",
     "ORDER_DTYPE",
+    "SLOT_DTYPES",
     "cast_operand",
     "check_empty_handle",
     "empty_slot_handle",
@@ -254,6 +255,7 @@ __all__ = [
     "lower_jnp",
     "lower_slot_apply",
     "lower_slot_refactor",
+    "lower_split_apply",
     "lower_switch",
     "lowered_site_key",
     "pattern_matvec",
@@ -261,6 +263,8 @@ __all__ = [
     "phased_invalidate_p",
     "phased_refactor_p",
     "phased_solve_p",
+    "slot_dtype",
+    "slot_targets",
     "storage_key",
 ]
 
@@ -567,21 +571,47 @@ def storage_key(storage: Optional[str]) -> np.int64:
 _SITE_ORDINALS = object()
 
 
-def _lowered_device() -> tuple:
-    """The id of the device under ``jax.default_device``, as key text; empty for the first device.
+def _lowered_device(ctx: Any, kind: str, per_device: bool) -> tuple:
+    """The platform and id of the device a native call runs on, as key text.
 
-    A site's slots are keyed by context and lane, and a cuDSS slot lives on the
-    device that created it. One program under ``jax.default_device`` is traced
-    and lowered once per device, so it takes one site per device. JAX lowers a
-    program with committed inputs once for every device, and that stays one
-    site. The first device keeps the plain key, so a program on one device
-    reads as it always did.
+    A site's slots are keyed by context and lane, and a cuDSS slot lives on
+    the device that created it, so a site belongs to one device. JAX keys its
+    trace on ``jax.default_device`` and lowers one program text for any
+    single device, so the device is the default device, or, in a
+    ``shard_map`` body, the one device of this process on the mesh. A cuDSS
+    slot used from another device (inputs committed elsewhere) refuses the
+    call. This process's first device keeps the plain key, so a program on it
+    reads as it always did. A call whose slot the extension keys by the device
+    that runs it (``per_device``, shared storage) may run in a ``shard_map``
+    body over several devices.
+
+    Raises:
+        FactorContractError: If the program runs the call on several devices
+            of this process, which would share the site's native storage.
     """
-    device = getattr(jax.config.jax_default_device, "id", 0)
-    return () if device == 0 else (f"device {device}",)
+    axis_context = ctx.module_context.axis_context
+    mesh = getattr(axis_context, "mesh", None)
+    if mesh is not None:
+        here = jax.process_index()
+        devices = [device for device in mesh.devices.flat if device.process_index == here]
+        device = devices[0] if len(devices) == 1 else None
+    else:
+        devices = range(int(getattr(axis_context, "num_devices", 1)))
+        device = jax.config.jax_default_device
+    if len(devices) > 1 and not (per_device and mesh is not None):
+        raise FactorContractError(
+            f"A native {kind} call is lowered into a program over {len(devices)} devices of this "
+            "process, and its factor storage does not tell devices apart. Run the call on one "
+            "device per process, or factor with diff_soup.linear.Dense, whose factors are arrays."
+        )
+    if isinstance(device, str):
+        device = jax.local_devices(backend=device)[0]
+    if device is None or device == jax.local_devices()[0]:
+        return ()
+    return (f"device {device.platform} {device.id}",)
 
 
-def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
+def lowered_site_key(ctx: Any, kind: str, *parts: Any, per_device: bool = False) -> np.int64:
     """A deterministic key of one lowered native factor or refactor call, for its ``site``.
 
     The key is a stable 64-bit hash of the module's symbol name, the call's
@@ -592,8 +622,9 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
     give the same keys and the same program text (so JAX's persistent compile
     cache recognises the program), and the native handlers create a site on the
     first call that carries an unknown key; the calls of one program, and of
-    distinct programs, get distinct keys, as do lowerings under different
-    default devices ([_lowered_device][diff_soup.linear._primitive._lowered_device]).
+    distinct programs, get distinct keys, as do lowerings for different
+    devices, told apart by platform and id
+    ([_lowered_device][diff_soup.linear._primitive._lowered_device]).
     The key has bit 62 set, so it never equals an id the extensions number their
     sites with by themselves.
 
@@ -601,10 +632,18 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
         ctx: The lowering rule context.
         kind: What the call does (``"factor"``, ``"refactor"``).
         *parts: Further values that identify the call, turned into text.
+        per_device: Whether the extension keys the call's slot by the device
+            that runs it (a call on shared storage).
 
     Returns:
         The key, a positive ``int64``.
+
+    Raises:
+        FactorContractError: If the program runs the call on several devices
+            of this process and ``per_device`` does not hold in a ``shard_map``
+            body.
     """
+    device = _lowered_device(ctx, kind, per_device)
     module = ctx.module_context
     counters = module.cached_primitive_lowerings
     ordinal = counters.get(_SITE_ORDINALS, 0)
@@ -613,9 +652,7 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
         name = ir.StringAttr(module.module.operation.attributes["sym_name"]).value
     except Exception:  # noqa: BLE001 - a module without a name keys on the rest
         name = ""
-    text = "|".join(
-        str(part) for part in (name, ctx.name_stack, ordinal, kind, *parts, *_lowered_device())
-    )
+    text = "|".join(str(part) for part in (name, ctx.name_stack, ordinal, kind, *parts, *device))
     digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest()
     return np.int64((int.from_bytes(digest, "little") & ((1 << 62) - 1)) | (1 << 62))
 
@@ -2012,6 +2049,103 @@ def lower_slot_apply(
 
     outs, order_out = lower_switch(ctx, index, order, [held, empty], results)
     return [*outs, order_out]
+
+
+#: The handler name suffix of each dtype a host slot backend factors (KLU, SuperLU).
+SLOT_DTYPES: dict[np.dtype, str] = {np.dtype(np.float64): "f64", np.dtype(np.complex128): "c128"}
+
+
+def slot_dtype(dtype: Any, backend: str, what: str = "values") -> np.dtype:
+    """The dtype a host slot backend's native calls take for operands of ``dtype``.
+
+    Args:
+        dtype: The dtype of the operand.
+        backend: The backend's name, for the error message.
+        what: What the operand is, for the error message.
+
+    Returns:
+        ``complex128`` for a complex dtype, ``float64`` for a real floating one.
+
+    Raises:
+        FactorContractError: If ``dtype`` is neither real nor complex floating point.
+    """
+    if jnp.issubdtype(dtype, jnp.complexfloating):
+        return np.dtype(np.complex128)
+    if jnp.issubdtype(dtype, jnp.floating):
+        return np.dtype(np.float64)
+    raise FactorContractError(
+        f"{backend} factors real and complex floating-point matrices; got {what} of dtype "
+        f"{jnp.dtype(dtype)}."
+    )
+
+
+def slot_targets(prefix: str, dtype: np.dtype) -> tuple[str, str, str]:
+    """The ``(factor, refactor, apply)`` FFI targets of a host slot backend for ``dtype``.
+
+    Args:
+        prefix: The targets' common prefix, for example ``"diffsoup_klu"``.
+        dtype: A key of [SLOT_DTYPES][diff_soup.linear._primitive.SLOT_DTYPES].
+
+    Returns:
+        The three target names.
+    """
+    suffix = SLOT_DTYPES[np.dtype(dtype)]
+    return (f"{prefix}_factor_{suffix}", f"{prefix}_refactor_{suffix}", f"{prefix}_apply_{suffix}")
+
+
+def lower_split_apply(
+    ctx: Any,
+    b: Any,
+    apply: Callable[[Any, Any], list],
+    *,
+    axis: int,
+    real_dtype: Any,
+) -> list:
+    """Lower a solve of a real factor with a complex right-hand side as one real solve.
+
+    The real and imaginary parts of ``b`` are stacked along its right-hand
+    side axis into one real block of twice the columns, ``apply`` solves the
+    block with the factor once, and the two halves are joined into the
+    complex solution. A failed factor gives ``nan`` in both parts.
+
+    Args:
+        ctx: The lowering rule context of the solve; ``b`` is its last operand.
+        b: The MLIR value of the complex right-hand side.
+        apply: Lowers the real solve: called with the rule context of the
+            real block and the block's MLIR value, it returns the MLIR values
+            of ``(x, status, order)``.
+        axis: The right-hand side axis of ``b``: ``0`` for ``(n,)`` or
+            ``(nrhs, n)``, ``1`` for a batched ``(lanes, n)`` or
+            ``(lanes, nrhs, n)``.
+        real_dtype: The dtype of the real block.
+
+    Returns:
+        The MLIR values of ``(x, status, order)``.
+    """
+    b_aval = ctx.avals_in[-1]
+    x_aval, status_aval, order_aval = ctx.avals_out
+    shape = tuple(b_aval.shape)
+    columns_shape = shape if len(shape) == axis + 2 else (*shape[:axis], 1, shape[-1])
+    columns = columns_shape[axis]
+    block = ShapedArray((*shape[:axis], 2 * columns, shape[-1]), np.dtype(real_dtype))
+
+    def stack(v: Any) -> list:
+        v = v.reshape(columns_shape)
+        return [jnp.concatenate([jnp.real(v), jnp.imag(v)], axis=axis).astype(block.dtype)]
+
+    def join(v: Any) -> list:
+        real, imag = jnp.split(v, 2, axis=axis)
+        return [jax.lax.complex(real, imag).reshape(x_aval.shape).astype(x_aval.dtype)]
+
+    (stacked,) = lower_jnp(ctx, stack, [b], [b_aval], [block])
+    real_ctx = dataclasses.replace(
+        ctx,
+        avals_in=[*ctx.avals_in[:-1], block],
+        avals_out=[block, status_aval, order_aval],
+    )
+    x_block, status, order = apply(real_ctx, stacked)
+    (x,) = lower_jnp(ctx, join, [x_block], [block], [x_aval])
+    return [x, status, order]
 
 
 # --------------------------------------------------------------------------- #

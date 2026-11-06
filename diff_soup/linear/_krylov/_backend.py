@@ -23,19 +23,12 @@ tolerance, and the cotangent a Krylov solve of the transposed operator,
 preconditioned by the inner factor's transposed solve. The preconditioner is
 never differentiated: the inner factor rides in the handle, which carries no
 derivative.
-
-[record_reports][diff_soup.linear._krylov.record_reports] is a diagnostic
-that collects the status, iterations and residual of every Krylov solve on the
-host.
 """
 
 from __future__ import annotations
 
-import contextlib
-import functools
 import threading
 import types
-from collections.abc import Iterator
 from typing import Any, Optional
 
 import equinox as eqx
@@ -67,7 +60,7 @@ from diff_soup.linear._primitive import (
     phased_refactor_p,
 )
 
-__all__ = ["Krylov", "exact_analysis", "exact_backend", "record_reports", "report_outcome"]
+__all__ = ["Krylov", "exact_analysis", "exact_backend"]
 
 #: The default stopping rule of a Krylov backend built without one.
 DEFAULT_TOLERANCE = Tolerance(rtol=1e-10, atol=0.0, max_iter=100, restart=20)
@@ -412,8 +405,6 @@ class Krylov(LinearSolver):
         if b.ndim - (values.ndim - 1) == 2:
             status, iterations = jnp.max(status, axis=-1), jnp.max(iterations, axis=-1)
             applications, residual = jnp.max(applications, axis=-1), jnp.max(residual, axis=-1)
-        if _RECORDERS:
-            _emit(tuple(_RECORDERS), orientation, bool(transpose), status, iterations, residual)
         return x, status, iterations, applications, order
 
     def refactor_fun(
@@ -634,116 +625,3 @@ def exact_analysis(analysis: Analysis) -> Analysis:
     if isinstance(backend, Krylov):
         return backend._inner_analysis(analysis, "A")
     return analysis
-
-
-# --------------------------------------------------------------------------- #
-# Diagnostic: the reports of every Krylov solve, on the host
-# --------------------------------------------------------------------------- #
-_RECORDERS: list = []
-_RECORDERS_LOCK = threading.Lock()
-
-
-@contextlib.contextmanager
-def record_reports() -> Iterator[list]:
-    """Collect the outcome of every Krylov solve of the programs lowered inside the context.
-
-    A diagnostic, not a counter: while the context is active, every Krylov
-    solve that is traced and lowered (a jitted function compiled inside the
-    context, or an eager solve) gets a host callback (``jax.debug.callback``,
-    unordered) that appends one record per execution to the yielded list,
-    also after the context exits for programs compiled inside it. Programs
-    compiled outside the context record nothing and carry no callback. Each
-    record is a dict with ``role`` (``"solve"``), ``orientation`` and
-    ``transpose`` (the factor's orientation and the solve's flag) and the
-    per-lane NumPy arrays ``status``, ``iterations`` and ``residual`` (a
-    block's slowest column). A consumer that retries a solve on a rebuilt
-    preconditioner may add one record of its final outcome with a role of its
-    own and a ``rebuilt`` array (see
-    [report_outcome][diff_soup.linear._krylov.report_outcome]). Callbacks run
-    asynchronously: call ``jax.effects_barrier()`` before reading the list.
-
-    Yields:
-        The list the records are appended to.
-    """
-    records: list = []
-    with _RECORDERS_LOCK:
-        _RECORDERS.append(records)
-    try:
-        yield records
-    finally:
-        with _RECORDERS_LOCK:
-            _RECORDERS[:] = [kept for kept in _RECORDERS if kept is not records]
-
-
-def report_outcome(
-    role: str,
-    orientation: str,
-    transpose: bool,
-    status: Any,
-    iterations: Any,
-    residual: Any,
-    rebuilt: Any = None,
-) -> None:
-    """Add one record of a consumer's final outcome to the active ``record_reports`` lists.
-
-    Traced at the consumer's call site and a no-op (nothing traced) when no
-    ``record_reports`` context is active; see
-    [record_reports][diff_soup.linear._krylov.record_reports].
-
-    Args:
-        role: What the outcome is, for example ``"cotangent"``.
-        orientation: The orientation of the factor solved with.
-        transpose: Whether the solve was transposed.
-        status: The final ``int32`` status per lane.
-        iterations: The iterations per lane, all attempts together.
-        residual: The final residual per lane.
-        rebuilt: ``None``, or a boolean per lane: whether the preconditioner
-            was rebuilt.
-    """
-    if not _RECORDERS:
-        return
-    extras = () if rebuilt is None else (rebuilt,)
-    jax.debug.callback(
-        functools.partial(_append, tuple(_RECORDERS), role, orientation, bool(transpose)),
-        status,
-        iterations,
-        residual,
-        *extras,
-        ordered=False,
-    )
-
-
-def _append(
-    targets: tuple,
-    role: str,
-    orientation: str,
-    transpose: bool,
-    status,
-    iterations,
-    residual,
-    rebuilt=None,
-):
-    """Host side of the diagnostic: append one record to every target list."""
-    record = {
-        "role": role,
-        "orientation": orientation,
-        "transpose": transpose,
-        "status": np.asarray(status),
-        "iterations": np.asarray(iterations),
-        "residual": np.asarray(residual),
-    }
-    if rebuilt is not None:
-        record["rebuilt"] = np.asarray(rebuilt)
-    for target in targets:
-        target.append(record)
-
-
-def _emit(targets: tuple, orientation: str, transpose: bool, status, iterations, residual) -> None:
-    """Trace the host callback of the diagnostic for one Krylov solve."""
-    jax.debug.callback(
-        functools.partial(_append, targets, "solve", orientation, transpose),
-        status,
-        iterations,
-        residual,
-        ordered=False,
-    )
