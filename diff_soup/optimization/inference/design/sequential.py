@@ -10,8 +10,8 @@ from typing import Any
 
 import numpy as np
 
-from diff_soup.inference.statistics.information import InformationResult
-from diff_soup.inference.statistics.laplace import LaplacePosterior
+from diff_soup.optimization.inference.statistics.information import InformationResult
+from diff_soup.optimization.inference.statistics.laplace import LaplacePosterior
 
 __all__ = [
     "CandidateDesign",

@@ -43,7 +43,7 @@ class ParameterSet:
     """The learnable parameters of a fit, split into those shared by every experiment and those varying by cluster.
 
     Pass it as `parameters=` of
-    [`InferenceProblem`][diff_soup.inference.InferenceProblem]. Every parameter
+    [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem]. Every parameter
     must be learnable, come from one recipe, and appear once.
 
     Args:

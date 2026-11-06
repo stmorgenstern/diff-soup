@@ -2,9 +2,9 @@
 
 Every criterion takes the information matrix ``F`` of shape ``(n, n)`` over
 the ``n`` analyzed parameters (from
-[fisher_information][diff_soup.inference.design.fisher.fisher_information],
+[fisher_information][diff_soup.optimization.inference.design.fisher.fisher_information],
 optionally with prior precision from
-[fisher_with_prior][diff_soup.inference.design.criteria.fisher_with_prior]),
+[fisher_with_prior][diff_soup.optimization.inference.design.criteria.fisher_with_prior]),
 symmetrizes it to ``(F + F^T) / 2``, adds ``ridge * I`` and returns a scalar.
 Each is built from log-determinants and Cholesky solves only, so ``jax.grad``
 and ``jax.hessian`` with respect to ``F``, and through ``F`` with respect to
@@ -13,22 +13,22 @@ definite cone, repeated eigenvalues included (a differentiated
 eigendecomposition is NaN there). Eigenvalues belong in host-side reports,
 never on a gradient path.
 
-* [d_optimal][diff_soup.inference.design.criteria.d_optimal]:
+* [d_optimal][diff_soup.optimization.inference.design.criteria.d_optimal]:
   ``log det F``, the log-volume of the information ellipsoid (larger is
   better).
-* [ds_optimal][diff_soup.inference.design.criteria.ds_optimal]:
+* [ds_optimal][diff_soup.optimization.inference.design.criteria.ds_optimal]:
   ``log det F - log det F_nn``, the log-determinant of the Schur complement
   of the nuisance block: the information about a target subset with the
   other parameters profiled out (larger is better).
-* [e_optimal_smooth][diff_soup.inference.design.criteria.e_optimal_smooth]:
+* [e_optimal_smooth][diff_soup.optimization.inference.design.criteria.e_optimal_smooth]:
   ``-(1/p) log tr(F^-p)``, a smooth lower surrogate of ``log lambda_min``,
   the worst-identified direction (larger is better).
-* [integrated_variance][diff_soup.inference.design.criteria.integrated_variance]:
+* [integrated_variance][diff_soup.optimization.inference.design.criteria.integrated_variance]:
   ``tr(Sigma_target G)``, ``Sigma_target`` the target block of ``F^-1`` and
   ``G`` the Gram matrix of the block's basis: the integrated pointwise
   variance ``int Var[f(c)] dc`` of a function-valued parameter (smaller is
   better).
-* [fisher_with_prior][diff_soup.inference.design.criteria.fisher_with_prior]:
+* [fisher_with_prior][diff_soup.optimization.inference.design.criteria.fisher_with_prior]:
   ``F + Lambda_0``, the information with a Gaussian prior's precision added.
 """
 
@@ -101,7 +101,7 @@ def ds_optimal(fim: Array, target: Any, *, ridge: float = 1e-10) -> Array:
     Raises:
         ValueError: If ``target`` is empty, out of range, contains duplicates,
             or covers every parameter (use
-            [d_optimal][diff_soup.inference.design.criteria.d_optimal] for
+            [d_optimal][diff_soup.optimization.inference.design.criteria.d_optimal] for
             that).
     """
     fim = jnp.asarray(fim)
@@ -175,7 +175,7 @@ def integrated_variance(fim: Array, target: Any, *, gram: Array, ridge: float = 
     Args:
         fim: Symmetric PD information matrix, shape ``(n, n)`` (add prior
             precision with
-            [fisher_with_prior][diff_soup.inference.design.criteria.fisher_with_prior]
+            [fisher_with_prior][diff_soup.optimization.inference.design.criteria.fisher_with_prior]
             first if the data alone
             leave null directions).
         target: Indices of the function block's coefficients (static Python

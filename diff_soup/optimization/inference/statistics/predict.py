@@ -38,9 +38,9 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from diff_soup.inference.statistics.experiment import _channel_likelihood_view
-from diff_soup.inference.statistics.laplace import LaplacePosterior
-from diff_soup.inference.statistics.likelihoods import CorrelatedGaussian, Gaussian
+from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
+from diff_soup.optimization.inference.statistics.laplace import LaplacePosterior
+from diff_soup.optimization.inference.statistics.likelihoods import CorrelatedGaussian, Gaussian
 
 __all__ = [
     "ComparisonReport",
@@ -493,7 +493,7 @@ def band_from_jacobian(
 
     The latent variance is the diagonal of ``J C Jᵀ`` with ``C`` the
     posterior covariance, evaluated through
-    [covariance_action][diff_soup.inference.statistics.laplace.LaplacePosterior.covariance_action]
+    [covariance_action][diff_soup.optimization.inference.statistics.laplace.LaplacePosterior.covariance_action]
     on the columns of ``Jᵀ`` — the dense covariance is never formed. An
     observation band adds the likelihood's per-output noise variance on the
     diagonal.
@@ -636,14 +636,14 @@ def _latent_band(posterior: LaplacePosterior, experiment: Any, *, parameters: An
 
     Linearizes each response/reference channel of the experiment at the
     posterior mode and propagates the posterior covariance; observation noise
-    is excluded; [predict][diff_soup.inference.predict] with ``kind="predictive"``
+    is excluded; [predict][diff_soup.optimization.inference.predict] with ``kind="predictive"``
     adds the measurement spread.
 
     Args:
         posterior: A Gaussian posterior in the flat physical coordinate
             (``coordinate == "x"``) over the experiment's learnable
             parameters.
-        experiment: The [Experiment][diff_soup.inference.statistics.measurement.Experiment].
+        experiment: The [Experiment][diff_soup.optimization.inference.statistics.measurement.Experiment].
         parameters: Optional parameter selection forwarded to
             ``experiment.predictor``; must match what the posterior covers.
 
@@ -689,8 +689,8 @@ def prior_predictive(
     Args:
         prior: A proper prior with ``coordinate == "x"`` whose ``sample``
             returns flat physical parameter vectors matching the predictor
-            (e.g. [GaussianPrior][diff_soup.inference.statistics.priors.GaussianPrior]).
-        experiment: The [Experiment][diff_soup.inference.statistics.measurement.Experiment].
+            (e.g. [GaussianPrior][diff_soup.optimization.inference.statistics.priors.GaussianPrior]).
+        experiment: The [Experiment][diff_soup.optimization.inference.statistics.measurement.Experiment].
         key: A ``jax.random`` PRNG key; the output is a deterministic
             function of it.
         n: Number of prior draws (and observation replicates).
@@ -792,7 +792,7 @@ class Prediction(Mapping):
 
 
 def _conditional_moments(likelihood, prediction):
-    from diff_soup.inference.statistics.likelihoods import (
+    from diff_soup.optimization.inference.statistics.likelihoods import (
         LogNormal,
         MultiplicativeGaussian,
         Poisson,
@@ -817,13 +817,13 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
     """Carry the parameter uncertainty of a fit or of posterior draws through to the predicted measurements.
 
     From a fit, each prediction is linearized at the fit and the Laplace covariance is
-    propagated. From [`Draws`][diff_soup.inference.Draws], the band is the mean and spread of the
+    propagated. From [`Draws`][diff_soup.optimization.inference.Draws], the band is the mean and spread of the
     predictions over the draws.
 
     Args:
-        problem: The [`InferenceProblem`][diff_soup.inference.InferenceProblem] of the fit or
+        problem: The [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] of the fit or
             the draws.
-        fit_or_draws: A fit as `laplace` takes it, or the draws of `ds.inference.sample` on
+        fit_or_draws: A fit as `laplace` takes it, or the draws of `ds.optimization.inference.sample` on
             `problem`.
         experiment_id: The experiment to predict, required when the problem has several.
         kind: `"latent"` for the spread from the parameters alone, or `"predictive"` with the
@@ -831,15 +831,15 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
         level: The coverage of the band, strictly between 0 and 1.
 
     Returns:
-        A [`Prediction`][diff_soup.inference.Prediction] mapping each measurement name to its
-            [`PredictionBand`][diff_soup.inference.PredictionBand].
+        A [`Prediction`][diff_soup.optimization.inference.Prediction] mapping each measurement name to its
+            [`PredictionBand`][diff_soup.optimization.inference.PredictionBand].
     """
     from statistics import NormalDist
 
-    from diff_soup.inference.fitting._layout import require_layout
-    from diff_soup.inference.statistics._analysis import experiment_view
-    from diff_soup.inference.statistics.laplace import laplace
-    from diff_soup.inference.statistics.sample import Draws
+    from diff_soup.optimization.inference.fitting._layout import require_layout
+    from diff_soup.optimization.inference.statistics._analysis import experiment_view
+    from diff_soup.optimization.inference.statistics.laplace import laplace
+    from diff_soup.optimization.inference.statistics.sample import Draws
 
     if kind not in ("latent", "predictive"):
         raise ValueError('predict kind must be "latent" or "predictive".')
@@ -885,7 +885,7 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
             variance = jnp.sum(J * covariance(J.T).T, axis=1).reshape(mean.shape)
             if kind == "predictive":
                 mean, noise = _conditional_moments(likelihood, mean)
-                from diff_soup.inference.statistics.likelihoods import Poisson
+                from diff_soup.optimization.inference.statistics.likelihoods import Poisson
 
                 if isinstance(likelihood, Poisson):
                     variance = variance * likelihood.exposure**2

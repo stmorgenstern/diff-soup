@@ -3,7 +3,7 @@
 A channel ``h(u, t, theta)`` maps a saved state frame ``u`` (shape
 ``(n_state,)``) to its ``n_channel`` measured values. With state
 sensitivities ``S[f, :, j] = du_f / dtheta_j`` (``jax.jacfwd`` of a
-[SensitivityRun][diff_soup.inference.design.solve.SensitivityRun], shape
+[SensitivityRun][diff_soup.optimization.inference.design.solve.SensitivityRun], shape
 ``(n_frames, n_state, n_directions)``), the channel sensitivities are
 ``s[f, c, j] = dh_c(u_f) / du . S[f, :, j] + dh_c / dtheta_j`` and the
 Fisher information of independent Gaussian noise with standard deviations
@@ -22,12 +22,12 @@ to the frames, the sensitivities and the channel's parameters, so
 ``jax.grad`` of a criterion of ``F`` reaches the design parameters of the
 solve.
 
-* [observable_trajectory][diff_soup.inference.design.fisher.observable_trajectory]:
+* [observable_trajectory][diff_soup.optimization.inference.design.fisher.observable_trajectory]:
   the channel on every frame, ``(n_frames, n_channel)``.
-* [observable_sensitivities][diff_soup.inference.design.fisher.observable_sensitivities]:
+* [observable_sensitivities][diff_soup.optimization.inference.design.fisher.observable_sensitivities]:
   ``s``, ``(n_frames, n_channel, n_directions)``, by one ``jax.jvp`` per
   direction, including the channel's direct ``dh / dtheta`` term.
-* [fisher_information][diff_soup.inference.design.fisher.fisher_information]:
+* [fisher_information][diff_soup.optimization.inference.design.fisher.fisher_information]:
   ``F``, ``(n_directions, n_directions)``.
 """
 
@@ -39,8 +39,8 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 
-from diff_soup.inference.design.criteria import fisher_with_prior
-from diff_soup.inference.fitting.observables import DiagonalNoise
+from diff_soup.optimization.inference.design.criteria import fisher_with_prior
+from diff_soup.optimization.inference.fitting.observables import DiagonalNoise
 
 __all__ = [
     "observable_trajectory",

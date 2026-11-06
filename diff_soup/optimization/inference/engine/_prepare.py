@@ -1,10 +1,10 @@
 """Compiling the programs of a lowered study, and the report of what was compiled.
 
-[prepare][diff_soup.inference.engine._prepare.prepare] compiles, before any
+[prepare][diff_soup.optimization.inference.engine._prepare.prepare] compiles, before any
 evaluation, the program of every bucket in every requested mode. A program that
 the study holds already, or that the process-wide registry holds for an equal
 key, is reused; any other is compiled by
-[compile_program][diff_soup.inference.engine._prepare.compile_program]: traced
+[compile_program][diff_soup.optimization.inference.engine._prepare.compile_program]: traced
 with the arrays of the bucket's first call, lowered and compiled. Nothing is
 solved.
 
@@ -17,8 +17,8 @@ A program that needs more device memory than the budget (0.8 of the device
 allocator's limit) is refused with the numbers that let the caller choose a
 narrower ``chunk=``; it is not registered, and nothing is compiled again.
 
-The result is a [PrepareReport][diff_soup.inference.engine._prepare.PrepareReport]:
-one [ProgramRecord][diff_soup.inference.engine._prepare.ProgramRecord] per bucket
+The result is a [PrepareReport][diff_soup.optimization.inference.engine._prepare.PrepareReport]:
+one [ProgramRecord][diff_soup.optimization.inference.engine._prepare.ProgramRecord] per bucket
 and mode, and the seconds of every stage of the study's setup, from lowering its
 experiments to compiling its last program.
 """
@@ -40,7 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import PartitionSpec
 
-from diff_soup.inference.engine._batched import (
+from diff_soup.optimization.inference.engine._batched import (
     BatchedLanes,
     BucketLanes,
     CompiledProgram,
@@ -48,8 +48,8 @@ from diff_soup.inference.engine._batched import (
     _first_call,
     _lane_leaves,
 )
-from diff_soup.inference.engine._batched import prepare as _prepare_programs
-from diff_soup.inference.engine._kernel import batched_kernel
+from diff_soup.optimization.inference.engine._batched import prepare as _prepare_programs
+from diff_soup.optimization.inference.engine._kernel import batched_kernel
 
 BUDGET_SHARE: float = 0.8
 """The share of the device allocator's memory limit one program may need."""
@@ -58,7 +58,7 @@ SETUP_STAGES: tuple = ("experiments lowered", "identity and classes", "lane inpu
 """The stages of lowering a study, in the order they run."""
 
 HIT, MISS, OFF, REUSED = "hit", "miss", "off", "reused"
-"""The cache words of a [ProgramRecord][diff_soup.inference.engine._prepare.ProgramRecord]."""
+"""The cache words of a [ProgramRecord][diff_soup.optimization.inference.engine._prepare.ProgramRecord]."""
 
 _REQUESTS = "/jax/compilation_cache/compile_requests_use_cache"
 _HITS = "/jax/compilation_cache/cache_hits"
@@ -108,7 +108,7 @@ class ProgramRecord:
             the fingerprint of the lowered text; ``None`` for a reused program.
         compile_seconds: Host wall seconds of compiling the lowered program and
             reading its memory analysis; ``None`` for a reused program.
-        host_bytes: The [HostBytes][diff_soup.inference.engine._prepare.HostBytes]
+        host_bytes: The [HostBytes][diff_soup.optimization.inference.engine._prepare.HostBytes]
             around the compile; ``None`` for a reused program.
         device_bytes: The device memory the compiled program needs: its
             arguments, outputs, temporaries and code, less the bytes its
@@ -153,14 +153,14 @@ class PrepareReport:
     """What ``prepare()`` compiled, and how long every stage of the setup took.
 
     Attributes:
-        records: One [ProgramRecord][diff_soup.inference.engine._prepare.ProgramRecord]
+        records: One [ProgramRecord][diff_soup.optimization.inference.engine._prepare.ProgramRecord]
             per bucket and mode, buckets in the plan's order.
         stages: Host wall seconds by stage: the stages of lowering the study
             (``SETUP_STAGES``), then, per program compiled by this call, its
             trace, lowering and compile, named ``"bucket <index> <mode> <stage>"``.
         seconds: Host wall seconds of this ``prepare()`` call.
         placement: In a run of several processes, the
-            [Placement][diff_soup.inference.engine.Placement] of the lanes
+            [Placement][diff_soup.optimization.inference.engine.Placement] of the lanes
             over the processes and the costs it balanced; ``None`` in one
             process. ``records`` then holds one record per process and program
             it prepared, buckets in the plan's order, then modes, then ranks.
@@ -500,19 +500,19 @@ def placed_kernel(program: Any, mode: str, mesh: Any = None) -> Any:
     """The kernel of one call of a bucket's program, placed as the plan places the lanes.
 
     Args:
-        program: The bucket's [LaneProgram][diff_soup.inference.engine._kernel.LaneProgram].
+        program: The bucket's [LaneProgram][diff_soup.optimization.inference.engine._kernel.LaneProgram].
         mode: The mode of the lane kernel.
         mesh: The mesh whose data axis every call is split over, or ``None``.
 
     Returns:
-        [batched_kernel][diff_soup.inference.engine._kernel.batched_kernel]
+        [batched_kernel][diff_soup.optimization.inference.engine._kernel.batched_kernel]
         without a mesh. On a mesh, that kernel mapped over the devices of its
         ``data`` axis with ``jax.shard_map``: every argument and result splits
         its leading lane axis over those devices, each device runs the batched
         kernel on its share of the call's units, and nothing is communicated
         between them. One program serves every device. Zero-size argument
         leaves stay outside the mapped body
-        ([split_empty_leaves][diff_soup.inference.engine._prepare.split_empty_leaves]).
+        ([split_empty_leaves][diff_soup.optimization.inference.engine._prepare.split_empty_leaves]).
     """
     kernel = batched_kernel(program, mode)
     if mesh is None:
@@ -540,17 +540,17 @@ def compile_program(
     Args:
         lanes: The lanes of the study.
         entry: The bucket whose program is compiled.
-        key: The program's [ProgramKey][diff_soup.inference.engine._batched.ProgramKey].
+        key: The program's [ProgramKey][diff_soup.optimization.inference.engine._batched.ProgramKey].
         budget_share: The share of the device allocator's limit the program
             may need; ``None`` takes ``BUDGET_SHARE``.
 
     Returns:
-        The [CompiledProgram][diff_soup.inference.engine._batched.CompiledProgram],
+        The [CompiledProgram][diff_soup.optimization.inference.engine._batched.CompiledProgram],
         its record carrying the measurements of this compile.
 
     Raises:
         ValueError: If the compiled program needs more device memory than
-            [memory_budget][diff_soup.inference.engine._prepare.memory_budget]
+            [memory_budget][diff_soup.optimization.inference.engine._prepare.memory_budget]
             allows; the message names the bucket, the mode, the width, the
             memory needed, the budget and the largest power-of-two width that
             fits.
@@ -615,11 +615,11 @@ def prepare(lanes: BatchedLanes, *, modes: Any = None, setup: Mapping) -> Prepar
     Args:
         lanes: The lanes of the study.
         modes: The modes to compile; ``None`` takes
-            [default_modes][diff_soup.inference.engine._prepare.default_modes].
+            [default_modes][diff_soup.optimization.inference.engine._prepare.default_modes].
         setup: The seconds of the stages of lowering the study, by name.
 
     Returns:
-        The [PrepareReport][diff_soup.inference.engine._prepare.PrepareReport].
+        The [PrepareReport][diff_soup.optimization.inference.engine._prepare.PrepareReport].
 
     Raises:
         ValueError: If a mode is not a mode of the lane kernel, a bucket's

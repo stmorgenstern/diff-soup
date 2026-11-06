@@ -2,7 +2,7 @@
 
 A run of several processes (one per GPU, launched as one MPI world) splits the
 lanes of a lowered study among its processes before anything is compiled.
-[place][diff_soup.inference.engine._placement.place] is a pure function of the
+[place][diff_soup.optimization.inference.engine._placement.place] is a pure function of the
 plan, the number of processes and the cost of every lane; the same inputs give
 the same placement in every process and in every run. Its rules, in order:
 
@@ -39,7 +39,7 @@ engine that a [Layout][diff_soup.Layout] selects, one at a time. The other,
 the device placement, runs inside one process: a layout whose mesh has a
 ``data`` axis of several devices splits every call of every program over
 those devices (the plan's ``mesh``), and
-[deal][diff_soup.inference.engine._balance.deal] hands each call's units to
+[deal][diff_soup.optimization.inference.engine._balance.deal] hands each call's units to
 them by their last step counts. It needs no record of its own: every lane is
 evaluated in the one process, and the plan says which devices share its calls.
 """
@@ -86,7 +86,7 @@ class Placement:
         whole_buckets: The indices of the buckets whose lanes belong to
             several experiments and sit on one process because the balance
             allowed it (the bucket rule of
-            [place][diff_soup.inference.engine._placement.place]), ascending.
+            [place][diff_soup.optimization.inference.engine._placement.place]), ascending.
     """
 
     world_size: int
@@ -142,7 +142,7 @@ def experiment_of(lane: Any) -> Any:
     An experiment solved in one shoot has one lane of its own id; one fitted in
     observed-start windows has one lane per window, named ``"<experiment>
     window k"`` (``"window k"`` in a study of one experiment), as
-    [LaneLayout][diff_soup.inference.engine._layout.LaneLayout] names them.
+    [LaneLayout][diff_soup.optimization.inference.engine._layout.LaneLayout] names them.
     """
     match = _WINDOW.match(str(lane)) if isinstance(lane, str) else None
     if match is None:
@@ -289,7 +289,7 @@ def place(
     """Place the lanes of a plan on ``world_size`` processes.
 
     Args:
-        plan: The [Plan][diff_soup.inference.engine.Plan] of the study.
+        plan: The [Plan][diff_soup.optimization.inference.engine.Plan] of the study.
         world_size: The number of processes, a positive whole number.
         costs: Lane id to its modelled cost, a positive number for every
             planned lane (``modelled_costs`` gives state size times frames);
@@ -316,7 +316,7 @@ def place(
             loaded.
 
     Returns:
-        The [Placement][diff_soup.inference.engine._placement.Placement].
+        The [Placement][diff_soup.optimization.inference.engine._placement.Placement].
 
     Raises:
         ValueError: If ``world_size`` is not a positive whole number, a cost
@@ -384,7 +384,7 @@ def modelled_costs(lanes: Any) -> dict:
     """Lane id to its modelled cost: the size of its state times the frames it records.
 
     Args:
-        lanes: The study's [BatchedLanes][diff_soup.inference.engine._batched.BatchedLanes]
+        lanes: The study's [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes]
             (host numbers, or the numbers of the plan alone), whose buckets
             give every lane's frames, and its initial state's size through
             ``state_sizes``.

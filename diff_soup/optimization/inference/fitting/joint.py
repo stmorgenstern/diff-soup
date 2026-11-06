@@ -7,8 +7,8 @@
 # together; the leaf InferenceProblem lives in inference_problem.py.
 """joint.py — fitting several leaf problems with tied shared parameters.
 
-A [JointInferenceProblem][diff_soup.inference.fitting.joint.JointInferenceProblem] composes several leaf
-[InferenceProblem][diff_soup.inference.fitting.inference_problem.InferenceProblem] children and ties
+A [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem] composes several leaf
+[InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem] children and ties
 explicitly named **shared** parameter groups across them while each child keeps
 its **local** parameter groups, geometry, solver, data, trajectory, and
 trajectory states.
@@ -50,13 +50,13 @@ import numpy as np
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
-from diff_soup.inference.engine._plan import n_padded, refuse_shared_storage
-from diff_soup.inference.fitting._forward_seam import (
+from diff_soup.optimization.inference.engine._plan import n_padded, refuse_shared_storage
+from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
     _solution_failed,
 )
-from diff_soup.inference.fitting._lane_map import folds_enclosing_batches
-from diff_soup.inference.fitting._sharding import (
+from diff_soup.optimization.inference.fitting._lane_map import folds_enclosing_batches
+from diff_soup.optimization.inference.fitting._sharding import (
     device_count,
     identity_order,
     order_children,
@@ -65,8 +65,8 @@ from diff_soup.inference.fitting._sharding import (
     reduce_child_lsq,
     run_child_kernel,
 )
-from diff_soup.inference.fitting.bounds import Bounds
-from diff_soup.inference.fitting.inference_problem import (
+from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.inference_problem import (
     InferenceProblem,
     LearnedInitialState,
     _loss_and_grad_from_residual,
@@ -75,7 +75,7 @@ from diff_soup.inference.fitting.inference_problem import (
     _stacked_residual_fn,
     build_stacked_residual_fns,
 )
-from diff_soup.inference.fitting.result import ChildFit
+from diff_soup.optimization.inference.fitting.result import ChildFit
 
 # ---------------------------------------------------------------------------
 # Per-child column bookkeeping
@@ -702,7 +702,7 @@ def _build_layout(
     """Lay out the joint vector: global, tied blocks level by level, child locals, states.
 
     ``levels`` is ``(level_groups, level_ids, child_levels)`` as
-    [_normalise_levels][diff_soup.inference.fitting.joint._normalise_levels]
+    [_normalise_levels][diff_soup.optimization.inference.fitting.joint._normalise_levels]
     returns them; without it, ``ownership_groups``, ``owner_ids`` and
     ``child_owner_indices`` declare one level whose members are the owners.
     """
@@ -983,7 +983,7 @@ def _follows_schedule(child: InferenceProblem) -> bool:
 def _same_structure(a: InferenceProblem, b: InferenceProblem) -> bool:
     """Whether two children share the structure required for one batched kernel.
 
-    The same predicate [_is_homogeneous][diff_soup.inference.fitting.joint._is_homogeneous]
+    The same predicate [_is_homogeneous][diff_soup.optimization.inference.fitting.joint._is_homogeneous]
     applies pairwise, used here to gather a
     heterogeneous joint into homogeneous structural groups (each group compiles and
     shards its own kernel).
@@ -1091,7 +1091,10 @@ def _resolve_child_y0(child: InferenceProblem) -> np.ndarray:
     that learns its initial state is classified ``"latent"`` and reconstructs that
     state from its own slice of the joint decision vector.
     """
-    from diff_soup.inference.fitting.inference_problem import FixedInitialState, _resolve_y0
+    from diff_soup.optimization.inference.fitting.inference_problem import (
+        FixedInitialState,
+        _resolve_y0,
+    )
 
     init = child.initial_state
     y0 = init.y0 if isinstance(init, FixedInitialState) else None
@@ -1640,7 +1643,7 @@ class _StepBalance:
 
     def feed(self, steps: np.ndarray, seconds: float) -> None:
         """Record one evaluation's step counts and wall time; maybe reassign lanes."""
-        from diff_soup.inference.engine._balance import StepBalancer
+        from diff_soup.optimization.inference.engine._balance import StepBalancer
 
         steps = np.maximum(np.asarray(steps, dtype=np.int64), 1)
         self.last_steps = steps
@@ -1919,7 +1922,7 @@ def _build_grouped_lsq(
     sharded = _sharding_requested(placement)
     if sharded:
         from diff_soup._distributed import mesh_groups, owns
-        from diff_soup.inference.hierarchical._submeshes import on_submesh, sum_lanes
+        from diff_soup.optimization.inference.hierarchical._submeshes import on_submesh, sum_lanes
 
         submeshes, lanes = _group_submeshes(groups, children, placement.mesh)
         lane_meshes = mesh_groups(placement.mesh, (1,) * int(placement.mesh.shape["data"]))
@@ -2207,7 +2210,7 @@ def _validate_layout(layout: Optional[Layout], children: tuple) -> None:
     Structurally heterogeneous children shard as independent homogeneous
     groups; children that learn their initial state are not supported. A
     data axis of several devices takes backends whose factors are arrays
-    (see [refuse_shared_storage][diff_soup.inference.engine._plan.refuse_shared_storage]).
+    (see [refuse_shared_storage][diff_soup.optimization.inference.engine._plan.refuse_shared_storage]).
 
     Args:
         layout: The requested placement, or ``None`` for single-device.
@@ -2268,7 +2271,7 @@ class JointInferenceProblem:
     """Several leaf problems fit together with tied shared parameter groups.
 
     Frozen, eager-build.  Composes a tuple of leaf
-    [InferenceProblem][diff_soup.inference.fitting.inference_problem.InferenceProblem] children and ties the
+    [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem] children and ties the
     named ``shared`` groups across them; each child keeps its local groups,
     geometry, solver, data, trajectory strategy, and trajectory states.
 
@@ -2412,7 +2415,7 @@ class JointInferenceProblem:
                 ``data`` axis fans the children out across the mesh
                 (child-batch sharding); without a ``data`` axis it records
                 placement but keeps single-device execution.
-            bounds: Optional [Bounds][diff_soup.inference.fitting.bounds.Bounds]
+            bounds: Optional [Bounds][diff_soup.optimization.inference.fitting.bounds.Bounds]
                 keyed by the joint parameter-group names.
             residual_rows: Optional precomputed per-child residual row counts,
                 in child order.  When provided (for example from a persisted
@@ -2749,7 +2752,7 @@ class JointInferenceProblem:
 
     @property
     def stacked_rj_fn(self) -> Callable:
-        """Jitted companion of [stacked_r_fn][diff_soup.inference.fitting.joint.JointInferenceProblem.stacked_r_fn].
+        """Jitted companion of [stacked_r_fn][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem.stacked_r_fn].
 
         Returns the ``x -> (r, J)`` pair; built once.
         """
@@ -2939,7 +2942,7 @@ class JointInferenceProblem:
         """Return a joint view with every trajectory-state coordinate frozen.
 
         The view remains a
-        [JointInferenceProblem][diff_soup.inference.fitting.joint.JointInferenceProblem], so ownership-aware
+        [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem], so ownership-aware
         Block-LM still applies. Owner residuals receive only global/owner/local
         parameter coordinates and splice the fixed state tail back in before
         evaluating the original kernels.
@@ -3101,7 +3104,7 @@ class JointInferenceProblem:
     def child_owner_indices(self) -> tuple:
         """Per child, the integer position of its owner in owner_ids.
 
-        See [owner_ids][diff_soup.inference.fitting.joint.JointInferenceProblem.owner_ids].
+        See [owner_ids][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem.owner_ids].
         """
         return self._layout.child_owner_indices
 
@@ -3117,12 +3120,12 @@ class JointInferenceProblem:
         """Indices of ``[global | owner | its child locals/states]``.
 
         ``owner`` is an ID from
-        [owner_ids][diff_soup.inference.fitting.joint.JointInferenceProblem.owner_ids];
+        [owner_ids][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem.owner_ids];
         integer IDs are treated as
         IDs, never ambiguously as positional indices. The returned order is the
         coordinate expected by
         [owner_residual_fns]
-        [diff_soup.inference.fitting.joint.JointInferenceProblem.owner_residual_fns].
+        [diff_soup.optimization.inference.fitting.joint.JointInferenceProblem.owner_residual_fns].
         """
         try:
             owner_index = self.owner_ids.index(owner)
@@ -3282,7 +3285,9 @@ class JointInferenceProblem:
         """Compact gather/scatter plans in deterministic owner order."""
         cache = self._owner_point_plan_cache
         if cache is None:
-            from diff_soup.inference.hierarchical.owner_points import build_owner_point_plans
+            from diff_soup.optimization.inference.hierarchical.owner_points import (
+                build_owner_point_plans,
+            )
 
             cache = build_owner_point_plans(self)
             object.__setattr__(self, "_owner_point_plan_cache", cache)
@@ -3297,7 +3302,7 @@ class JointInferenceProblem:
     def placement(self) -> tuple[tuple[int, int], ...]:
         """Per child, ``(lane, process_index)``: the experiment lane that evaluates it.
 
-        See [child_lanes][diff_soup.inference.fitting.joint.child_lanes] for the rule.
+        See [child_lanes][diff_soup.optimization.inference.fitting.joint.child_lanes] for the rule.
         """
         return child_lanes(self.problems, self.shared, self.ownership, self._placement)
 
@@ -3435,7 +3440,7 @@ class JointInferenceProblem:
         """Reconstruct each child's fitted problem + local/state values from ``x_flat``.
 
         Returns a tuple of
-        [ChildFit][diff_soup.inference.fitting.result.ChildFit], one per
+        [ChildFit][diff_soup.optimization.inference.fitting.result.ChildFit], one per
         child in input order.
         """
         x = jnp.asarray(x_flat)

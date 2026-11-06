@@ -137,8 +137,8 @@ the [inference](../inference/identifiability.md) layer.
 Second-order compositions work on the native engines, and the solve's
 `adjoint=` selects the composition. The Hessian of the loss computes
 three ways, and the fit layer reaches the same compositions through
-`ds.inference.InferenceProblem.loss_grad_hessian_fn(composition=)`, which
-`ds.inference.NewtonTrustRegion` and the observed information use
+`ds.optimization.inference.InferenceProblem.loss_grad_hessian_fn(composition=)`, which
+`ds.optimization.NewtonTrustRegion` and the observed information use
 ([optimization solvers](../inference/solvers.md)). Forward over reverse,
 the `jax.hessian` route, is the most performant:
 

@@ -17,7 +17,7 @@ slowest lane; units of similar step counts in one call waste the least. The
 first evaluation knows no step count and runs in canonical order. No call is
 made smaller to reduce the spread.
 
-The step counts are kept in a [StepMemory][diff_soup.inference.engine._order.StepMemory]
+The step counts are kept in a [StepMemory][diff_soup.optimization.inference.engine._order.StepMemory]
 per series of evaluations: every fit of a lowered study keeps its own, so a
 fit's first evaluation runs in canonical order whatever the study evaluated
 before, and two fits from the same start order their units alike.

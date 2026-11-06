@@ -28,8 +28,8 @@ import numpy as np
 from scipy.special import ndtri
 from scipy.stats import rankdata
 
-from diff_soup.inference.data.deferred import DeferredValues
-from diff_soup.inference.statistics.experiment import _channel_likelihood_view
+from diff_soup.optimization.inference.data.deferred import DeferredValues
+from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
 
 __all__ = [
     "ChannelResiduals",
@@ -102,9 +102,9 @@ def residual_report(problem, fit, *, experiment_id=None) -> ResidualReport:
     one, and no lag-1 autocorrelation.
 
     Args:
-        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] whose measurements
+        problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] whose measurements
             all declare a likelihood.
-        fit: An [`OptResult`][diff_soup.inference.OptResult], a parameter vector, or a mapping
+        fit: An [`OptResult`][diff_soup.optimization.OptResult], a parameter vector, or a mapping
             from every fitted handle to its value.
         experiment_id: The experiment to check, required when the problem has several.
 
@@ -112,9 +112,9 @@ def residual_report(problem, fit, *, experiment_id=None) -> ResidualReport:
         A `ResidualReport` with one entry per measurement in `channels`, and the departures in
             words in `flags`.
     """
-    from diff_soup.inference.statistics._analysis import experiment_view
-    from diff_soup.inference.statistics.information import _point
-    from diff_soup.inference.statistics.measurement import require_likelihoods
+    from diff_soup.optimization.inference.statistics._analysis import experiment_view
+    from diff_soup.optimization.inference.statistics.information import _point
+    from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
 
     require_likelihoods(problem, "residual_report")
 
@@ -458,7 +458,7 @@ def mcmc_report(draws: Any, *, rhat_max: float = 1.01, ess_floor: float = 400.0)
     eight draws.
 
     Args:
-        draws: The [`Draws`][diff_soup.inference.Draws] of `ds.inference.sample`, or an array
+        draws: The [`Draws`][diff_soup.optimization.inference.Draws] of `ds.optimization.inference.sample`, or an array
             shaped `(chain, draw, dim)`.
         rhat_max: The largest split R-hat that passes.
         ess_floor: The smallest bulk or tail effective sample size that passes.

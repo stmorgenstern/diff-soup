@@ -1,9 +1,9 @@
 """bounds.py — Named box bounds for optimizer decision variables.
 
-[Bounds][diff_soup.inference.fitting.bounds.Bounds] lets a caller constrain a
-[InferenceProblem][diff_soup.inference.InferenceProblem] by parameter-group name rather than
+[Bounds][diff_soup.optimization.inference.fitting.bounds.Bounds] lets a caller constrain a
+[InferenceProblem][diff_soup.optimization.inference.InferenceProblem] by parameter-group name rather than
 by raw flat-vector column, and
-[resolve_decision_bounds][diff_soup.inference.fitting.bounds.resolve_decision_bounds]
+[resolve_decision_bounds][diff_soup.optimization.inference.fitting.bounds.resolve_decision_bounds]
 turns that named spec into the flat ``(lb, ub)`` arrays a solver actually needs.
 """
 

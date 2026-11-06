@@ -4,12 +4,12 @@ A compiled program of a study placed over the devices of a mesh's data axis
 runs each call split over those devices: the units at positions ``[d w, (d +
 1) w)`` of a call of width ``W = n w`` run on device ``d``. The lanes on one
 device advance in lockstep, so a device lasts as long as its slowest unit.
-[deal][diff_soup.inference.engine._balance.deal] hands the units of a call to
+[deal][diff_soup.optimization.inference.engine._balance.deal] hands the units of a call to
 the devices longest first, each to the device with the smallest load so far,
 so the devices of a call finish together; it permutes units within a call and
 never changes a program, so nothing compiles again.
 
-[StepBalancer][diff_soup.inference.engine._balance.StepBalancer] uses the same
+[StepBalancer][diff_soup.optimization.inference.engine._balance.StepBalancer] uses the same
 dealing to plan the experiment rows of a joint problem sharded over a mesh,
 with fixed slot shapes, and accepts a new assignment only when its predicted
 saving exceeds the measured time of moving the rows.
@@ -26,7 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec
 
-from diff_soup.inference.engine._order import UNKNOWN_STEPS
+from diff_soup.optimization.inference.engine._order import UNKNOWN_STEPS
 
 
 def deal(steps: Sequence[int], capacities: Sequence[int], *, lockstep: bool = True) -> tuple:
@@ -80,7 +80,7 @@ def device_order(steps: np.ndarray, width: int, devices: int) -> np.ndarray:
     Returns:
         A permutation of the units that keeps every unit in its call. Within a
         call whose step counts are all known, the units are dealt with
-        [deal][diff_soup.inference.engine._balance.deal] to the call's
+        [deal][diff_soup.optimization.inference.engine._balance.deal] to the call's
         devices (device ``d`` takes the positions ``[d w, (d + 1) w)``,
         ``w = W / devices``; the last call's padding fills its last
         positions); a call with a unit of unknown step count keeps its order.
@@ -152,7 +152,7 @@ class StepBalancer:
 
     ``batch_step_seconds[k - 1]`` is the measured time for one step of a batch of
     ``k`` experiments. The integrator's previous trial-step counts determine
-    the next plan, dealt by [deal][diff_soup.inference.engine._balance.deal].
+    the next plan, dealt by [deal][diff_soup.optimization.inference.engine._balance.deal].
     Reassignment occurs only when the predicted makespan saving exceeds the
     measured data-transfer time. Slot capacity and class count are fixed for
     the lifetime of a fit.

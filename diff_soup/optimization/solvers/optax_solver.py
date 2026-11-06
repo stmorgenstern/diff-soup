@@ -13,11 +13,11 @@ Usage::
     import optax
     import diff_soup as ds
 
-    problem = ds.inference.InferenceProblem(
+    problem = ds.optimization.inference.InferenceProblem(
         problem, series, solver=solver_config, parameters=groups
     )
-    solver = ds.inference.Optax(optax.adamw(1e-3, weight_decay=1e-4), max_steps=5000)
-    result = ds.inference.optsolve(problem, solver)
+    solver = ds.optimization.Optax(optax.adamw(1e-3, weight_decay=1e-4), max_steps=5000)
+    result = ds.optimization.optsolve(problem, solver)
 """
 
 from __future__ import annotations
@@ -31,11 +31,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._optional import import_optional
-from diff_soup.inference._abc import OptSolver
-from diff_soup.inference.fitting.bounds import projected_gradient_norm
-from diff_soup.inference.fitting.regularization import NoReg
-from diff_soup.inference.fitting.result import OptResult, StepInfo, TerminationStatus
-from diff_soup.inference.solvers._termination import gradient_tolerance
+from diff_soup.optimization._abc import OptSolver
+from diff_soup.optimization.inference.fitting.bounds import projected_gradient_norm
+from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.result import OptResult, StepInfo, TerminationStatus
+from diff_soup.optimization.solvers._termination import gradient_tolerance
 
 
 class Optax(OptSolver):
@@ -51,15 +51,15 @@ class Optax(OptSolver):
         grad_tol: The gradient-norm tolerance, or `None` for the dtype's default.
         log_every: Ignored.
         ad: `"reverse"` takes the gradient from the reverse adjoint, `"forward"` from the forward-mode Jacobian.
-        callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
+        callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
 
     !!! example
 
         ```python
         import optax
 
-        solver = ds.inference.Optax(optimizer=optax.adamw(1e-2), max_steps=200)
-        result = ds.inference.optsolve(infproblem, solver)
+        solver = ds.optimization.Optax(optimizer=optax.adamw(1e-2), max_steps=200)
+        result = ds.optimization.optsolve(infproblem, solver)
         ```
     """
 
@@ -76,7 +76,7 @@ class Optax(OptSolver):
         """Run Optax on an [InferenceProblem][] decision vector.
 
         Args:
-            problem: An [OptimizationProblem][diff_soup.inference._abc.OptimizationProblem]
+            problem: An [OptimizationProblem][diff_soup.optimization._abc.OptimizationProblem]
                 with ``"value_gradient"``: its ``value_and_gradient`` (the
                 lowering differentiates it in this solver's ``ad`` mode), its
                 ``regularization`` penalty, added to the objective, and its
@@ -87,7 +87,7 @@ class Optax(OptSolver):
                 Must be passed as a keyword argument.
 
         Returns:
-            A [OptResult][diff_soup.inference.fitting.result.OptResult] describing
+            A [OptResult][diff_soup.optimization.inference.fitting.result.OptResult] describing
             the
             outcome of the training run.
         """

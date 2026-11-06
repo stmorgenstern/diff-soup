@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
 from diff_soup.domains import cartesian_grid_1d
+from diff_soup.optimization import inference as inf
 from tests.support.inference import (
     NOISE,
     TIMES,

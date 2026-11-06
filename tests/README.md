@@ -27,9 +27,9 @@ There is no `linear/` tier. Timeouts apply when `pytest-timeout` is installed.
 
 | scope | files | test functions | collected items | source lines |
 |---|---|---|---|---|
-| whole suite | 45 | 418 | 628 | 15,158 |
+| whole suite | 45 | 418 | 628 | 15,162 |
 | `public_api` | 19 | 189 | 295 | 6,143 |
-| `contracts` | 19 | 173 | 264 | 5,849 |
+| `contracts` | 19 | 173 | 264 | 5,853 |
 | `performance_contracts` | 2 | 12 | 29 | 509 |
 | `multi_device` | 2 | 29 | 34 | 960 |
 | `integration` | 2 | 11 | 32 | 680 |
@@ -47,7 +47,7 @@ two minutes; per-file durations are recorded in the session report.
 1. **One file per public verb group.** The manifest's `feature_contracts` names the
    group; a new group is a manifest decision made in its own commit.
 2. **Public behaviour only.** Tests import `diff_soup` and the namespaces the
-   manifest lists under `public_namespaces` (`diff_soup.inference`,
+   manifest lists under `public_namespaces` (`diff_soup.optimization.inference`,
    `diff_soup.linear`, `diff_soup.domains`, ...). Any other `diff_soup` module is
    private. A `contracts/` file whose contract is about one private module may
    import that one module, named in the manifest under `private_imports`; no other

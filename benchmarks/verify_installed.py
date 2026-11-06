@@ -172,7 +172,7 @@ def _surface_check(import_order: tuple[str, str]) -> str:
         assert diff_soup.problem is sys.modules["diff_soup.problem"]
         assert callable(diff_soup.problem)
         assert isinstance(diff_soup.problem("surface_check"), ProblemSpec)
-        assert diff_soup.inference is sys.modules["diff_soup.inference"]
+        assert diff_soup.optimization.inference is sys.modules["diff_soup.optimization.inference"]
         assert diff_soup.ProblemSpec is ProblemSpec
         assert diff_soup.lower is lower
         print(diff_soup.__file__)
@@ -232,8 +232,8 @@ def main() -> int:
         # Import both public domains in fresh interpreters so module-cache order
         # cannot hide a circular dependency or a checkout-path leak.
         for import_order in (
-            ("diff_soup.inference", "diff_soup.problem"),
-            ("diff_soup.problem", "diff_soup.inference"),
+            ("diff_soup.optimization.inference", "diff_soup.problem"),
+            ("diff_soup.problem", "diff_soup.optimization.inference"),
         ):
             subprocess.run(
                 [

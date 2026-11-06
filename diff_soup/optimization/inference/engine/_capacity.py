@@ -27,7 +27,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
-from diff_soup.inference.engine._layout import _window_count
+from diff_soup.optimization.inference.engine._layout import _window_count
 
 WASTE_BOUND: float = 0.5
 """The default waste bound ``b`` of a frame class."""
@@ -102,7 +102,7 @@ def frame_classes(
 
     Args:
         lanes: The unpadded sample counts of the lanes, from
-            [lane_frames][diff_soup.inference.engine._capacity.lane_frames].
+            [lane_frames][diff_soup.optimization.inference.engine._capacity.lane_frames].
         waste_bound: The largest fraction ``b`` of its union slots a lane may
             leave unused; ``0 <= b < 1``.
 

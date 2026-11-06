@@ -30,7 +30,7 @@ the numbers of a likelihood and frame counts enter the program as arguments and
 are part of no component.
 A bucket adds three sizes to the identity of its lanes, its frame class, its
 derivative width and its segment class;
-[COMPONENTS][diff_soup.inference.engine._identity.COMPONENTS] lists all
+[COMPONENTS][diff_soup.optimization.inference.engine._identity.COMPONENTS] lists all
 fourteen words in the order the plan reports them.
 
 Each component is encoded with the recorder of the study fingerprint and hashed
@@ -50,14 +50,14 @@ from typing import Any
 import jax
 import numpy as np
 
-from diff_soup.inference.engine._layout import _window_count
-from diff_soup.inference.statistics._fingerprint import (
+from diff_soup.optimization.inference.engine._layout import _window_count
+from diff_soup.optimization.inference.statistics._fingerprint import (
     UnstableFingerprintError,
     _canonical_json,
     _qualified_type,
     _Recorder,
 )
-from diff_soup.inference.statistics.likelihoods import CorrelatedGaussian
+from diff_soup.optimization.inference.statistics.likelihoods import CorrelatedGaussian
 
 LANE_COMPONENTS: tuple[str, ...] = (
     "lane kind",
@@ -90,14 +90,14 @@ class LaneIdentity:
     """The identity of one lane, or of a bucket. Equal identities share one program.
 
     A lane's identity has the components of
-    [LANE_COMPONENTS][diff_soup.inference.engine._identity.LANE_COMPONENTS];
-    a bucket's identity ([bucket_identity][diff_soup.inference.engine._identity.bucket_identity])
+    [LANE_COMPONENTS][diff_soup.optimization.inference.engine._identity.LANE_COMPONENTS];
+    a bucket's identity ([bucket_identity][diff_soup.optimization.inference.engine._identity.bucket_identity])
     adds its three sizes. Equality compares ``digest`` only. ``str()`` gives
     its first twelve hexadecimal characters, the form the plan prints.
 
     Attributes:
         digest: SHA-256, in hexadecimal, of the component digests in the order
-            of [COMPONENTS][diff_soup.inference.engine._identity.COMPONENTS].
+            of [COMPONENTS][diff_soup.optimization.inference.engine._identity.COMPONENTS].
         components: One ``(component, digest)`` pair per component, in that
             order.
         by_object: The components that hold a value the recorder cannot
@@ -244,7 +244,7 @@ def _lane_streams(child: Any) -> tuple:
 
 def _components(child: Any, recorder: _IdentityRecorder) -> tuple:
     """The record of every component of ``child``, in the order of ``LANE_COMPONENTS``."""
-    from diff_soup.inference.fitting.joint import _child_mode
+    from diff_soup.optimization.inference.fitting.joint import _child_mode
 
     seam = child._seam
     view = seam.problem
@@ -310,7 +310,7 @@ def lane_identity(child: Any) -> LaneIdentity:
         child: One experiment's fitted problem, an entry of ``joint.problems``.
 
     Returns:
-        The [LaneIdentity][diff_soup.inference.engine._identity.LaneIdentity].
+        The [LaneIdentity][diff_soup.optimization.inference.engine._identity.LaneIdentity].
     """
     recorder = _IdentityRecorder()
     components = tuple((name, _sha256(record)) for name, record in _components(child, recorder))
@@ -334,7 +334,7 @@ def bucket_identity(lane: LaneIdentity, *, frames: Any, width: int, segments: An
             schedule.
 
     Returns:
-        A [LaneIdentity][diff_soup.inference.engine._identity.LaneIdentity]
+        A [LaneIdentity][diff_soup.optimization.inference.engine._identity.LaneIdentity]
         whose components are those of ``lane`` followed by "frame class",
         "derivative width" and "segment class".
     """
@@ -380,7 +380,7 @@ def lane_refusal(child: Any) -> str | None:
         The reason, a sentence that names what the lanes cannot take, or
         ``None``.
     """
-    from diff_soup.inference.fitting.joint import _child_mode
+    from diff_soup.optimization.inference.fitting.joint import _child_mode
 
     mode = _child_mode(child)
     if mode not in ("single", "observed_ic"):

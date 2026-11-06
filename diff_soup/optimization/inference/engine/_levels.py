@@ -1,6 +1,6 @@
 """Tables and reductions over a parameter hierarchy of any depth.
 
-A study declared with a [Hierarchy][diff_soup.inference.Hierarchy] has levels
+A study declared with a [Hierarchy][diff_soup.optimization.inference.Hierarchy] has levels
 numbered from the study (level 0, the shared coordinates) through its
 intermediate levels to the experiments (level D). Every lane carries, level by
 level, the coordinates of its node at every level, so its narrow point is
@@ -21,7 +21,7 @@ so its value does not depend on the order of the lane results or on which
 device produced them. A reduction refuses a set of lanes that contains a
 failed one of nonzero weight; a failed lane of weight zero adds nothing, its
 cost and derivatives being zero. The reduction of many population members at
-once, [reduce_member_gradients][diff_soup.inference.engine.reduce_member_gradients],
+once, [reduce_member_gradients][diff_soup.optimization.inference.engine.reduce_member_gradients],
 refuses nothing: a member with such a failed lane gets a NaN cost and gradient.
 """
 
@@ -35,8 +35,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.engine._reducers import refuse_failed
-from diff_soup.inference.engine._status import ABSENT
+from diff_soup.optimization.inference.engine._reducers import refuse_failed
+from diff_soup.optimization.inference.engine._status import ABSENT
 
 Array = jax.Array
 
@@ -358,14 +358,14 @@ def level_tables(
     are all absent from ``lanes`` stays in the tables and sums to zero.
 
     Args:
-        hierarchy: The study's [Hierarchy][diff_soup.inference.Hierarchy].
+        hierarchy: The study's [Hierarchy][diff_soup.optimization.inference.Hierarchy].
         experiments: Every experiment of the study, in study order.
         lanes: The ids of the lane results, in their order; ``None`` for every
             experiment in study order.
         device: The JAX device of the tables; ``None`` for the default device.
 
     Returns:
-        The [LevelTables][diff_soup.inference.engine.LevelTables], with the
+        The [LevelTables][diff_soup.optimization.inference.engine.LevelTables], with the
         level names and the lane ids.
 
     Raises:
@@ -373,7 +373,7 @@ def level_tables(
             ``lanes`` is empty, names an experiment twice, or names an id that
             is not an experiment of the study.
     """
-    from diff_soup.inference.statistics.hierarchy import _tree
+    from diff_soup.optimization.inference.statistics.hierarchy import _tree
 
     tree = _tree(hierarchy, experiments)
     ids = tree.ids if lanes is None else tuple(lanes)
@@ -603,7 +603,7 @@ def reduce_levels(
             refused.
 
     Returns:
-        The [LevelBlocks][diff_soup.inference.engine.LevelBlocks].
+        The [LevelBlocks][diff_soup.optimization.inference.engine.LevelBlocks].
 
     Raises:
         LaneFailure: If a lane of the set failed whose weight is not zero.
@@ -639,10 +639,10 @@ def reduce_level_gradients(
         tables: The level tables of the lanes, in the order of the results.
         results: The lane results of the ``gradient`` or the ``blocks`` mode.
         lane_ids: The identifier of each lane, in the order of the results.
-        weights: As for [reduce_levels][diff_soup.inference.engine.reduce_levels].
+        weights: As for [reduce_levels][diff_soup.optimization.inference.engine.reduce_levels].
 
     Returns:
-        The [LevelGradients][diff_soup.inference.engine.LevelGradients].
+        The [LevelGradients][diff_soup.optimization.inference.engine.LevelGradients].
 
     Raises:
         LaneFailure: If a lane of the set failed whose weight is not zero.
@@ -674,7 +674,7 @@ def reduce_member_gradients(
     """The cost and the joint gradient of every population member of a result, in one reduction.
 
     Each member's lanes are summed as
-    [reduce_level_gradients][diff_soup.inference.engine.reduce_level_gradients]
+    [reduce_level_gradients][diff_soup.optimization.inference.engine.reduce_level_gradients]
     sums them, under that member's own weight of every lane, and its gradient
     is laid out as one joint vector: the shared coordinates, then every node of
     level 1 in node order, and so on down to the experiments. A member none of
@@ -686,7 +686,7 @@ def reduce_member_gradients(
 
     Args:
         tables: The level tables of the lanes, in the order of the results.
-        results: The [Results][diff_soup.inference.engine.Results] of the
+        results: The [Results][diff_soup.optimization.inference.engine.Results] of the
             ``gradient`` or the ``blocks`` mode, of ``M`` members and ``L``
             lanes.
         lane_ids: The identifier of each lane, in the order of the results.
@@ -761,13 +761,13 @@ def partial_levels(tables: LevelTables, results: Any, device: Any = None) -> Any
 
     Args:
         tables: The level tables of the lanes of ``results``, in their order.
-        results: The [Results][diff_soup.inference.engine.Results] of the
+        results: The [Results][diff_soup.optimization.inference.engine.Results] of the
             ``blocks``, ``hessian`` or ``gradient`` mode.
         device: The JAX device the sums run on; ``None`` for the default.
 
     Returns:
-        A [LevelBlocks][diff_soup.inference.engine.LevelBlocks] (``blocks``,
-        ``hessian``) or [LevelGradients][diff_soup.inference.engine.LevelGradients]
+        A [LevelBlocks][diff_soup.optimization.inference.engine.LevelBlocks] (``blocks``,
+        ``hessian``) or [LevelGradients][diff_soup.optimization.inference.engine.LevelGradients]
         (``gradient``) of host arrays whose leaves lead with the member axis
         of ``results``.
 
@@ -826,7 +826,7 @@ def _level_one_of_nodes(tables: LevelTables) -> tuple:
 def weigh_levels(tables: LevelTables, sums: Any, weights: Any) -> Any:
     """One member's sums over the levels, weighed by one weight per member of level 1.
 
-    The sums of [partial_levels][diff_soup.inference.engine._levels.partial_levels]
+    The sums of [partial_levels][diff_soup.optimization.inference.engine._levels.partial_levels]
     weigh every lane one. A lane's weight that is the weight of its node at
     level 1 multiplies every sum below that node, so weighing the sums of each
     node by the weight of its level-1 node, after the sum, gives the weighted
@@ -834,8 +834,8 @@ def weigh_levels(tables: LevelTables, sums: Any, weights: Any) -> Any:
 
     Args:
         tables: The level tables of the study.
-        sums: One member's [LevelBlocks][diff_soup.inference.engine.LevelBlocks]
-            or [LevelGradients][diff_soup.inference.engine.LevelGradients],
+        sums: One member's [LevelBlocks][diff_soup.optimization.inference.engine.LevelBlocks]
+            or [LevelGradients][diff_soup.optimization.inference.engine.LevelGradients],
             host arrays.
         weights: ``None`` for one, or ``(level, values)`` with the level 1 (by
             number or by name) and one value per node of level 1.
@@ -915,7 +915,7 @@ def joint_gradient(tables: LevelTables, sums: Any) -> tuple:
     """``(cost, gradient)`` of one member's sums, the gradient laid out as one joint vector.
 
     The layout is that of
-    [reduce_member_gradients][diff_soup.inference.engine.reduce_member_gradients]:
+    [reduce_member_gradients][diff_soup.optimization.inference.engine.reduce_member_gradients]:
     the shared coordinates, then every node of level 1 in node order, and so
     on down to the experiments.
     """

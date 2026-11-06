@@ -2,13 +2,13 @@
 
 Two complementary tools:
 
-* [GRFBasis][diff_soup.inference.approx.grf.GRFBasis] — differentiable parameterisation of log k(x,y) as a
+* [GRFBasis][diff_soup.optimization.inference.approx.grf.GRFBasis] — differentiable parameterisation of log k(x,y) as a
   linear combination of 2-D cosine Fourier modes.  The ``coeffs`` field is a
   ``jax.Array`` (learnable via ``eqx.filter_grad``).  The precomputed basis
   matrix is stored as a NumPy array so it is treated as a constant during
   differentiation.
 
-* [GRFGenerator][diff_soup.inference.approx.grf.GRFGenerator] — NumPy/SciPy utility that draws spatially correlated
+* [GRFGenerator][diff_soup.optimization.inference.approx.grf.GRFGenerator] — NumPy/SciPy utility that draws spatially correlated
   random fields from an RBF-covariance Gaussian prior.  Use this to initialise
   or sample GRF realisations (not differentiable).
 
@@ -245,15 +245,15 @@ class KLBasis(eqx.Module):
     Represents a log-field ψ(x) = σ_ψ₀ Z₀ + Σᵢ √λᵢ φᵢ(x) Zᵢ where
     (λᵢ, φᵢ) are eigenpairs of the RBF covariance kernel.
 
-    Unlike [GRFBasis][diff_soup.inference.approx.grf.GRFBasis] (cosine modes on rectangles), this works on
+    Unlike [GRFBasis][diff_soup.optimization.inference.approx.grf.GRFBasis] (cosine modes on rectangles), this works on
     arbitrary unstructured meshes by eigendecomposing the covariance matrix.
 
     ``Z`` is the coefficient vector and the only fitted quantity;
-    [learnable_paths][diff_soup.inference.approx.grf.KLBasis.learnable_paths]
+    [learnable_paths][diff_soup.optimization.inference.approx.grf.KLBasis.learnable_paths]
     declares that, so
     ``spec.function("psi", kl, learnable=True)`` selects the coefficients alone
     and never the precomputed mode arrays.  The class is callable — ``kl()``
-    returns [psi][diff_soup.inference.approx.grf.KLBasis.psi] — so it can be
+    returns [psi][diff_soup.optimization.inference.approx.grf.KLBasis.psi] — so it can be
     declared directly as a named function
     and evaluated in an equation as ``q.fn.psi()``.
 
@@ -281,17 +281,17 @@ class KLBasis(eqx.Module):
         sigma_psi0: Prior standard deviation of the constant mode (static float).
         modes: Mass-orthonormal eigenmodes Φ (columns), shape
             ``(n_pts, n_modes)``, satisfying ``Φᵀ M Φ = I``.  Set by
-            [from_covariance_operator][diff_soup.inference.approx.grf.KLBasis.from_covariance_operator]; ``None`` for the RBF
+            [from_covariance_operator][diff_soup.optimization.inference.approx.grf.KLBasis.from_covariance_operator]; ``None`` for the RBF
             constructors.
         mass_matrix: The mass (metric) matrix M of the generalized
-            eigenproblem.  Set by [from_covariance_operator][diff_soup.inference.approx.grf.KLBasis.from_covariance_operator]; ``None``
+            eigenproblem.  Set by [from_covariance_operator][diff_soup.optimization.inference.approx.grf.KLBasis.from_covariance_operator]; ``None``
             otherwise.
         mass_diagonal: A lumped diagonal metric stored in O(N) memory. Set by
-            [from_lumped_covariance][diff_soup.inference.approx.grf.KLBasis.from_lumped_covariance];
+            [from_lumped_covariance][diff_soup.optimization.inference.approx.grf.KLBasis.from_lumped_covariance];
             mutually exclusive with ``mass_matrix``.
         eigenvalues: Leading eigenvalues λ in descending order, shape
             ``(n_modes,)``.  Set by
-            [from_covariance_operator][diff_soup.inference.approx.grf.KLBasis.from_covariance_operator];
+            [from_covariance_operator][diff_soup.optimization.inference.approx.grf.KLBasis.from_covariance_operator];
             ``None`` otherwise.
     """
 
@@ -417,8 +417,8 @@ class KLBasis(eqx.Module):
         Stored fields: ``eigenvalues`` (leading λ, descending),
         ``mass_matrix`` (the symmetrized M), ``modes`` (M-orthonormal Φ), and
         ``basis`` = ``Φ · √λ`` so
-        [psi][diff_soup.inference.approx.grf.KLBasis.psi] and
-        [k][diff_soup.inference.approx.grf.KLBasis.k] weight the modes
+        [psi][diff_soup.optimization.inference.approx.grf.KLBasis.psi] and
+        [k][diff_soup.optimization.inference.approx.grf.KLBasis.k] weight the modes
         exactly like the RBF constructor.  ``Z`` is initialised to zeros.
 
         Typical usage::
@@ -437,7 +437,7 @@ class KLBasis(eqx.Module):
                 ``1 <= n_modes <= n``.
 
         Returns:
-            A [KLBasis][diff_soup.inference.approx.grf.KLBasis] whose
+            A [KLBasis][diff_soup.optimization.inference.approx.grf.KLBasis] whose
             ``modes``, ``mass_matrix``, and
             ``eigenvalues`` fields are populated.
         """
@@ -519,7 +519,7 @@ class KLBasis(eqx.Module):
                 host-side in float64 and cast only at the JAX boundary.
 
         Returns:
-            A [KLBasis][diff_soup.inference.approx.grf.KLBasis] with
+            A [KLBasis][diff_soup.optimization.inference.approx.grf.KLBasis] with
             ``mass_diagonal`` populated and ``mass_matrix is None``.
         """
         from scipy.sparse import issparse
@@ -677,7 +677,7 @@ class KLBasis(eqx.Module):
         """Evaluate the log-heterogeneity field.
 
         Returns the same array as
-        [psi][diff_soup.inference.approx.grf.KLBasis.psi].
+        [psi][diff_soup.optimization.inference.approx.grf.KLBasis.psi].
 
         Present so a basis can be declared directly as a named learnable
         function (``spec.function("psi", kl, learnable=True)``) and evaluated
@@ -803,7 +803,7 @@ class GRFGenerator:
     ) -> None:
         """Precompute the approximate KL basis used by ``generate``.
 
-        See [generate][diff_soup.inference.approx.grf.GRFGenerator.generate].
+        See [generate][diff_soup.optimization.inference.approx.grf.GRFGenerator.generate].
 
         Args:
             mesh_points: Node coordinates ``(n_pts, 2)``.

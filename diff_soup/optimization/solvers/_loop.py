@@ -34,7 +34,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from diff_soup._distributed import local_value
-from diff_soup.inference.solvers._termination import (
+from diff_soup.optimization.solvers._termination import (
     DEFAULT_COST_ATOL,
     DEFAULT_COST_TOL,
     DEFAULT_STEP_TOL,

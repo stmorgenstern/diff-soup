@@ -1,6 +1,6 @@
 """Observed values that are loaded on the process that owns them.
 
-A :class:`~diff_soup.inference.Measurement` may take a zero-argument callable
+A :class:`~diff_soup.optimization.inference.Measurement` may take a zero-argument callable
 for its ``values``. The callable is not invoked at construction. Its shape and
 dtype are either declared on the measurement or probed once on the primary
 process and shared with the other processes as metadata. The values

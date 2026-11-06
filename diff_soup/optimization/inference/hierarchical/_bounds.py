@@ -424,7 +424,7 @@ def coleman_li_scaling(x: Any, g: Any, lb: Any, ub: Any, scale: Any) -> Scaling:
         scale: ``(n,)``, positive.
 
     Returns:
-        The [Scaling][diff_soup.inference.hierarchical._bounds.Scaling].
+        The [Scaling][diff_soup.optimization.inference.hierarchical._bounds.Scaling].
     """
     scale = np.asarray(scale)
     g = np.asarray(g)

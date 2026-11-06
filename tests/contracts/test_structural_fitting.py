@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
-from diff_soup.inference.approx import KLBasis
-from diff_soup.inference.solvers._loop import (
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.approx import KLBasis
+from diff_soup.optimization.solvers._loop import (
     Trials,
     _after_attempt,
     _floor_sample,
@@ -20,7 +20,7 @@ from diff_soup.inference.solvers._loop import (
     cost_scale,
     cost_threshold,
 )
-from diff_soup.inference.solvers.tangent import (
+from diff_soup.optimization.solvers.tangent import (
     jacfwd_from_pushforward,
     linearize_value,
     value_and_jacfwd,

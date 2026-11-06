@@ -1,23 +1,23 @@
 """windows.py — multishoot window specs + continuity config.
 
-[Windows][diff_soup.inference.fitting.windows.Windows] is the multiple-shooting window specification.  Its *constructor
+[Windows][diff_soup.optimization.inference.fitting.windows.Windows] is the multiple-shooting window specification.  Its *constructor
 choice* selects the multishoot mode ("Mode rule — no string flag"):
 
-* [from_data][diff_soup.inference.fitting.windows.Windows.from_data] — **observed-IC windows**.  Each window starts
+* [from_data][diff_soup.optimization.inference.fitting.windows.Windows.from_data] — **observed-IC windows**.  Each window starts
   from the observed full state at its frame; there are NO continuity rows (segments
   are independent observed-IC one-frame predictions, scoped to full-state data via
   the eager ``__check_init__`` on the problem).
-* [at][diff_soup.inference.fitting.windows.Windows.at] / [uniform][diff_soup.inference.fitting.windows.Windows.uniform] — **decision-variable windows**.
+* [at][diff_soup.optimization.inference.fitting.windows.Windows.at] / [uniform][diff_soup.optimization.inference.fitting.windows.Windows.uniform] — **decision-variable windows**.
   The window-start states become decision variables ``s̃_w`` and the LM stack gains
   continuity rows.
 
-[Continuity][diff_soup.inference.fitting.windows.Continuity] configures the continuity-row weight for decision-variable
+[Continuity][diff_soup.optimization.inference.fitting.windows.Continuity] configures the continuity-row weight for decision-variable
 windows.  ``weight="auto"`` is the reference-scaled WRMS, matched to the
 RMS magnitude of the observation rows' declared `Series.weight`: the literal
 ``1/(atol+rtol|s̃|)`` formula blows up conditioning at production tolerances, so
 the per-row weight is made a dimensionless ratio instead.
 
-[StateBasis][diff_soup.inference.fitting.windows.StateBasis] chooses the coordinate the
+[StateBasis][diff_soup.optimization.inference.fitting.windows.StateBasis] chooses the coordinate the
 decision-variable window starts
 live in.  ``StateBasis.full()`` (the default) makes every differential degree of
 freedom a decision variable; ``StateBasis.from_modes(B)`` represents a window
@@ -47,7 +47,7 @@ class WindowInitialization:
     """Exact, reusable initialization for decision-variable windows.
 
     Supplying this object to
-    [InferenceProblem][diff_soup.inference.fitting.inference_problem.InferenceProblem] makes
+    [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem] makes
     construction pure: no
     manifold forward sweep and no separate endpoint-validation solve are
     executed. Applications can content-address and persist it alongside a
@@ -76,7 +76,7 @@ class RestartStep(eqx.Module):
     """The integrator's first-step policy at a window restart.
 
     Declared on ``Multishoot(first_step=...)`` under the public name
-    ``diff_soup.inference.FirstStep``: ``FirstStep.auto()`` uses the stock
+    ``diff_soup.optimization.inference.FirstStep``: ``FirstStep.auto()`` uses the stock
     integrator estimate, ``FirstStep.fixed(dt)`` a fixed first step,
     ``FirstStep.fraction(f)`` a clipped fraction of the segment duration, and
     ``FirstStep.hinted(...)`` per-segment hints. A policy resolves to the
@@ -174,7 +174,7 @@ class RestartStep(eqx.Module):
 
 
 class Windows(eqx.Module):
-    """The windows of a [Multishoot][diff_soup.inference.Multishoot] trajectory, built by one of its constructors.
+    """The windows of a [Multishoot][diff_soup.optimization.inference.Multishoot] trajectory, built by one of its constructors.
 
     `from_data` and `from_states` start every window from a known state and fit only the
     parameters. `at` and `uniform` fit the window starts beside the parameters.

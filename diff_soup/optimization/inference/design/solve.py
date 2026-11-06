@@ -1,10 +1,10 @@
 """Sensitivity runs: a solve wired for forward sensitivities and design gradients.
 
-[sensitivity_solve][diff_soup.inference.design.solve.sensitivity_solve] splits a problem's parameters into the *analyzed*
+[sensitivity_solve][diff_soup.optimization.inference.design.solve.sensitivity_solve] splits a problem's parameters into the *analyzed*
 set (``wrt`` — what the experiment tries to identify) and everything else
 (including the *design* set — protocol coefficients an experiment-design loop
 optimizes), and returns a
-[SensitivityRun][diff_soup.inference.design.solve.SensitivityRun]:
+[SensitivityRun][diff_soup.optimization.inference.design.solve.SensitivityRun]:
 
 * ``run(x)`` solves with the analyzed parameters set to the flat vector ``x``
   and returns the saved frames — using the solver's composable
@@ -36,8 +36,8 @@ from jax.flatten_util import ravel_pytree
 from jaxtyping import Array
 
 from diff_soup._warnings import warn_user
-from diff_soup.inference.fitting._forward_seam import parameter_handle_leaf_ids
-from diff_soup.inference.fitting._path_filter import parameters_at
+from diff_soup.optimization.inference.fitting._forward_seam import parameter_handle_leaf_ids
+from diff_soup.optimization.inference.fitting._path_filter import parameters_at
 from diff_soup.problem._registry import theta_leaf_keys, theta_mask
 
 __all__ = ["SensitivityRun", "sensitivity_solve"]
@@ -194,7 +194,7 @@ class SensitivityRun:
             A pytree shaped like ``unravel(x0)`` whose leaves carry a leading
             ``n_directions`` axis: entry ``j`` is the analyzed subtree moved
             along basis direction ``j``. Pass it as ``theta_tangents`` to
-            [observable_sensitivities][diff_soup.inference.design.fisher.observable_sensitivities]
+            [observable_sensitivities][diff_soup.optimization.inference.design.fisher.observable_sensitivities]
             for channels that read the analyzed parameters directly.
         """
         basis = jnp.eye(self.n_directions, dtype=self.x0.dtype)
@@ -207,7 +207,7 @@ class SensitivityRun:
             x: Flat analyzed-parameter vector (``x0``-shaped).
             theta: Optional replacement for the full parameter pytree —
                 typically
-                [SensitivityRun.design_theta][diff_soup.inference.design.solve.SensitivityRun.design_theta]
+                [SensitivityRun.design_theta][diff_soup.optimization.inference.design.solve.SensitivityRun.design_theta]
                 output. The analyzed entries of ``theta`` are overridden by
                 ``x``.
 
@@ -323,7 +323,7 @@ def sensitivity_solve(
         **solve_kwargs: Forwarded to the solver's ``solve`` (e.g. ``max_steps``).
 
     Returns:
-        A [SensitivityRun][diff_soup.inference.design.solve.SensitivityRun]
+        A [SensitivityRun][diff_soup.optimization.inference.design.solve.SensitivityRun]
         whose call ``run(x, theta)`` is differentiable by ``jax.jacfwd`` with
         respect to ``x`` and, through a criterion of those sensitivities, by
         ``jax.grad`` with respect to the design values ``d`` of

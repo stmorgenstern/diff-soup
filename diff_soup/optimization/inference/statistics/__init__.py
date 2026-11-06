@@ -1,42 +1,52 @@
 """Advanced statistical functions and numerical building blocks.
 
-The documented fitting and analysis surface is ``ds.inference``. This
+The documented fitting and analysis surface is ``ds.optimization.inference``. This
 namespace provides advanced functions such as ``posterior_target``,
 ``whitening`` and ``sbc``, likelihood base classes, and result kernels.
 """
 
-from diff_soup.inference.statistics.cluster import ClusterCovarianceResult, ClusterResidualBlock
-from diff_soup.inference.statistics.compression import (
+from diff_soup.optimization.inference.statistics.cluster import (
+    ClusterCovarianceResult,
+    ClusterResidualBlock,
+)
+from diff_soup.optimization.inference.statistics.compression import (
     AffineSummary,
     CompressionReport,
     compare_compression,
 )
-from diff_soup.inference.statistics.diagnostics import ChannelResiduals, McmcReport, ResidualReport
-from diff_soup.inference.statistics.evidence import (
+from diff_soup.optimization.inference.statistics.diagnostics import (
+    ChannelResiduals,
+    McmcReport,
+    ResidualReport,
+)
+from diff_soup.optimization.inference.statistics.evidence import (
     EvidenceResult,
     PriorDominatedDirection,
     PriorSensitivity,
     laplace_evidence,
 )
-from diff_soup.inference.statistics.experiment import (
+from diff_soup.optimization.inference.statistics.experiment import (
     CHANNEL_ROLES,
     Channel,
     ExperimentSet,
     Predictor,
 )
-from diff_soup.inference.statistics.identifiability import (
+from diff_soup.optimization.inference.statistics.identifiability import (
     IdentifiabilityCoordinate,
     IdentifiabilityReport,
 )
-from diff_soup.inference.statistics.information import InformationResult, assemble_information
-from diff_soup.inference.statistics.laplace import LaplacePosterior, laplace_posterior
-from diff_soup.inference.statistics.likelihoods import (
+from diff_soup.optimization.inference.statistics.information import (
+    InformationResult,
+    assemble_information,
+)
+from diff_soup.optimization.inference.statistics.laplace import LaplacePosterior, laplace_posterior
+from diff_soup.optimization.inference.statistics.likelihoods import (
     CholeskyOutputInformation,
     DiagonalOutputInformation,
     Likelihood,
     OutputInformation,
 )
-from diff_soup.inference.statistics.parameters import (
+from diff_soup.optimization.inference.statistics.parameters import (
     BoundedAffine,
     ConstrainedParameterization,
     ConvertedCovariance,
@@ -52,9 +62,9 @@ from diff_soup.inference.statistics.parameters import (
     Transform,
     constrained,
 )
-from diff_soup.inference.statistics.posterior import posterior_target
-from diff_soup.inference.statistics.practical import PracticalReport, ToleranceStatus
-from diff_soup.inference.statistics.predict import (
+from diff_soup.optimization.inference.statistics.posterior import posterior_target
+from diff_soup.optimization.inference.statistics.practical import PracticalReport, ToleranceStatus
+from diff_soup.optimization.inference.statistics.predict import (
     ComparisonReport,
     HeldOutEvent,
     HeldOutPrediction,
@@ -64,7 +74,7 @@ from diff_soup.inference.statistics.predict import (
     compare_predictive,
     prior_predictive,
 )
-from diff_soup.inference.statistics.priors import (
+from diff_soup.optimization.inference.statistics.priors import (
     GaussianPrior,
     IndependentProduct,
     Prior,
@@ -72,8 +82,8 @@ from diff_soup.inference.statistics.priors import (
     prior_from_regularizer,
     pullback_log_prob,
 )
-from diff_soup.inference.statistics.profile import At, ProfileRefit, ProfileResult
-from diff_soup.inference.statistics.report import (
+from diff_soup.optimization.inference.statistics.profile import At, ProfileRefit, ProfileResult
+from diff_soup.optimization.inference.statistics.report import (
     FunctionBand,
     FunctionReport,
     IdentifiedSubspace,
@@ -84,8 +94,8 @@ from diff_soup.inference.statistics.report import (
     identifiability_report,
     pointwise_variance,
 )
-from diff_soup.inference.statistics.robust import RobustCovariance, sandwich_covariance
-from diff_soup.inference.statistics.sample import (
+from diff_soup.optimization.inference.statistics.robust import RobustCovariance, sandwich_covariance
+from diff_soup.optimization.inference.statistics.sample import (
     Draws,
     GradientCheck,
     LogDensity,
@@ -95,7 +105,7 @@ from diff_soup.inference.statistics.sample import (
     sbc,
     whitening,
 )
-from diff_soup.inference.statistics.splits import (
+from diff_soup.optimization.inference.statistics.splits import (
     ConditioningRecord,
     CrossValidationSplit,
     HeldOutResponseGroup,

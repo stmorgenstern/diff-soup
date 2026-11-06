@@ -1,6 +1,6 @@
 """Optimization progress callbacks.
 
-Callbacks receive a [StepInfo][diff_soup.inference.fitting.result.StepInfo]
+Callbacks receive a [StepInfo][diff_soup.optimization.inference.fitting.result.StepInfo]
 after each optimizer step and can log, checkpoint, or abort the
 optimization.
 """
@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from diff_soup.inference.fitting.result import (
+from diff_soup.optimization.inference.fitting.result import (
     OptResult,
     StepInfo,
     TerminationStatus,
@@ -36,14 +36,14 @@ class Callback(ABC):
     """Base class for a callback that the optimizer calls during a fit.
 
     A subclass implements `on_step`, and the other methods do nothing by default. Raise
-    [StopFit][diff_soup.inference.StopFit] from `on_step` to end the fit early.
+    [StopFit][diff_soup.optimization.inference.StopFit] from `on_step` to end the fit early.
     """
 
     def bind(self, problem: Any) -> None:
         """Receive the problem before the fit starts.
 
         Args:
-            problem: The problem passed to `ds.inference.optsolve`.
+            problem: The problem passed to `ds.optimization.optsolve`.
         """
         return None
 
@@ -70,7 +70,7 @@ class Callback(ABC):
         """Called once with the result after the last step.
 
         Args:
-            result: The [OptResult][diff_soup.inference.OptResult] of the fit.
+            result: The [OptResult][diff_soup.optimization.OptResult] of the fit.
         """
         return None
 
@@ -212,7 +212,7 @@ def last_checkpoint_event(directory: Any) -> Optional[dict]:
 
 
 class CheckpointCallback(Callback):
-    """Saves a fit to a directory as it runs, so that `ds.inference.optsolve` can resume it.
+    """Saves a fit to a directory as it runs, so that `ds.optimization.optsolve` can resume it.
 
     Each step appends a line to `events.jsonl`, and every `every`-th step is saved as an
     `.npz` result. Pass the directory as `resume=` or `checkpoint=` to continue the fit.

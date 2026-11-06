@@ -1,11 +1,11 @@
-"""Hierarchical and owner-aware estimation for ``diff_soup.inference``.
+"""Hierarchical and owner-aware estimation for ``diff_soup.optimization.inference``.
 
-[TrustRegion][diff_soup.inference.TrustRegion] fits a lowered study on its
+[TrustRegion][diff_soup.optimization.inference.TrustRegion] fits a lowered study on its
 lanes, eliminating the levels of its parameter hierarchy from the experiments
 up. ``owner_points`` plans compact per-owner point sets.
 """
 
-from diff_soup.inference.hierarchical.owner_points import (
+from diff_soup.optimization.inference.hierarchical.owner_points import (
     OwnerChildPointPlan,
     OwnerPointPlan,
     build_owner_point_plans,

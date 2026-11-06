@@ -212,7 +212,7 @@ def global_mesh(axis_names: Sequence[str], *, shape: Sequence[int] | None = None
 def mesh_groups(mesh: Mesh, sizes: Sequence[int]) -> tuple[Mesh, ...]:
     """Split a mesh along its `data` axis into consecutive submeshes.
 
-    Pass the groups as `device_groups=` to `ds.inference.checkpointed_map`.
+    Pass the groups as `device_groups=` to `ds.optimization.inference.checkpointed_map`.
 
     Args:
         mesh: Mesh to split, usually from `global_mesh`.
@@ -407,7 +407,7 @@ def run(study: Any, **options: Any) -> Iterator[Any]:
     Use it as `with ds.distributed.run(study) as lowered:`. In a run of several processes, process 0 runs the block and the others evaluate their experiments until it ends, so write results inside the block.
 
     Args:
-        study: The [Study][diff_soup.inference.Study] to lower.
+        study: The [Study][diff_soup.optimization.inference.Study] to lower.
         **options: Passed to `ds.lower`, for example `objective=` or `layout=`.
 
     Yields:
@@ -422,7 +422,7 @@ def run(study: Any, **options: Any) -> Iterator[Any]:
     if getattr(type(study), "_ds_lower", None) is None:
         raise TypeError(
             f"ds.distributed.run lowers a Study; got {type(study).__name__}. Declare the "
-            "experiments in a diff_soup.inference.Study and pass it."
+            "experiments in a diff_soup.optimization.inference.Study and pass it."
         )
     lowered = lower(study, **options)
     try:

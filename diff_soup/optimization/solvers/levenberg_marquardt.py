@@ -8,11 +8,11 @@ iteration:
     acceptance;
   - adapts the damping by Nielsen's rule with step-norm clipping.
 
-The damping diagonal is supplied by an [XScale][diff_soup.inference.fitting.scales.XScale]
-object (default [JacScale][diff_soup.inference.fitting.scales.JacScale]), and any extra
+The damping diagonal is supplied by an [XScale][diff_soup.optimization.inference.fitting.scales.XScale]
+object (default [JacScale][diff_soup.optimization.inference.fitting.scales.JacScale]), and any extra
 least-squares rows come from the problem's
-[Regularizer][diff_soup.inference.fitting.regularization.Regularizer] via its ``residual``
-method.  Construct the solver and call [LevenbergMarquardt.solve][diff_soup.inference.solvers.levenberg_marquardt.LevenbergMarquardt.solve]::
+[Regularizer][diff_soup.optimization.inference.fitting.regularization.Regularizer] via its ``residual``
+method.  Construct the solver and call [LevenbergMarquardt.solve][diff_soup.optimization.solvers.levenberg_marquardt.LevenbergMarquardt.solve]::
 
     solver = LevenbergMarquardt(max_steps=200)
     result = solver.solve(problem, callbacks=(my_callback,))
@@ -30,13 +30,18 @@ import numpy as np
 
 from diff_soup._distributed import any_process, assert_decision_value, local_value
 from diff_soup._errors import BackendError, ConfigurationError
-from diff_soup.inference._abc import OptSolver
-from diff_soup.inference.fitting.bounds import projected_gradient_norm
-from diff_soup.inference.fitting.callbacks import StopFit
-from diff_soup.inference.fitting.result import EvalCounts, OptResult, StepInfo, TerminationStatus
-from diff_soup.inference.fitting.scales import JacScale, XScale
-from diff_soup.inference.solvers._loop import cost_threshold, trial_valid
-from diff_soup.inference.solvers._termination import (
+from diff_soup.optimization._abc import OptSolver
+from diff_soup.optimization.inference.fitting.bounds import projected_gradient_norm
+from diff_soup.optimization.inference.fitting.callbacks import StopFit
+from diff_soup.optimization.inference.fitting.result import (
+    EvalCounts,
+    OptResult,
+    StepInfo,
+    TerminationStatus,
+)
+from diff_soup.optimization.inference.fitting.scales import JacScale, XScale
+from diff_soup.optimization.solvers._loop import cost_threshold, trial_valid
+from diff_soup.optimization.solvers._termination import (
     DEFAULT_COST_ATOL,
     DEFAULT_COST_TOL,
     DEFAULT_STEP_TOL,
@@ -47,7 +52,7 @@ from diff_soup.inference.solvers._termination import (
     stall_reason_of,
     step_budget,
 )
-from diff_soup.inference.solvers.factorization import (
+from diff_soup.optimization.solvers.factorization import (
     cholesky_factor,
     solve_augmented_qr,
     solve_factorized_normal,
@@ -142,7 +147,7 @@ def _gn_step_normal(
     The distributed path reduces ``J^T J`` and ``J^T r`` across the device mesh and
     never forms the full Jacobian, so the step is computed from those replicated
     matrices.  Mirrors
-    [_gn_step][diff_soup.inference.solvers.levenberg_marquardt._gn_step]
+    [_gn_step][diff_soup.optimization.solvers.levenberg_marquardt._gn_step]
     exactly given the same ``(J^T J, J^T r)``.
 
     Returns ``(delta, dnorm, pred_red, Jtr, grad_norm)``.
@@ -211,7 +216,7 @@ class LevenbergMarquardt(OptSolver):
         linear_solver: `"cholesky"`, `"qr"`, `"solve"`, or `"auto"` for QR in single precision with a full Jacobian and Cholesky otherwise.
         x_scale: The parameter scaling of the damping, `JacScale()` by default.
         jacobian_tile: How many Jacobian directions are formed at once: 8 to 128, `"full"`, or `"auto"`, whole when that fits the free memory.
-        callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
+        callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
     """
 
     requires: ClassVar[frozenset] = frozenset({"residual_jacobian"})
@@ -236,7 +241,7 @@ class LevenbergMarquardt(OptSolver):
         """Run LM on the given problem.
 
         Args:
-            problem: A [LeastSquaresProblem][diff_soup.inference._abc.LeastSquaresProblem]
+            problem: A [LeastSquaresProblem][diff_soup.optimization._abc.LeastSquaresProblem]
                 (structure ``"residual_jacobian"``). When its
                 ``reduced_gauss_newton`` is set (the lanes of a lowered study,
                 or a joint sharded over devices) the loop steps from its
@@ -251,7 +256,7 @@ class LevenbergMarquardt(OptSolver):
                 fire during the solve.  Must be passed as a keyword argument.
 
         Returns:
-            A [OptResult][diff_soup.inference.fitting.result.OptResult].
+            A [OptResult][diff_soup.optimization.inference.fitting.result.OptResult].
         """
         cbs = tuple(self.callbacks) + tuple(callbacks)
 
@@ -337,7 +342,9 @@ class LevenbergMarquardt(OptSolver):
         # free memory, else in tiles; the problem's structured Jacobian when it has one.
         jacobian = None
         if not (use_reduced or use_lanes):
-            from diff_soup.inference.fitting.inference_problem import checked_residual_jacobian
+            from diff_soup.optimization.inference.fitting.inference_problem import (
+                checked_residual_jacobian,
+            )
 
             jacobian = checked_residual_jacobian(
                 problem, x, self.jacobian_tile, knob="jacobian_tile"

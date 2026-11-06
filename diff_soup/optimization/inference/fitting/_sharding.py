@@ -25,9 +25,9 @@ from jax import shard_map
 from jax.sharding import NamedSharding, PartitionSpec
 
 from diff_soup._layout import Layout
-from diff_soup.inference.engine._plan import n_padded
-from diff_soup.inference.engine._prepare import split_empty_leaves
-from diff_soup.inference.fitting._lane_map import lane_map
+from diff_soup.optimization.inference.engine._plan import n_padded
+from diff_soup.optimization.inference.engine._prepare import split_empty_leaves
+from diff_soup.optimization.inference.fitting._lane_map import lane_map
 
 
 def sharding_active(layout: Optional[Layout]) -> bool:
@@ -165,7 +165,7 @@ def reduce_child_lsq(
         columns: Optional ``(N, n_narrow)`` integer array of the joint columns each
             child's residual depends on, of one fixed width across children.
         order: Optional slot-to-child map (see
-            [identity_order][diff_soup.inference.fitting._sharding.identity_order])
+            [identity_order][diff_soup.optimization.inference.fitting._sharding.identity_order])
             deciding which lane evaluates which child under a sharded layout;
             the contiguous order when omitted.
 
@@ -177,7 +177,7 @@ def reduce_child_lsq(
         and the replicated ``(N,)`` int32 trial-step count per child (zero for a
         residual function that reports none).
     """
-    from diff_soup.inference.fitting._forward_seam import _FAILED_SENTINEL
+    from diff_soup.optimization.inference.fitting._forward_seam import _FAILED_SENTINEL
 
     n_params = int(jnp.asarray(x).shape[0])
 
@@ -292,7 +292,7 @@ def reduce_child_cost(
     """Reduce the scalar least-squares cost across children without gathering the residual.
 
     The residual-only companion to
-    [reduce_child_lsq][diff_soup.inference.fitting._sharding.reduce_child_lsq],
+    [reduce_child_lsq][diff_soup.optimization.inference.fitting._sharding.reduce_child_lsq],
     used for trial-step
     acceptance where no Jacobian is needed: each device sums ``0.5||r_local||^2`` over
     its children and the scalar is summed across the mesh.  The full residual is never
@@ -301,7 +301,7 @@ def reduce_child_cost(
     Returns:
         ``(cost, n_active_rows, any_failed)`` — all replicated.
     """
-    from diff_soup.inference.fitting._forward_seam import _FAILED_SENTINEL
+    from diff_soup.optimization.inference.fitting._forward_seam import _FAILED_SENTINEL
 
     def device_cost(x_local, inputs_d, active_d):
         def one(inp, act):
@@ -363,7 +363,7 @@ def run_child_kernel(
             ``vmap``; a sharded layout fans the children over the mesh and runs a
             local ``vmap`` on each device.
         fold: On the single-device path, fold any enclosing ``vmap`` into the
-            child axis (see [lane_map][diff_soup.inference.fitting._lane_map.lane_map])
+            child axis (see [lane_map][diff_soup.optimization.inference.fitting._lane_map.lane_map])
             so a linear backend with one factorization per batch lane still
             sees a single matrix-batch axis. Only valid when every traced value
             the kernel reads arrives through ``inputs``.

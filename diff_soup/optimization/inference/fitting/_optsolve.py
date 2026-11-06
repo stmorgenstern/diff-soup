@@ -5,7 +5,7 @@ point for parameter estimation:
 
 * ``problem`` is an ``InferenceProblem`` (an experiment or study paired with
   an MLE or MAP objective), a lowered study (``ds.lower(study)``), or an
-  [OptimizationProblem][diff_soup.inference.OptimizationProblem]; the start
+  [OptimizationProblem][diff_soup.optimization.OptimizationProblem]; the start
   point is the problem's, there is no positional ``x0`` argument.
 * ``optimizer`` defaults to ``NewtonTrustRegion()``, so the minimal call is
   ``optsolve(problem)``.
@@ -31,9 +31,9 @@ from diff_soup._distributed import assert_decision_value, local_value
 from diff_soup._errors import ConfigurationError
 from diff_soup._logging import log as logger
 from diff_soup._warnings import warn_user
-from diff_soup.inference._abc import RESUME
-from diff_soup.inference.fitting._protocols import StatisticalInferenceProblem
-from diff_soup.inference.fitting.result import OptResult, TerminationStatus
+from diff_soup.optimization._abc import RESUME
+from diff_soup.optimization.inference.fitting._protocols import StatisticalInferenceProblem
+from diff_soup.optimization.inference.fitting.result import OptResult, TerminationStatus
 
 #: The built-in solvers and the structure each requires, in the order a refusal lists them.
 _BUILT_IN = (
@@ -60,7 +60,9 @@ def _numeric_problem(problem: Any, optimizer: Any) -> Any:
     if getattr(problem, "structure", None) is not None:
         return problem
     if getattr(problem, "segment_fns", None) is not None:
-        from diff_soup.inference.fitting.inference_problem import lower_residual_problem
+        from diff_soup.optimization.inference.fitting.inference_problem import (
+            lower_residual_problem,
+        )
 
         return lower_residual_problem(problem, optimizer)
     raise TypeError(
@@ -188,7 +190,7 @@ def _recorded_failures(result: OptResult, problem: Any) -> tuple[int, tuple[int,
     ``count_failed``) when no residual is recorded or its blocks are separate
     closures whose row counts the problem does not expose.
     """
-    from diff_soup.inference.fitting._forward_seam import _FAILED_SENTINEL
+    from diff_soup.optimization.inference.fitting._forward_seam import _FAILED_SENTINEL
 
     residual = result.info.get("final_data_residual")
     if residual is None:
@@ -302,19 +304,19 @@ def _attach_parameter_schema(result: OptResult, problem: Any) -> OptResult:
 
 
 def _attach_diagnostics(result: OptResult, problem: Any) -> OptResult:
-    """Attach [OptDiagnostics][diff_soup.inference.fitting.diagnostics.OptDiagnostics].
+    """Attach [OptDiagnostics][diff_soup.optimization.inference.fitting.diagnostics.OptDiagnostics].
 
     Computed at the converged params from the data residual and Jacobian the
     optimizer recorded there (``info["final_data_residual"]`` /
     ``info["final_data_jacobian"]``); an optimizer that records none costs one
     extra ``jacfwd`` over the columns that are not learnable-function weights and
     one residual evaluation of the residual closures at the solution.  Fires
-    [IdentifiabilityWarning][diff_soup.inference.fitting.diagnostics.IdentifiabilityWarning]
+    [IdentifiabilityWarning][diff_soup.optimization.inference.fitting.diagnostics.IdentifiabilityWarning]
     when
     the θ-block is rank-deficient, and records the warning text plus the
     window-state warm-start handle on the result.
     """
-    from diff_soup.inference.fitting.diagnostics import compute_diagnostics
+    from diff_soup.optimization.inference.fitting.diagnostics import compute_diagnostics
 
     diagnostic_problem = getattr(problem, "diagnostic_problem", problem)
     diag = compute_diagnostics(
@@ -377,7 +379,7 @@ def _checkpoint_source(problem: Any, directory: Any) -> Any:
     newest ``step-`` file of the others. A checkpoint whose parameters are laid
     out otherwise than ``problem``'s is refused.
     """
-    from diff_soup.inference.fitting.callbacks import checkpoint_files
+    from diff_soup.optimization.inference.fitting.callbacks import checkpoint_files
 
     files = checkpoint_files(directory)
     if not files:
@@ -388,7 +390,7 @@ def _checkpoint_source(problem: Any, directory: Any) -> Any:
     schema = getattr(problem, "parameter_schema", None)
     recorded_layout = result.info.get("schema_layout")
     if schema is not None and recorded_layout:
-        from diff_soup.inference.fitting._layout import describe_layout, layout_text
+        from diff_soup.optimization.inference.fitting._layout import describe_layout, layout_text
 
         if str(recorded_layout) != layout_text(schema):
             raise ValueError(
@@ -412,7 +414,7 @@ def _resume_from(problem: Any, resume: Any) -> tuple[Any, Any]:
     if isinstance(resume, OptResult):
         result = resume
     else:
-        from diff_soup.inference.fitting.callbacks import checkpoint_files
+        from diff_soup.optimization.inference.fitting.callbacks import checkpoint_files
 
         if os.path.isdir(str(resume)):
             files = checkpoint_files(resume)
@@ -463,7 +465,7 @@ def _resolved_optimizer(problem: Any, optimizer: Any) -> Any:
     whenever the problem has residual rows, and on the exact Hessian otherwise.
     """
     if optimizer is None:
-        from diff_soup.inference.solvers.newton_trust_region import NewtonTrustRegion
+        from diff_soup.optimization.solvers.newton_trust_region import NewtonTrustRegion
 
         optimizer = NewtonTrustRegion()
     for_problem = getattr(optimizer, "_for_problem", None)
@@ -491,8 +493,8 @@ def optsolve(
 
     Args:
         problem: The problem to fit.
-        optimizer: The optimizer, `ds.inference.NewtonTrustRegion()` when `None`, which steps on the Gauss-Newton matrix of the residual rows.
-        callbacks: [Callback][diff_soup.inference.Callback] objects called during the fit.
+        optimizer: The optimizer, `ds.optimization.NewtonTrustRegion()` when `None`, which steps on the Gauss-Newton matrix of the residual rows.
+        callbacks: [Callback][diff_soup.optimization.inference.Callback] objects called during the fit.
         diagnostics: If `True`, attach the fit diagnostics to the result.
         run_restricted_initialization: If `True` and the trajectory sets `warm_start_steps`, first fit the parameters alone for that many steps.
         restricted_callbacks: Callbacks for that first fit.
@@ -500,7 +502,7 @@ def optsolve(
         checkpoint: A directory the fit is saved to as it runs, and resumed from when it already holds a checkpoint.
 
     Returns:
-        The [OptResult][diff_soup.inference.OptResult] of the fit.
+        The [OptResult][diff_soup.optimization.OptResult] of the fit.
 
     Raises:
         ConfigurationError: If the optimizer requires a structure the problem does not provide.
@@ -514,7 +516,7 @@ def optsolve(
 
     callbacks = tuple(callbacks)
     if checkpoint is not None:
-        from diff_soup.inference.fitting.callbacks import CheckpointCallback
+        from diff_soup.optimization.inference.fitting.callbacks import CheckpointCallback
 
         if resume is None:
             resume = _checkpoint_source(problem, checkpoint)

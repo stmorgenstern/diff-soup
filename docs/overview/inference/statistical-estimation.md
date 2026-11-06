@@ -2,7 +2,7 @@
 
 This page provides an overview of fitting the learnable parameters of a
 model to observed data as a statistical estimation problem with
-`ds.inference.InferenceProblem`.
+`ds.optimization.inference.InferenceProblem`.
 
 For maximum likelihood estimation, we
 assume the data, \(u_{\text{data}}\), is distributed under a known
@@ -126,7 +126,7 @@ spec = ds.problem("heat")
 spec.domain("rod", cartesian_grid_1d(n, 0.0, 1.0, method="fvm"))
 spec.field("u", mass="differential", scale=1.0, init=lambda x: x * (1.0 - x))
 D = spec.param("D", value=0.1, learnable=True, bounds=(0.01, 2.0),
-               prior=ds.inference.NormalPrior(mean=0.25, scale=0.1))       # the learnable diffusivity and its prior
+               prior=ds.optimization.inference.NormalPrior(mean=0.25, scale=0.1))       # the learnable diffusivity and its prior
 
 
 @spec.equation(writes="u", reads=("u",))
@@ -138,12 +138,12 @@ spec.bc.dirichlet("u", node_indices=np.array([0, n - 1]), value=0.0)
 problem = spec.build()
 y0 = spec.assemble_state({})
 
-measurement = ds.inference.Measurement("u", times=ts, values=data,
-                                       likelihood=ds.inference.Gaussian(sigma=1e-3))   # declare the data and its noise model
-experiment = ds.inference.Experiment(model=problem, solver=solver, t_span=(0.0, 0.1),
+measurement = ds.optimization.inference.Measurement("u", times=ts, values=data,
+                                       likelihood=ds.optimization.inference.Gaussian(sigma=1e-3))   # declare the data and its noise model
+experiment = ds.optimization.inference.Experiment(model=problem, solver=solver, t_span=(0.0, 0.1),
                                      initial_state=y0, measurements=(measurement,))     # bind the data to one solve
-est = ds.inference.InferenceProblem(experiment, parameters=D, objective=ds.inference.MLE())   # pose the maximum-likelihood problem
-fit = ds.inference.optsolve(est, ds.inference.LevenbergMarquardt())                     # solve it
+est = ds.optimization.inference.InferenceProblem(experiment, parameters=D, objective=ds.optimization.inference.MLE())   # pose the maximum-likelihood problem
+fit = ds.optimization.optsolve(est, ds.optimization.LevenbergMarquardt())                     # solve it
 fit[D]                                                                                  # the maximum-likelihood diffusivity
 ```
 
@@ -154,49 +154,49 @@ carries over with two additions. `likelihood=` on the measurement states
 the noise model of the data, and `objective=` on the inference problem
 selects the maximum-likelihood or the maximum-a-posteriori estimate.
 `spec.param` also takes `prior=`, the prior on the parameter
-([priors and MAP](#priors-and-map)). `ds.inference.optsolve` and its
+([priors and MAP](#priors-and-map)). `ds.optimization.optsolve` and its
 options are unchanged.
 
 ### Declare the measurement
 
-`ds.inference.Measurement(name, times, values, *,
-likelihood=ds.inference.Gaussian(sigma=1.0), observe=None, mask=None)`
+`ds.optimization.inference.Measurement(name, times, values, *,
+likelihood=ds.optimization.inference.Gaussian(sigma=1.0), observe=None, mask=None)`
 declares one stream of observed values together with its noise model
 ([declare the data](fitting.md#declare-the-data)).
 
 ```python
-measurement = ds.inference.Measurement("u", times=ts, values=data,
-                                       likelihood=ds.inference.Gaussian(sigma=1e-3))
+measurement = ds.optimization.inference.Measurement("u", times=ts, values=data,
+                                       likelihood=ds.optimization.inference.Gaussian(sigma=1e-3))
 ```
 
 - `likelihood=` is the noise model of the measurement. The default is
-  `ds.inference.Gaussian(sigma=1.0)`. The families are covered under
+  `ds.optimization.inference.Gaussian(sigma=1.0)`. The families are covered under
   [likelihoods](#likelihoods).
 
 ### Declare the experiment
 
-`ds.inference.Experiment(model, solver, t_span, initial_state,
+`ds.optimization.inference.Experiment(model, solver, t_span, initial_state,
 measurements, id=None, trajectory=None)` binds the measurements to one
 solve of the model ([declare the experiment](fitting.md#declare-the-experiment)).
 
 ```python
-experiment = ds.inference.Experiment(model=problem, solver=solver, t_span=(0.0, 0.1),
+experiment = ds.optimization.inference.Experiment(model=problem, solver=solver, t_span=(0.0, 0.1),
                                      initial_state=y0, measurements=(measurement,))
 ```
 
 ### Pose the estimation problem
 
-`ds.inference.InferenceProblem(experiments, *, parameters,
-objective=ds.inference.MLE(), ...)` pairs the experiment with its
-objective and is the problem `ds.inference.optsolve` solves
+`ds.optimization.inference.InferenceProblem(experiments, *, parameters,
+objective=ds.optimization.inference.MLE(), ...)` pairs the experiment with its
+objective and is the problem `ds.optimization.optsolve` solves
 ([pose the inference problem](fitting.md#pose-the-inference-problem)).
 
 ```python
-est = ds.inference.InferenceProblem(experiment, parameters=D, objective=ds.inference.MLE())
+est = ds.optimization.inference.InferenceProblem(experiment, parameters=D, objective=ds.optimization.inference.MLE())
 ```
 
-- `objective=` is `ds.inference.MLE()`, the default, or
-  `ds.inference.MAP()`. `ds.inference.MAP()` requires a prior on every
+- `objective=` is `ds.optimization.inference.MLE()`, the default, or
+  `ds.optimization.inference.MAP()`. `ds.optimization.inference.MAP()` requires a prior on every
   fitted parameter and is refused without one
   ([priors and MAP](#priors-and-map)).
 - `est.with_start(fit)` returns the same problem started from an
@@ -204,7 +204,7 @@ est = ds.inference.InferenceProblem(experiment, parameters=D, objective=ds.infer
 
 ### Analyze the result
 
-The result is the `ds.inference.OptResult` of
+The result is the `ds.optimization.OptResult` of
 [fitting parameters](fitting.md#analyze-the-result) with its statistical
 fields filled. `fit[D]` returns the fitted value of the parameter `D`
 by handle.
@@ -234,35 +234,35 @@ the values of one time, errors with outliers, counts, and errors that
 grow with the value. The families:
 
 ```python
-ds.inference.Gaussian(sigma=1e-3)
-ds.inference.CorrelatedGaussian(cholesky=1e-3 * jnp.eye(n))
-ds.inference.StudentT(df=4.0, scale=1e-3)
-ds.inference.Poisson(exposure=1.0)
-ds.inference.LogNormal(scale=0.1)
-ds.inference.MultiplicativeGaussian(scale=0.1)
+ds.optimization.inference.Gaussian(sigma=1e-3)
+ds.optimization.inference.CorrelatedGaussian(cholesky=1e-3 * jnp.eye(n))
+ds.optimization.inference.StudentT(df=4.0, scale=1e-3)
+ds.optimization.inference.Poisson(exposure=1.0)
+ds.optimization.inference.LogNormal(scale=0.1)
+ds.optimization.inference.MultiplicativeGaussian(scale=0.1)
 ```
 
-- `ds.inference.Gaussian(sigma)` is independent Gaussian noise with
+- `ds.optimization.inference.Gaussian(sigma)` is independent Gaussian noise with
   standard deviation `sigma`, one value for every entry or one per
   entry. The fit is then the least-squares fit of
   [fitting parameters](fitting.md) with the weight \(1/\sigma\), and
   the scale sets the size of the standard errors.
-- `ds.inference.CorrelatedGaussian(cholesky)` is Gaussian noise
+- `ds.optimization.inference.CorrelatedGaussian(cholesky)` is Gaussian noise
   correlated across the values of one time, with covariance
   \(\Sigma = LL^\top\) and `cholesky` the lower factor \(L\). It is the
   choice when neighbouring sensors share their errors, at the price of
   one factor of the size of a frame.
-- `ds.inference.StudentT(df, scale)` is heavy-tailed noise with `df`
+- `ds.optimization.inference.StudentT(df, scale)` is heavy-tailed noise with `df`
   degrees of freedom and scale `scale`. It tolerates outliers, which a
   Gaussian fit follows, and approaches the Gaussian as `df` grows.
-- `ds.inference.Poisson(exposure=1.0)` is the noise of counts, with the
+- `ds.optimization.inference.Poisson(exposure=1.0)` is the noise of counts, with the
   predicted value times `exposure` as the expected count. It is the
   choice for event counts, whose spread grows with the count.
-- `ds.inference.LogNormal(scale)` is multiplicative noise, with the
+- `ds.optimization.inference.LogNormal(scale)` is multiplicative noise, with the
   logarithm of each value Gaussian of standard deviation `scale` and the
   predicted value its mean. It is the choice for a positive quantity
   whose errors grow in proportion to it.
-- `ds.inference.MultiplicativeGaussian(scale)` is Gaussian noise of
+- `ds.optimization.inference.MultiplicativeGaussian(scale)` is Gaussian noise of
   standard deviation `scale` times the predicted value. An observed
   value of zero is refused under it, and such times are masked out.
 
@@ -273,20 +273,20 @@ the fit under [goodness of fit](#goodness-of-fit). For example, the
 same fit under heavy-tailed noise:
 
 ```python
-student_measurement = ds.inference.Measurement(
-    "u", times=ts, values=data, likelihood=ds.inference.StudentT(df=4.0, scale=1e-3))
-student_experiment = ds.inference.Experiment(
+student_measurement = ds.optimization.inference.Measurement(
+    "u", times=ts, values=data, likelihood=ds.optimization.inference.StudentT(df=4.0, scale=1e-3))
+student_experiment = ds.optimization.inference.Experiment(
     model=problem, solver=solver, t_span=(0.0, 0.1), initial_state=y0,
     measurements=(student_measurement,))
-student_fit = ds.inference.optsolve(
-    ds.inference.InferenceProblem(student_experiment, parameters=D),
-    ds.inference.LevenbergMarquardt())
+student_fit = ds.optimization.optsolve(
+    ds.optimization.inference.InferenceProblem(student_experiment, parameters=D),
+    ds.optimization.LevenbergMarquardt())
 student_fit[D]            # the heavy-tailed estimate
 ```
 
 ## Goodness of fit
 
-`ds.inference.residual_report(problem, fit, *, experiment_id=None)`
+`ds.optimization.inference.residual_report(problem, fit, *, experiment_id=None)`
 checks the likelihood against the data after the fit. It standardizes
 the residual of every measurement by its own likelihood, so that under
 the declared noise model the standardized residuals have mean zero,
@@ -294,7 +294,7 @@ standard deviation one, and no correlation from one time to the next,
 and it flags the departures in words:
 
 ```python
-report = ds.inference.residual_report(est, fit)
+report = ds.optimization.inference.residual_report(est, fit)
 report.channels["u"].std                     # near one when the noise scale is right
 report.channels["u"].mean                    # near zero
 report.channels["u"].lag1_autocorrelation    # near zero for independent errors
@@ -315,7 +315,7 @@ experiment when several are fitted together.
 
 A prior states what we know about a parameter before the data, a
 plausible value and how far from it we would be surprised. With a prior
-declared on every fitted handle, `ds.inference.MAP()` minimizes the
+declared on every fitted handle, `ds.optimization.inference.MAP()` minimizes the
 negative log likelihood plus the negative log prior, and the fit is the
 maximum-a-posteriori estimate. The prior matters when the data pin the
 parameter down weakly, and it is negligible against informative data.
@@ -325,22 +325,22 @@ It is also what makes the posterior a distribution one can sample
 families:
 
 ```python
-ds.inference.NormalPrior(mean=0.25, scale=0.1)
-ds.inference.LogNormalPrior(median=0.25, log_sd=0.5)
-ds.inference.GaussianCoefficientPrior(scale=1.0, smoothness=2.0)
+ds.optimization.inference.NormalPrior(mean=0.25, scale=0.1)
+ds.optimization.inference.LogNormalPrior(median=0.25, log_sd=0.5)
+ds.optimization.inference.GaussianCoefficientPrior(scale=1.0, smoothness=2.0)
 ```
 
-- `ds.inference.NormalPrior(mean, scale)` is a normal prior with the
+- `ds.optimization.inference.NormalPrior(mean, scale)` is a normal prior with the
   given mean and standard deviation. It is the textbook choice, and with
   the Gaussian likelihood the MAP fit is the ridge-regularized
   least-squares fit of [regularization](fitting.md#regularization),
   centered on `mean`.
-- `ds.inference.LogNormalPrior(median, log_sd)` is a log-normal prior on
+- `ds.optimization.inference.LogNormalPrior(median, log_sd)` is a log-normal prior on
   a positive parameter, with `median` its median and `log_sd` the
   standard deviation of its logarithm. It is the choice for a rate or a
   diffusivity that is positive and uncertain over orders of magnitude.
   It is refused on a function handle.
-- `ds.inference.GaussianCoefficientPrior(scale, smoothness=2.0)`
+- `ds.optimization.inference.GaussianCoefficientPrior(scale, smoothness=2.0)`
   is a normal prior on the coefficients of a learnable function,
   centered on the declared coefficients, with a standard deviation that
   shrinks with the degree at the rate `smoothness`
@@ -349,8 +349,8 @@ ds.inference.GaussianCoefficientPrior(scale=1.0, smoothness=2.0)
 The MAP fit of the same study uses the prior declared on `D`:
 
 ```python
-est_map = ds.inference.InferenceProblem(experiment, parameters=D, objective=ds.inference.MAP())
-fit_map = ds.inference.optsolve(est_map, ds.inference.LevenbergMarquardt())
+est_map = ds.optimization.inference.InferenceProblem(experiment, parameters=D, objective=ds.optimization.inference.MAP())
+fit_map = ds.optimization.optsolve(est_map, ds.optimization.LevenbergMarquardt())
 fit_map[D]                # the maximum-a-posteriori diffusivity
 fit_map.objective         # MAP()
 fit_map.log_prior         # the log prior density at the fit
@@ -369,11 +369,11 @@ likelihood at the fit. It measures how sharply the data pin down each
 parameter. Its inverse is the covariance of the estimate, and the
 square roots of its diagonal are the standard errors. For a MAP fit the
 curvature of the prior adds to \(I\).
-`ds.inference.information(problem, *, at, kind="observed")`
+`ds.optimization.inference.information(problem, *, at, kind="observed")`
 assembles the information matrix at a point:
 
 ```python
-info = ds.inference.information(est, at=fit)
+info = ds.optimization.inference.information(est, at=fit)
 info.observed            # the information matrix, here 1 by 1
 info.rank()              # the number of directions the data determine
 ```
@@ -391,13 +391,13 @@ info.rank()              # the number of directions the data determine
 - `info.rank()` counts the directions the data determine. The full
   spectrum is the subject of [identifiability](identifiability.md).
 
-`ds.inference.laplace(problem, fit, *, curvature="observed",
+`ds.optimization.inference.laplace(problem, fit, *, curvature="observed",
 on_singular="raise")` builds the Laplace approximation, the Gaussian
 centered on the fit with the inverse of the information matrix as its
 covariance:
 
 ```python
-posterior = ds.inference.laplace(est, fit)
+posterior = ds.optimization.inference.laplace(est, fit)
 posterior[D].sd                                  # the standard error of D
 posterior[D].interval(0.95)                      # the 95% interval of the Gaussian
 posterior.cov[D, D]                              # the variance of D
@@ -423,7 +423,7 @@ posterior.sample(jax.random.PRNGKey(0), 1000)    # draws from the Gaussian aroun
   starts has them integrated out, so `information`, `laplace` and
   `identifiability` report the parameters alone.
 
-For a MAP fit, `ds.inference.evidence(problem, fit, *,
+For a MAP fit, `ds.optimization.inference.evidence(problem, fit, *,
 curvature="observed")` uses the same Gaussian to approximate the log
 evidence, the logarithm of the normalizer \(p(u_{\text{data}})\) of
 Bayes' rule:
@@ -437,8 +437,8 @@ the curvature of the prior. Between priors or models fitted to the same
 data, the larger evidence is preferred.
 
 ```python
-ds.inference.evidence(est_map, fit_map).log_evidence    # the log evidence of the MAP fit
-ds.inference.laplace(est_map, fit_map).log_evidence     # the same value
+ds.optimization.inference.evidence(est_map, fit_map).log_evidence    # the log evidence of the MAP fit
+ds.optimization.inference.laplace(est_map, fit_map).log_evidence     # the same value
 ```
 
 - The priors are the ones declared on the handles. A maximum-likelihood
@@ -449,20 +449,20 @@ ds.inference.laplace(est_map, fit_map).log_evidence     # the same value
   1e-3.
 
 Uncertainty across the experiments of a population fit is estimated by
-`ds.inference.cluster_covariance` and `ds.inference.bootstrap`
+`ds.optimization.inference.cluster_covariance` and `ds.optimization.inference.bootstrap`
 ([hierarchical fits](hierarchical.md)).
 
 ## Prediction bands
 
-`ds.inference.predict(problem, fit, *, experiment_id=None, kind="latent",
+`ds.optimization.inference.predict(problem, fit, *, experiment_id=None, kind="latent",
 level=0.95)` carries the spread of the parameters through to the
 predicted measurements. Each measurement is linearized at the fit and
 the covariance of the Laplace approximation is propagated, giving one
 band per measurement name:
 
 ```python
-latent = ds.inference.predict(est, fit)["u"]                         # from the parameter uncertainty alone
-predictive = ds.inference.predict(est, fit, kind="predictive")["u"]  # with the measurement noise added
+latent = ds.optimization.inference.predict(est, fit)["u"]                         # from the parameter uncertainty alone
+predictive = ds.optimization.inference.predict(est, fit, kind="predictive")["u"]  # with the measurement noise added
 latent.times, latent.mean, latent.sd, latent.lower, latent.upper    # over the observation times
 ```
 

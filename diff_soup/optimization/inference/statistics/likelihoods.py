@@ -1,20 +1,20 @@
 """likelihoods.py — normalized observation models for fitting and inference.
 
-A [Likelihood][diff_soup.inference.statistics.likelihoods.Likelihood] states the full probability of observed data given
+A [Likelihood][diff_soup.optimization.inference.statistics.likelihoods.Likelihood] states the full probability of observed data given
 predicted values — normalization constants included — so the same object can
 drive weighted least squares, Fisher information, normalized log posteriors,
 model comparison, and simulation. The supplied families cover fixed Gaussian
 noise, counts, robust continuous measurements, and positive or multiplicative
 errors:
 
-* [Gaussian][diff_soup.inference.statistics.likelihoods.Gaussian] — independent errors with known (possibly per-observation)
+* [Gaussian][diff_soup.optimization.inference.statistics.likelihoods.Gaussian] — independent errors with known (possibly per-observation)
   standard deviation.
-* [CorrelatedGaussian][diff_soup.inference.statistics.likelihoods.CorrelatedGaussian] — one jointly Gaussian event with a known dense
+* [CorrelatedGaussian][diff_soup.optimization.inference.statistics.likelihoods.CorrelatedGaussian] — one jointly Gaussian event with a known dense
   covariance, supplied through its lower Cholesky factor.
-* [Poisson][diff_soup.inference.statistics.likelihoods.Poisson], [Multinomial][diff_soup.inference.statistics.likelihoods.Multinomial], and
-  [DirichletMultinomial][diff_soup.inference.statistics.likelihoods.DirichletMultinomial] — normalized count events.
-* [StudentT][diff_soup.inference.statistics.likelihoods.StudentT] — a heavy-tailed location likelihood.
-* [LogNormal][diff_soup.inference.statistics.likelihoods.LogNormal] and [MultiplicativeGaussian][diff_soup.inference.statistics.likelihoods.MultiplicativeGaussian] — positive and
+* [Poisson][diff_soup.optimization.inference.statistics.likelihoods.Poisson], [Multinomial][diff_soup.optimization.inference.statistics.likelihoods.Multinomial], and
+  [DirichletMultinomial][diff_soup.optimization.inference.statistics.likelihoods.DirichletMultinomial] — normalized count events.
+* [StudentT][diff_soup.optimization.inference.statistics.likelihoods.StudentT] — a heavy-tailed location likelihood.
+* [LogNormal][diff_soup.optimization.inference.statistics.likelihoods.LogNormal] and [MultiplicativeGaussian][diff_soup.optimization.inference.statistics.likelihoods.MultiplicativeGaussian] — positive and
   explicitly parameter-dependent relative-error models.
 
 The two Gaussian families have their usual weighted-least-squares rows.
@@ -69,7 +69,7 @@ class OutputInformation(eqx.Module):
     returns the log determinant of the inverse metric retained under its
     original Gaussian-era name; likelihood density normalization always comes
     from
-    [Likelihood.log_prob][diff_soup.inference.statistics.likelihoods.Likelihood.log_prob],
+    [Likelihood.log_prob][diff_soup.optimization.inference.statistics.likelihoods.Likelihood.log_prob],
     never from this method.
     """
 

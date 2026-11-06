@@ -3,7 +3,7 @@
 A run of several processes is one MPI world launched with one process per GPU
 (``srun --mpi=pmi2 --kill-on-bad-exit=1 -n K --gpus-per-task=1 python -m mpi4py
 script.py``). Process 0 coordinates and evaluates lanes; processes 1 .. K-1
-evaluate lanes. [world][diff_soup.inference.engine._transport.world]
+evaluate lanes. [world][diff_soup.optimization.inference.engine._transport.world]
 (``inf.world()``) answers which process this is and how many there are, before
 or after ``ds.lower``; without ``mpi4py``, or outside an MPI launch, the world
 is this one process and nothing here is imported. ``mpi4py`` is imported here

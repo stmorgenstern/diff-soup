@@ -1,6 +1,6 @@
 """Posterior-sampling targets for estimation problems.
 
-The fitting coordinate exposed by [InferenceProblem][diff_soup.inference.InferenceProblem] is the declared
+The fitting coordinate exposed by [InferenceProblem][diff_soup.optimization.inference.InferenceProblem] is the declared
 physical Recipe coordinate. Posterior samplers instead need an unconstrained
 coordinate when Recipe bounds are finite. ``posterior`` constructs that map
 explicitly, includes its change-of-variables Jacobian, and returns the mature
@@ -15,12 +15,12 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.fitting._layout import resolve_point
-from diff_soup.inference.fitting.bounds import resolve_decision_bounds
-from diff_soup.inference.fitting.result import OptResult
-from diff_soup.inference.statistics.estimation import MAP, EstimationProblem
-from diff_soup.inference.statistics.measurement import require_likelihoods
-from diff_soup.inference.statistics.parameters import (
+from diff_soup.optimization.inference.fitting._layout import resolve_point
+from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
+from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.statistics.estimation import MAP, EstimationProblem
+from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
+from diff_soup.optimization.inference.statistics.parameters import (
     BoundedAffine,
     Identity,
     Log,
@@ -28,7 +28,7 @@ from diff_soup.inference.statistics.parameters import (
     Parameterization,
     Transform,
 )
-from diff_soup.inference.statistics.sample import LogDensity
+from diff_soup.optimization.inference.statistics.sample import LogDensity
 
 
 def _scalar_layout(problem: EstimationProblem) -> tuple:
@@ -124,7 +124,7 @@ def _validated_start(problem: EstimationProblem, start: Any) -> np.ndarray:
         if start.parameter_schema is None:
             raise ValueError(
                 "posterior start OptResult has no handle-based parameter schema; "
-                "fit this InferenceProblem through diff_soup.inference.optsolve first, "
+                "fit this InferenceProblem through diff_soup.optimization.optsolve first, "
                 "or pass fit.params."
             )
         if type(start.objective).__name__ != "MAP":

@@ -15,33 +15,33 @@ import numpy as np
 
 from diff_soup._distributed import any_process, assert_decision, is_primary
 from diff_soup._errors import ConfigurationError
-from diff_soup.inference._abc import RESUME, OptSolver
-from diff_soup.inference.engine._layout import lane_layout
-from diff_soup.inference.engine._levels import (
+from diff_soup.optimization._abc import RESUME, OptSolver
+from diff_soup.optimization.inference.engine._layout import lane_layout
+from diff_soup.optimization.inference.engine._levels import (
     LevelTables,
     _lane_weights,
     member_row,
     reduce_levels,
     weigh_levels,
 )
-from diff_soup.inference.engine._reducers import refuse_failed
-from diff_soup.inference.engine._request import Request
-from diff_soup.inference.engine._status import LaneStatus
-from diff_soup.inference.fitting._trial import trial_is_valid
-from diff_soup.inference.fitting.bounds import resolve_decision_bounds
-from diff_soup.inference.fitting.callbacks import StopFit
-from diff_soup.inference.fitting.result import (
+from diff_soup.optimization.inference.engine._reducers import refuse_failed
+from diff_soup.optimization.inference.engine._request import Request
+from diff_soup.optimization.inference.engine._status import LaneStatus
+from diff_soup.optimization.inference.fitting._trial import trial_is_valid
+from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
+from diff_soup.optimization.inference.fitting.callbacks import StopFit
+from diff_soup.optimization.inference.fitting.result import (
     EvalCounts,
     OptResult,
     StepInfo,
     TerminationStatus,
     TrustRegionReport,
 )
-from diff_soup.inference.fitting.scales import ConstantScale, HessianScale, JacScale
-from diff_soup.inference.hierarchical import _bounds as box
-from diff_soup.inference.hierarchical import _level_elimination as elimination
-from diff_soup.inference.hierarchical._constraints import _constraint_rows
-from diff_soup.inference.solvers._loop import (
+from diff_soup.optimization.inference.fitting.scales import ConstantScale, HessianScale, JacScale
+from diff_soup.optimization.inference.hierarchical import _bounds as box
+from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._constraints import _constraint_rows
+from diff_soup.optimization.solvers._loop import (
     _NOISE_RUN,
     _TINY,
     LoopState,
@@ -65,7 +65,7 @@ from diff_soup.inference.solvers._loop import (
     loop_tolerances,
     step_small,
 )
-from diff_soup.inference.solvers._termination import step_budget
+from diff_soup.optimization.solvers._termination import step_budget
 
 _LABEL = "TrustRegion"
 
@@ -279,13 +279,13 @@ def _owner_level_tables(problem: Any, view: Any, ids: tuple, plan: Any, device: 
 def _route_tables(problem: Any, view: Any, ids: tuple, plan: Any, device: Any) -> tuple:
     """``(tables, members)``: the level tables of the lanes ``ids`` and the labels of every level.
 
-    A [Hierarchy][diff_soup.inference.Hierarchy] study takes the tables of its
+    A [Hierarchy][diff_soup.optimization.inference.Hierarchy] study takes the tables of its
     hierarchy; a ``ParameterSet`` study with an owner tier the owners and the
     experiments; any other study one level of experiments. ``ids`` may be any
     subset of the planned lanes, in canonical order: the tables keep every
     node of the study, so the sums over disjoint subsets add up.
     """
-    from diff_soup.inference.statistics.hierarchy import Hierarchy
+    from diff_soup.optimization.inference.statistics.hierarchy import Hierarchy
 
     study = problem.study
     if isinstance(study.parameters, Hierarchy):
@@ -447,7 +447,7 @@ class _LaneRoute:
         """A copy of this route that weighs by ``weights``; this route is unchanged.
 
         The copy's lane weights, block weights and gauge rows come from
-        [weigh_by][diff_soup.inference.hierarchical.level_solvers._LaneRoute.weigh_by],
+        [weigh_by][diff_soup.optimization.inference.hierarchical.level_solvers._LaneRoute.weigh_by],
         the one place that defines them; everything else is this route's.
         """
         other = copy.copy(self)
@@ -583,7 +583,7 @@ class _LaneRoute:
         )
 
     def levels(self) -> Any:
-        """The [LevelLayout][diff_soup.inference.hierarchical._level_elimination.LevelLayout] of the tables, built once."""
+        """The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_elimination.LevelLayout] of the tables, built once."""
         if self.layout is None:
             self.layout = elimination.level_layout(self.tables, self.device)
         return self.layout
@@ -1754,7 +1754,7 @@ class TrustRegion(OptSolver):
     """The trust-region Gauss-Newton method for a hierarchical study, with each step solved cluster by cluster.
 
     It needs a study lowered with `ds.lower(study)`. Box bounds are kept. Pass `checkpoint=` to
-    `ds.inference.optsolve` to save the fit and resume it later.
+    `ds.optimization.optsolve` to save the fit and resume it later.
 
     Args:
         hessian: `"gauss-newton"` steps on the Gauss-Newton curvature, `"true"` on the exact Hessian.
@@ -1782,9 +1782,9 @@ class TrustRegion(OptSolver):
         weights: One weight per member of the first level, or a `(level, weights)` pair, multiplying each member's share of the objective.
         weight_priors: If `True`, the weights also multiply each member's prior and regularization terms.
         constraints: Linear equality constraints on the joint parameter vector, as `LinearConstraint` objects.
-        gauges: [Gauge][diff_soup.inference.Gauge] constraints that pin directions the data leave free.
+        gauges: [Gauge][diff_soup.optimization.inference.Gauge] constraints that pin directions the data leave free.
         fixed_indices: The indices of the joint parameter vector held at their starting values.
-        callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
+        callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
     """
 
     requires: ClassVar[frozenset] = frozenset({"batched_lanes", RESUME})
@@ -1874,13 +1874,13 @@ class TrustRegion(OptSolver):
         x_scale = HessianScale() if x_scale is None else x_scale
         if not isinstance(x_scale, (HessianScale, JacScale, ConstantScale)):
             raise ConfigurationError(
-                "TrustRegion x_scale must be ds.inference.HessianScale, ds.inference.JacScale, "
-                "or ds.inference.ConstantScale."
+                "TrustRegion x_scale must be ds.optimization.inference.HessianScale, ds.optimization.inference.JacScale, "
+                "or ds.optimization.inference.ConstantScale."
             )
         if hessian == "true" and isinstance(x_scale, JacScale):
             raise ConfigurationError(
                 "TrustRegion cannot use JacScale with hessian='true'. Use "
-                "ds.inference.HessianScale() or ds.inference.ConstantScale(...)."
+                "ds.optimization.inference.HessianScale() or ds.optimization.inference.ConstantScale(...)."
             )
         step_budget(max_steps, label=_LABEL)
         if target_accepted_steps is not None and int(target_accepted_steps) < 0:
@@ -2032,7 +2032,7 @@ class TrustRegion(OptSolver):
                 fit. ``None`` starts afresh.
 
         Returns:
-            The [OptResult][diff_soup.inference.OptResult]; on the lanes it
+            The [OptResult][diff_soup.optimization.OptResult]; on the lanes it
             carries ``work`` and ``state``.
 
         Raises:

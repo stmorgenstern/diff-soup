@@ -2,24 +2,24 @@
 
 A joint problem holds one fitted problem per experiment and the layout of the
 joint parameter vector, which
-[lane_layout][diff_soup.inference.engine._layout.lane_layout] reads; a study
+[lane_layout][diff_soup.optimization.inference.engine._layout.lane_layout] reads; a study
 of one experiment has that experiment's fitted problem. An experiment solved
 in one shoot is one lane; an experiment fitted in windows that start from
 observed states is one lane per window, a shoot from the measured state at
 the window's start, scored at the window's end. This module turns the lanes
 that can share a compiled program into that program's
-[LaneProgram][diff_soup.inference.engine._kernel.LaneProgram], one stacked
-[LaneInputs][diff_soup.inference.engine._kernel.LaneInputs], the table that
+[LaneProgram][diff_soup.optimization.inference.engine._kernel.LaneProgram], one stacked
+[LaneInputs][diff_soup.optimization.inference.engine._kernel.LaneInputs], the table that
 gathers every lane's narrow point from the joint vector, and the tables of the
 parameter tree.
 
 Experiments share a program when their identities are equal
-([lane_identity][diff_soup.inference.engine._identity.lane_identity]) and so
+([lane_identity][diff_soup.optimization.inference.engine._identity.lane_identity]) and so
 is their derivative width. They may differ in every number: parameter values,
 initial state, span, sample times, number of frames, targets, weights, masks
 and the leaves of their likelihood objects. A lane with fewer sample times or
 frames than the slots of its frame class
-([frame_classes][diff_soup.inference.engine._capacity.frame_classes]) is
+([frame_classes][diff_soup.optimization.inference.engine._capacity.frame_classes]) is
 padded, and the padding is masked. Experiments that follow a schedule carry its
 segment arrays as numbers too; a group pads them with inactive segments to one
 segment capacity, and an inactive segment does not run. Each lane also carries
@@ -39,22 +39,22 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.engine._capacity import Frames, lane_frames, smallest_frames
-from diff_soup.inference.engine._identity import (
+from diff_soup.optimization.inference.engine._capacity import Frames, lane_frames, smallest_frames
+from diff_soup.optimization.inference.engine._identity import (
     _lane_streams,
     _likelihood_leaves,
     _window_streams,
     lane_identity,
     lane_refusal,
 )
-from diff_soup.inference.engine._kernel import LaneInputs, LaneProgram, StreamInputs
-from diff_soup.inference.engine._layout import (
+from diff_soup.optimization.inference.engine._kernel import LaneInputs, LaneProgram, StreamInputs
+from diff_soup.optimization.inference.engine._layout import (
     LaneLayout,
     _window_count,
     lane_layout,
     lane_problems,
 )
-from diff_soup.inference.engine._reducers import TreeTables, tree_tables
+from diff_soup.optimization.inference.engine._reducers import TreeTables, tree_tables
 
 Array = jax.Array
 
@@ -129,7 +129,7 @@ def _lane_schedules(problems: tuple, lane_ids: tuple, segments: Any) -> Any:
     schedule, and a capacity given for experiments without one. The target
     terms are padded with zero coefficients to the largest target degree of
     the group. What one experiment alone cannot run with is refused by
-    [lane_refusal][diff_soup.inference.engine._identity.lane_refusal].
+    [lane_refusal][diff_soup.optimization.inference.engine._identity.lane_refusal].
     """
     arrays = tuple(getattr(child, "_schedule_arrays", None) for child in problems)
     scheduled = tuple(item is not None for item in arrays)
@@ -237,7 +237,7 @@ def _stream_arrays(
 
     ``frames`` are the frames of the stream the lane holds, every frame when
     ``None``. Returns ``(frame, keep, target, weight, likelihood)``, the fields
-    of [StreamInputs][diff_soup.inference.engine._kernel.StreamInputs].
+    of [StreamInputs][diff_soup.optimization.inference.engine._kernel.StreamInputs].
     """
     held = slice(None) if frames is None else np.asarray(frames, dtype=np.int64)
     stamps = np.asarray(series.ts, dtype=times.dtype).reshape(-1)[held]
@@ -281,8 +281,8 @@ def _lane_spans(child: Any, dtype: Any) -> tuple:
     time order: a window starts from the measured state of its first frame at
     that frame's time, and holds the one frame of the scored stream at its end.
     """
-    from diff_soup.inference.fitting._forward_seam import observed_windows
-    from diff_soup.inference.fitting.joint import _resolve_child_y0
+    from diff_soup.optimization.inference.fitting._forward_seam import observed_windows
+    from diff_soup.optimization.inference.fitting.joint import _resolve_child_y0
 
     if not _window_count(child):
         times = np.asarray(child._union_ts, dtype=dtype).reshape(-1)
@@ -361,14 +361,14 @@ def lane_group(
     Args:
         joint: A joint problem, or the fitted problem of one experiment.
         children: The indices of the lanes of the group in the problem's
-            [lane_layout][diff_soup.inference.engine._layout.lane_layout], in
+            [lane_layout][diff_soup.optimization.inference.engine._layout.lane_layout], in
             any order; every lane when omitted. When every experiment has one
             lane, lane ``i`` is experiment ``i``. The lanes are ordered by
             index.
         frames: The slots of the group's frame class,
             ``(union sample times, (frames per stream, ...))``, the time of the
             initial state counted among the sample times; see
-            [frame_classes][diff_soup.inference.engine._capacity.frame_classes].
+            [frame_classes][diff_soup.optimization.inference.engine._capacity.frame_classes].
             When omitted, the smallest slots that hold every lane of the group.
         segments: The segment capacity of the group's schedules: the number of
             segment entries every lane carries. When omitted, the largest
@@ -376,7 +376,7 @@ def lane_group(
             schedule.
 
     Returns:
-        The [LaneGroup][diff_soup.inference.engine._inputs.LaneGroup].
+        The [LaneGroup][diff_soup.optimization.inference.engine._inputs.LaneGroup].
 
     Raises:
         ValueError: If the experiments cannot share a compiled program (the
@@ -534,7 +534,7 @@ def tree_of(joint: Any, groups: Any) -> tuple[TreeTables, tuple]:
     Args:
         joint: The joint problem, or the fitted problem of one experiment, the
             groups were built from.
-        groups: The [LaneGroup][diff_soup.inference.engine._inputs.LaneGroup]
+        groups: The [LaneGroup][diff_soup.optimization.inference.engine._inputs.LaneGroup]
             objects, in the order of the concatenation.
 
     Returns:

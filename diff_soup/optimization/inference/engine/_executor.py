@@ -2,12 +2,12 @@
 
 Every process of the run lowers the same study and builds the same plan
 (``PLAN_CHECK`` refuses a mismatch). Process 0 places the lanes
-([place][diff_soup.inference.engine._placement.place]) and every process keeps
+([place][diff_soup.optimization.inference.engine._placement.place]) and every process keeps
 its own lanes and builds their inputs on its one device (``PLACE``). Process 0
-then holds a [Coordinator][diff_soup.inference.engine._executor.Coordinator]:
+then holds a [Coordinator][diff_soup.optimization.inference.engine._executor.Coordinator]:
 the lowered study's ``prepare`` and ``evaluate`` go through it, and it evaluates
 its own lanes like any worker. Every other process enters
-[Worker.serve][diff_soup.inference.engine._executor.Worker.serve] inside
+[Worker.serve][diff_soup.optimization.inference.engine._executor.Worker.serve] inside
 ``ds.lower`` and never returns from it: it answers ``PREPARE`` and ``EVALUATE``
 until ``SHUTDOWN``, then frees its device memory, runs its exit handlers,
 acknowledges, finalizes MPI and raises ``SystemExit(0)``; process 0's
@@ -21,7 +21,7 @@ process evaluates its own units through its compiled programs, sums its lanes
 over the study's level tables (every lane weighing one) into one partial table
 per member, and replies with those sums and its lanes' costs, rows, statuses,
 work and seconds. Process 0 adds the partial tables in rank order and returns
-[Results][diff_soup.inference.engine.Results] whose ``levels`` carry the sums
+[Results][diff_soup.optimization.inference.engine.Results] whose ``levels`` carry the sums
 and whose ``normal`` and ``gradient`` are ``None``: the lanes' own matrices
 never leave the process that computed them. A request of many members is sent
 in groups of members whose sums fit the wire budget.
@@ -60,17 +60,21 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from diff_soup._errors import BackendError
-from diff_soup.inference.engine import _batched
-from diff_soup.inference.engine import _prepare as preparing
-from diff_soup.inference.engine import _transport as transports
-from diff_soup.inference.engine._ledger import attributed_seconds
-from diff_soup.inference.engine._levels import LevelBlocks, LevelGradients, partial_levels
-from diff_soup.inference.engine._order import canonical_lanes
-from diff_soup.inference.engine._plan import population_plan
-from diff_soup.inference.engine._request import Request
-from diff_soup.inference.engine._result import Batch, Results, Status, Work
-from diff_soup.inference.engine._status import ABSENT
-from diff_soup.inference.engine._transport import Transport
+from diff_soup.optimization.inference.engine import _batched
+from diff_soup.optimization.inference.engine import _prepare as preparing
+from diff_soup.optimization.inference.engine import _transport as transports
+from diff_soup.optimization.inference.engine._ledger import attributed_seconds
+from diff_soup.optimization.inference.engine._levels import (
+    LevelBlocks,
+    LevelGradients,
+    partial_levels,
+)
+from diff_soup.optimization.inference.engine._order import canonical_lanes
+from diff_soup.optimization.inference.engine._plan import population_plan
+from diff_soup.optimization.inference.engine._request import Request
+from diff_soup.optimization.inference.engine._result import Batch, Results, Status, Work
+from diff_soup.optimization.inference.engine._status import ABSENT
+from diff_soup.optimization.inference.engine._transport import Transport
 
 WIRE_BUDGET: int = 1 << 30
 """The bytes of partial tables process 0 receives for one group of members, at most."""
@@ -84,7 +88,7 @@ class Remote(NamedTuple):
     """A program the processes of a run hold, recorded where process 0 keeps its lanes' programs.
 
     Attributes:
-        key: The [ProgramKey][diff_soup.inference.engine._batched.ProgramKey].
+        key: The [ProgramKey][diff_soup.optimization.inference.engine._batched.ProgramKey].
     """
 
     key: Any
@@ -117,7 +121,7 @@ class Shard:
     """One process's lanes of one cut of the study.
 
     Attributes:
-        lanes: The [BatchedLanes][diff_soup.inference.engine._batched.BatchedLanes]
+        lanes: The [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes]
             of the process's lanes, with their inputs and programs.
         origin: Per bucket of ``lanes``, its index in the study's plan.
     """
@@ -196,11 +200,11 @@ class Cluster:
     """What every process of a run holds: the transport, the placement, its own lanes, the tables.
 
     Attributes:
-        transport: The [Transport][diff_soup.inference.engine._transport.Transport].
+        transport: The [Transport][diff_soup.optimization.inference.engine._transport.Transport].
         study: The lowered study of this process (on a worker, the one under
             construction, which never returns).
         metadata: The study's lanes without inputs, for its own plan.
-        placement: The [Placement][diff_soup.inference.engine._placement.Placement].
+        placement: The [Placement][diff_soup.optimization.inference.engine._placement.Placement].
         fingerprint: The plan's fingerprint every process agreed on.
         shards: Per cut (``None``, or ``(members, chunk)``), this process's
             lanes of the study, with the study's own evaluation state.
@@ -280,7 +284,7 @@ class Cluster:
         key = tuple(lane_ids)
         tables = self._tables.get(key)
         if tables is None:
-            from diff_soup.inference.hierarchical.level_solvers import _route_tables
+            from diff_soup.optimization.inference.hierarchical.level_solvers import _route_tables
 
             if self._view is None:
                 self._view = self.study.joint_view()
@@ -516,7 +520,7 @@ class Coordinator(Cluster):
     """Process 0: the lowered study's evaluations and prepares, sent to every process."""
 
     def __init__(self, *args: Any, **kwargs: Any):
-        """As [Cluster][diff_soup.inference.engine._executor.Cluster]; the run is open."""
+        """As [Cluster][diff_soup.optimization.inference.engine._executor.Cluster]; the run is open."""
         super().__init__(*args, **kwargs)
         self.closed = False
         self._fits = 0
@@ -555,14 +559,14 @@ class Coordinator(Cluster):
             lanes: The study's lanes without inputs, for the plan of ``cut``,
                 or a fit's copy of them: every process then evaluates through
                 its lanes of that fit, with the fit's own evaluation state.
-            request: The [Request][diff_soup.inference.engine.Request].
+            request: The [Request][diff_soup.optimization.inference.engine.Request].
             cut: ``None``, or ``(members, chunk)`` of a study cut for a
                 population.
             retry: ``(retry_kinds, retry_first_step_factors)``.
             longest: The longest seconds one evaluation of a lane took so far.
 
         Returns:
-            The [Results][diff_soup.inference.engine.Results]: ``levels`` holds
+            The [Results][diff_soup.optimization.inference.engine.Results]: ``levels`` holds
             every member's sums over the level tables in the ``blocks``,
             ``hessian`` and ``gradient`` modes; ``normal``, ``gradient`` and
             ``observables`` are ``None``.
@@ -707,7 +711,7 @@ class Coordinator(Cluster):
             setup: The seconds of the stages of lowering the study.
 
         Returns:
-            The [PrepareReport][diff_soup.inference.engine.PrepareReport], one
+            The [PrepareReport][diff_soup.optimization.inference.engine.PrepareReport], one
             record per process and program, and the placement.
 
         Raises:

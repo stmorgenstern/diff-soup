@@ -1,6 +1,6 @@
 """legendre.py — Legendre polynomial function approximation.
 
-Provides [LegendreExpansion][diff_soup.inference.approx.legendre.LegendreExpansion], the core generic building block for
+Provides [LegendreExpansion][diff_soup.optimization.inference.approx.legendre.LegendreExpansion], the core generic building block for
 Legendre polynomial expansions.  Users compose their own physics-specific
 functions from this base::
 

@@ -1,4 +1,4 @@
-"""User-facing measurements and experiments for ``diff_soup.inference``."""
+"""User-facing measurements and experiments for ``diff_soup.optimization.inference``."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.data.deferred import DeferredValues
-from diff_soup.inference.fitting.inference_problem import Trajectory
-from diff_soup.inference.fitting.observables import Observable
-from diff_soup.inference.statistics.experiment import Channel, _CompiledExperiment
-from diff_soup.inference.statistics.likelihoods import Gaussian, Likelihood
+from diff_soup.optimization.inference.data.deferred import DeferredValues
+from diff_soup.optimization.inference.fitting.inference_problem import Trajectory
+from diff_soup.optimization.inference.fitting.observables import Observable
+from diff_soup.optimization.inference.statistics.experiment import Channel, _CompiledExperiment
+from diff_soup.optimization.inference.statistics.likelihoods import Gaussian, Likelihood
 
 
 @dataclasses.dataclass(frozen=True)
@@ -150,7 +150,7 @@ class Measurement:
         times: The observation times, a one-dimensional array.
         values: The observed values with one row per time, or a function of no arguments returning them, called once when first needed.
         weight: A positive weight on the squared residual, a scalar or an array that broadcasts against `values`.
-        likelihood: The noise model, such as [Gaussian][diff_soup.inference.Gaussian].
+        likelihood: The noise model, such as [Gaussian][diff_soup.optimization.inference.Gaussian].
         observe: The observed quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, the name of a `spec.observe` declaration, or `None` for the state.
         mask: One boolean per time, `True` where the time carries a measurement.
         shape: The shape of `values`, checked against them.
@@ -321,7 +321,7 @@ def _check_schedule(schedule: Any, model: Any, t_span: tuple, trajectory: Any) -
     """Refuse a schedule the model cannot follow over ``t_span`` in one shoot."""
     from diff_soup._errors import ConfigurationError
     from diff_soup._schedule import Schedule, schedule_arrays
-    from diff_soup.inference.fitting.inference_problem import SingleShoot
+    from diff_soup.optimization.inference.fitting.inference_problem import SingleShoot
 
     if not isinstance(schedule, Schedule):
         raise TypeError(
@@ -383,19 +383,19 @@ def _checked_members(members: Any) -> dict:
 class Experiment:
     """One solve of a model, compared against its measurements.
 
-    Pass one or several experiments to an [InferenceProblem][diff_soup.inference.InferenceProblem] or a [Study][diff_soup.inference.Study]. Every measurement time lies inside `t_span`.
+    Pass one or several experiments to an [InferenceProblem][diff_soup.optimization.inference.InferenceProblem] or a [Study][diff_soup.optimization.inference.Study]. Every measurement time lies inside `t_span`.
 
     Args:
         model: The built problem, or a Recipe template built with the template arguments in `inputs`.
         solver: The time-stepping solver used for every solve of the fit.
         t_span: The interval `(t0, t1)` of the solve, with `t0 < t1`.
         initial_state: The state the solve starts from at `t0`.
-        measurements: A non-empty tuple of [Measurement][diff_soup.inference.Measurement] with distinct names.
+        measurements: A non-empty tuple of [Measurement][diff_soup.optimization.inference.Measurement] with distinct names.
         inputs: Template arguments and fixed parameter values for this experiment alone, by name.
         id: A hashable name for the experiment, or `None` to build one from `inputs` or, without inputs, to number the experiment.
-        trajectory: [SingleShoot][diff_soup.inference.SingleShoot] or [Multishoot][diff_soup.inference.Multishoot], or `None` for one solve over `t_span`.
+        trajectory: [SingleShoot][diff_soup.optimization.inference.SingleShoot] or [Multishoot][diff_soup.optimization.inference.Multishoot], or `None` for one solve over `t_span`.
         schedule: An operating protocol the solve follows, a `ds.Schedule`.
-        parameters: A mapping from each level of the study's [Hierarchy][diff_soup.inference.Hierarchy] to this experiment's member of it.
+        parameters: A mapping from each level of the study's [Hierarchy][diff_soup.optimization.inference.Hierarchy] to this experiment's member of it.
     """
 
     model: Any
@@ -435,7 +435,7 @@ class Experiment:
                 )
         if self.trajectory is not None and not isinstance(self.trajectory, Trajectory):
             raise TypeError(
-                "Experiment trajectory must be a diff_soup.inference Trajectory "
+                "Experiment trajectory must be a diff_soup.optimization.inference Trajectory "
                 "(SingleShoot or Multishoot), or None for a single shoot over t_span; "
                 f"got {type(self.trajectory).__name__}."
             )
@@ -569,7 +569,7 @@ class Experiment:
                 objective's ``MAP(state_prior=...)``).
 
         Returns:
-            An ordinary :class:`~diff_soup.inference.InferenceProblem`.
+            An ordinary :class:`~diff_soup.optimization.inference.InferenceProblem`.
         """
         return self._delegate.as_inference_problem(
             parameters=parameters,
@@ -609,8 +609,8 @@ def measurements_without_likelihood(source: Any) -> tuple[str, ...]:
 
     Args:
         source: An estimation problem, a
-            [Study][diff_soup.inference.Study], or a single
-            [Experiment][diff_soup.inference.Experiment].
+            [Study][diff_soup.optimization.inference.Study], or a single
+            [Experiment][diff_soup.optimization.inference.Experiment].
 
     Returns:
         The names, in declaration order, of every measurement built without

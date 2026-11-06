@@ -44,7 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._logging import log as logger
-from diff_soup.inference.fitting._lane_map import folds_enclosing_batches, lane_map
+from diff_soup.optimization.inference.fitting._lane_map import folds_enclosing_batches, lane_map
 from diff_soup.problem._registry import theta_leaf_keys, theta_mask, theta_table
 
 # Residual value stamped on any failed or non-finite PDE solve. Large enough
@@ -385,7 +385,7 @@ def selected_leaf_ids(pytree: Any, mask: Any) -> frozenset:
     """Return the slot keys of the ``pytree`` leaves selected ``True`` by ``mask``.
 
     ``mask`` is a boolean pytree of ``pytree``'s structure (e.g. from
-    [parameters_at][diff_soup.inference.fitting._path_filter.parameters_at]). A
+    [parameters_at][diff_soup.optimization.inference.fitting._path_filter.parameters_at]). A
     key is the first path of the places holding one array in the problem's path
     table, so a problem-relative mask names the same leaves in every theta of
     the problem's structure.
@@ -413,7 +413,7 @@ def parameter_handle_leaf_ids(handle: Any, *, problem: Any = None) -> frozenset:
             "parameter_handle_leaf_ids needs the problem that declares "
             f"{getattr(handle, 'name', handle)!r}."
         )
-    from diff_soup.inference.fitting.learnables import learnable_paths
+    from diff_soup.optimization.inference.fitting.learnables import learnable_paths
     from diff_soup.problem._registry import handle_declarations
 
     kind = getattr(handle, "kind", None)
@@ -437,11 +437,11 @@ def build_forward_seam(problem: Any, theta: Any) -> ForwardSeam:
         problem: A solver problem/view or a source with ``solver_problem()``.
         theta: The learnable spec — ``None`` selects the problem's declared
             learnables, a name tuple resolves via [names_to_theta_mask][], and a
-            [GroupedThetaSelection][diff_soup.inference.fitting._forward_seam.GroupedThetaSelection]
+            [GroupedThetaSelection][diff_soup.optimization.inference.fitting._forward_seam.GroupedThetaSelection]
             resolves via [_grouped_leaf_filter][].
 
     Returns:
-        A frozen [ForwardSeam][diff_soup.inference.fitting._forward_seam.ForwardSeam].
+        A frozen [ForwardSeam][diff_soup.optimization.inference.fitting._forward_seam.ForwardSeam].
 
     Raises:
         ValueError: If the problem declares no learnables and no selection was
@@ -517,7 +517,7 @@ def _declared_leaf_filter(source: Any, theta0: Any) -> Any:
     array.  Every occurrence of one declared value is selected, so a parameter
     several closures read stays one unknown.
     """
-    from diff_soup.inference.fitting.learnables import declared_learnable_leaf_ids
+    from diff_soup.optimization.inference.fitting.learnables import declared_learnable_leaf_ids
 
     keys = declared_learnable_leaf_ids(source)
     if not keys:
@@ -596,7 +596,7 @@ def _ravel_deduplicated(learn: Any, selected: tuple) -> tuple:
 
 
 def _grouped_leaf_filter(problem: Any, theta0: Any, selection: GroupedThetaSelection) -> Any:
-    """Union a [GroupedThetaSelection][diff_soup.inference.fitting._forward_seam.GroupedThetaSelection]'s sources into one θ-leaf bool mask.
+    """Union a [GroupedThetaSelection][diff_soup.optimization.inference.fitting._forward_seam.GroupedThetaSelection]'s sources into one θ-leaf bool mask.
 
     Name sources resolve via [names_to_theta_mask][] (path-token match); mask
     sources resolve via the problem's path table ([selected_leaf_ids][]) so
@@ -659,7 +659,7 @@ def _selected_theta_leaf_ids(selected: tuple) -> tuple:
 
     Each scalar carries the key of the slot it was raveled from; a parameter
     group built from a handle or a
-    [LearnableSelector][diff_soup.inference.fitting.learnables.LearnableSelector]
+    [LearnableSelector][diff_soup.optimization.inference.fitting.learnables.LearnableSelector]
     owns a scalar when that key is in the group's set, which resolves declared
     learnables whose name is not a path token.
     """
@@ -714,7 +714,7 @@ def union_prediction_factory(
     same code path a data fit uses.
 
     Args:
-        seam: The built [ForwardSeam][diff_soup.inference.fitting._forward_seam.ForwardSeam].
+        seam: The built [ForwardSeam][diff_soup.optimization.inference.fitting._forward_seam.ForwardSeam].
         streams: Stream declarations in order. Each must expose ``ts``,
             ``frame_mask``, ``observe``; ``values``/``weight`` are optional.
         y0: Initial differential state at the trajectory IC.
@@ -736,7 +736,7 @@ def union_prediction_factory(
         stream's observable-space values at its kept (unmasked) frames and
         ``failed`` flags any unsuccessful terminal solver code as well as
         non-finite states or multipliers in the solution; the per-stream
-        [StreamPlan][diff_soup.inference.fitting._forward_seam.StreamPlan] tuple (row slices are zero-length for streams
+        [StreamPlan][diff_soup.optimization.inference.fitting._forward_seam.StreamPlan] tuple (row slices are zero-length for streams
         without values); the union save grid (numpy); and a ``solve_probe``
         dict whose ``"n"`` counts forward solves performed at trace time (one
         per prediction — the single-solve invariant).
@@ -859,8 +859,8 @@ def union_residual_factory(
     re-evaluation can detect and surface the failure.
 
     Args:
-        seam: The built [ForwardSeam][diff_soup.inference.fitting._forward_seam.ForwardSeam].
-        streams: The problem's [Series][diff_soup.inference.fitting.series.Series]
+        seam: The built [ForwardSeam][diff_soup.optimization.inference.fitting._forward_seam.ForwardSeam].
+        streams: The problem's [Series][diff_soup.optimization.inference.fitting.series.Series]
             streams (declaration order preserved).
         y0: Initial differential state at the trajectory IC.
         solver: The (already AD-resolved) solver config.
@@ -869,11 +869,11 @@ def union_residual_factory(
             decision vector.
         decision_to_y0: Optional learned-initial-state reconstruction.
         schedule: Optional segment arrays of an operating protocol, passed to
-            [union_prediction_factory][diff_soup.inference.fitting._forward_seam.union_prediction_factory].
+            [union_prediction_factory][diff_soup.optimization.inference.fitting._forward_seam.union_prediction_factory].
 
     Returns:
         ``(residual, stream_plans, union_ts, solve_probe)`` — the residual
-        closure ``x -> r``; the per-stream [StreamPlan][diff_soup.inference.fitting._forward_seam.StreamPlan] tuple (for
+        closure ``x -> r``; the per-stream [StreamPlan][diff_soup.optimization.inference.fitting._forward_seam.StreamPlan] tuple (for
         diagnostics by name); the union save grid (numpy); and a ``solve_probe``
         dict whose ``"n"`` counts forward solves performed at trace time (one per
         residual evaluation — the single-solve invariant).
@@ -1101,7 +1101,7 @@ def observed_windows(series: Any, *, scored: Any = None) -> ObservedWindows:
             is.
 
     Returns:
-        The [ObservedWindows][diff_soup.inference.fitting._forward_seam.ObservedWindows].
+        The [ObservedWindows][diff_soup.optimization.inference.fitting._forward_seam.ObservedWindows].
 
     Raises:
         ValueError: If the ``frame_mask`` removes every window (no observed target).
@@ -1159,11 +1159,11 @@ def batched_transition_residual_factory(
     can detect and surface it.
 
     Args:
-        seam: The built [ForwardSeam][diff_soup.inference.fitting._forward_seam.ForwardSeam].
-        series: The full-state [Series][diff_soup.inference.fitting.series.Series] whose
+        seam: The built [ForwardSeam][diff_soup.optimization.inference.fitting._forward_seam.ForwardSeam].
+        series: The full-state [Series][diff_soup.optimization.inference.fitting.series.Series] whose
             measured states seed each window start.
         solver: The (already AD-resolved) solver config.
-        scored: Optional separate [Series][diff_soup.inference.fitting.series.Series]
+        scored: Optional separate [Series][diff_soup.optimization.inference.fitting.series.Series]
             supplying the observable, targets, weights, frame mask, and likelihood.
             ``None`` scores the seed stream itself.
 

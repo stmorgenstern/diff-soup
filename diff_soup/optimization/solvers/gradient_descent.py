@@ -15,12 +15,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._distributed import any_process, assert_decision_value, local_value
-from diff_soup.inference._abc import OptSolver
-from diff_soup.inference.fitting.bounds import projected_gradient_norm
-from diff_soup.inference.fitting.callbacks import StopFit
-from diff_soup.inference.fitting.regularization import NoReg
-from diff_soup.inference.fitting.result import OptResult, StepInfo, TerminationStatus
-from diff_soup.inference.solvers._termination import gradient_tolerance, step_budget
+from diff_soup.optimization._abc import OptSolver
+from diff_soup.optimization.inference.fitting.bounds import projected_gradient_norm
+from diff_soup.optimization.inference.fitting.callbacks import StopFit
+from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.result import OptResult, StepInfo, TerminationStatus
+from diff_soup.optimization.solvers._termination import gradient_tolerance, step_budget
 
 
 class GradientDescent(OptSolver):
@@ -34,7 +34,7 @@ class GradientDescent(OptSolver):
         max_steps: The step budget.
         grad_tol: The gradient-norm tolerance, or `None` for the dtype's default.
         ad: `"reverse"` takes the gradient from the reverse adjoint, `"forward"` from the forward-mode Jacobian.
-        callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
+        callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
     """
 
     # The least-squares gradient is J^T r, which a sharded joint reduces across the
@@ -52,7 +52,7 @@ class GradientDescent(OptSolver):
         """Run gradient descent (optionally with heavy-ball momentum).
 
         Args:
-            problem: An [OptimizationProblem][diff_soup.inference._abc.OptimizationProblem]
+            problem: An [OptimizationProblem][diff_soup.optimization._abc.OptimizationProblem]
                 with ``"value_gradient"``: its ``value_and_gradient`` (the
                 lowering differentiates it in this solver's ``ad`` mode), its
                 ``regularization`` penalty, added to the objective, and its

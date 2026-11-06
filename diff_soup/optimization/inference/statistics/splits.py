@@ -2,8 +2,8 @@
 
 The splitting unit in a hierarchical campaign is an owner, not an individual
 response row.  This module therefore keeps the statistical partition and its
-provenance together: every [CrossValidationSplit][diff_soup.inference.statistics.splits.CrossValidationSplit] contains immutable
-training/held-out [ExperimentSet][diff_soup.inference.statistics.experiment.ExperimentSet]
+provenance together: every [CrossValidationSplit][diff_soup.optimization.inference.statistics.splits.CrossValidationSplit] contains immutable
+training/held-out [ExperimentSet][diff_soup.optimization.inference.statistics.experiment.ExperimentSet]
 views, a scalar-row manifest for the held-out likelihood events, and a
 separate manifest of the inputs on which those predictions are conditioned.
 
@@ -339,7 +339,7 @@ def _conditioning_records(
     experiment_set: Any, indices: tuple[int, ...]
 ) -> tuple[ConditioningRecord, ...]:
     """Build deterministic held-out conditioning provenance."""
-    from diff_soup.inference.fitting.inference_problem import _initial_state_array
+    from diff_soup.optimization.inference.fitting.inference_problem import _initial_state_array
 
     experiment_ids = _experiment_ids(experiment_set)
     experiments = tuple(experiment_set.experiments)
@@ -480,7 +480,7 @@ def grouped_kfold(experiment_set: Any, k: int, *, by: str = "owner") -> tuple:
             ownership group when several distinct partitions are declared.
 
     Returns:
-        A tuple of [CrossValidationSplit][diff_soup.inference.statistics.splits.CrossValidationSplit] objects.
+        A tuple of [CrossValidationSplit][diff_soup.optimization.inference.statistics.splits.CrossValidationSplit] objects.
     """
     if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
         raise TypeError(f"k must be an integer; got {type(k).__name__}.")
@@ -524,7 +524,7 @@ def grouped_kfold(experiment_set: Any, k: int, *, by: str = "owner") -> tuple:
 def leave_one_entity_out(experiment_set: Any, *, by: str = "owner") -> tuple:
     """Return one owner-level fold per entity, in first-occurrence order.
 
-    ``by`` has the same semantics as [grouped_kfold][diff_soup.inference.statistics.splits.grouped_kfold]; naming an owned
+    ``by`` has the same semantics as [grouped_kfold][diff_soup.optimization.inference.statistics.splits.grouped_kfold]; naming an owned
     parameter group is required when a callable declaration does not expose a
     common ``"owner"`` pseudo-group.
     """
@@ -558,7 +558,7 @@ def within_entity_holdout(experiment_set: Any, entity: Any, *, by: str = "owner"
     inputs and response likelihood event are available for evaluation.  It is
     absent from ``split.train``; a sibling of the same owner therefore remains
     the source of owner-level information during every fold. ``by`` selects
-    the ownership partition exactly as in [grouped_kfold][diff_soup.inference.statistics.splits.grouped_kfold].
+    the ownership partition exactly as in [grouped_kfold][diff_soup.optimization.inference.statistics.splits.grouped_kfold].
     """
     labels = _owner_labels(experiment_set, by=by)
     entities = _unique_in_order(labels)

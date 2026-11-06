@@ -8,23 +8,23 @@ levels, and each level composes with the one below it:
   many right-hand sides). This costs nothing to use and is always on.
 * **Samples (one device).** ``jax.vmap`` of a per-sample criterion over prior
   samples or protocol candidates —
-  [batched_criterion][diff_soup.inference.design.parallel.batched_criterion] /
-  [robust_criterion][diff_soup.inference.design.parallel.robust_criterion].
+  [batched_criterion][diff_soup.optimization.inference.design.parallel.batched_criterion] /
+  [robust_criterion][diff_soup.optimization.inference.design.parallel.robust_criterion].
 * **Devices.** ``jax.shard_map`` of the sample axis over the visible devices
   with a ``psum`` mean —
-  [sharded_robust_gradient][diff_soup.inference.design.parallel.sharded_robust_gradient].
+  [sharded_robust_gradient][diff_soup.optimization.inference.design.parallel.sharded_robust_gradient].
   The global state is never gathered.
 * **Processes.** Independent runs (multi-start design, profile likelihoods,
   heterogeneous models) on disjoint submeshes through
-  [checkpointed_map][diff_soup.inference.design.parallel.checkpointed_map]. No
+  [checkpointed_map][diff_soup.optimization.inference.design.parallel.checkpointed_map]. No
   JAX-transformation coupling at all, so it is also the fallback when an outer
   transformation does not compose.
 * **Campaigns.** Long collections of independent fits use
-  [checkpointed_map][diff_soup.inference.design.parallel.checkpointed_map]:
+  [checkpointed_map][diff_soup.optimization.inference.design.parallel.checkpointed_map]:
   every accepted or failed task is atomically recorded under a stable task ID,
   accepted tasks survive restarts, and process workers are confined to
   disjoint device groups. Aggregate results use
-  [deterministic_weighted_reduce][diff_soup.inference.design.parallel.deterministic_weighted_reduce],
+  [deterministic_weighted_reduce][diff_soup.optimization.inference.design.parallel.deterministic_weighted_reduce],
   whose summation order is fixed and independent of task completion order.
 
 Choosing a pattern:
@@ -39,7 +39,7 @@ Multi-start design, independent convergence   processes
 Profile likelihoods / many independent fits   processes
 ============================================  =============================
 
-[choose_pattern][diff_soup.inference.design.parallel.choose_pattern] encodes
+[choose_pattern][diff_soup.optimization.inference.design.parallel.choose_pattern] encodes
 the same table programmatically.
 """
 
@@ -137,7 +137,7 @@ class CampaignResult:
     """Ordered accepted outputs plus the complete requested-task ledger view.
 
     ``results`` follows the order of ``items`` passed to
-    [checkpointed_map][diff_soup.inference.design.parallel.checkpointed_map],
+    [checkpointed_map][diff_soup.optimization.inference.design.parallel.checkpointed_map],
     never process completion order. Failed tasks do
     not acquire placeholder scientific values; they remain explicit under
     ``failures`` and ``records``.

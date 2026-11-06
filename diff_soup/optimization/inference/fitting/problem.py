@@ -19,9 +19,9 @@ import numpy as np
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._warnings import warn_user
-from diff_soup.inference.engine import _batched, _transport
-from diff_soup.inference.engine._ledger import Ledger
-from diff_soup.inference.engine._levels import (
+from diff_soup.optimization.inference.engine import _batched, _transport
+from diff_soup.optimization.inference.engine._ledger import Ledger
+from diff_soup.optimization.inference.engine._levels import (
     LevelTables,
     joint_gradient,
     joint_matrix,
@@ -29,29 +29,29 @@ from diff_soup.inference.engine._levels import (
     reduce_member_gradients,
     weigh_levels,
 )
-from diff_soup.inference.engine._plan import (
+from diff_soup.optimization.inference.engine._plan import (
     Plan,
     _chunk_width,
     _member_count,
     build_plan,
     population_plan,
 )
-from diff_soup.inference.engine._prepare import SETUP_STAGES, PrepareReport
-from diff_soup.inference.engine._prepare import prepare as prepare_lanes
-from diff_soup.inference.engine._reducers import TreeTables
-from diff_soup.inference.engine._request import Request
-from diff_soup.inference.engine._result import Results
-from diff_soup.inference.engine._status import KINDS
-from diff_soup.inference.fitting.result import ExperimentFit
-from diff_soup.inference.statistics.estimation import (
+from diff_soup.optimization.inference.engine._prepare import SETUP_STAGES, PrepareReport
+from diff_soup.optimization.inference.engine._prepare import prepare as prepare_lanes
+from diff_soup.optimization.inference.engine._reducers import TreeTables
+from diff_soup.optimization.inference.engine._request import Request
+from diff_soup.optimization.inference.engine._result import Results
+from diff_soup.optimization.inference.engine._status import KINDS
+from diff_soup.optimization.inference.fitting.result import ExperimentFit
+from diff_soup.optimization.inference.statistics.estimation import (
     MAP,
     MLE,
     EstimationProblem,
     lower_estimation,
 )
-from diff_soup.inference.statistics.hierarchy import Hierarchy
-from diff_soup.inference.statistics.measurement import Experiment
-from diff_soup.inference.statistics.study import Study
+from diff_soup.optimization.inference.statistics.hierarchy import Hierarchy
+from diff_soup.optimization.inference.statistics.measurement import Experiment
+from diff_soup.optimization.inference.statistics.study import Study
 from diff_soup.problem.parameters import ParameterSet
 
 _RUNS: list = []
@@ -61,13 +61,13 @@ _RUNS: list = []
 class InferenceProblem(EstimationProblem):
     """An experiment or a study paired with the objective a fit minimizes.
 
-    Pass it to `ds.inference.optsolve` or to the statistics methods. `ds.lower(study)` builds
+    Pass it to `ds.optimization.optsolve` or to the statistics methods. `ds.lower(study)` builds
     the batched form of the same problem.
 
     Args:
         experiments: An `Experiment`, a sequence of them, or a `Study`, which already declares its parameters and clusters.
         parameters: The handles the fit moves: one handle, a tuple of them, a `ParameterSet` or a `Hierarchy`.
-        objective: [MLE][diff_soup.inference.MLE], or [MAP][diff_soup.inference.MAP], which adds the declared priors.
+        objective: [MLE][diff_soup.optimization.inference.MLE], or [MAP][diff_soup.optimization.inference.MAP], which adds the declared priors.
         clusters: The cluster label of each experiment, for a parameter with one value per cluster.
         layout: The placement of the experiments on a device mesh.
         trajectory: A `SingleShoot` or `Multishoot` applied to every experiment.
@@ -171,7 +171,7 @@ class InferenceProblem(EstimationProblem):
         Returns:
             A read-only mapping from each fitted parameter to its value, as `fit[rate]` reads it.
         """
-        from diff_soup.inference.fitting.inference_problem import parameter_values
+        from diff_soup.optimization.inference.fitting.inference_problem import parameter_values
 
         return parameter_values(self.parameter_schema, x)
 
@@ -252,7 +252,7 @@ class InferenceProblem(EstimationProblem):
         Raises:
             ValueError: If `start` has another parameter layout or shape.
         """
-        from diff_soup.inference.fitting._layout import resolve_point
+        from diff_soup.optimization.inference.fitting._layout import resolve_point
 
         values = np.asarray(resolve_point(self, start, where="InferenceProblem.with_start"))
         if values.shape != self.x0.shape:
@@ -385,7 +385,7 @@ def _on_the_host(function: Any, point: Any, shapes: Any) -> Any:
 class ValueAndGradient(NamedTuple):
     """The objective of a lowered study and its gradient at many points, from one request.
 
-    [LoweredStudy.value_and_gradient][diff_soup.inference.LoweredStudy.value_and_gradient]
+    [LoweredStudy.value_and_gradient][diff_soup.optimization.inference.LoweredStudy.value_and_gradient]
     returns it.
 
     Attributes:
@@ -397,9 +397,9 @@ class ValueAndGradient(NamedTuple):
         failures: One record per failed lane of nonzero weight, in canonical
             order: ``member`` (the row of the weights, 0 without weights),
             ``point``, ``lane``, ``kind`` (a name of
-            [KINDS][diff_soup.inference.engine.KINDS]), ``t_reached`` and
+            [KINDS][diff_soup.optimization.inference.engine.KINDS]), ``t_reached`` and
             ``rung`` (the last rung tried).
-        results: The [Results][diff_soup.inference.engine.Results] of the one
+        results: The [Results][diff_soup.optimization.inference.engine.Results] of the one
             ``gradient`` request: work, walls, batches and retries.
     """
 
@@ -442,8 +442,8 @@ def _measured_seconds(measured: Any, lanes: tuple) -> dict | None:
 class LoweredStudy(InferenceProblem):
     """A study prepared for fitting by `ds.lower(study)`, with its experiments' solves compiled and batched.
 
-    `ds.inference.optsolve` and the statistics methods take it in place of an
-    `InferenceProblem`, and `ds.inference.TrustRegion` fits only this form. A failed solve is
+    `ds.optimization.optsolve` and the statistics methods take it in place of an
+    `InferenceProblem`, and `ds.optimization.inference.TrustRegion` fits only this form. A failed solve is
     retried from a smaller first step.
     """
 
@@ -467,7 +467,7 @@ class LoweredStudy(InferenceProblem):
         """Lower a study: its experiments, the plan of its lanes, and their numbers.
 
         Args:
-            study: The [Study][diff_soup.inference.Study].
+            study: The [Study][diff_soup.optimization.inference.Study].
             objective: ``MLE()`` or ``MAP(...)``.
             layout: Optional device placement, also of the experiment batch
                 for the routes of ``InferenceProblem``. A
@@ -497,9 +497,9 @@ class LoweredStudy(InferenceProblem):
                 evaluate the cost (the noise of the cost's evaluation, not the
                 data's), a positive number; ``None`` takes the largest ``rtol``
                 of the experiments' solvers. See
-                [evaluation_noise][diff_soup.inference.LoweredStudy.evaluation_noise].
+                [evaluation_noise][diff_soup.optimization.inference.LoweredStudy.evaluation_noise].
             retry_kinds: The failure kinds (names of
-                [KINDS][diff_soup.inference.engine.KINDS] other than ``"ok"``)
+                [KINDS][diff_soup.optimization.inference.engine.KINDS] other than ``"ok"``)
                 after which a lane is solved again from a smaller first step;
                 ``()`` solves no lane again.
             retry_first_step_factors: Positive factors, one per rung in the
@@ -513,7 +513,7 @@ class LoweredStudy(InferenceProblem):
                 the processes by the seconds a previous run measured, from its
                 checkpoint: the checkpoint directory of a fit or a bootstrap
                 (or one of its ``attempt-`` or ``population-`` files), a
-                [Ledger][diff_soup.inference.engine.Ledger], or a mapping of
+                [Ledger][diff_soup.optimization.inference.engine.Ledger], or a mapping of
                 lane id to the seconds one evaluation of the lane took; a lane
                 without a measurement is balanced by its modelled cost.
                 ``None`` balances every lane by its modelled cost. Ignored in
@@ -591,7 +591,7 @@ class LoweredStudy(InferenceProblem):
         lowered:``; the other processes end with ``SystemExit(0)`` when the
         study is closed.
         """
-        from diff_soup.inference.engine import _executor, _placement
+        from diff_soup.optimization.inference.engine import _executor, _placement
 
         if _RUNS:
             raise RuntimeError(
@@ -653,8 +653,8 @@ class LoweredStudy(InferenceProblem):
         process 0, and every form becomes lane id to seconds per evaluation for
         the planned lanes it names.
         """
-        from diff_soup.inference.engine._layout import lane_layout
-        from diff_soup.inference.engine._placement import modelled_costs
+        from diff_soup.optimization.inference.engine._layout import lane_layout
+        from diff_soup.optimization.inference.engine._placement import modelled_costs
 
         layout = lane_layout(self._inference_problem)
         experiments, members = {}, {}
@@ -689,7 +689,7 @@ class LoweredStudy(InferenceProblem):
 
     def _plan_fingerprint(self) -> str | None:
         """The fingerprint of the plan: lanes, bucket identities, widths; ``None`` without a plan."""
-        from diff_soup.inference.engine._executor import plan_fingerprint
+        from diff_soup.optimization.inference.engine._executor import plan_fingerprint
 
         lanes = self.__dict__.get("_lanes")
         return None if lanes is None else plan_fingerprint(lanes.plan)
@@ -711,7 +711,7 @@ class LoweredStudy(InferenceProblem):
         A tolerance is part of a lane's compiled program, so a tolerance rung
         would compile another program per bucket and mode; the lanes of a
         lowered study retry from a smaller first step only
-        ([retry_first_step_factors][diff_soup.inference.LoweredStudy.retry_first_step_factors]).
+        ([retry_first_step_factors][diff_soup.optimization.inference.LoweredStudy.retry_first_step_factors]).
         """
         return self._retry[2]
 
@@ -876,7 +876,7 @@ class LoweredStudy(InferenceProblem):
         return fit
 
     def numeric_problem(self, optimizer: Any) -> Any:
-        """The [LeastSquaresProblem][diff_soup.inference.LeastSquaresProblem] ``optimizer`` solves.
+        """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] ``optimizer`` solves.
 
         As ``InferenceProblem.numeric_problem``, evaluated through a copy of
         this study with the evaluation state of one fit of its own
@@ -1002,7 +1002,10 @@ class LoweredStudy(InferenceProblem):
         kept = self.__dict__.get("_value_route")
         route = kept[1] if kept is not None and kept[0]() is self else None
         if route is None:
-            from diff_soup.inference.hierarchical.level_solvers import TrustRegion, _LaneRoute
+            from diff_soup.optimization.inference.hierarchical.level_solvers import (
+                TrustRegion,
+                _LaneRoute,
+            )
 
             route = _LaneRoute(TrustRegion(), self)
             # The kept route refers to this study weakly: keeping it makes no reference cycle,
@@ -1107,7 +1110,7 @@ class LoweredStudy(InferenceProblem):
         """The rows of the ``MAP`` priors at ``point`` and their Jacobian; ``None`` without priors."""
         if not self._prior_blocks:
             return None
-        from diff_soup.inference.solvers.tangent import value_and_jacfwd
+        from diff_soup.optimization.solvers.tangent import value_and_jacfwd
 
         def rows(x):
             return jnp.concatenate(
@@ -1312,7 +1315,7 @@ class LoweredStudy(InferenceProblem):
                 "parameter tree's levels only (the score of each experiment on the shared "
                 "coordinates is not among them); compute cluster scores in a run of one process."
             )
-        from diff_soup.inference.engine._layout import lane_layout
+        from diff_soup.optimization.inference.engine._layout import lane_layout
 
         _cost, _gradient, bread, _rows, failed, results = self._lanes_at("blocks", x)
         # A bucket names each lane by the study's ids and gives its index in the lane layout.

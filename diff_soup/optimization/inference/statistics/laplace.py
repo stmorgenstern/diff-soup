@@ -4,26 +4,26 @@ A Laplace approximation summarizes a posterior as a Gaussian centered at the
 mode with precision equal to a curvature matrix: the data curvature (expected
 Fisher information, observed negative-log-likelihood Hessian, or Gauss-Newton
 approximation — the ``curvature_kind`` label keeps them distinct) plus an
-optional Gaussian prior precision. [laplace_posterior][diff_soup.inference.statistics.laplace.laplace_posterior] builds the
+optional Gaussian prior precision. [laplace_posterior][diff_soup.optimization.inference.statistics.laplace.laplace_posterior] builds the
 approximation rank-safely:
 
 * an SPD total precision factorizes (Cholesky) into a valid
-  [LaplacePosterior][diff_soup.inference.statistics.laplace.LaplacePosterior];
+  [LaplacePosterior][diff_soup.optimization.inference.statistics.laplace.LaplacePosterior];
 * singular data curvature closed by a proper prior is still a valid
-  posterior, and [identifiability][diff_soup.inference.identifiability] keeps
+  posterior, and [identifiability][diff_soup.optimization.inference.identifiability] keeps
   reporting which directions the *data* left undetermined;
 * a singular total precision never becomes invented finite variances — the
   caller receives an
-  [ImproperPosteriorError][diff_soup.inference.statistics.report.ImproperPosteriorError] carrying
-  the [IdentifiedSubspace][diff_soup.inference.statistics.report.IdentifiedSubspace], or the
+  [ImproperPosteriorError][diff_soup.optimization.inference.statistics.report.ImproperPosteriorError] carrying
+  the [IdentifiedSubspace][diff_soup.optimization.inference.statistics.report.IdentifiedSubspace], or the
   subspace itself (``on_singular="raise"`` or ``"subspace"``).
 
 Singularity is detected by an eigenvalue threshold on the total precision
 before any factorization is attempted, so failure is a deliberate statistical
 statement rather than a numerical accident. Every posterior query
-([LaplacePosterior.covariance_action][diff_soup.inference.statistics.laplace.LaplacePosterior.covariance_action],
-[LaplacePosterior.marginal_sd][diff_soup.inference.statistics.laplace.LaplacePosterior.marginal_sd], [LaplacePosterior.sample][diff_soup.inference.statistics.laplace.LaplacePosterior.sample],
-[LaplacePosterior.log_det_precision][diff_soup.inference.statistics.laplace.LaplacePosterior.log_det_precision]) goes through triangular solves
+([LaplacePosterior.covariance_action][diff_soup.optimization.inference.statistics.laplace.LaplacePosterior.covariance_action],
+[LaplacePosterior.marginal_sd][diff_soup.optimization.inference.statistics.laplace.LaplacePosterior.marginal_sd], [LaplacePosterior.sample][diff_soup.optimization.inference.statistics.laplace.LaplacePosterior.sample],
+[LaplacePosterior.log_det_precision][diff_soup.optimization.inference.statistics.laplace.LaplacePosterior.log_det_precision]) goes through triangular solves
 against the stored Cholesky factor — no matrix inverse is ever formed.
 """
 
@@ -40,9 +40,9 @@ import numpy as np
 from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array
 
-from diff_soup.inference.fitting.result import OptResult
-from diff_soup.inference.statistics.estimation import EstimationProblem
-from diff_soup.inference.statistics.information import (
+from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.statistics.estimation import EstimationProblem
+from diff_soup.optimization.inference.statistics.information import (
     _coordinate_names,
     _information_terms,
     _observed_curvature,
@@ -51,9 +51,12 @@ from diff_soup.inference.statistics.information import (
     _window_split,
     assemble_information,
 )
-from diff_soup.inference.statistics.measurement import require_likelihoods
-from diff_soup.inference.statistics.parameters import COORDINATES
-from diff_soup.inference.statistics.report import IdentifiedSubspace, ImproperPosteriorError
+from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
+from diff_soup.optimization.inference.statistics.parameters import COORDINATES
+from diff_soup.optimization.inference.statistics.report import (
+    IdentifiedSubspace,
+    ImproperPosteriorError,
+)
 
 __all__ = [
     "LaplacePosterior",
@@ -121,7 +124,7 @@ class _CovarianceLookup:
 class LaplacePosterior(eqx.Module):
     """A proper Gaussian (Laplace) posterior with its curvature provenance.
 
-    Built by [laplace_posterior][diff_soup.inference.statistics.laplace.laplace_posterior], which guarantees the stored precision
+    Built by [laplace_posterior][diff_soup.optimization.inference.statistics.laplace.laplace_posterior], which guarantees the stored precision
     is symmetric positive definite. All covariance queries are solves against
     the Cholesky factor; no inverse is ever formed.
 
@@ -222,9 +225,9 @@ class LaplacePosterior(eqx.Module):
         triangular solves against the identity (still no ``inv()``), so it
         costs ``n`` solves and ``n²`` storage. For large ``n`` prefer
         [LaplacePosterior.covariance_action]
-        [diff_soup.inference.statistics.laplace.LaplacePosterior.covariance_action]
+        [diff_soup.optimization.inference.statistics.laplace.LaplacePosterior.covariance_action]
         and [LaplacePosterior.marginal_sd]
-        [diff_soup.inference.statistics.laplace.LaplacePosterior.marginal_sd].
+        [diff_soup.optimization.inference.statistics.laplace.LaplacePosterior.marginal_sd].
         """
         cov = self.covariance_action(jnp.eye(self.dim, dtype=self.mode.dtype))
         return 0.5 * (cov + cov.T)
@@ -297,15 +300,15 @@ class LaplacePosterior(eqx.Module):
 
     @property
     def log_evidence(self) -> float:
-        """The Laplace approximation to the log marginal likelihood, as `ds.inference.evidence` returns it."""
-        from diff_soup.inference.statistics.evidence import laplace_evidence
+        """The Laplace approximation to the log marginal likelihood, as `ds.optimization.inference.evidence` returns it."""
+        from diff_soup.optimization.inference.statistics.evidence import laplace_evidence
 
         prior = self._evidence_prior
         if isinstance(prior, str):
             raise ValueError(prior)
         if prior is None:
             raise ValueError(
-                "log_evidence needs a posterior from ds.inference.laplace(problem, fit); for "
+                "log_evidence needs a posterior from ds.optimization.inference.laplace(problem, fit); for "
                 "a posterior built by hand use laplace_evidence(posterior, prior)."
             )
         return laplace_evidence(self, prior).log_evidence
@@ -453,9 +456,9 @@ def laplace_posterior(
         on_singular: What to do when the total precision is singular (or
             indefinite): ``"raise"`` raises
             [ImproperPosteriorError]
-            [diff_soup.inference.statistics.report.ImproperPosteriorError]
+            [diff_soup.optimization.inference.statistics.report.ImproperPosteriorError]
             carrying the identified subspace; ``"subspace"`` returns the
-            [IdentifiedSubspace][diff_soup.inference.statistics.report.IdentifiedSubspace]
+            [IdentifiedSubspace][diff_soup.optimization.inference.statistics.report.IdentifiedSubspace]
             instead of a posterior.
         log_likelihood_at_mode: Optional normalized log likelihood evaluated
             at ``mode``. Evidence calculations require this value.
@@ -474,8 +477,8 @@ def laplace_posterior(
         warnings: Geometry warnings retained with the posterior.
 
     Returns:
-        A [LaplacePosterior][diff_soup.inference.statistics.laplace.LaplacePosterior], or an
-        [IdentifiedSubspace][diff_soup.inference.statistics.report.IdentifiedSubspace] when
+        A [LaplacePosterior][diff_soup.optimization.inference.statistics.laplace.LaplacePosterior], or an
+        [IdentifiedSubspace][diff_soup.optimization.inference.statistics.report.IdentifiedSubspace] when
         the total precision is singular and ``on_singular="subspace"``.
 
     Raises:
@@ -641,7 +644,7 @@ class _DeclaredPrior:
 
 def _evidence_refusal(problem: EstimationProblem) -> str | None:
     """Why ``problem`` has no Laplace evidence, or ``None`` when it has one."""
-    from diff_soup.inference.statistics.estimation import MAP
+    from diff_soup.optimization.inference.statistics.estimation import MAP
 
     split = _window_split(problem)
     if split is not None:
@@ -836,9 +839,9 @@ def laplace(problem: Any, fit: Any, *, curvature: str = "observed", on_singular:
     log evidence. A multiple-shooting fit that fits its window starts has them integrated out.
 
     Args:
-        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] whose measurements
+        problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] whose measurements
             all declare a likelihood.
-        fit: The [`OptResult`][diff_soup.inference.OptResult] to center on, a parameter vector,
+        fit: The [`OptResult`][diff_soup.optimization.OptResult] to center on, a parameter vector,
             or a mapping from every fitted handle to its value.
         curvature: `"observed"` or `"expected"`, as `kind=` of `information`.
         on_singular: What happens when the data leave a direction undetermined, `"raise"` to

@@ -2,22 +2,22 @@
 
 "Is this parameter identifiable?" has no unconditional yes/no answer: it
 depends on the evaluated parameter point, the protocol, the noise level, and
-on what precision would satisfy the person asking. [practical_report][diff_soup.inference.statistics.practical.practical_report]
+on what precision would satisfy the person asking. [practical_report][diff_soup.optimization.inference.statistics.practical.practical_report]
 therefore assembles the *evidence* — four sections, each an object the rest
 of the package already knows how to compute — and never a verdict:
 
 1. **Local sensitivity** — the information spectrum, correlations, and
    degenerate combinations at the fit (an
-   [IdentifiabilityReport][diff_soup.inference.statistics.IdentifiabilityReport]).
+   [IdentifiabilityReport][diff_soup.optimization.inference.statistics.IdentifiabilityReport]).
 2. **Likelihood geometry** — profile-likelihood summaries: intervals, open
    directions, and how each walk ended.
 3. **Uncertainty contraction** — the posterior's marginal scales and
-   data-null directions (from a [LaplacePosterior][diff_soup.inference.statistics.LaplacePosterior]).
+   data-null directions (from a [LaplacePosterior][diff_soup.optimization.inference.statistics.LaplacePosterior]).
 4. **Model adequacy** — whether the residuals are consistent with the
-   declared likelihood (a [ResidualReport][diff_soup.inference.statistics.ResidualReport]);
+   declared likelihood (a [ResidualReport][diff_soup.optimization.inference.statistics.ResidualReport]);
    uncertainty statements inherit the model's credibility.
 
-The only pass/fail surface is [ToleranceStatus][diff_soup.inference.statistics.practical.ToleranceStatus], and it exists only
+The only pass/fail surface is [ToleranceStatus][diff_soup.optimization.inference.statistics.practical.ToleranceStatus], and it exists only
 against tolerances the caller declares — each entry quotes the declared
 tolerance next to the achieved value.
 """
@@ -56,7 +56,7 @@ class PracticalReport:
 
     Deliberately carries no unconditional "identifiable" flag: every section
     is evidence relative to this experiment, this fit, and this noise model.
-    The optional [status][diff_soup.inference.statistics.practical.PracticalReport.status] is the only pass/fail surface, and it exists
+    The optional [status][diff_soup.optimization.inference.statistics.practical.PracticalReport.status] is the only pass/fail surface, and it exists
     only against tolerances the caller declared.
 
     Attributes:
@@ -69,7 +69,7 @@ class PracticalReport:
             data-null directions — or ``None`` when no posterior was given.
         model_adequacy: The residual-adequacy report, or ``None`` when the
             experiment carries no data.
-        status: Tolerance checks (see [ToleranceStatus][diff_soup.inference.statistics.practical.ToleranceStatus]), or ``None``
+        status: Tolerance checks (see [ToleranceStatus][diff_soup.optimization.inference.statistics.practical.ToleranceStatus]), or ``None``
             when no tolerances were declared.
         provenance: What evidence was and was not available, so a reader can
             tell an unexamined question from a settled one.
@@ -99,9 +99,9 @@ def practical_report(
     report, and names the evidence that was not supplied.
 
     Args:
-        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] whose measurements
+        problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] whose measurements
             all declare a likelihood.
-        fit: The [`OptResult`][diff_soup.inference.OptResult] of `ds.inference.optsolve` on
+        fit: The [`OptResult`][diff_soup.optimization.OptResult] of `ds.optimization.optsolve` on
             `problem`.
         posterior: The result of `laplace` at the fit, whose standard errors enter the report.
         profiles: Results of `profile`, whose intervals and open directions enter the report.
@@ -114,9 +114,9 @@ def practical_report(
     Returns:
         A `PracticalReport`, with each tolerance marked as met or not in `status`.
     """
-    from diff_soup.inference.statistics.diagnostics import residual_report
-    from diff_soup.inference.statistics.identifiability import identifiability
-    from diff_soup.inference.statistics.measurement import require_likelihoods
+    from diff_soup.optimization.inference.statistics.diagnostics import residual_report
+    from diff_soup.optimization.inference.statistics.identifiability import identifiability
+    from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
 
     require_likelihoods(problem, "practical_report")
     x_hat = np.asarray(fit.params, dtype=float)

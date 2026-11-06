@@ -60,7 +60,7 @@ import jax
 import jax.numpy as jnp
 
 from diff_soup._schedule import ScheduleArrays, SegmentEnds, solve_schedule
-from diff_soup.inference.engine._status import LaneStatus, lane_status
+from diff_soup.optimization.inference.engine._status import LaneStatus, lane_status
 
 Array = jax.Array
 
@@ -152,7 +152,7 @@ class LaneInputs(eqx.Module):
         t1: The end of the span, the last sample time.
         times: The sample times, strictly increasing. Entries after ``t1`` pad
             a lane that records fewer samples than its program has slots.
-        streams: One [StreamInputs][diff_soup.inference.engine._kernel.StreamInputs]
+        streams: One [StreamInputs][diff_soup.optimization.inference.engine._kernel.StreamInputs]
             per stream.
         dt0: The first step the lane's solve starts from, a scalar; ``0``
             lets the integrator estimate it. Lowering gives each lane the
@@ -545,11 +545,11 @@ def batched_kernel(program: LaneProgram, mode: str) -> Callable[[Array, LaneInpu
 
     Args:
         program: What the lanes share.
-        mode: One of [MODES][diff_soup.inference.engine._kernel.MODES].
+        mode: One of [MODES][diff_soup.optimization.inference.engine._kernel.MODES].
 
     Returns:
         ``kernel(points, lanes)``: ``points`` holds one narrow point per lane,
-        ``lanes`` one [LaneInputs][diff_soup.inference.engine._kernel.LaneInputs]
+        ``lanes`` one [LaneInputs][diff_soup.optimization.inference.engine._kernel.LaneInputs]
         whose leaves lead with the lane axis. The result leads with the lane
         axis too. The program is compiled once per batch width.
     """

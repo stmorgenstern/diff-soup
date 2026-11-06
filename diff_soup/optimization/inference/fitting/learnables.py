@@ -10,7 +10,7 @@ happens to be an array.
 Everything here reads those declarations. A fit that states no selection of its
 own fits exactly the declared learnables, a name matches a declared learnable,
 and a leaf that was never declared is reached only by naming it explicitly in a
-[ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups].
+[ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups].
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any, Optional
 import equinox as eqx
 import jax
 
-from diff_soup.inference.fitting._path_filter import parameters_at
+from diff_soup.optimization.inference.fitting._path_filter import parameters_at
 from diff_soup.problem._ir.content_hash import declared_callable_layers, iter_declared_closures
 
 
@@ -216,7 +216,7 @@ def learnable_function_leaf_ids(problem: Any) -> frozenset:
 
     These are the weights of the networks and other callables declared with
     ``spec.function(..., learnable=True)``, a subset of
-    [declared_learnable_leaf_ids][diff_soup.inference.fitting.learnables.declared_learnable_leaf_ids].
+    [declared_learnable_leaf_ids][diff_soup.optimization.inference.fitting.learnables.declared_learnable_leaf_ids].
     """
     located = _traced_adapter_layer(problem)
     if located is None or not getattr(located[1], "learnable_functions", ()):
@@ -228,12 +228,12 @@ def learnable_function_leaf_ids(problem: Any) -> frozenset:
 class LearnableSelector:
     """A named selection of a problem's declared learnables.
 
-    Returned by [learnables][diff_soup.inference.fitting.learnables.learnables].
+    Returned by [learnables][diff_soup.optimization.inference.fitting.learnables.learnables].
     Carries the requested parameter names (used
     to label a parameter group and to build the optimizer's decision-variable
     selection) and the problem-structured boolean mask (used to partition the
     problem pytree).  Pass it as a
-    [ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups]
+    [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
     group value.
 
     Attributes:

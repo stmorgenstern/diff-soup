@@ -119,7 +119,7 @@ read in closures as `q.p.<name>`.
 
 ::: diff_soup.problem.parameter_gradient
 
-::: diff_soup.inference.learnables
+::: diff_soup.optimization.inference.learnables
 
 ---
 

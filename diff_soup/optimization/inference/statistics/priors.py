@@ -1,33 +1,33 @@
 """priors.py — normalized prior probability models for inference.
 
-A [Prior][diff_soup.inference.statistics.priors.Prior] is a proper probability
+A [Prior][diff_soup.optimization.inference.statistics.priors.Prior] is a proper probability
 model: its ``log_prob`` is a
 normalized density in a declared coordinate, it can simulate draws for
 prior-predictive checks, and Gaussian families expose their exact precision
 for Laplace and design work. Because every density carries its coordinate
 label, change-of-variables corrections are explicit rather than implicit:
 
-* [GaussianPrior][diff_soup.inference.statistics.priors.GaussianPrior] — independent
+* [GaussianPrior][diff_soup.optimization.inference.statistics.priors.GaussianPrior] — independent
   (diagonal-scale) or fully correlated
   (precision-matrix) Gaussian blocks.
-* [TransformedPrior][diff_soup.inference.statistics.priors.TransformedPrior] — the
+* [TransformedPrior][diff_soup.optimization.inference.statistics.priors.TransformedPrior] — the
   exact pushforward of a base prior through a
-  [Transform][diff_soup.inference.statistics.parameters.Transform].
-* [IndependentProduct][diff_soup.inference.statistics.priors.IndependentProduct] — an
+  [Transform][diff_soup.optimization.inference.statistics.parameters.Transform].
+* [IndependentProduct][diff_soup.optimization.inference.statistics.priors.IndependentProduct] — an
   explicit product of independent blocks.
-* [pullback_log_prob][diff_soup.inference.statistics.priors.pullback_log_prob] —
+* [pullback_log_prob][diff_soup.optimization.inference.statistics.priors.pullback_log_prob] —
   evaluate a physically-declared prior in the
   inference coordinate, including the ``log |dx/dz|`` correction.
-* [prior_from_regularizer][diff_soup.inference.statistics.priors.prior_from_regularizer] —
+* [prior_from_regularizer][diff_soup.optimization.inference.statistics.priors.prior_from_regularizer] —
   bridge a quadratic regularizer to the
   Gaussian prior it implies, but only when its mean, precision, and
   coordinate are all supplied and consistent; without them a regularizer
   stays regularization and cannot be used for evidence or normalized
   posterior densities.
 
-* [NormalPrior][diff_soup.inference.statistics.priors.NormalPrior],
-  [LogNormalPrior][diff_soup.inference.statistics.priors.LogNormalPrior], and
-  [GaussianCoefficientPrior][diff_soup.inference.statistics.priors.GaussianCoefficientPrior]
+* [NormalPrior][diff_soup.optimization.inference.statistics.priors.NormalPrior],
+  [LogNormalPrior][diff_soup.optimization.inference.statistics.priors.LogNormalPrior], and
+  [GaussianCoefficientPrior][diff_soup.optimization.inference.statistics.priors.GaussianCoefficientPrior]
   — the short physical-coordinate declarations an ``InferenceProblem`` with a
   ``MAP`` objective accepts per parameter handle; ``compile_prior`` lowers them
   (or a physical-coordinate ``GaussianPrior``) to normalized residual blocks.
@@ -50,7 +50,7 @@ from jax.flatten_util import ravel_pytree
 from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array
 
-from diff_soup.inference.statistics.parameters import COORDINATES, Transform
+from diff_soup.optimization.inference.statistics.parameters import COORDINATES, Transform
 
 __all__ = [
     "NormalPrior",
@@ -361,7 +361,7 @@ def prior_from_regularizer(
         coordinate: The coordinate the density lives in (``"x"`` or ``"z"``).
 
     Returns:
-        The verified [GaussianPrior][diff_soup.inference.statistics.priors.GaussianPrior].
+        The verified [GaussianPrior][diff_soup.optimization.inference.statistics.priors.GaussianPrior].
 
     Raises:
         ValueError: If any metadata is missing or the penalty disagrees with

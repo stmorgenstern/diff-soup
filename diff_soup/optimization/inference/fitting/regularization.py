@@ -52,8 +52,8 @@ class Regularizer(ABC):
     least-squares rows appended to the data residual before solving.
     The default ``penalty(x)`` is ``0.5 * ||residual(x)||²``.
 
-    Subclasses must implement [residual][diff_soup.inference.fitting.regularization.Regularizer.residual].  They may override
-    [penalty][diff_soup.inference.fitting.regularization.Regularizer.penalty] when a cheaper closed-form expression exists, provided
+    Subclasses must implement [residual][diff_soup.optimization.inference.fitting.regularization.Regularizer.residual].  They may override
+    [penalty][diff_soup.optimization.inference.fitting.regularization.Regularizer.penalty] when a cheaper closed-form expression exists, provided
     the result is numerically identical to the default.
     """
 
@@ -278,7 +278,7 @@ class Tikhonov(Regularizer):
             blocks: Column index tuples, one per occurrence of the handle.
 
         Returns:
-            A [BlockRegularization][diff_soup.inference.fitting.regularization.BlockRegularization]
+            A [BlockRegularization][diff_soup.optimization.inference.fitting.regularization.BlockRegularization]
             with one block per entry.
         """
         resolved = []

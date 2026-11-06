@@ -2,15 +2,15 @@
 
 The sampling surface starts from one object: a [LogDensity][], the
 normalized log posterior of a data-bearing
-[Experiment][diff_soup.inference.statistics.measurement.Experiment] under a proper
-[Prior][diff_soup.inference.statistics.priors.Prior]. Build it with
+[Experiment][diff_soup.optimization.inference.statistics.measurement.Experiment] under a proper
+[Prior][diff_soup.optimization.inference.statistics.priors.Prior]. Build it with
 [log_posterior][]:
 
 * the likelihood term is assembled from each scored response channel's own
   normalized ``log_prob`` — any `Likelihood` family works here,
   including `CorrelatedGaussian` channels that have no
   least-squares lowering;
-* with a [Parameterization][diff_soup.inference.statistics.parameters.Parameterization]
+* with a [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization]
   the target lives in the inference coordinate ``z``: the physically
   declared prior is pulled back exactly, ``log |dx/dz|`` included;
 * gradients are **forward-assembled** by default (``jax.jacfwd`` — the mode
@@ -29,7 +29,7 @@ refuses a failed one.
 unit-Gaussian coordinate ``w`` to the parameter coordinate of a proper
 Gaussian source — a [LaplacePosterior][] (``z = mode + L⁻ᵀ w`` against
 the stored precision Cholesky factor) or a
-[GaussianPrior][diff_soup.inference.statistics.priors.GaussianPrior]. Improper sources
+[GaussianPrior][diff_soup.optimization.inference.statistics.priors.GaussianPrior]. Improper sources
 are refused: whitening needs a finite SPD covariance.
 
 [sample][] draws from a [LogDensity][] with `blackjax
@@ -65,13 +65,17 @@ from jaxtyping import Array
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._warnings import warn_user
-from diff_soup.inference.data.deferred import DeferredValues
-from diff_soup.inference.solvers.tangent import deferred_value_and_grad
-from diff_soup.inference.statistics.experiment import _channel_likelihood_view
-from diff_soup.inference.statistics.laplace import LaplacePosterior, _credited_rtol, _solver_rtol
-from diff_soup.inference.statistics.parameters import Transform
-from diff_soup.inference.statistics.priors import GaussianPrior, Prior
-from diff_soup.inference.statistics.report import IdentifiedSubspace
+from diff_soup.optimization.inference.data.deferred import DeferredValues
+from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
+from diff_soup.optimization.inference.statistics.laplace import (
+    LaplacePosterior,
+    _credited_rtol,
+    _solver_rtol,
+)
+from diff_soup.optimization.inference.statistics.parameters import Transform
+from diff_soup.optimization.inference.statistics.priors import GaussianPrior, Prior
+from diff_soup.optimization.inference.statistics.report import IdentifiedSubspace
+from diff_soup.optimization.solvers.tangent import deferred_value_and_grad
 
 __all__ = [
     "Draws",
@@ -283,7 +287,7 @@ class LogDensity:
             rtol: The largest acceptable vector relative error.
 
         Returns:
-            The recorded [`GradientCheck`][diff_soup.inference.statistics.GradientCheck].
+            The recorded [`GradientCheck`][diff_soup.optimization.inference.statistics.GradientCheck].
 
         Raises:
             ValueError: If the target was built with `gradient=None`.
@@ -567,14 +571,14 @@ def log_posterior(
 
     Args:
         experiment: The data-bearing
-            [Experiment][diff_soup.inference.statistics.measurement.Experiment]
+            [Experiment][diff_soup.optimization.inference.statistics.measurement.Experiment]
             (attach observations with ``with_data`` first).
-        prior: A proper [Prior][diff_soup.inference.statistics.priors.Prior]
+        prior: A proper [Prior][diff_soup.optimization.inference.statistics.priors.Prior]
             declared on the physical coordinate ``"x"``. Required: without a
             normalized prior the posterior density is not a probability
             model, so there is nothing well-defined to sample.
         parameterization: Optional
-            [Parameterization][diff_soup.inference.statistics.parameters.Parameterization]
+            [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization]
             mapping the flat inference vector ``z`` to the physical ``x``.
         gradient: ``"forward"`` (default) assembles the gradient with
             ``jax.jacfwd`` — the mode composable forward-sensitivity solver
@@ -593,7 +597,7 @@ def log_posterior(
             is unknown; or if a reverse-mode gradient fails or disagrees
             with the forward gradient near the initial point.
     """
-    from diff_soup.inference.statistics.measurement import require_likelihoods
+    from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
 
     require_likelihoods(experiment, "log_posterior")
     if gradient not in GRADIENT_MODES:
@@ -752,10 +756,10 @@ def whitening(source: Any) -> WhiteningTransform:
     unit-curvature coordinate for samplers to work in.
 
     Args:
-        source: A [LaplacePosterior][diff_soup.inference.statistics.laplace.LaplacePosterior]
+        source: A [LaplacePosterior][diff_soup.optimization.inference.statistics.laplace.LaplacePosterior]
             (``center`` = mode, ``A = L⁻ᵀ`` from the stored precision
             Cholesky factor) or a proper
-            [GaussianPrior][diff_soup.inference.statistics.priors.GaussianPrior]
+            [GaussianPrior][diff_soup.optimization.inference.statistics.priors.GaussianPrior]
             (``center`` = mean, ``A`` from the precision's Cholesky factor).
 
     Returns:
@@ -763,7 +767,7 @@ def whitening(source: Any) -> WhiteningTransform:
 
     Raises:
         ValueError: If the source is an
-            [IdentifiedSubspace][diff_soup.inference.statistics.report.IdentifiedSubspace]
+            [IdentifiedSubspace][diff_soup.optimization.inference.statistics.report.IdentifiedSubspace]
             (an improper source: some directions were left undetermined, so
             no finite covariance exists), or a Gaussian prior whose precision
             is singular or not positive definite.
@@ -911,8 +915,8 @@ def _target_batches_its_solves(problem: Any) -> tuple[bool, bool]:
     multi-experiment batch is spread over a device mesh. Unknown or foreign
     targets answer ``(False, False)``.
     """
-    from diff_soup.inference.fitting._sharding import sharding_active
-    from diff_soup.inference.fitting.inference_problem import Multishoot
+    from diff_soup.optimization.inference.fitting._sharding import sharding_active
+    from diff_soup.optimization.inference.fitting.inference_problem import Multishoot
 
     batched = sharded = False
     seen: set[int] = set()
@@ -961,7 +965,7 @@ def _refuse_shared_storage_on_devices(problem: Any) -> None:
     ``jax.pmap`` runs the chains of every local device in one execution, as a
     layout's data axis over those devices runs experiments, so the refusal of
     such a placement applies (see
-    [refuse_shared_storage][diff_soup.inference.engine._plan.refuse_shared_storage]):
+    [refuse_shared_storage][diff_soup.optimization.inference.engine._plan.refuse_shared_storage]):
     a backend whose factors are not arrays keeps them in this process's
     storage, which does not tell the devices apart. A target without a fitted
     problem, and one device, are accepted.
@@ -973,8 +977,8 @@ def _refuse_shared_storage_on_devices(problem: Any) -> None:
     """
     from jax.sharding import Mesh
 
-    from diff_soup.inference.engine._layout import _experiment_problems
-    from diff_soup.inference.engine._plan import refuse_shared_storage
+    from diff_soup.optimization.inference.engine._layout import _experiment_problems
+    from diff_soup.optimization.inference.engine._plan import refuse_shared_storage
 
     devices = jax.local_devices()
     if problem is None or len(devices) < 2:
@@ -1052,7 +1056,7 @@ def sample(
     processes.
 
     Args:
-        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] with a `MAP`
+        problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] with a `MAP`
             objective, or a target from `posterior_target`, which takes no `fit`.
         fit: The `MAP` fit the chains start from.
         kernel: `"nuts"` for the No-U-Turn sampler, which first audits the gradient at a perturbed
@@ -1078,10 +1082,10 @@ def sample(
             size toward, by default 0.8.
 
     Returns:
-        The [`Draws`][diff_soup.inference.Draws].
+        The [`Draws`][diff_soup.optimization.inference.Draws].
     """
-    from diff_soup.inference.statistics.laplace import laplace
-    from diff_soup.inference.statistics.posterior import posterior_target
+    from diff_soup.optimization.inference.statistics.laplace import laplace
+    from diff_soup.optimization.inference.statistics.posterior import posterior_target
 
     processes = getattr(problem, "processes", 1)
     if isinstance(processes, int) and processes > 1:
@@ -1729,13 +1733,13 @@ def sbc(
     Args:
         model_builder: A zero-argument callable returning a mapping with
             keys ``"experiment"`` (the design-stage
-            [Experiment][diff_soup.inference.statistics.measurement.Experiment] whose
+            [Experiment][diff_soup.optimization.inference.statistics.measurement.Experiment] whose
             response channels define the observation models — no attached
             data needed) and ``"prior"`` (a proper
-            [Prior][diff_soup.inference.statistics.priors.Prior] on the physical
+            [Prior][diff_soup.optimization.inference.statistics.priors.Prior] on the physical
             coordinate). Optional keys: ``"parameters"`` (parameter groups),
             ``"parameterization"`` (a
-            [Parameterization][diff_soup.inference.statistics.parameters.Parameterization]
+            [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization]
             — chains then run in the inference coordinate with the exact
             prior pullback), and ``"generator"`` (an experiment whose
             channels generate the synthetic data instead; scoring still uses

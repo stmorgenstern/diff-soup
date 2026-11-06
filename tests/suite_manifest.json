@@ -3,7 +3,7 @@
     "test_files": 45,
     "test_functions": 418,
     "collected_tests": 628,
-    "source_lines": 15158
+    "source_lines": 15162
   },
   "tier_budgets": {
     "public_api": {
@@ -16,7 +16,7 @@
       "files": 19,
       "functions": 173,
       "collected": 264,
-      "lines": 5849
+      "lines": 5853
     },
     "performance_contracts": {
       "files": 2,
@@ -46,10 +46,12 @@
   "public_namespaces": [
     "diff_soup",
     "diff_soup.inference",
-    "diff_soup.inference.approx",
-    "diff_soup.inference.design",
-    "diff_soup.inference.data",
-    "diff_soup.inference.statistics",
+    "diff_soup.optimization",
+    "diff_soup.optimization.inference",
+    "diff_soup.optimization.inference.approx",
+    "diff_soup.optimization.inference.design",
+    "diff_soup.optimization.inference.data",
+    "diff_soup.optimization.inference.statistics",
     "diff_soup.linear",
     "diff_soup.domains",
     "diff_soup.timestepping",
@@ -65,12 +67,12 @@
     "tests/contracts/test_linear_primitive.py": "diff_soup.linear._primitive",
     "tests/contracts/test_second_order_ad.py": "diff_soup.timestepping.vsvo",
     "tests/contracts/test_second_order_ad_precision.py": "diff_soup.timestepping.vsvo",
-    "tests/contracts/test_structural_fitting.py": "diff_soup.inference.solvers",
-    "tests/contracts/test_recipe_handles.py": "diff_soup.inference.fitting",
+    "tests/contracts/test_structural_fitting.py": "diff_soup.optimization.solvers",
+    "tests/contracts/test_recipe_handles.py": "diff_soup.optimization.inference.fitting",
     "tests/contracts/test_linear_structured.py": "diff_soup.problem._ir._low_rank",
     "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
-    "tests/contracts/test_lowered_study.py": "diff_soup.inference.hierarchical",
+    "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference.hierarchical",
     "tests/contracts/test_lane_select.py": "diff_soup.utils.lanes"
   },
   "support_data": [

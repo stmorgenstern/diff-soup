@@ -7,7 +7,7 @@ one such matrix-batch axis, so an outer ``vmap`` over parameter points (MCMC
 chains, importance samples, a population of trial points) reached it as a
 second, nested matrix axis and was refused.
 
-[lane_map][diff_soup.inference.fitting._lane_map.lane_map] computes exactly
+[lane_map][diff_soup.optimization.inference.fitting._lane_map.lane_map] computes exactly
 ``jax.vmap(kernel, in_axes)(*args)``, but when an enclosing ``vmap`` batches its
 arguments it folds that batch into the lane axis: ``N`` points over ``L``
 lanes run as one ``N * L``-lane map, so the solves still meet the backend with
@@ -24,7 +24,7 @@ the staged tangent map recomputes the primal it differentiates, as a staged
 
 Reverse-mode differentiation is not defined for the fold, so it is used only on
 forward-only solve seams, which reverse mode cannot differentiate in any case;
-[folds_enclosing_batches][diff_soup.inference.fitting._lane_map.folds_enclosing_batches]
+[folds_enclosing_batches][diff_soup.optimization.inference.fitting._lane_map.folds_enclosing_batches]
 states that condition for a solver.
 """
 

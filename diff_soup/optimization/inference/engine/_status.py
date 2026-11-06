@@ -63,7 +63,7 @@ class LaneStatus(eqx.Module):
     Every field is an array, so a batch of lanes carries one status per lane.
 
     Attributes:
-        kind: Index into [KINDS][diff_soup.inference.engine._status.KINDS];
+        kind: Index into [KINDS][diff_soup.optimization.inference.engine._status.KINDS];
             zero means the lane solved.
         t_reached: The time the solve reached.
         rung: The rung that produced this result: 0 for the solve from the

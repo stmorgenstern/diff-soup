@@ -8,9 +8,9 @@ Three layers with two public scientific namespaces:
 
 **Curated top-level namespace.** This file re-exports the subset of symbols
 that users import directly from ``diff_soup``.  Every other symbol lives
-behind its sub-namespace. ``diff_soup.inference`` is not imported eagerly:
-``ds.inference`` resolves it on first access, so the idiomatic spelling is
-``ds.inference.x``.
+behind its sub-namespace. ``diff_soup.optimization.inference`` is not imported eagerly:
+``ds.optimization.inference`` resolves it on first access, so the idiomatic spelling is
+``ds.optimization.inference.x``.
 
 Import direction: L1 → L2 → L3, never upward. Enforced by the
 contract test ``tests/contracts/test_architecture.py`` and, for module-level
@@ -309,14 +309,14 @@ def __getattr__(name: str):
     """Resolve inference and its learnable selector on first attribute access.
 
     The inference package imports the whole fitting and statistics stack, so it
-    is not loaded with ``import diff_soup``; ``ds.inference`` imports it on
+    is not loaded with ``import diff_soup``; ``ds.optimization.inference`` imports it on
     demand and returns the package. Any other unknown attribute raises
     ``AttributeError`` as usual.
     """
     if name in ("inference", "learnables"):
         import importlib
 
-        inference = importlib.import_module("diff_soup.inference")
+        inference = importlib.import_module("diff_soup.optimization.inference")
         return inference if name == "inference" else inference.learnables
     if name == "optimization":
         import importlib
