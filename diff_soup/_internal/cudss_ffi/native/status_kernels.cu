@@ -261,6 +261,22 @@ unsigned int StridedBlocks(int64_t total) {
     return static_cast<unsigned int>(blocks);
 }
 
+// Calls `launch(real, scalar)` with a value of the real type of a factor's width (double for
+// float64 and complex128, float otherwise) and of its scalar type (that real type, or Complex
+// of it), the template arguments of a queue function's kernels.
+template <typename Launch>
+void DispatchScalar(bool f64, bool complex, Launch&& launch) {
+    if (complex && f64) {
+        launch(double{}, Complex<double>{});
+    } else if (complex) {
+        launch(float{}, Complex<float>{});
+    } else if (f64) {
+        launch(double{}, double{});
+    } else {
+        launch(float{}, float{});
+    }
+}
+
 }  // namespace
 
 cudaError_t QueueLaneStatusScan(cudaStream_t stream, bool f64, const void* values,
@@ -287,28 +303,15 @@ cudaError_t QueueLaneStatusScan(cudaStream_t stream, bool f64, const void* value
     if (blocks_per_lane > kMaxBlocks / lanes) blocks_per_lane = kMaxBlocks / lanes;
     if (blocks_per_lane < 1) blocks_per_lane = 1;
     const dim3 grid(static_cast<unsigned int>(lanes * blocks_per_lane));
-    if (complex) {
-        // Each complex value is scanned as its two parts: a lane holds 2 * value_count of them.
-        if (f64) {
-            LaneStatusKernel<double, Complex<double>><<<grid, kThreads, 0, stream>>>(
-                static_cast<const double*>(values), 2 * value_count,
-                static_cast<const Complex<double>*>(diagonal), diagonal_count, blocks_per_lane,
-                out);
-        } else {
-            LaneStatusKernel<float, Complex<float>><<<grid, kThreads, 0, stream>>>(
-                static_cast<const float*>(values), 2 * value_count,
-                static_cast<const Complex<float>*>(diagonal), diagonal_count, blocks_per_lane,
-                out);
-        }
-    } else if (f64) {
-        LaneStatusKernel<double><<<grid, kThreads, 0, stream>>>(
-            static_cast<const double*>(values), value_count,
-            static_cast<const double*>(diagonal), diagonal_count, blocks_per_lane, out);
-    } else {
-        LaneStatusKernel<float><<<grid, kThreads, 0, stream>>>(
-            static_cast<const float*>(values), value_count, static_cast<const float*>(diagonal),
+    // Each complex value is scanned as its two parts: a lane holds 2 * value_count of them.
+    const int64_t parts = complex ? 2 : 1;
+    DispatchScalar(f64, complex, [&](auto real, auto scalar) {
+        using R = decltype(real);
+        using S = decltype(scalar);
+        LaneStatusKernel<R, S><<<grid, kThreads, 0, stream>>>(
+            static_cast<const R*>(values), parts * value_count, static_cast<const S*>(diagonal),
             diagonal_count, blocks_per_lane, out);
-    }
+    });
     return cudaGetLastError();
 }
 
@@ -356,25 +359,12 @@ cudaError_t QueueProbeRightHandSides(cudaStream_t stream, bool f64, const int32_
     }
     const int64_t total = n * lanes;
     const unsigned int blocks = StridedBlocks(total);
-    if (complex) {
-        if (f64) {
-            ProbeRightHandSidesKernel<double, Complex<double>><<<blocks, kThreads, 0, stream>>>(
-                offsets, columns, static_cast<const Complex<double>*>(values), n, nse, total,
-                static_cast<Complex<double>*>(b));
-        } else {
-            ProbeRightHandSidesKernel<float, Complex<float>><<<blocks, kThreads, 0, stream>>>(
-                offsets, columns, static_cast<const Complex<float>*>(values), n, nse, total,
-                static_cast<Complex<float>*>(b));
-        }
-    } else if (f64) {
-        ProbeRightHandSidesKernel<double><<<blocks, kThreads, 0, stream>>>(
-            offsets, columns, static_cast<const double*>(values), n, nse, total,
-            static_cast<double*>(b));
-    } else {
-        ProbeRightHandSidesKernel<float><<<blocks, kThreads, 0, stream>>>(
-            offsets, columns, static_cast<const float*>(values), n, nse, total,
-            static_cast<float*>(b));
-    }
+    DispatchScalar(f64, complex, [&](auto real, auto scalar) {
+        using R = decltype(real);
+        using S = decltype(scalar);
+        ProbeRightHandSidesKernel<R, S><<<blocks, kThreads, 0, stream>>>(
+            offsets, columns, static_cast<const S*>(values), n, nse, total, static_cast<S*>(b));
+    });
     return cudaGetLastError();
 }
 
@@ -384,21 +374,11 @@ cudaError_t QueueProbeErrors(cudaStream_t stream, bool f64, void* x, int64_t n, 
     if (x == nullptr) return cudaErrorInvalidValue;
     const int64_t total = n * lanes;
     const unsigned int blocks = StridedBlocks(total);
-    if (complex) {
-        if (f64) {
-            ProbeErrorsKernel<double><<<blocks, kThreads, 0, stream>>>(
-                static_cast<Complex<double>*>(x), n, total);
-        } else {
-            ProbeErrorsKernel<float><<<blocks, kThreads, 0, stream>>>(
-                static_cast<Complex<float>*>(x), n, total);
-        }
-    } else if (f64) {
-        ProbeErrorsKernel<double><<<blocks, kThreads, 0, stream>>>(static_cast<double*>(x), n,
-                                                                   total);
-    } else {
-        ProbeErrorsKernel<float><<<blocks, kThreads, 0, stream>>>(static_cast<float*>(x), n,
-                                                                  total);
-    }
+    DispatchScalar(f64, complex, [&](auto real, auto scalar) {
+        using R = decltype(real);
+        using S = decltype(scalar);
+        ProbeErrorsKernel<R><<<blocks, kThreads, 0, stream>>>(static_cast<S*>(x), n, total);
+    });
     return cudaGetLastError();
 }
 

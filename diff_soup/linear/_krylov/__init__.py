@@ -12,17 +12,12 @@
 * [exact_backend][diff_soup.linear._krylov.exact_backend] and
   [exact_analysis][diff_soup.linear._krylov.exact_analysis] give the exact
   backend behind a Krylov backend, for the consumers that need exact inverses.
-* [record_reports][diff_soup.linear._krylov.record_reports] is a diagnostic
-  that collects every Krylov solve's status, iterations and residual on the
-  host.
 """
 
 from diff_soup.linear._krylov._backend import (
     Krylov,
     exact_analysis,
     exact_backend,
-    record_reports,
-    report_outcome,
 )
 from diff_soup.linear._krylov._gmres import gmres, gmres_core
 from diff_soup.linear._krylov._transposed import transposed_topology, transposed_values
@@ -33,8 +28,6 @@ __all__ = [
     "exact_backend",
     "gmres",
     "gmres_core",
-    "record_reports",
-    "report_outcome",
     "transposed_topology",
     "transposed_values",
 ]

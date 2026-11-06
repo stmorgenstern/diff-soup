@@ -103,22 +103,7 @@
 #include "xla/ffi/api/ffi.h"
 
 #include "slu_mt_ddefs.h"
-// The complex128 routines. slu_mt_zdefs.h cannot share a translation unit with
-// slu_mt_ddefs.h (both define GlobalLU_t), so the few entry points used here are
-// declared from it directly; every other type they take is precision-free.
-#include "slu_dcomplex.h"
-extern "C" {
-void zCreate_CompCol_Matrix(SuperMatrix*, int_t, int_t, int_t, doublecomplex*, int_t*, int_t*,
-                            Stype_t, Dtype_t, Mtype_t);
-void zCreate_Dense_Matrix(SuperMatrix*, int_t, int_t, doublecomplex*, int_t, Stype_t, Dtype_t,
-                          Mtype_t);
-void pzgstrf(superlumt_options_t*, SuperMatrix*, int_t*, SuperMatrix*, SuperMatrix*, Gstat_t*,
-             int_t*);
-void pzgstrf_init(int_t, fact_t, trans_t, yes_no_t, int_t, int_t, double, yes_no_t, double,
-                  int_t*, int_t*, void*, int_t, SuperMatrix*, SuperMatrix*,
-                  superlumt_options_t*, Gstat_t*);
-void zgstrs(trans_t, SuperMatrix*, SuperMatrix*, int_t*, int_t*, SuperMatrix*, Gstat_t*, int_t*);
-}
+#include "superlu_z_prototypes.h"
 
 namespace ffi = xla::ffi;
 namespace nb = nanobind;

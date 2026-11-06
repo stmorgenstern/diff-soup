@@ -4,6 +4,12 @@ that a solve by name keeps its backend."""
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -301,6 +307,71 @@ def test_a_host_backend_refuses_a_program_compiled_for_a_gpu(name):
         )
         with pytest.raises(FactorContractError, match="cpu platform only.*cuda"):
             traced.lower(lowering_platforms=("cuda",))
+
+
+#: On two forced host devices: KLU lanes committed over both devices, and a shard_map body over
+#: both, each lowered with a native factor; the refusal each raises.
+_TWO_DEVICE_WORKER = r"""
+import json
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+from diff_soup.linear import KLU, FactorContractError, SolveContext, SparseTopology, analyze
+from diff_soup.linear import factor, solve
+
+index = np.arange(6)
+pattern = SparseTopology(
+    rows=np.concatenate([index, index[1:]]), cols=np.concatenate([index, index[:-1]]), n_dofs=6
+)
+lanes = jnp.asarray(np.tile(np.concatenate([np.full(6, 4.0), np.full(5, -1.0)]), (2, 1)))
+mesh = Mesh(np.asarray(jax.devices()), ("data",))
+refusals = []
+with SolveContext() as ctx:
+    analysis = analyze(pattern, backend=KLU())
+    one = lambda v: solve(factor(analysis, v, ctx=ctx), jnp.ones(6))[0]
+    placed = jax.device_put(lanes, NamedSharding(mesh, PartitionSpec("data")))
+    for program in (
+        jax.jit(jax.vmap(one)),
+        jax.jit(jax.shard_map(jax.vmap(one), mesh=mesh, in_specs=PartitionSpec("data"),
+                              out_specs=PartitionSpec("data"))),
+    ):
+        try:
+            program(placed)
+            refusals.append(None)
+        except FactorContractError as exc:
+            refusals.append(str(exc))
+print("REPORT " + json.dumps(refusals))
+"""
+
+
+@pytest.mark.requires_klu
+def test_a_native_factor_over_two_devices_of_the_process_is_refused():
+    """A KLU factor lowered into a program over two devices of the process, lanes committed over
+    both or a ``shard_map`` body over both, raises FactorContractError naming the two devices,
+    since its slots do not tell devices apart."""
+    env = {key: value for key, value in os.environ.items() if "proxy" not in key.lower()}
+    env.update(
+        JAX_PLATFORMS="cpu",
+        XLA_FLAGS="--xla_force_host_platform_device_count=2",
+        OMP_NUM_THREADS="1",
+        CUDA_VISIBLE_DEVICES="",
+        JAX_ENABLE_X64="1",
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", _TWO_DEVICE_WORKER],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=110,
+    )
+    assert run.returncode == 0, run.stderr[-4000:]
+    line = next(item for item in run.stdout.splitlines() if item.startswith("REPORT "))
+    refusals = json.loads(line.removeprefix("REPORT "))
+    assert [("over 2 devices of this process" in (text or "")) for text in refusals] == [True] * 2
 
 
 _DIFFUSION = reaction_diffusion_recipe(n=12)
