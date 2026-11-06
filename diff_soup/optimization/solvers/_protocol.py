@@ -20,8 +20,8 @@ class SolveStatus(enum.IntEnum):
     Attributes:
         KKT_TOL: The scaled optimality error fell below the tolerance.
         MAX_STEPS: The step budget ran out.
-        INFEASIBLE: The restoration phase converged to a point that still violates the constraints.
-        RESTORATION_FAILED: The restoration phase ran out of its own budget.
+        INFEASIBLE: The restoration phase converged, or the augmented Lagrangian's penalty reached its cap, at a point that still violates the constraints.
+        RESTORATION_FAILED: The line search failed, and the restoration phase, where there is one, did not recover.
         SOLVER_FAILED: Consecutive trial evaluations failed, a NaN or a DAE solve that did not finish.
         DIVERGED: An iterate or a multiplier left the finite range.
     """
@@ -35,12 +35,12 @@ class SolveStatus(enum.IntEnum):
 
 
 class SolverState(eqx.Module):
-    """The carry of a compiled solver's loop; each solver subclasses it with its own leaves.
+    """The state a compiled solver's loop carries, which each solver extends with its own fields.
 
     Attributes:
         x: The current point, `(n,)`.
         step: The number of steps taken.
-        done: Whether this lane has finished.
+        done: Whether this problem's run has ended.
         status: The [SolveStatus][diff_soup.optimization.SolveStatus] as an integer array.
     """
 
@@ -64,7 +64,7 @@ class SolveRecord(eqx.Module):
         kkt_error: The scaled optimality error at the solution.
         constraint_violation: The largest constraint violation at the solution.
         status: The [SolveStatus][diff_soup.optimization.SolveStatus] as an integer array.
-        degenerate: Whether an active inequality had both its multiplier and its slack at zero, in which case the implicit derivative is that of the barrier solution at `mu`.
+        degenerate: Whether a multiplier and its slack are both zero or the active rows are dependent, which makes the derivative the barrier solution's at `mu`.
     """
 
     multipliers_equality: Any
@@ -81,14 +81,11 @@ class SolveRecord(eqx.Module):
 
 
 class CompiledSolver(OptSolver):
-    """A solver whose loop is `lax.while_loop` over `step`, so `run` composes with `jit`, `vmap` and `grad`.
+    """A solver whose whole loop compiles, so `run` composes with `jit`, `vmap` and `grad`.
 
-    `run` is the pure entry and returns arrays only. Under `vmap` a finished lane is masked:
-    `step` applies where `done` is false and the state is kept where it is true, and the loop
-    runs until every lane is done or the budget ends. `solve` wraps `run` on the host for
-    callbacks, diagnostics and the `OptResult` the other solvers return. The derivative of
-    `run` with respect to `args` is the implicit one at the solution, by one `custom_jvp`
-    linear in its tangents.
+    `run` is the pure entry and returns arrays only. Under `vmap` a finished problem keeps its
+    state while the others step, until every problem is done or the budget ends. `solve` wraps
+    `run` and returns the `OptResult` the other solvers return.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
@@ -118,7 +115,21 @@ class CompiledSolver(OptSolver):
         max_steps: int | None = None,
         warm_start: Any = None,
     ) -> tuple[Any, SolveRecord]:
-        """Minimize from `x0` and return the solution and its record, arrays only."""
+        """Minimize from `x0` and return the solution and its record, arrays only.
+
+        The derivative in `args` is the implicit one at the solution, and `x0` and `warm_start`
+        carry none. A run that did not end with `KKT_TOL` has NaN tangents.
+
+        Args:
+            problem: The numeric problem.
+            x0: The starting point, `(n,)`.
+            args: The problem's arguments, which the derivative is taken in.
+            max_steps: The step budget, or `None` for the solver's own.
+            warm_start: The `SolveRecord` of an earlier run whose multipliers start this one, or `None`.
+
+        Returns:
+            `(x, record)`: the solution and its [SolveRecord][diff_soup.optimization.SolveRecord].
+        """
         raise NotImplementedError
 
     def solve(self, problem: Any, *, callbacks: tuple = ()) -> Any:

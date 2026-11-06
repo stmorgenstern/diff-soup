@@ -182,3 +182,5 @@ nav:
           - Cohorts: reference/inference/cohorts.md
       - Optimization:
           - Problems and constraints: reference/optimization/problems.md
+          - Constrained solvers: reference/optimization/solvers.md
+          - KKT solves: reference/optimization/kkt.md
