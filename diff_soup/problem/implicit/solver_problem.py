@@ -1064,11 +1064,14 @@ def _build_solver_view(problem, source_key: Hashable) -> SolverView:
 def solver_view(problem) -> SolverView:
     """Return the view the solvers take of ``problem``, building it once.
 
-    The view is what ``pdesolve`` and the implicit-layer verbs read: the
-    residual ``F(t, y, ydot, theta, control)`` as ``residual``, the state size
-    ``n`` and its local block ``n_u``, the differential rows ``id_mask``, the
-    iteration matrix's sparse pattern ``full_topology`` and the linearization
-    ``plan`` its values follow. It is built once per model and cached: a
+    The view is what ``pdesolve`` and the implicit-layer verbs read. Its public
+    surface is what [SolverView][diff_soup.problem.SolverView] documents: the
+    attributes it lists (the state size ``n`` and its local block ``n_u``, the
+    differential rows ``id_mask``, the linearization ``plan``, and the rest),
+    the residual ``F(t, y, ydot, theta, control)`` as ``residual``, the
+    iteration matrix's sparse pattern ``full_topology`` and the mass
+    operator's dependence ``mass_dependence``. Its other members are internal.
+    It is built once per model and cached: a
     problem equal in content to one already presented (a rebuilt problem, or
     a lowered problem with the same structure and values) gets the same view,
     and the key of a recently presented object is kept with the object, so
