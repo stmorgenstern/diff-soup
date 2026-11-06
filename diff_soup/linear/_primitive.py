@@ -571,7 +571,7 @@ def storage_key(storage: Optional[str]) -> np.int64:
 _SITE_ORDINALS = object()
 
 
-def _lowered_device(ctx: Any, kind: str) -> tuple:
+def _lowered_device(ctx: Any, kind: str, per_device: bool) -> tuple:
     """The platform and id of the device a native call runs on, as key text.
 
     A site's slots are keyed by context and lane, and a cuDSS slot lives on
@@ -581,7 +581,9 @@ def _lowered_device(ctx: Any, kind: str) -> tuple:
     ``shard_map`` body, the one device of this process on the mesh. A cuDSS
     slot used from another device (inputs committed elsewhere) refuses the
     call. This process's first device keeps the plain key, so a program on it
-    reads as it always did.
+    reads as it always did. A call whose slot the extension keys by the device
+    that runs it (``per_device``, shared storage) may run in a ``shard_map``
+    body over several devices.
 
     Raises:
         FactorContractError: If the program runs the call on several devices
@@ -596,7 +598,7 @@ def _lowered_device(ctx: Any, kind: str) -> tuple:
     else:
         devices = range(int(getattr(axis_context, "num_devices", 1)))
         device = jax.config.jax_default_device
-    if len(devices) > 1:
+    if len(devices) > 1 and not (per_device and mesh is not None):
         raise FactorContractError(
             f"A native {kind} call is lowered into a program over {len(devices)} devices of this "
             "process, and its factor storage does not tell devices apart. Run the call on one "
@@ -609,7 +611,7 @@ def _lowered_device(ctx: Any, kind: str) -> tuple:
     return (f"device {device.platform} {device.id}",)
 
 
-def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
+def lowered_site_key(ctx: Any, kind: str, *parts: Any, per_device: bool = False) -> np.int64:
     """A deterministic key of one lowered native factor or refactor call, for its ``site``.
 
     The key is a stable 64-bit hash of the module's symbol name, the call's
@@ -630,14 +632,18 @@ def lowered_site_key(ctx: Any, kind: str, *parts: Any) -> np.int64:
         ctx: The lowering rule context.
         kind: What the call does (``"factor"``, ``"refactor"``).
         *parts: Further values that identify the call, turned into text.
+        per_device: Whether the extension keys the call's slot by the device
+            that runs it (a call on shared storage).
 
     Returns:
         The key, a positive ``int64``.
 
     Raises:
-        FactorContractError: If the program spans several devices of this process.
+        FactorContractError: If the program runs the call on several devices
+            of this process and ``per_device`` does not hold in a ``shard_map``
+            body.
     """
-    device = _lowered_device(ctx, kind)
+    device = _lowered_device(ctx, kind, per_device)
     module = ctx.module_context
     counters = module.cached_primitive_lowerings
     ordinal = counters.get(_SITE_ORDINALS, 0)

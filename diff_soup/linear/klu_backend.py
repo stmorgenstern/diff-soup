@@ -161,7 +161,9 @@ def _parse_contract_options(options: tuple) -> dict[str, Any]:
     }
 
 
-def _site_key(ctx: Any, kind: str, analysis: Analysis, *parts: Any) -> np.int64:
+def _site_key(
+    ctx: Any, kind: str, analysis: Analysis, *parts: Any, per_device: bool = False
+) -> np.int64:
     """The native site key of one lowered factor or refactor call on ``analysis``.
 
     A deterministic key of the lowered call
@@ -171,11 +173,14 @@ def _site_key(ctx: Any, kind: str, analysis: Analysis, *parts: Any) -> np.int64:
     site belongs to no context: its slots are keyed by the context id the
     call carries at run time, and each slot is freed with its context.
     ``parts`` are the call's parameters and operand shapes, which tell
-    calls of otherwise equal programs apart.
+    calls of otherwise equal programs apart; ``per_device`` marks a call on
+    shared storage, whose slot the extension keys by device.
     """
     record: _KLUContractAnalysis = analysis.backend_analysis
     shapes = tuple((tuple(aval.shape), str(aval.dtype)) for aval in ctx.avals_in)
-    return lowered_site_key(ctx, f"klu {kind}", record.native_id, shapes, *parts)
+    return lowered_site_key(
+        ctx, f"klu {kind}", record.native_id, shapes, *parts, per_device=per_device
+    )
 
 
 def _analysis_id(analysis: Analysis) -> np.int64:
@@ -479,7 +484,16 @@ class KLUBackend(LinearSolver):
             order,
             refactor_target=refactor_target,
             factor_target=factor_target,
-            site=_site_key(ctx, "refactor", analysis, orientation, precision, adopt, storage),
+            site=_site_key(
+                ctx,
+                "refactor",
+                analysis,
+                orientation,
+                precision,
+                adopt,
+                storage,
+                per_device=storage is not None,
+            ),
             analysis_id=_analysis_id(analysis),
             values_dtype=dtype,
             storage=storage_key(storage),

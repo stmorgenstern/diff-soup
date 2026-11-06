@@ -1565,6 +1565,7 @@ def lower_refactor(
         _call_shapes(ctx),
         bool(adopt),
         storage,
+        per_device=storage is not None,
     )
     results, order = lower_ffi_call(
         ctx,
