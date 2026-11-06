@@ -182,3 +182,6 @@ nav:
           - Cohorts: reference/inference/cohorts.md
       - Optimization:
           - Problems and constraints: reference/optimization/problems.md
+          - Control problems: reference/optimization/control/problem.md
+          - Receding horizon: reference/optimization/control/receding-horizon.md
+          - Estimators: reference/optimization/control/estimators.md
