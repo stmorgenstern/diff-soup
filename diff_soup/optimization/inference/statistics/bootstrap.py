@@ -29,7 +29,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.problem.parameters import ParameterEntry, ParameterOccurrence, parameter_decoder
 
 # Smallest number of resampling clusters a cluster bootstrap can report from.
@@ -697,7 +697,7 @@ class _AtFit(NamedTuple):
 
 def _at_fit(products: Any, jackknife: np.ndarray, lane_members: np.ndarray, count: int) -> _AtFit:
     """The evaluation at the fit's products, its leave-one-member-out rows those of ``jackknife``."""
-    from diff_soup.inference.hierarchical._replicates import fit_training_rmse
+    from diff_soup.optimization.inference.hierarchical._replicates import fit_training_rmse
 
     held = {int(member) for member in jackknife}
     return _AtFit(
@@ -755,7 +755,7 @@ def _at_fit_record(at: _AtFit) -> dict:
 
 def _saved_at_fit(record: Mapping) -> _AtFit:
     """The products a checkpoint file kept, as the result keeps them."""
-    from diff_soup.inference.hierarchical._replicates import OneStepFailure
+    from diff_soup.optimization.inference.hierarchical._replicates import OneStepFailure
 
     arrays, texts = record["arrays"], record["texts"]
     columns = arrays["inverse.columns"]
@@ -1000,7 +1000,7 @@ class BootstrapOneStep:
     ``interval`` and ``band`` take their intervals over the one-step
     estimates, with the leave-one-member-out one-steps as the jackknife of
     BCa, as those of the
-    [BootstrapResult][diff_soup.inference.BootstrapResult] take theirs over
+    [BootstrapResult][diff_soup.optimization.inference.BootstrapResult] take theirs over
     the replicates' end points.
 
     In a part of a bootstrap run in shards, ``estimates`` holds the part's
@@ -1055,7 +1055,7 @@ class BootstrapOneStep:
         """A bootstrap interval over the one-step estimates.
 
         Takes the same arguments as
-        [BootstrapResult.interval][diff_soup.inference.BootstrapResult.interval];
+        [BootstrapResult.interval][diff_soup.optimization.inference.BootstrapResult.interval];
         the estimates are the one-step estimates, and BCa's acceleration
         comes from the leave-one-member-out one-steps.
         """
@@ -1076,7 +1076,7 @@ class BootstrapOneStep:
         """A pointwise bootstrap band over the one-step estimates.
 
         Takes the same arguments as
-        [BootstrapResult.band][diff_soup.inference.BootstrapResult.band]; the
+        [BootstrapResult.band][diff_soup.optimization.inference.BootstrapResult.band]; the
         estimates are the one-step estimates.
         """
         fields = _summarize(
@@ -1102,7 +1102,7 @@ class BootstrapOneStep:
 class BootstrapOutcome(NamedTuple):
     """How one replicate, or one leave-one-member-out member, ended.
 
-    The fields are those of [BootstrapOutcomes][diff_soup.inference.statistics.bootstrap.BootstrapOutcomes]
+    The fields are those of [BootstrapOutcomes][diff_soup.optimization.inference.statistics.bootstrap.BootstrapOutcomes]
     for one population member; ``point`` is its row of ``points``.
     """
 
@@ -1136,7 +1136,7 @@ class BootstrapOutcomes:
     on it, one elsewhere) and serves the jackknife. Every attribute but
     ``replicates`` has one entry per population member, in that order;
     ``outcomes[q]`` gives member ``q``'s entries as one
-    [BootstrapOutcome][diff_soup.inference.statistics.bootstrap.BootstrapOutcome],
+    [BootstrapOutcome][diff_soup.optimization.inference.statistics.bootstrap.BootstrapOutcome],
     and iterating gives them all.
 
     Attributes:
@@ -1182,7 +1182,7 @@ class BootstrapOutcomes:
             ``((index, -1 | 1), ...)``.
         failed_lanes: Every lane that failed at one of its trials or at a
             point it accepted, each a
-            [ReplicateLaneFailure][diff_soup.inference.hierarchical._replicates.ReplicateLaneFailure]
+            [ReplicateLaneFailure][diff_soup.optimization.inference.hierarchical._replicates.ReplicateLaneFailure]
             with ``lane``, ``kind``, ``t_reached``, ``rungs``, ``attempt``,
             ``at`` (``"trial"`` or ``"accepted"``) and ``ignored`` (a lane of
             weight zero).
@@ -1580,7 +1580,7 @@ class BootstrapResult:
                 member label to value.
 
         Returns:
-            A [`BootstrapInterval`][diff_soup.inference.BootstrapInterval].
+            A [`BootstrapInterval`][diff_soup.optimization.inference.BootstrapInterval].
         """
         fields = _summarize(
             self._context(), self._draws(), statistic, level=level, kind=kind, members=members
@@ -1608,7 +1608,7 @@ class BootstrapResult:
                 member label to value.
 
         Returns:
-            A [`BootstrapBand`][diff_soup.inference.BootstrapBand].
+            A [`BootstrapBand`][diff_soup.optimization.inference.BootstrapBand].
         """
         fields = _summarize(
             self._context(),
@@ -1752,7 +1752,7 @@ class BootstrapResult:
 
     @classmethod
     def load(cls, path: Any) -> BootstrapResult:
-        """Read a result written by [save][diff_soup.inference.BootstrapResult.save].
+        """Read a result written by [save][diff_soup.optimization.inference.BootstrapResult.save].
 
         The loaded result answers ``values``, ``interval``, ``band`` and the
         one-step's ``interval`` and ``band`` as the saved one did, given the
@@ -1765,12 +1765,12 @@ class BootstrapResult:
             path: The file; ``.npz`` is appended when missing.
 
         Returns:
-            The [BootstrapResult][diff_soup.inference.BootstrapResult].
+            The [BootstrapResult][diff_soup.optimization.inference.BootstrapResult].
 
         Raises:
             ValueError: If the file was not written by ``save``.
         """
-        from diff_soup.inference.hierarchical._replicates import ReplicateLaneFailure
+        from diff_soup.optimization.inference.hierarchical._replicates import ReplicateLaneFailure
 
         target = _npz(path)
         with np.load(target, allow_pickle=False) as data:
@@ -1881,7 +1881,7 @@ class BootstrapResult:
         ``r`` only, and its trust region on its weights only, so each
         replicate ends in its shard as it ends in the unsharded run. ``merge``
         takes the ``n`` parts, in any order, in memory or read back by
-        [load][diff_soup.inference.BootstrapResult.load], and returns the
+        [load][diff_soup.optimization.inference.BootstrapResult.load], and returns the
         result the unsharded run gives: the weights and every outcome at the
         replicate's or member's own number, the one-step estimates, the counts,
         and the intervals and bands taken over every replicate. The Laplace
@@ -1895,7 +1895,7 @@ class BootstrapResult:
                 ``n``.
 
         Returns:
-            The [BootstrapResult][diff_soup.inference.BootstrapResult], with
+            The [BootstrapResult][diff_soup.optimization.inference.BootstrapResult], with
             ``shard`` ``None``.
 
         Raises:
@@ -1905,7 +1905,9 @@ class BootstrapResult:
                 is named); they are shards of different counts ``n``; a shard
                 is given more than once, or one is missing.
         """
-        from diff_soup.inference.hierarchical._population import declaration_differences
+        from diff_soup.optimization.inference.hierarchical._population import (
+            declaration_differences,
+        )
 
         parts = list(parts)
         if not parts:
@@ -2122,9 +2124,9 @@ def bootstrap(
     weights. The top level needs at least three members.
 
     Args:
-        problem: The [`LoweredStudy`][diff_soup.inference.LoweredStudy] the fit was made on.
-        fit: The [`OptResult`][diff_soup.inference.OptResult] of
-            [`TrustRegion`][diff_soup.inference.TrustRegion] on `problem`.
+        problem: The [`LoweredStudy`][diff_soup.optimization.inference.LoweredStudy] the fit was made on.
+        fit: The [`OptResult`][diff_soup.optimization.OptResult] of
+            [`TrustRegion`][diff_soup.optimization.inference.TrustRegion] on `problem`.
         replicates: The number of replicates, a positive integer.
         key: The JAX random key that fixes the weights, such as `jax.random.key(0)`.
         over: The level to reweight, by name or as `1`, which must be the top level, or `None`
@@ -2153,7 +2155,7 @@ def bootstrap(
             `None` for every replicate.
 
     Returns:
-        A [`BootstrapResult`][diff_soup.inference.BootstrapResult].
+        A [`BootstrapResult`][diff_soup.optimization.inference.BootstrapResult].
 
     Raises:
         TypeError: If `problem` is not a lowered study or `fit` is not an `OptResult`.
@@ -2161,14 +2163,17 @@ def bootstrap(
             `require_converged=True`, or the top level has fewer than three members.
     """
     from diff_soup._errors import ConfigurationError
-    from diff_soup.inference import LoweredStudy
-    from diff_soup.inference.hierarchical._population import PopulationCheckpoint, PopulationRoute
-    from diff_soup.inference.hierarchical._replicates import (
+    from diff_soup.optimization.inference import LoweredStudy
+    from diff_soup.optimization.inference.hierarchical._population import (
+        PopulationCheckpoint,
+        PopulationRoute,
+    )
+    from diff_soup.optimization.inference.hierarchical._replicates import (
         FitProducts,
         ReplicateStepper,
         inherited_noise,
     )
-    from diff_soup.inference.hierarchical.level_solvers import TrustRegion
+    from diff_soup.optimization.inference.hierarchical.level_solvers import TrustRegion
 
     if not isinstance(problem, LoweredStudy):
         raise TypeError(

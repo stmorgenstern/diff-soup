@@ -1,7 +1,7 @@
 """The Gauss-Newton system of a parameter hierarchy, solved along its tree.
 
 The system of a hierarchy is stored per node of every level, as the level
-reducer sums it ([LevelBlocks][diff_soup.inference.engine.LevelBlocks]): per
+reducer sums it ([LevelBlocks][diff_soup.optimization.inference.engine.LevelBlocks]): per
 node its diagonal block and its coupling to each of its ancestors, and at the
 root the shared block. Joint columns are laid out level by level: the shared
 coordinates, then every node of level 1, and so on down to the experiments.
@@ -232,10 +232,10 @@ class LevelLayout:
 
 
 def level_layout(tables: Any, device: Any = None) -> LevelLayout:
-    """The [LevelLayout][diff_soup.inference.hierarchical._level_elimination.LevelLayout] of ``tables``.
+    """The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_elimination.LevelLayout] of ``tables``.
 
     Args:
-        tables: The [LevelTables][diff_soup.inference.engine.LevelTables].
+        tables: The [LevelTables][diff_soup.optimization.inference.engine.LevelTables].
         device: The JAX device the systems are placed on; ``None`` for the
             default device.
     """
@@ -575,9 +575,9 @@ def level_system(
     at their value; equality rows absorb their values.
 
     Args:
-        blocks: The [LevelBlocks][diff_soup.inference.engine.LevelBlocks] at
+        blocks: The [LevelBlocks][diff_soup.optimization.inference.engine.LevelBlocks] at
             ``point``.
-        tables: The [LevelTables][diff_soup.inference.engine.LevelTables] the
+        tables: The [LevelTables][diff_soup.optimization.inference.engine.LevelTables] the
             blocks were summed with.
         point: ``(n,)``, the joint point, level by level.
         constraint_matrix: Optional ``(c, n)`` equality rows.
@@ -596,7 +596,7 @@ def level_system(
             held.
         device: The JAX device the system is placed on, that of the blocks
             and tables; ``None`` for the default device.
-        layout: The [LevelLayout][diff_soup.inference.hierarchical._level_elimination.LevelLayout]
+        layout: The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_elimination.LevelLayout]
             of ``tables`` on ``device``, to reuse its index tables and kept
             arrays; ``None`` builds one for this system alone.
         regularizer_blocks: What ``regularizer_blocks`` returned for this
@@ -604,7 +604,7 @@ def level_system(
             instead of evaluating the regularizer again; ``None`` evaluates it.
 
     Returns:
-        The [LevelSystem][diff_soup.inference.hierarchical._level_elimination.LevelSystem].
+        The [LevelSystem][diff_soup.optimization.inference.hierarchical._level_elimination.LevelSystem].
 
     Raises:
         ValueError: If the point does not have the coordinates of the levels,
@@ -1424,7 +1424,7 @@ def scaled_system(system: LevelSystem, scale: Any, addition: Any = None) -> Leve
         addition: Optional ``(n,)``, nonnegative; ``None`` adds nothing.
 
     Returns:
-        A [LevelSystem][diff_soup.inference.hierarchical._level_elimination.LevelSystem]
+        A [LevelSystem][diff_soup.optimization.inference.hierarchical._level_elimination.LevelSystem]
         of the same shape.
     """
     return _scaled(system, np.asarray(scale, dtype=_dtype(system)), _addition(system, addition))
@@ -1606,7 +1606,7 @@ def attempt_solve(
             scaled matrix.
 
     Returns:
-        The [AttemptSolve][diff_soup.inference.hierarchical._level_elimination.AttemptSolve].
+        The [AttemptSolve][diff_soup.optimization.inference.hierarchical._level_elimination.AttemptSolve].
         A search that finds no finite step inside the radius sets its
         ``failed``; nothing is raised here, so the solve at zero damping and
         its predicted decrease serve the tests a loop makes before it takes a
@@ -2257,7 +2257,7 @@ def reduce_to(system: LevelSystem, level: int) -> LevelSystem:
         level: The cut, ``1 .. D``.
 
     Returns:
-        A [LevelSystem][diff_soup.inference.hierarchical._level_elimination.LevelSystem]
+        A [LevelSystem][diff_soup.optimization.inference.hierarchical._level_elimination.LevelSystem]
         of depth ``level - 1`` (the root alone for ``level = 1``).
 
     Raises:

@@ -25,7 +25,7 @@ from typing import Any
 import jax
 import numpy as np
 
-from diff_soup.inference.fitting.windows import WindowInitialization
+from diff_soup.optimization.inference.fitting.windows import WindowInitialization
 from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
 
 _SUBDIRECTORY = "window-initialization"

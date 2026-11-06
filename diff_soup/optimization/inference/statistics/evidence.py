@@ -1,7 +1,7 @@
 """Guarded Laplace approximation to a normalized marginal likelihood.
 
 Marginal likelihood is sensitive to constants and local geometry that do not
-matter for point estimation. [diff_soup.inference.statistics.evidence.laplace_evidence][] therefore accepts only
+matter for point estimation. [diff_soup.optimization.inference.statistics.evidence.laplace_evidence][] therefore accepts only
 a posterior carrying explicit evidence provenance: a normalized likelihood at
 a checked stationary mode, an unregularized positive-definite curvature, and
 the exact prior-curvature contribution used in that factor. The normalized
@@ -25,10 +25,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.statistics.estimation import EstimationProblem
-from diff_soup.inference.statistics.laplace import LaplacePosterior, _evidence_refusal, laplace
-from diff_soup.inference.statistics.measurement import require_likelihoods
-from diff_soup.inference.statistics.priors import Prior
+from diff_soup.optimization.inference.statistics.estimation import EstimationProblem
+from diff_soup.optimization.inference.statistics.laplace import (
+    LaplacePosterior,
+    _evidence_refusal,
+    laplace,
+)
+from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
+from diff_soup.optimization.inference.statistics.priors import Prior
 
 __all__ = [
     "EvidenceResult",
@@ -324,13 +328,13 @@ def laplace_evidence(posterior: LaplacePosterior, prior: Any) -> EvidenceResult:
     Args:
         posterior: Proper Laplace posterior carrying explicit evidence
             provenance from
-            [laplace_posterior][diff_soup.inference.statistics.laplace.laplace_posterior].
+            [laplace_posterior][diff_soup.optimization.inference.statistics.laplace.laplace_posterior].
         prior: Proper normalized prior density in the same integration
             coordinate. Its value and observed local curvature are evaluated
             directly at the mode.
 
     Returns:
-        Frozen [EvidenceResult][diff_soup.inference.statistics.evidence.EvidenceResult]
+        Frozen [EvidenceResult][diff_soup.optimization.inference.statistics.evidence.EvidenceResult]
         with the decomposition, provenance,
         prior-sensitivity summary, and prior-dominated direction reports.
 
@@ -462,13 +466,13 @@ def evidence(problem: Any, fit: Any, *, curvature: str = "observed") -> Evidence
     """Approximate the log marginal likelihood of the data at a MAP fit, by Laplace's method.
 
     The value is `log p(y | mode) + log p(mode) + d/2 log(2 pi) - 1/2 log det H`, with `H` the
-    posterior precision of `ds.inference.laplace(problem, fit)` and the priors the problem
+    posterior precision of `ds.optimization.inference.laplace(problem, fit)` and the priors the problem
     declares. A fit that is not at a stationary point is refused.
 
     Args:
-        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] with
+        problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] with
             `objective=MAP()`, whose measurements all declare a likelihood.
-        fit: The [`OptResult`][diff_soup.inference.OptResult] of the MAP fit, a parameter vector,
+        fit: The [`OptResult`][diff_soup.optimization.OptResult] of the MAP fit, a parameter vector,
             or a mapping from every fitted handle to its value.
         curvature: `"observed"` or `"expected"`, as `curvature=` of `laplace`.
 

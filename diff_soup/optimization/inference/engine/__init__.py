@@ -20,35 +20,35 @@ the lanes among its processes, each evaluating its own on its one device.
 
 | module | holds |
 |---|---|
-| [_kernel][diff_soup.inference.engine._kernel] | the lane kernel and its modes |
-| [_status][diff_soup.inference.engine._status] | the status of a lane |
-| [_reducers][diff_soup.inference.engine._reducers] | sums over the parameter tree |
-| [_levels][diff_soup.inference.engine._levels] | tables and sums over a parameter hierarchy of any depth, one pass per level |
-| [_identity][diff_soup.inference.engine._identity] | the identity of a lane and of a bucket |
-| [_capacity][diff_soup.inference.engine._capacity] | frame classes and derivative widths |
-| [_layout][diff_soup.inference.engine._layout] | where every lane reads its coordinates in the fitted vector |
-| [_inputs][diff_soup.inference.engine._inputs] | the lanes of a group, as the numbers their kernel takes |
-| [_plan][diff_soup.inference.engine._plan] | the buckets of a study, built before any compile |
-| [_request][diff_soup.inference.engine._request] | a request: mode, points, members, lanes |
-| [_order][diff_soup.inference.engine._order] | canonical order, the calls of a program, the order units run in |
-| [_balance][diff_soup.inference.engine._balance] | units dealt to the devices of a call, and experiment rows to the lanes of a mesh, by their step counts |
-| [_result][diff_soup.inference.engine._result] | the results of a request, in canonical order |
-| [_batched][diff_soup.inference.engine._batched] | compiled programs per bucket and mode, and the evaluation of a request |
-| [_prepare][diff_soup.inference.engine._prepare] | compiling the programs of a study, and the report of what was compiled |
-| [_transport][diff_soup.inference.engine._transport] | the processes of a run and the messages between them, over MPI |
-| [_placement][diff_soup.inference.engine._placement] | which process evaluates which lanes: the process placement |
-| [_executor][diff_soup.inference.engine._executor] | the lanes of one study evaluated by several processes: coordinator and workers |
-| [_ledger][diff_soup.inference.engine._ledger] | what every lane cost so far, for a later run's placement |
+| [_kernel][diff_soup.optimization.inference.engine._kernel] | the lane kernel and its modes |
+| [_status][diff_soup.optimization.inference.engine._status] | the status of a lane |
+| [_reducers][diff_soup.optimization.inference.engine._reducers] | sums over the parameter tree |
+| [_levels][diff_soup.optimization.inference.engine._levels] | tables and sums over a parameter hierarchy of any depth, one pass per level |
+| [_identity][diff_soup.optimization.inference.engine._identity] | the identity of a lane and of a bucket |
+| [_capacity][diff_soup.optimization.inference.engine._capacity] | frame classes and derivative widths |
+| [_layout][diff_soup.optimization.inference.engine._layout] | where every lane reads its coordinates in the fitted vector |
+| [_inputs][diff_soup.optimization.inference.engine._inputs] | the lanes of a group, as the numbers their kernel takes |
+| [_plan][diff_soup.optimization.inference.engine._plan] | the buckets of a study, built before any compile |
+| [_request][diff_soup.optimization.inference.engine._request] | a request: mode, points, members, lanes |
+| [_order][diff_soup.optimization.inference.engine._order] | canonical order, the calls of a program, the order units run in |
+| [_balance][diff_soup.optimization.inference.engine._balance] | units dealt to the devices of a call, and experiment rows to the lanes of a mesh, by their step counts |
+| [_result][diff_soup.optimization.inference.engine._result] | the results of a request, in canonical order |
+| [_batched][diff_soup.optimization.inference.engine._batched] | compiled programs per bucket and mode, and the evaluation of a request |
+| [_prepare][diff_soup.optimization.inference.engine._prepare] | compiling the programs of a study, and the report of what was compiled |
+| [_transport][diff_soup.optimization.inference.engine._transport] | the processes of a run and the messages between them, over MPI |
+| [_placement][diff_soup.optimization.inference.engine._placement] | which process evaluates which lanes: the process placement |
+| [_executor][diff_soup.optimization.inference.engine._executor] | the lanes of one study evaluated by several processes: coordinator and workers |
+| [_ledger][diff_soup.optimization.inference.engine._ledger] | what every lane cost so far, for a later run's placement |
 """
 
-from diff_soup.inference.engine._inputs import (
+from diff_soup.optimization.inference.engine._inputs import (
     LaneGroup,
     concatenate_results,
     lane_group,
     lanes_at,
     tree_of,
 )
-from diff_soup.inference.engine._kernel import (
+from diff_soup.optimization.inference.engine._kernel import (
     MODES,
     LaneInputs,
     LaneProgram,
@@ -57,8 +57,8 @@ from diff_soup.inference.engine._kernel import (
     StreamInputs,
     batched_kernel,
 )
-from diff_soup.inference.engine._ledger import Ledger
-from diff_soup.inference.engine._levels import (
+from diff_soup.optimization.inference.engine._ledger import Ledger
+from diff_soup.optimization.inference.engine._levels import (
     LevelBlocks,
     LevelGradients,
     LevelTables,
@@ -67,10 +67,10 @@ from diff_soup.inference.engine._levels import (
     reduce_levels,
     reduce_member_gradients,
 )
-from diff_soup.inference.engine._placement import Placement, modelled_costs, place
-from diff_soup.inference.engine._plan import Plan
-from diff_soup.inference.engine._prepare import PrepareReport, ProgramRecord
-from diff_soup.inference.engine._reducers import (
+from diff_soup.optimization.inference.engine._placement import Placement, modelled_costs, place
+from diff_soup.optimization.inference.engine._plan import Plan
+from diff_soup.optimization.inference.engine._prepare import PrepareReport, ProgramRecord
+from diff_soup.optimization.inference.engine._reducers import (
     LaneFailure,
     OwnerBlocks,
     OwnerGradients,
@@ -79,9 +79,9 @@ from diff_soup.inference.engine._reducers import (
     reduce_gradient,
     tree_tables,
 )
-from diff_soup.inference.engine._request import Request
-from diff_soup.inference.engine._result import Results
-from diff_soup.inference.engine._status import KINDS, LaneStatus, failures
+from diff_soup.optimization.inference.engine._request import Request
+from diff_soup.optimization.inference.engine._result import Results
+from diff_soup.optimization.inference.engine._status import KINDS, LaneStatus, failures
 
 __all__ = [
     "KINDS",

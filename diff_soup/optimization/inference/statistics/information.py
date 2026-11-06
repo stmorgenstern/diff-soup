@@ -17,11 +17,11 @@ never conflates them:
 * the **prior precision** and the **posterior precision** approximation
   (data curvature plus prior precision).
 
-[InformationResult][diff_soup.inference.statistics.information.InformationResult] stores each kind separately, alongside the
+[InformationResult][diff_soup.optimization.inference.statistics.information.InformationResult] stores each kind separately, alongside the
 coordinate the curvature lives in and the provenance/tolerances of the
 evaluation. It is an analysis container, not a differentiable object: its
 methods run host-side numpy (rank, delegation to
-[identifiability_report][diff_soup.inference.statistics.report.identifiability_report]), but arrays
+[identifiability_report][diff_soup.optimization.inference.statistics.report.identifiability_report]), but arrays
 passed in are stored as given — JAX arrays stay JAX arrays.
 
 Build instances with [assemble_information][], which validates shapes and
@@ -40,13 +40,13 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from diff_soup.inference.fitting._layout import resolve_point
-from diff_soup.inference.fitting.result import OptResult
-from diff_soup.inference.statistics.estimation import MAP, EstimationProblem
-from diff_soup.inference.statistics.experiment import (
+from diff_soup.optimization.inference.fitting._layout import resolve_point
+from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.statistics.estimation import MAP, EstimationProblem
+from diff_soup.optimization.inference.statistics.experiment import (
     _channel_likelihood_view,
 )
-from diff_soup.inference.statistics.measurement import require_likelihoods
+from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
 
 __all__ = [
     "InformationResult",
@@ -89,7 +89,7 @@ class InformationResult(eqx.Module):
     """Local curvature at one evaluation point, each kind kept distinct.
 
     Every field is optional except the labels: an instance carries exactly
-    the kinds that were computed, and [kinds][diff_soup.inference.statistics.information.InformationResult.kinds] names them. Nothing here
+    the kinds that were computed, and [kinds][diff_soup.optimization.inference.statistics.information.InformationResult.kinds] names them. Nothing here
     is ever labeled "the Hessian" without qualification — the expected data
     Fisher information, the observed negative-log-likelihood curvature, and
     the generalized Gauss-Newton curvature are stored and reported as three
@@ -138,7 +138,7 @@ class InformationResult(eqx.Module):
     # -- rank ---------------------------------------------------------------
 
     def rank_source(self) -> str:
-        """Name the field [rank][diff_soup.inference.statistics.information.InformationResult.rank] computes from.
+        """Name the field [rank][diff_soup.optimization.inference.statistics.information.InformationResult.rank] computes from.
 
         Returns:
             ``"whitened_jacobian"`` when the whitened sensitivity is stored
@@ -166,7 +166,7 @@ class InformationResult(eqx.Module):
         """Return the local sensitivity rank of the data information.
 
         Counts the directions whose information exceeds ``null_tol`` times
-        the largest. The source is chosen by [rank_source][diff_soup.inference.statistics.information.InformationResult.rank_source]: the SVD of
+        the largest. The source is chosen by [rank_source][diff_soup.optimization.inference.statistics.information.InformationResult.rank_source]: the SVD of
         the whitened sensitivity when stored (squared singular values, so the
         threshold has information units), else the eigenvalues of the
         ``expected`` (or ``ggn``) matrix — a formed matrix squares the
@@ -292,7 +292,7 @@ def assemble_information(
     provenance: Optional[dict] = None,
     tolerances: Optional[dict] = None,
 ) -> InformationResult:
-    """Validate and assemble an [InformationResult][diff_soup.inference.statistics.information.InformationResult].
+    """Validate and assemble an [InformationResult][diff_soup.optimization.inference.statistics.information.InformationResult].
 
     Assembly rules:
 
@@ -329,7 +329,7 @@ def assemble_information(
             ``symmetry_rtol``.
 
     Returns:
-        The frozen [InformationResult][diff_soup.inference.statistics.information.InformationResult].
+        The frozen [InformationResult][diff_soup.optimization.inference.statistics.information.InformationResult].
 
     Raises:
         ValueError: On an empty call, an unknown coordinate, a non-square or
@@ -638,7 +638,7 @@ def _information_terms(
     recorded the data Jacobian at its parameters, that Jacobian is used and no
     forward solve runs for it. Observed information is the real
     ``jax.jacfwd(jax.jacfwd(nll))`` Hessian retained by
-    [InferenceProblem][diff_soup.inference.InferenceProblem], on a lowered
+    [InferenceProblem][diff_soup.optimization.inference.InferenceProblem], on a lowered
     study the sum of its lanes' exact Hessians.
 
     A decision-variable multishoot fit also fits the window-start states. They are
@@ -715,9 +715,9 @@ def information(problem: Any, *, at: Any, kind: str = "observed") -> Information
     the matrix covers the parameters alone.
 
     Args:
-        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] whose measurements
+        problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] whose measurements
             all declare a likelihood.
-        at: The point, an [`OptResult`][diff_soup.inference.OptResult], a parameter vector, or a
+        at: The point, an [`OptResult`][diff_soup.optimization.OptResult], a parameter vector, or a
             mapping from every fitted handle to its value.
         kind: `"observed"` for the curvature at the data seen, or `"expected"` for the curvature
             averaged over data drawn from the model.

@@ -5,18 +5,18 @@
 # mechanics live in _windows_dv.
 """inference_problem.py — the one-geometry inference problem and its composers.
 
-An [InferenceProblem][diff_soup.inference.fitting.inference_problem.InferenceProblem] owns exactly one problem/geometry and one latent
+An [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem] owns exactly one problem/geometry and one latent
 trajectory.  It composes four interchangeable nouns:
 
-* an **objective** — [LeastSquares][diff_soup.inference.fitting.inference_problem.LeastSquares] (weighted output-error fitting);
-* a **trajectory** strategy — [SingleShoot][diff_soup.inference.fitting.inference_problem.SingleShoot] (one forward solve over the
-  horizon) or [Multishoot][diff_soup.inference.fitting.inference_problem.Multishoot] (window partitioning);
-* an **initial-state** policy — [FixedInitialState][diff_soup.inference.fitting.inference_problem.FixedInitialState] (the first
-  differential state is fixed) or [LearnedInitialState][diff_soup.inference.fitting.inference_problem.LearnedInitialState] (it is optimized);
-* **parameter groups** — [ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups] naming the local and shared
+* an **objective** — [LeastSquares][diff_soup.optimization.inference.fitting.inference_problem.LeastSquares] (weighted output-error fitting);
+* a **trajectory** strategy — [SingleShoot][diff_soup.optimization.inference.fitting.inference_problem.SingleShoot] (one forward solve over the
+  horizon) or [Multishoot][diff_soup.optimization.inference.fitting.inference_problem.Multishoot] (window partitioning);
+* an **initial-state** policy — [FixedInitialState][diff_soup.optimization.inference.fitting.inference_problem.FixedInitialState] (the first
+  differential state is fixed) or [LearnedInitialState][diff_soup.optimization.inference.fitting.inference_problem.LearnedInitialState] (it is optimized);
+* **parameter groups** — [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups] naming the local and shared
   learnable selections.
 
-An inference problem may carry several named [Series][diff_soup.inference.fitting.series.Series]
+An inference problem may carry several named [Series][diff_soup.optimization.inference.fitting.series.Series]
 streams of the same trajectory.  In single-shoot mode one forward solve serves
 the union of every stream's times; each stream's frames are sliced from that one
 trajectory.
@@ -46,7 +46,7 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision, cast_to_compute_dtype, compute_dtype_of
 from diff_soup._warnings import warn_user
-from diff_soup.inference.fitting._forward_seam import (
+from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
     GroupedThetaSelection,
     batched_transition_residual_factory,
@@ -58,26 +58,31 @@ from diff_soup.inference.fitting._forward_seam import (
     selected_leaf_ids,
     union_residual_factory,
 )
-from diff_soup.inference.fitting._window_cache import (
+from diff_soup.optimization.inference.fitting._window_cache import (
     load_window_initialization,
     store_window_initialization,
     window_initialization_key,
 )
-from diff_soup.inference.fitting._windows_dv import (
+from diff_soup.optimization.inference.fitting._windows_dv import (
     DecisionWindowBuild,
     WindowLayout,
     boundaries_from_windows,
     warn_if_over_ceiling,
 )
-from diff_soup.inference.fitting.bounds import Bounds
-from diff_soup.inference.fitting.learnables import (
+from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.learnables import (
     LearnableSelector,
     has_declared_learnables,
     learnables,
 )
-from diff_soup.inference.fitting.regularization import NoReg
-from diff_soup.inference.fitting.series import FullState, Series, observes_full_state
-from diff_soup.inference.fitting.windows import Continuity, RestartStep, StateBasis, Windows
+from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.series import FullState, Series, observes_full_state
+from diff_soup.optimization.inference.fitting.windows import (
+    Continuity,
+    RestartStep,
+    StateBasis,
+    Windows,
+)
 
 # ---------------------------------------------------------------------------
 # Objective objects
@@ -85,7 +90,7 @@ from diff_soup.inference.fitting.windows import Continuity, RestartStep, StateBa
 
 
 class Objective(eqx.Module):
-    """Base class of the objective an [InferenceProblem][diff_soup.inference.fitting.inference_problem.InferenceProblem] takes through ``objective=``.
+    """Base class of the objective an [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem] takes through ``objective=``.
 
     An objective says how the misfit of the observations becomes the rows of
     the problem's residual.
@@ -116,9 +121,9 @@ class Multishoot(Trajectory):
     every experiment.
 
     Args:
-        windows: The [Windows][diff_soup.inference.Windows] that split the time span.
+        windows: The [Windows][diff_soup.optimization.inference.Windows] that split the time span.
         continuity: The weight of the continuity term between fitted windows, `Continuity()` when `None`.
-        states: The [StateBasis][diff_soup.inference.StateBasis] of the fitted window starts, or `None` to fit every differential entry.
+        states: The [StateBasis][diff_soup.optimization.inference.StateBasis] of the fitted window starts, or `None` to fit every differential entry.
         warm_start_steps: The number of optimizer steps on the parameters alone, with the window starts held, before the full fit.
         first_step: A `FirstStep` policy for the first time step of each window's solve, or `None` to leave it to the solver.
     """
@@ -263,11 +268,11 @@ class ParameterGroups:
     """Named local and shared learnable-parameter selections. Frozen.
 
     Each value is a
-    [LearnableSelector][diff_soup.inference.fitting.learnables.LearnableSelector]
+    [LearnableSelector][diff_soup.optimization.inference.fitting.learnables.LearnableSelector]
     (from ``learnables(problem, names)``), a learnable name, or a sequence of
     names.  ``local`` groups are geometry-specific (e.g. a particle's ``k(x)``);
     ``shared`` groups name constitutive functions intended to be tied across
-    geometries by a [JointInferenceProblem][diff_soup.inference.fitting.joint.JointInferenceProblem]
+    geometries by a [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem]
     (e.g. ``j0(c; theta)``).  When a
     leaf is fit alone, shared groups are ordinary learnable groups.
 
@@ -320,7 +325,7 @@ def _declared_learnable_names(problem: Any) -> frozenset:
     module named ``"reaction"`` is declared once under that name however many array
     fields it holds.
     """
-    from diff_soup.inference.fitting.learnables import (
+    from diff_soup.optimization.inference.fitting.learnables import (
         _model_declared_paths,
         _traced_adapter_layer,
     )
@@ -341,7 +346,7 @@ def _theta_path_tokens(problem: Any) -> tuple:
     name is matched against) and the subset that names a leaf itself (what an error
     message advertises).
     """
-    from diff_soup.inference.fitting._forward_seam import (
+    from diff_soup.optimization.inference.fitting._forward_seam import (
         _path_key_tokens,
         coerce_forward_problem,
     )
@@ -360,19 +365,19 @@ def _theta_path_tokens(problem: Any) -> tuple:
 
 
 def _resolve_parameters(parameters: Optional[ParameterGroups], problem: Any) -> tuple:
-    """Resolve [ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups].
+    """Resolve [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups].
 
     Produces a θ-selection spec and group records. Returns ``(theta_selection, groups)``:
 
     * ``theta_selection`` is what the forward seam selects as learnable — ``None``
       (the problem's declared learnables) when no groups are declared, and otherwise a
       [GroupedThetaSelection]
-      [diff_soup.inference.fitting._forward_seam.GroupedThetaSelection]. Its
+      [diff_soup.optimization.inference.fitting._forward_seam.GroupedThetaSelection]. Its
       ``order`` puts the flat decision vector in declaration order: shared
       groups first, then local groups, each in the order declared -- the same
       order a joint problem gives its shared and per-experiment blocks. Declared
       names and explicit
-      [LearnableSelector][diff_soup.inference.fitting.learnables.LearnableSelector]
+      [LearnableSelector][diff_soup.optimization.inference.fitting.learnables.LearnableSelector]
       values are resolved to slot keys of the problem's path table, while legacy model names retain their
       path-token matching behavior. Thus, a declared learnable whose public name is
       not a θ-leaf path token still resolves.
@@ -649,7 +654,7 @@ def _group_columns(seam: Any, groups: tuple) -> tuple:
 def _parameter_groups_select_name(parameters: ParameterGroups, name: str) -> bool:
     """Whether an explicit nonempty parameter declaration selects ``name``.
 
-    An empty [ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups]
+    An empty [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
     states no selection at all, and the fit falls back to the problem's declared
     learnables, so callers should only use this helper after establishing that at
     least one group was declared.
@@ -678,7 +683,7 @@ def build_stacked_residual_fns(segment_fns: tuple) -> tuple:
     solvers, so penalty weights can change between solves without recompiling.
     """
     # Local import avoids a fitting-to-solver module cycle at import time.
-    from diff_soup.inference.solvers.tangent import value_and_jacfwd
+    from diff_soup.optimization.solvers.tangent import value_and_jacfwd
 
     @jax.jit
     def _r_fn(p):
@@ -717,7 +722,7 @@ def _loss_fn_from_residual(residual_fn: Callable) -> Callable:
 def _loss_and_grad_from_residual(residual_fn: Callable, ad: str) -> Callable:
     """Build one scalar-loss value-and-gradient seam."""
     if ad == "forward":
-        from diff_soup.inference.solvers.tangent import value_and_jacfwd
+        from diff_soup.optimization.solvers.tangent import value_and_jacfwd
 
         @jax.jit
         def forward_loss_and_grad(x):
@@ -881,7 +886,7 @@ def _check_hessian_memory(compiled: Any, width: int, tile: Any) -> None:
         f"{need / gib:.1f} GiB and the {platform} device has {free / gib:.1f} GiB "
         f"free. With NewtonTrustRegion pass {smaller}"
         'hessian="gauss-newton", or subproblem="cg" with '
-        "x_scale=ds.inference.ConstantScale(...). For laplace and information, "
+        "x_scale=ds.optimization.inference.ConstantScale(...). For laplace and information, "
         'use the expected curvature (curvature="expected", kind="expected").'
     )
 
@@ -908,7 +913,7 @@ def _jacobian_memory_reporter(knob: str) -> Callable:
         raise _JacobianMemoryError(
             f"The Gauss-Newton residual Jacobian over {width} parameters, formed {how}, "
             f"needs {need / gib:.1f} GiB and the {platform} device has {free / gib:.1f} GiB "
-            f"free. {smaller}eclare a ds.inference.StateBasis or fewer windows to shrink "
+            f"free. {smaller}eclare a ds.optimization.inference.StateBasis or fewer windows to shrink "
             "the decision vector."
         )
 
@@ -977,7 +982,7 @@ class _TiledJacobian:
 
     ``build(tile)`` returns the evaluation pushing ``tile`` tangents at a time;
     calling the object evaluates it with every tangent at once. The solvers
-    read [at_tile][diff_soup.inference.fitting.inference_problem._TiledJacobian.at_tile]
+    read [at_tile][diff_soup.optimization.inference.fitting.inference_problem._TiledJacobian.at_tile]
     to tile a structured Jacobian instead of tiling the residual's directions.
     """
 
@@ -1013,7 +1018,7 @@ def checked_residual_jacobian(problem: Any, x: Any, tile: Any, *, knob: str) -> 
     Raises:
         ConfigurationError: If no candidate tile fits.
     """
-    from diff_soup.inference.solvers.tangent import value_and_jacfwd_tiled
+    from diff_soup.optimization.solvers.tangent import value_and_jacfwd_tiled
 
     at_tile = getattr(problem.residual_and_jacobian, "at_tile", None)
     residual = problem.residual
@@ -1091,10 +1096,10 @@ def lower_residual_problem(
     regularization: Any = None,
     joint_view: Any = None,
 ) -> Any:
-    """The [LeastSquaresProblem][diff_soup.inference.LeastSquaresProblem] of a residual problem.
+    """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] of a residual problem.
 
     ``problem`` is an inference problem of residual rows: an
-    [InferenceProblem][diff_soup.inference.fitting.inference_problem.InferenceProblem],
+    [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem],
     a joint problem, or a view of one. The result's residual is its
     ``batched_r_fn`` (else ``stacked_r_fn``, else the concatenation of its
     ``segment_fns``) with the matching Jacobian; its value, gradient and exact
@@ -1128,8 +1133,8 @@ def lower_residual_problem(
         joint_view: ``() -> `` the joint problem with its level structure,
             for ``"batched_lanes"``.
     """
-    from diff_soup.inference._abc import LeastSquaresProblem
-    from diff_soup.inference.fitting.bounds import resolve_decision_bounds
+    from diff_soup.optimization._abc import LeastSquaresProblem
+    from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
 
     evaluator = problem if evaluator is None else evaluator
     requires = frozenset(getattr(optimizer, "requires", ()))
@@ -1276,7 +1281,7 @@ def _resolve_spec_declared_bounds(inference_problem: Any, problem: Any):
     found by slot key through its stable Recipe handle (a declared
     parameter's public name need not be a θ-leaf path token). A bounded learnable intentionally
     omitted by a nonempty
-    [ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups]
+    [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
     is fixed for this fit and
     needs no bound, so it is ignored silently. A declared non-learnable, or a
     learnable explicitly selected but absent from the decision vector, warns
@@ -1362,7 +1367,7 @@ def _regularizer_for_decision_vector(regularizer: Any, n_theta: int, n_decision:
 
 
 def _as_named_series_tuple(data: Any) -> tuple:
-    """Coerce ``data`` into a tuple of [Series][diff_soup.inference.fitting.series.Series] with unique names."""
+    """Coerce ``data`` into a tuple of [Series][diff_soup.optimization.inference.fitting.series.Series] with unique names."""
     series = (data,) if isinstance(data, Series) else tuple(data)
     if not series or not all(isinstance(s, Series) for s in series):
         raise TypeError("InferenceProblem 'data' must be a Series or a tuple of Series.")
@@ -1396,7 +1401,7 @@ def _resolve_y0(data: tuple, y0: Any) -> Any:
 def _check_initial_state_time(initial_state: Any, data: tuple) -> None:
     """Reject a FixedInitialState time that contradicts the frame it labels.
 
-    A [FixedInitialState][diff_soup.inference.fitting.inference_problem.FixedInitialState]
+    A [FixedInitialState][diff_soup.optimization.inference.fitting.inference_problem.FixedInitialState]
     with no ``y0`` takes its state from the first stream's first observed frame, so
     the only time that state can carry is that frame's own time.
 
@@ -2020,7 +2025,7 @@ class InferenceProblem:
         """Eagerly build the decision-variable window stack.
 
         With
-        [LearnedInitialState][diff_soup.inference.fitting.inference_problem.LearnedInitialState],
+        [LearnedInitialState][diff_soup.optimization.inference.fitting.inference_problem.LearnedInitialState],
         the first window's differential start
         ``s_0`` joins the decision vector (``x = [theta | s_0 | s_1 | ... ]``); an
         observation at ``t_0`` then constrains it directly (the window-0 obs row uses
@@ -2233,7 +2238,7 @@ class InferenceProblem:
         if self._stacked_r is None:
             _segments, _batched, r_fn, _solver = self._residual_seam("forward")
 
-            from diff_soup.inference.solvers.tangent import value_and_jacfwd
+            from diff_soup.optimization.solvers.tangent import value_and_jacfwd
 
             @jax.jit
             def rj_fn(x):
@@ -2260,7 +2265,7 @@ class InferenceProblem:
     def stacked_rj_fn(self) -> Callable:
         """The jitted ``x -> (r, J)`` companion of ``stacked_r_fn``, built once.
 
-        See [stacked_r_fn][diff_soup.inference.fitting.inference_problem.InferenceProblem.stacked_r_fn].
+        See [stacked_r_fn][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem.stacked_r_fn].
         """
         if self._stacked_rj is None:
             self.stacked_r_fn  # noqa: B018 — builds and caches both callables
@@ -2285,7 +2290,7 @@ class InferenceProblem:
         if batched is None:
             return None
         if self._batched_rj is None:
-            from diff_soup.inference.solvers.tangent import value_and_jacfwd
+            from diff_soup.optimization.solvers.tangent import value_and_jacfwd
 
             @jax.jit
             def batched_rj(x):
@@ -2392,7 +2397,7 @@ class InferenceProblem:
     @property
     def function_columns(self) -> tuple:
         """The columns of the theta block that hold learnable-function (network) weights."""
-        from diff_soup.inference.fitting.learnables import learnable_function_leaf_ids
+        from diff_soup.optimization.inference.fitting.learnables import learnable_function_leaf_ids
 
         owners = (self.problem, getattr(self._seam.problem, "source", None))
         ids = frozenset().union(
@@ -2418,7 +2423,7 @@ class InferenceProblem:
         """Stable flat order of learnable θ scalars.
 
         This is the scalar order used by ``x0`` and by
-        [InequalityConstraints][diff_soup.inference.fitting.constrained.InequalityConstraints].
+        [InequalityConstraints][diff_soup.optimization.inference.fitting.constrained.InequalityConstraints].
         It is suitable for naming constraint coordinates without relying on
         undocumented pytree leaf order.
         """

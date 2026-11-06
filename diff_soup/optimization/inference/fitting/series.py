@@ -1,7 +1,7 @@
 """series.py — observed data bound to its observable.
 
 A [Series][] carries the observation times, the observed values *in
-observable space*, the [ObservationOperator][diff_soup.inference.data.base.ObservationOperator]
+observable space*, the [ObservationOperator][diff_soup.optimization.inference.data.base.ObservationOperator]
 that maps solver state to that space, optional ``1/σ`` weights, and an optional
 time-frame mask for windowed-in-time observation.
 
@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
 
-from diff_soup.inference.data.base import ObservationOperator
+from diff_soup.optimization.inference.data.base import ObservationOperator
 
 
 def _compute_dtype() -> Any:
@@ -135,7 +135,7 @@ def as_observable(obs: Any) -> ObservationOperator:
         obs: An operator, a ``fn(u) -> obs`` callable, or ``None``.
 
     Returns:
-        An [ObservationOperator][diff_soup.inference.data.base.ObservationOperator].
+        An [ObservationOperator][diff_soup.optimization.inference.data.base.ObservationOperator].
     """
     if obs is None:
         return FullState()
@@ -167,9 +167,9 @@ class Series(eqx.Module):
         ts: Observation times, shape ``(n_frames,)``.
         values: Observed values in observable space, shape ``(n_frames, ...)``.
         observable: The
-            [ObservationOperator][diff_soup.inference.data.base.ObservationOperator]
+            [ObservationOperator][diff_soup.optimization.inference.data.base.ObservationOperator]
             mapping state → observable
-            space (default [FullState][diff_soup.inference.fitting.series.FullState]).
+            space (default [FullState][diff_soup.optimization.inference.fitting.series.FullState]).
         weight: ``1/σ`` rows broadcast to ``values`` (or ``None``).
         likelihood: Optional normalized likelihood with an exact
             ``least_squares_rows(observed, predicted, context=...)`` map. This
@@ -202,7 +202,7 @@ class Series(eqx.Module):
         frame_mask: Any = None,
         dtype: Any = None,
     ):
-        """Build a frozen [Series][diff_soup.inference.fitting.series.Series].
+        """Build a frozen [Series][diff_soup.optimization.inference.fitting.series.Series].
 
         Casts data to ``compute_dtype``.
 
@@ -211,9 +211,9 @@ class Series(eqx.Module):
             ts: Observation times (cast to ``compute_dtype``).
             values: Observed values in observable space (cast to ``compute_dtype``).
             observable: An
-                [ObservationOperator][diff_soup.inference.data.base.ObservationOperator],
+                [ObservationOperator][diff_soup.optimization.inference.data.base.ObservationOperator],
                 a bare ``fn(u) -> obs``
-                callable, or ``None`` (→ [FullState][diff_soup.inference.fitting.series.FullState]).
+                callable, or ``None`` (→ [FullState][diff_soup.optimization.inference.fitting.series.FullState]).
             weight: ``1/σ`` rows or ``None`` (cast to ``compute_dtype`` if present).
             likelihood: Optional exact least-squares likelihood. Its
                 ``least_squares_rows`` method acts on the complete retained

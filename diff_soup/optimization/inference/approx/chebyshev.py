@@ -1,8 +1,8 @@
 """chebyshev.py — Chebyshev polynomial function approximation.
 
-Provides [ChebyshevExpansion][diff_soup.inference.approx.chebyshev.ChebyshevExpansion], a generic building block for
+Provides [ChebyshevExpansion][diff_soup.optimization.inference.approx.chebyshev.ChebyshevExpansion], a generic building block for
 Chebyshev polynomial expansions.  Same usage pattern as
-[LegendreExpansion][diff_soup.inference.approx.legendre.LegendreExpansion].
+[LegendreExpansion][diff_soup.optimization.inference.approx.legendre.LegendreExpansion].
 """
 
 from __future__ import annotations

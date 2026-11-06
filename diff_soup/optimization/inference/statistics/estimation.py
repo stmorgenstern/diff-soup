@@ -11,12 +11,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._precision import cast_floating_leaves
-from diff_soup.inference.fitting._layout import resolve_point
-from diff_soup.inference.fitting.inference_problem import _MemoryCheckedHessian
-from diff_soup.inference.fitting.regularization import NoReg
-from diff_soup.inference.fitting.result import OptResult
-from diff_soup.inference.solvers.tangent import value_and_jacfwd
-from diff_soup.inference.statistics.likelihoods import (
+from diff_soup.optimization.inference.fitting._layout import resolve_point
+from diff_soup.optimization.inference.fitting.inference_problem import _MemoryCheckedHessian
+from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.statistics.likelihoods import (
     CorrelatedGaussian,
     Gaussian,
     LogNormal,
@@ -24,12 +23,13 @@ from diff_soup.inference.statistics.likelihoods import (
     Poisson,
     StudentT,
 )
-from diff_soup.inference.statistics.measurement import (
+from diff_soup.optimization.inference.statistics.measurement import (
     measurements_without_likelihood,
     require_likelihoods,
 )
-from diff_soup.inference.statistics.priors import compile_prior
-from diff_soup.inference.statistics.study import Study
+from diff_soup.optimization.inference.statistics.priors import compile_prior
+from diff_soup.optimization.inference.statistics.study import Study
+from diff_soup.optimization.solvers.tangent import value_and_jacfwd
 from diff_soup.problem._ir.lower import prior_digest
 from diff_soup.utils.ad_guards import reverse_linearization_observed
 
@@ -38,7 +38,7 @@ from diff_soup.utils.ad_guards import reverse_linearization_observed
 class MLE:
     """The maximum-likelihood objective, which minimizes the negative log likelihood of the data.
 
-    Pass it as `objective=` of an [`InferenceProblem`][diff_soup.inference.InferenceProblem],
+    Pass it as `objective=` of an [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem],
     where it is the default.
     """
 
@@ -47,11 +47,11 @@ class MLE:
 class MAP:
     """The maximum-a-posteriori objective, which minimizes the negative log likelihood of the data plus the negative log prior.
 
-    Pass it as `objective=` of an [`InferenceProblem`][diff_soup.inference.InferenceProblem].
+    Pass it as `objective=` of an [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem].
     Every fitted handle needs a prior, and every measurement a likelihood.
 
     Args:
-        state_prior: A [`Gaussian`][diff_soup.inference.Gaussian] with one positive scale, the
+        state_prior: A [`Gaussian`][diff_soup.optimization.inference.Gaussian] with one positive scale, the
             prior on the window starts of a multiple-shooting fit, or `None`.
     """
 
@@ -61,7 +61,7 @@ class MAP:
         """Reject a state prior that is not a Gaussian with a positive scale."""
         if self.state_prior is None:
             return
-        from diff_soup.inference.statistics.likelihoods import Gaussian
+        from diff_soup.optimization.inference.statistics.likelihoods import Gaussian
 
         if not isinstance(self.state_prior, Gaussian):
             raise TypeError(
@@ -285,7 +285,7 @@ class EstimationProblem:
         """Compile the declaration, parameter schema, prior rows, and warm start.
 
         Args:
-            study: The declared :class:`~diff_soup.inference.Study`.
+            study: The declared :class:`~diff_soup.optimization.inference.Study`.
             objective: :class:`MLE` or physical-space :class:`MAP`.
             regularization: Optional parameter regularization. A
                 ``Tikhonov(lambda_=..., on=handle)`` is resolved here to the
@@ -295,7 +295,7 @@ class EstimationProblem:
                 PDE solve; a ``False`` rejects the trial without evaluating it.
             start: Optional warm start: a flat vector, a mapping from every fitted
                 handle to its value, or an
-                :class:`~diff_soup.inference.fitting.result.OptResult` of the same
+                :class:`~diff_soup.optimization.inference.fitting.result.OptResult` of the same
                 parameter layout.
             layout: Optional device placement for the Study's child batch,
                 forwarded to :meth:`Study.compile_inference_problem`.
@@ -555,7 +555,7 @@ class EstimationProblem:
         """The joint problem with its level structure, warm-started at this problem's start.
 
         For a study of several experiments this is the underlying
-        [JointInferenceProblem][diff_soup.inference.fitting.joint.JointInferenceProblem]
+        [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem]
         at this problem's start. Under MLE that is the data problem; under
         MAP, or with a regularization, it also carries the independent prior
         rows with their global/owner-local column declarations, so a fit on
@@ -585,7 +585,7 @@ class EstimationProblem:
         return problem
 
     def numeric_problem(self, optimizer: Any) -> Any:
-        """The [LeastSquaresProblem][diff_soup.inference.LeastSquaresProblem] ``optimizer`` solves.
+        """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] ``optimizer`` solves.
 
         Its residual is the whitened data rows followed by the MAP prior
         rows; its value and gradient, exact Hessian and Gauss-Newton
@@ -729,10 +729,10 @@ def _reduced_gauss_newton(problem: EstimationProblem) -> Any:
 
 
 def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any = None) -> Any:
-    """The [LeastSquaresProblem][diff_soup.inference.LeastSquaresProblem] of an estimation problem.
+    """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] of an estimation problem.
 
     Args:
-        problem: The [EstimationProblem][diff_soup.inference.statistics.estimation.EstimationProblem]
+        problem: The [EstimationProblem][diff_soup.optimization.inference.statistics.estimation.EstimationProblem]
             whose residual (data rows, then MAP prior rows), bounds,
             regularization and reconstruction the result carries.
         evaluator: The problem whose ``loss_fn``, ``loss_and_grad_fn``,
@@ -746,7 +746,7 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
         lanes: The lowered study that evaluates the objective on its lanes,
             or ``None``.
     """
-    from diff_soup.inference.fitting.inference_problem import lower_residual_problem
+    from diff_soup.optimization.inference.fitting.inference_problem import lower_residual_problem
 
     gauss_newton = value = None
     if lanes is not None:

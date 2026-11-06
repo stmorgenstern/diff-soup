@@ -1,11 +1,11 @@
-"""Function approximation for ``diff_soup.inference``: expansions, fields, signals.
+"""Function approximation for ``diff_soup.optimization.inference``: expansions, fields, signals.
 
 Provides generic, differentiable polynomial expansions, random-field bases,
 and time-signal bases that users compose into physics-specific
-parameterisations. [Basis][diff_soup.inference._abc.Basis] is the abstract
+parameterisations. [Basis][diff_soup.optimization._abc.Basis] is the abstract
 interface for coefficient-carrying bases; the concrete expansions below are
 plain ``eqx.Module`` pytrees with the same call convention.
-[legendre_weights][diff_soup.inference.fitting.regularization.legendre_weights]
+[legendre_weights][diff_soup.optimization.inference.fitting.regularization.legendre_weights]
 supplies the degree-graded Tikhonov weights that pair with ``LegendreExpansion``.
 
 * [Legendre][] — Named learnable Legendre function on a physical interval.
@@ -13,7 +13,7 @@ supplies the degree-graded Tikhonov weights that pair with ``LegendreExpansion``
 * [ChebyshevExpansion][] — Chebyshev polynomial basis on [−1, 1].
 * [MonomialExpansion][] — Direct power-law basis.
 * [mono_to_legendre][] — Convert monomial coefficients to Legendre.
-* [diff_soup.inference.approx.grf][] — Gaussian Random Field (GRF)
+* [diff_soup.optimization.inference.approx.grf][] — Gaussian Random Field (GRF)
   parameterisations via 2-D cosine Fourier modes (differentiable) and RBF
   covariance eigenmodes (sampling utility).
 * [PiecewiseConstant][], [PiecewiseLinear][], [CubicHermite][],
@@ -31,28 +31,35 @@ Usage example::
     j0 = lambda c: c*(1-c) * jnp.exp(expansion(2*c - 1))
 """
 
-from diff_soup.inference._abc import Basis
-from diff_soup.inference.approx.chebyshev import ChebyshevExpansion
-from diff_soup.inference.approx.coordinate_nets import SIREN, WIRE, FourierFeatureNet
-from diff_soup.inference.approx.grf import (
+from diff_soup.optimization._abc import Basis
+from diff_soup.optimization.inference.approx.chebyshev import ChebyshevExpansion
+from diff_soup.optimization.inference.approx.coordinate_nets import SIREN, WIRE, FourierFeatureNet
+from diff_soup.optimization.inference.approx.grf import (
     GRFBasis,
     GRFGenerator,
     KLBasis,
     build_grf_basis,
     grf_mode_list,
 )
-from diff_soup.inference.approx.legendre import Legendre, LegendreExpansion, mono_to_legendre
-from diff_soup.inference.approx.networks import ICNN, MonotoneMLP, Transform
-from diff_soup.inference.approx.operators import DeepONet, FNO1d, FNO2d
-from diff_soup.inference.approx.polynomial import MonomialExpansion
-from diff_soup.inference.approx.signals import (
+from diff_soup.optimization.inference.approx.legendre import (
+    Legendre,
+    LegendreExpansion,
+    mono_to_legendre,
+)
+from diff_soup.optimization.inference.approx.networks import ICNN, MonotoneMLP, Transform
+from diff_soup.optimization.inference.approx.operators import DeepONet, FNO1d, FNO2d
+from diff_soup.optimization.inference.approx.polynomial import MonomialExpansion
+from diff_soup.optimization.inference.approx.signals import (
     CubicHermite,
     Fourier,
     PiecewiseConstant,
     PiecewiseLinear,
 )
-from diff_soup.inference.approx.sparse_legendre import SparseLegendre, sparse_legendre_weights
-from diff_soup.inference.fitting.regularization import legendre_weights
+from diff_soup.optimization.inference.approx.sparse_legendre import (
+    SparseLegendre,
+    sparse_legendre_weights,
+)
+from diff_soup.optimization.inference.fitting.regularization import legendre_weights
 
 __all__ = [
     # Abstract basis interface

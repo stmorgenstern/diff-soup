@@ -1,12 +1,12 @@
 # Posterior sampling
 
-`ds.inference.sample` draws from the posterior of a `MAP` fit with MCMC,
-and `ds.inference.mcmc_report` checks the draws. See
+`ds.optimization.inference.sample` draws from the posterior of a `MAP` fit with MCMC,
+and `ds.optimization.inference.mcmc_report` checks the draws. See
 [posterior sampling](../../overview/inference/mcmc.md).
 
-::: diff_soup.inference.sample
+::: diff_soup.optimization.inference.sample
 
-::: diff_soup.inference.Draws
+::: diff_soup.optimization.inference.Draws
     options:
       members:
         - values
@@ -14,4 +14,4 @@ and `ds.inference.mcmc_report` checks the draws. See
         - chain_map
         - positions
 
-::: diff_soup.inference.mcmc_report
+::: diff_soup.optimization.inference.mcmc_report

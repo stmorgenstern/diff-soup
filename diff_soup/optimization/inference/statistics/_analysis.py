@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from diff_soup.inference.statistics.estimation import EstimationProblem
+from diff_soup.optimization.inference.statistics.estimation import EstimationProblem
 
 
 def experiment_view(problem, experiment_id=None):

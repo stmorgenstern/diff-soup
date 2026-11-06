@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
+from diff_soup.optimization import inference as inf
 from tests.support.inference import NOISE, decay_experiment, decay_recipe, small_fit
 from tests.support.programs import primitive_names
 
@@ -165,8 +165,8 @@ import jax.numpy as jnp
 import numpy as np
 
 import diff_soup as ds
-from diff_soup import inference as inf
-from diff_soup.inference import design
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference import design
 from diff_soup.linear import KLU, SolveContext, SparseTopology, analyze, factor, solve
 from tests.support.inference import NOISE, decay_experiment, decay_recipe, small_fit
 

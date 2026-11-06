@@ -2,7 +2,7 @@
 
 The units of a request are evaluated in calls of compiled programs, in an order
 chosen for speed, and the last call of a bucket is filled up with copies of a
-unit. [assemble][diff_soup.inference.engine._result.assemble] keeps the
+unit. [assemble][diff_soup.optimization.inference.engine._result.assemble] keeps the
 results of each call's own units, drops the copies, and writes every unit to
 its place in canonical order: members ascending, then lanes experiment by
 experiment, the windows of one experiment in time order. The predictions of
@@ -11,11 +11,11 @@ what its lane returned: zeros and a typed status.
 
 A unit that failed with a kind of the study's ``retry_kinds`` is solved again,
 from a smaller first step, in later calls of the same programs.
-[merge_calls][diff_soup.inference.engine._result.merge_calls] replaces such a
+[merge_calls][diff_soup.optimization.inference.engine._result.merge_calls] replaces such a
 unit's result by the one of its later call, and ``assemble`` then records the
 rung that produced each unit's result and the record of every unit that was
 solved again. Per bucket the evaluation touched, a
-[Batch][diff_soup.inference.engine._result.Batch] records how its units were
+[Batch][diff_soup.optimization.inference.engine._result.Batch] records how its units were
 cut into calls.
 """
 
@@ -32,15 +32,15 @@ import equinox as eqx
 import jax
 import numpy as np
 
-from diff_soup.inference.engine._kernel import LaneResult, LaneWork
-from diff_soup.inference.engine._status import ABSENT, KINDS, LaneStatus
+from diff_soup.optimization.inference.engine._kernel import LaneResult, LaneWork
+from diff_soup.optimization.inference.engine._status import ABSENT, KINDS, LaneStatus
 
 
 class Status(eqx.Module):
     """How the solve of every unit ended: numpy arrays with leading axes (members, lanes).
 
     Attributes:
-        kind: Index into [KINDS][diff_soup.inference.engine._status.KINDS];
+        kind: Index into [KINDS][diff_soup.optimization.inference.engine._status.KINDS];
             zero means the unit solved.
         t_reached: The time the solve reached.
         rung: The rung that produced the result: 0 for the solve from the
@@ -71,7 +71,7 @@ class Status(eqx.Module):
 class Work(eqx.Module):
     """The work counters of every unit's solve: numpy arrays with leading axes (members, lanes).
 
-    The fields are those of [LaneWork][diff_soup.inference.engine._kernel.LaneWork],
+    The fields are those of [LaneWork][diff_soup.optimization.inference.engine._kernel.LaneWork],
     from the solve that produced each unit's result.
 
     Attributes:
@@ -123,7 +123,7 @@ class Results:
             fitted in observed-start windows.
         members: The population members, ascending, shape ``(P,)``.
         bucket: Per lane, the index of its bucket in the plan, shape ``(L,)``.
-        status: The [Status][diff_soup.inference.engine._result.Status] of
+        status: The [Status][diff_soup.optimization.inference.engine._result.Status] of
             every unit.
         cost: Half the squared whitened residual; zero for a failed unit.
         rows: The number of residual rows of every unit.
@@ -136,7 +136,7 @@ class Results:
         observables: In the ``observe`` mode, ``observables[p][l][s]`` holds
             the predictions of stream ``s`` of lane ``l`` for member ``p`` at
             the lane's own frames; ``None`` otherwise.
-        work: The [Work][diff_soup.inference.engine._result.Work] counters of
+        work: The [Work][diff_soup.optimization.inference.engine._result.Work] counters of
             every unit, from the solve that produced its result.
         seconds: Per bucket index, the wall seconds its calls took, from the
             first call to the results on the host, summed over the passes
@@ -154,7 +154,7 @@ class Results:
             scale) and ``seconds`` (per rung tried after the first, the wall
             seconds of the calls of the unit's bucket that tried it).
         batches: Per index of a bucket the evaluation touched, and no other,
-            the [Batch][diff_soup.inference.engine._result.Batch] of its
+            the [Batch][diff_soup.optimization.inference.engine._result.Batch] of its
             first pass: the units it ran, the width of the bucket's program
             and the calls it made. A request of ``P`` points runs ``P`` times
             a bucket's lanes in calls of that width, so a bucket's ``calls``
@@ -163,9 +163,9 @@ class Results:
         levels: In a lowered study whose lanes run in several processes, per
             member of ``members`` (the leading axis), the sums of the lanes'
             blocks (``blocks`` and ``hessian`` modes, a
-            [LevelBlocks][diff_soup.inference.engine.LevelBlocks]) or of
+            [LevelBlocks][diff_soup.optimization.inference.engine.LevelBlocks]) or of
             their gradients (``gradient`` mode, a
-            [LevelGradients][diff_soup.inference.engine.LevelGradients]) over
+            [LevelGradients][diff_soup.optimization.inference.engine.LevelGradients]) over
             the level tables of the study's fits, every lane weighing one; the
             lanes' own matrices stay in the processes that hold them, so
             ``normal`` and ``gradient`` are then ``None``. ``None`` in one
@@ -233,7 +233,7 @@ class Results:
                 default device.
 
         Returns:
-            A [LaneResult][diff_soup.inference.engine._kernel.LaneResult]
+            A [LaneResult][diff_soup.optimization.inference.engine._kernel.LaneResult]
             whose leaves lead with the lane axis, in the order of
             ``lane_ids``, on ``device``. It carries no predictions.
 
@@ -278,7 +278,7 @@ class CallOutput(NamedTuple):
     Attributes:
         rows: Per own unit of the call, its position in the results' members.
         columns: Per own unit, its position in the results' lanes.
-        output: The call's [LaneResult][diff_soup.inference.engine._kernel.LaneResult]
+        output: The call's [LaneResult][diff_soup.optimization.inference.engine._kernel.LaneResult]
             as numpy arrays, leading with the call's width; its first
             ``len(rows)`` entries are the call's own units, the rest padded
             copies.
@@ -381,7 +381,7 @@ def assemble(
         lane_ids: The requested lane ids, in canonical order.
         members: The requested population members, ascending.
         bucket: Per lane of ``lane_ids``, its bucket index.
-        calls: One [CallOutput][diff_soup.inference.engine._result.CallOutput]
+        calls: One [CallOutput][diff_soup.optimization.inference.engine._result.CallOutput]
             per call of a program; at least one.
         seconds: Per bucket index, the wall seconds of its calls.
         rungs: Per unit, shape (members, lanes), the rung whose solve
@@ -389,14 +389,14 @@ def assemble(
         retries: The records of the units solved again, for
             ``Results.retries``.
         batches: Per bucket index, the
-            [Batch][diff_soup.inference.engine._result.Batch] of its first
+            [Batch][diff_soup.optimization.inference.engine._result.Batch] of its first
             pass, for ``Results.batches``; ``None`` records none.
         present: Per unit, shape (members, lanes), whether it was evaluated;
             ``None`` when every unit was. A unit not evaluated gets the kind
             ``absent`` and zeros everywhere else.
 
     Returns:
-        The [Results][diff_soup.inference.engine._result.Results].
+        The [Results][diff_soup.optimization.inference.engine._result.Results].
 
     Raises:
         RuntimeError: If the calls do not give exactly one result for every

@@ -15,12 +15,17 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._distributed import any_process, assert_decision_value, local_value
-from diff_soup.inference._abc import OptSolver
-from diff_soup.inference.fitting.bounds import projected_gradient_norm
-from diff_soup.inference.fitting.callbacks import StopFit
-from diff_soup.inference.fitting.regularization import NoReg
-from diff_soup.inference.fitting.result import EvalCounts, OptResult, StepInfo, TerminationStatus
-from diff_soup.inference.solvers._termination import (
+from diff_soup.optimization._abc import OptSolver
+from diff_soup.optimization.inference.fitting.bounds import projected_gradient_norm
+from diff_soup.optimization.inference.fitting.callbacks import StopFit
+from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.result import (
+    EvalCounts,
+    OptResult,
+    StepInfo,
+    TerminationStatus,
+)
+from diff_soup.optimization.solvers._termination import (
     DEFAULT_STEP_TOL,
     gradient_tolerance,
     relative_tolerance,
@@ -43,7 +48,7 @@ class BFGS(OptSolver):
         max_linesearch: The number of step halvings the line search tries per step.
         memory: The number of past steps the curvature estimate is built from.
         ad: `"reverse"` takes the gradient from the reverse adjoint, `"forward"` from the forward-mode Jacobian.
-        callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
+        callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient"})
@@ -61,7 +66,7 @@ class BFGS(OptSolver):
         """Run L-BFGS with Armijo line search on ``problem``.
 
         Args:
-            problem: An [OptimizationProblem][diff_soup.inference._abc.OptimizationProblem]
+            problem: An [OptimizationProblem][diff_soup.optimization._abc.OptimizationProblem]
                 with ``"value_gradient"``: its ``value_and_gradient`` (the
                 lowering differentiates it in this solver's ``ad`` mode), its
                 ``regularization`` penalty, added to the objective, and its
@@ -72,7 +77,7 @@ class BFGS(OptSolver):
                 during the solve.  Must be passed as a keyword argument.
 
         Returns:
-            A [OptResult][diff_soup.inference.fitting.result.OptResult] populated with
+            A [OptResult][diff_soup.optimization.inference.fitting.result.OptResult] populated with
             the final parameters, cost/gradient histories, timing, and termination
             status.
         """

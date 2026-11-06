@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 
 import equinox as eqx
 
-from diff_soup.inference._abc import OptSolver
+from diff_soup.optimization._abc import OptSolver
 
 
 class SolveStatus(enum.IntEnum):
@@ -119,5 +119,5 @@ class CompiledSolver(OptSolver):
         raise NotImplementedError
 
     def solve(self, problem: Any, *, callbacks: tuple = ()) -> Any:
-        """Run on the host and return the `OptResult`, as `ds.inference.optsolve` expects."""
+        """Run on the host and return the `OptResult`, as `ds.optimization.optsolve` expects."""
         raise NotImplementedError

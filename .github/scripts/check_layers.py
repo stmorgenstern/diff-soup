@@ -52,20 +52,21 @@ LAYERS: tuple[str, ...] = (
     "_adjoints",  # adjoint-mode markers shared by nonlinear and timestepping
     "_internal",  # native extension bindings; imported lazily by the solvers
     "utils",  # numerical helpers; imports only _jax_compat and _errors
-    "_distributed",  # device-mesh helpers on _jax_compat; used by linear and inference
+    "_distributed",  # device-mesh helpers on _jax_compat; used by linear and optimization
     "distributed",  # public launcher over _distributed
     # The solver stack.
     "linear",  # linear solvers; imports only the leaves
     "nonlinear",  # Newton solvers built on linear
-    # The modeling spine: domains -> problem -> _lowering -> timestepping -> inference.
+    # The modeling spine: domains -> problem -> _lowering -> timestepping -> optimization.
     "domains",  # meshes and geometry; the base of the modeling spine
     "problem",  # the Recipe API and residual IR; builds on linear and nonlinear
     "_lowering",  # turns a problem and its domains into solver-ready arrays
     "timestepping",  # time integrators over nonlinear and linear
     "pdesolve",  # the solve entry point; wires timestepping together
     "_compile",  # ds.compile: compiles one pdesolve call ahead of time
-    "_schedule",  # multi-phase schedules over pdesolve; used by inference
-    "inference",  # fitting and sensitivities over the whole solve stack
+    "_schedule",  # multi-phase schedules over pdesolve; used by optimization
+    "optimization",  # problems, constraints, solvers, inference and control over the solve stack
+    "inference",  # the deprecated alias of optimization.inference, for one release
     # Top level: wires the packages together for the public namespace.
     "projection",  # consistent-initialization projection over the solver stack
     TOP,  # diff_soup/__init__.py, the public namespace

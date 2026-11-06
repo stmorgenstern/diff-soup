@@ -3,10 +3,10 @@ r"""observation/pixel_averaging.py — FEM field to image pixel observation oper
 
 Provides two observation operators:
 
-1. [PixelAveragingOperator][diff_soup.inference.data.pixel_averaging.PixelAveragingOperator] — direct mesh-to-pixel interpolation
+1. [PixelAveragingOperator][diff_soup.optimization.inference.data.pixel_averaging.PixelAveragingOperator] — direct mesh-to-pixel interpolation
    (simple, for unit tests and cases where PSF blurring is not needed)
 
-2. [UpConvDownOperator][diff_soup.inference.data.pixel_averaging.UpConvDownOperator] — production observation operator implementing
+2. [UpConvDownOperator][diff_soup.optimization.inference.data.pixel_averaging.UpConvDownOperator] — production observation operator implementing
    the full pipeline from the Zhao dimensional:
 
    .. math:: \\mathcal{O} = D \\cdot C \\cdot U
@@ -30,7 +30,7 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from scipy.signal import fftconvolve
 
-from diff_soup.inference.data.base import ObservationOperator
+from diff_soup.optimization.inference.data.base import ObservationOperator
 
 
 class PixelAveragingOperator(ObservationOperator):
@@ -446,7 +446,7 @@ class UpConvDownOperator(ObservationOperator):
         XF, YF = np.meshgrid(x_fine, y_fine)  # (ny_f, nx_f)
 
         # matplotlib is an OPTIONAL dependency — imported lazily here (the only
-        # use site) so `import diff_soup.inference` does not hard-require it.
+        # use site) so `import diff_soup.optimization.inference` does not hard-require it.
         from matplotlib.tri import Triangulation
 
         tri_obj = Triangulation(points[:, 0], points[:, 1], cells)

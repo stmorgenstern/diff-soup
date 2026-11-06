@@ -3,7 +3,7 @@
 After a fit completes, [OptDiagnostics][] makes the *conditioning* of the
 parameter estimate visible.  A poor fit on a PDE inversion usually means the
 problem is under-determined, not that the optimizer failed; this module surfaces
-that evidence on every [OptResult][diff_soup.inference.fitting.result.OptResult].
+that evidence on every [OptResult][diff_soup.optimization.inference.fitting.result.OptResult].
 
 Fields on [OptDiagnostics][]:
 

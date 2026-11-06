@@ -14,8 +14,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._distributed import local_value
-from diff_soup.inference.fitting.joint import JointInferenceProblem
-from diff_soup.inference.statistics.estimation import EstimationProblem
+from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
+from diff_soup.optimization.inference.statistics.estimation import EstimationProblem
 
 Array = jax.Array
 
@@ -28,7 +28,7 @@ def _constraint_rows(
     dtype: Any,
 ) -> tuple[Array, Array]:
     """Lower named linear constraints and gauges to flat joint rows."""
-    from diff_soup.inference.statistics.parameters import Gauge, LinearConstraint
+    from diff_soup.optimization.inference.statistics.parameters import Gauge, LinearConstraint
 
     if constraints is None:
         constraints = ()

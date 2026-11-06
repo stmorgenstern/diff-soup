@@ -1,9 +1,9 @@
 """Optimization result types.
 
-[OptResult][diff_soup.inference.fitting.result.OptResult] holds the solution,
+[OptResult][diff_soup.optimization.inference.fitting.result.OptResult] holds the solution,
 an enum termination status, iteration and evaluation counts, cost and
 gradient histories, the trust-region record
-([TrustRegionReport][diff_soup.inference.fitting.result.TrustRegionReport])
+([TrustRegionReport][diff_soup.optimization.inference.fitting.result.TrustRegionReport])
 and conditioning diagnostics of one fit. Both are pytrees: the arrays and the
 numbers of the fit are leaves, everything else is static.
 """
@@ -147,7 +147,7 @@ class EvalCounts:
 class ChildFit:
     """One child's reconstruction inside a joint fit result. Frozen.
 
-    A [JointInferenceProblem][diff_soup.inference.fitting.joint.JointInferenceProblem] fit
+    A [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem] fit
     returns one of
     these per child (in input order) instead of a single ``opt_params``.
 
@@ -361,7 +361,7 @@ class OptInfo(TypedDict, total=False):
     ``info`` is solver-specific detail; a key is present only when the solver
     or the end-of-fit step that writes it ran. The trust-region numbers are
     not in it: they are the result's ``trust_region``
-    ([TrustRegionReport][diff_soup.inference.fitting.result.TrustRegionReport]).
+    ([TrustRegionReport][diff_soup.optimization.inference.fitting.result.TrustRegionReport]).
 
     Attributes:
         hessian: ``"true"`` or ``"gauss-newton"``, the model matrix a Newton
@@ -495,7 +495,7 @@ def _layout_text(schema: Any, info: Any) -> str:
     """The parameter layout ``OptResult.save`` writes: the schema's, else the one loaded."""
     if schema is None:
         return str(info.get("schema_layout", ""))
-    from diff_soup.inference.fitting._layout import layout_text
+    from diff_soup.optimization.inference.fitting._layout import layout_text
 
     return layout_text(schema)
 
@@ -530,7 +530,7 @@ def _attached(result: Any, problem: Any, recorded_uq: Any, file: str) -> Any:
     """``result`` with ``problem``'s schema, objective and ``info["uq"]``, after the checks."""
     import dataclasses
 
-    from diff_soup.inference.fitting._optsolve import _recorded_fingerprint
+    from diff_soup.optimization.inference.fitting._optsolve import _recorded_fingerprint
 
     schema = getattr(problem, "parameter_schema", None)
     if schema is None:
@@ -541,7 +541,7 @@ def _attached(result: Any, problem: Any, recorded_uq: Any, file: str) -> Any:
     where = f"OptResult.load({file!r}, problem=...)"
     recorded_layout = result.info.get("schema_layout")
     if recorded_layout:
-        from diff_soup.inference.fitting._layout import describe_layout, layout_text
+        from diff_soup.optimization.inference.fitting._layout import describe_layout, layout_text
 
         if recorded_layout != layout_text(schema):
             raise ValueError(
@@ -601,7 +601,7 @@ def _attached(result: Any, problem: Any, recorded_uq: Any, file: str) -> Any:
 
 
 class OptResult(eqx.Module):
-    """The result of `ds.inference.optsolve`.
+    """The result of `ds.optimization.optsolve`.
 
     `result[handle]` returns the fitted value of a parameter handle. A field the solver does
     not fill keeps its default.
@@ -609,10 +609,10 @@ class OptResult(eqx.Module):
     Attributes:
         params: The fitted values as one flat array.
         cost: The final value of the objective.
-        status: The [TerminationStatus][diff_soup.inference.TerminationStatus] of the run.
+        status: The [TerminationStatus][diff_soup.optimization.TerminationStatus] of the run.
         message: How the run ended, as text.
         n_steps: The number of steps the optimizer took.
-        diagnostics: The [OptDiagnostics][diff_soup.inference.OptDiagnostics] of the fit, or `None` with `diagnostics=False`.
+        diagnostics: The [OptDiagnostics][diff_soup.optimization.inference.OptDiagnostics] of the fit, or `None` with `diagnostics=False`.
         log_likelihood: The log-likelihood at the solution, or `None` when no measurement declares a likelihood.
         log_prior: The log-prior at the solution under a `MAP` objective, or `None`.
         opt_params: The fitted parameter values in the form `ds.pdesolve` takes through `theta=`.

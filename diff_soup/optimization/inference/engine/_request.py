@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from diff_soup.inference.engine._kernel import MODES
+from diff_soup.optimization.inference.engine._kernel import MODES
 
 
 def _ids(value: Any, name: str) -> tuple | None:
@@ -105,7 +105,7 @@ class Request:
     """The units one evaluation of the batched lanes returns.
 
     Attributes:
-        mode: One of [MODES][diff_soup.inference.engine._kernel.MODES]:
+        mode: One of [MODES][diff_soup.optimization.inference.engine._kernel.MODES]:
             ``value``, ``blocks``, ``gradient``, ``observe`` or ``hessian``.
         points: The joint parameter vector, shape ``(n,)``, or one per
             population member, shape ``(P, n)``. Stored as a read-only numpy

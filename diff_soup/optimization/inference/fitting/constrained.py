@@ -1,7 +1,7 @@
 """Inequality constraints for parameter fitting via augmented-Lagrangian penalties.
 
 A user declares inequality constraints with
-[InequalityConstraints][diff_soup.inference.fitting.constrained.InequalityConstraints]:
+[InequalityConstraints][diff_soup.optimization.inference.fitting.constrained.InequalityConstraints]:
 a
 function ``g(params) -> (m,)`` on the *unflattened* learnables view, where
 ``g(params) <= 0`` means feasible.  The constraints are enforced with the
@@ -32,14 +32,14 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
-from diff_soup.inference.fitting.bounds import projected_gradient_norm
-from diff_soup.inference.fitting.regularization import NoReg
-from diff_soup.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.fitting.bounds import projected_gradient_norm
+from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.result import OptResult
 
 
 @dataclasses.dataclass(frozen=True)
 class InequalityConstraints:
-    """Inequality constraints `g(params) <= 0` for `ds.inference.constrained_optsolve`.
+    """Inequality constraints `g(params) <= 0` for `ds.optimization.inference.constrained_optsolve`.
 
     Attributes:
         g: A function of the fitted parameters returning one value per constraint, satisfied where every value is at most zero.
@@ -106,7 +106,7 @@ class _ChainedRegularizer:
 def augmented_lagrangian_penalty(problem, constraints: InequalityConstraints):
     """Build the PHR penalty rows for ``constraints`` on ``problem``.
 
-    ``problem`` is an [OptimizationProblem][diff_soup.inference.OptimizationProblem]
+    ``problem`` is an [OptimizationProblem][diff_soup.optimization.OptimizationProblem]
     (``optsolve`` lowers an ``InferenceProblem`` to one). The constraint
     function receives the *unflattened* learnables view via
     ``problem.unflatten``.  In decision-window mode ``unflatten`` already
@@ -129,7 +129,7 @@ def augmented_lagrangian_penalty(problem, constraints: InequalityConstraints):
     Returns:
         A ``(regularizer, penalty)`` pair.  ``regularizer`` is what to attach to
         the problem's regularizer seam; ``penalty`` is the mutable
-        [_AugmentedLagrangianRows][diff_soup.inference.fitting.constrained._AugmentedLagrangianRows]
+        [_AugmentedLagrangianRows][diff_soup.optimization.inference.fitting.constrained._AugmentedLagrangianRows]
         whose ``lam``/``rho`` the outer loop
         reassigns between inner solves.
     """
@@ -195,7 +195,7 @@ class _ConstrainedView:
         at its own ``x0`` and regularization, so the view replaces both on
         the lowered problem.
         """
-        from diff_soup.inference.fitting._optsolve import _numeric_problem
+        from diff_soup.optimization.inference.fitting._optsolve import _numeric_problem
 
         lowered = _numeric_problem(self._inner, optimizer)
         return dataclasses.replace(
@@ -205,11 +205,11 @@ class _ConstrainedView:
 
 @dataclasses.dataclass(frozen=True)
 class ConstrainedOptResult:
-    """The result of [constrained_optsolve][diff_soup.inference.fitting.constrained.constrained_optsolve].
+    """The result of [constrained_optsolve][diff_soup.optimization.inference.fitting.constrained.constrained_optsolve].
 
     Attributes:
         result: The final inner solve's
-            [OptResult][diff_soup.inference.fitting.result.OptResult].
+            [OptResult][diff_soup.optimization.inference.fitting.result.OptResult].
         multipliers: The augmented-Lagrangian multiplier estimates, one per
             constraint row (zero where the constraint is inactive).
         rho: The final penalty weight.
@@ -285,7 +285,7 @@ def _inner_optimizer(optimizer: Any, grad_target: float, dtype: Any) -> Any:
         A copy of ``optimizer`` with the unset tolerances filled in, or
         ``optimizer`` itself when it has none unset.
     """
-    from diff_soup.inference.solvers._termination import _resolution
+    from diff_soup.optimization.solvers._termination import _resolution
 
     if not dataclasses.is_dataclass(optimizer):
         return optimizer
@@ -309,7 +309,7 @@ def _lagrangian_gradient(view: Any, penalty: _AugmentedLagrangianRows, x, lam):
     The sum equals the gradient of the objective-plus-PHR-penalty at the inner
     optimum, because the PHR penalty's gradient is exactly ``G^T max(0,
     lam_prev + rho*g) = G^T lam``. ``view`` is the lowered
-    [LeastSquaresProblem][diff_soup.inference.LeastSquaresProblem]. The
+    [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem]. The
     objective gradient is ``J^T r`` from its Gauss-Newton statistics where
     they are reduced without forming the Jacobian (the lanes of a lowered
     study, a joint sharded over devices), and otherwise from its residual and
@@ -347,13 +347,13 @@ def constrained_optsolve(
 ) -> ConstrainedOptResult:
     """Fit a problem subject to inequality constraints with an augmented-Lagrangian outer loop.
 
-    Each outer iteration runs `ds.inference.optsolve` on the objective plus a penalty on the
+    Each outer iteration runs `ds.optimization.optsolve` on the objective plus a penalty on the
     constraints, then updates the multipliers. It needs JAX 64-bit mode.
 
     Args:
-        problem: The problem to fit, as for `ds.inference.optsolve`.
+        problem: The problem to fit, as for `ds.optimization.optsolve`.
         optimizer: The inner optimizer, `NewtonTrustRegion()` when `None`.
-        constraints: The [InequalityConstraints][diff_soup.inference.InequalityConstraints] to satisfy.
+        constraints: The [InequalityConstraints][diff_soup.optimization.inference.InequalityConstraints] to satisfy.
         outer_max: The largest number of outer iterations.
         feas_tol: The largest constraint violation accepted at convergence.
         stat_tol: The tolerance on the norm of the Lagrangian gradient, relative to the gradient scale.
@@ -363,7 +363,7 @@ def constrained_optsolve(
     Returns:
         A `ConstrainedOptResult` with the last inner fit as `result`, the `multipliers`, the `kkt` measures and `converged`.
     """
-    from diff_soup.inference.fitting._optsolve import _numeric_problem, optsolve
+    from diff_soup.optimization.inference.fitting._optsolve import _numeric_problem, optsolve
     from diff_soup.utils.precision import warn_if_float32_default
 
     warn_if_float32_default()
@@ -379,7 +379,7 @@ def constrained_optsolve(
         )
 
     if optimizer is None:
-        from diff_soup.inference.solvers.newton_trust_region import NewtonTrustRegion
+        from diff_soup.optimization.solvers.newton_trust_region import NewtonTrustRegion
 
         optimizer = NewtonTrustRegion()  # the default of optsolve
     regularizer, penalty = augmented_lagrangian_penalty(

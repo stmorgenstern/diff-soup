@@ -11,16 +11,16 @@ import jax
 import numpy as np
 
 from diff_soup._layout import Layout
-from diff_soup.inference.fitting.bounds import Bounds
-from diff_soup.inference.fitting.inference_problem import ParameterGroups
-from diff_soup.inference.fitting.joint import (
+from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.inference_problem import ParameterGroups
+from diff_soup.optimization.inference.fitting.joint import (
     JointInferenceProblem,
     _sharding_requested,
     plan_child_data_owners,
 )
-from diff_soup.inference.statistics._fingerprint import study_content_fingerprint
-from diff_soup.inference.statistics.hierarchy import EXPERIMENT, Hierarchy, _tree
-from diff_soup.inference.statistics.measurement import Experiment
+from diff_soup.optimization.inference.statistics._fingerprint import study_content_fingerprint
+from diff_soup.optimization.inference.statistics.hierarchy import EXPERIMENT, Hierarchy, _tree
+from diff_soup.optimization.inference.statistics.measurement import Experiment
 from diff_soup.problem._registry import parameter_handles
 from diff_soup.problem.parameters import (
     ParameterEntry,
@@ -86,8 +86,8 @@ def balance_owners(experiments: Any, lanes: int, *, weight: Callable | None = No
     heaviest first, each to the lightest block with room.
 
     Args:
-        experiments: A [`Study`][diff_soup.inference.Study] or a sequence of
-            [`Experiment`][diff_soup.inference.Experiment].
+        experiments: A [`Study`][diff_soup.optimization.inference.Study] or a sequence of
+            [`Experiment`][diff_soup.optimization.inference.Experiment].
         lanes: The number of consecutive blocks, filled in order with `ceil(n_owners / lanes)`
             owners each.
         weight: A function giving the load of one experiment, or `None` to count its measured
@@ -148,11 +148,11 @@ def balance_owners(experiments: Any, lanes: int, *, weight: Callable | None = No
 class Study:
     """A group of experiments with the parameters they share or vary, lowered with `ds.lower` for a joint fit.
 
-    With a [Hierarchy][diff_soup.inference.Hierarchy], each experiment names its members in its own `parameters=`. With a `ds.ParameterSet`, `clusters=` gives the owner of each experiment for each cluster.
+    With a [Hierarchy][diff_soup.optimization.inference.Hierarchy], each experiment names its members in its own `parameters=`. With a `ds.ParameterSet`, `clusters=` gives the owner of each experiment for each cluster.
 
     Args:
-        experiments: One [Experiment][diff_soup.inference.Experiment] or a non-empty iterable of them, with distinct ids.
-        parameters: A `ds.ParameterSet` or a [Hierarchy][diff_soup.inference.Hierarchy].
+        experiments: One [Experiment][diff_soup.optimization.inference.Experiment] or a non-empty iterable of them, with distinct ids.
+        parameters: A `ds.ParameterSet` or a [Hierarchy][diff_soup.optimization.inference.Hierarchy].
         clusters: A mapping from cluster name to one owner label per experiment, for a `ds.ParameterSet` only.
         independent: Whether the experiments are independent, which must be `True` for several experiments under a `ds.ParameterSet`.
     """
@@ -193,7 +193,7 @@ class Study:
         if not isinstance(parameters, (ParameterSet, Hierarchy)):
             raise TypeError(
                 "Study parameters must be a diff_soup.ParameterSet or a "
-                f"diff_soup.inference.Hierarchy; got {type(parameters).__name__}."
+                f"diff_soup.optimization.inference.Hierarchy; got {type(parameters).__name__}."
             )
         hierarchy = parameters if isinstance(parameters, Hierarchy) else None
         if (
@@ -419,8 +419,8 @@ class Study:
                 content fingerprint.
 
         Returns:
-            The single child's :class:`~diff_soup.inference.InferenceProblem`, or a
-            :class:`~diff_soup.inference.JointInferenceProblem` over all of them.
+            The single child's :class:`~diff_soup.optimization.inference.InferenceProblem`, or a
+            :class:`~diff_soup.optimization.inference.JointInferenceProblem` over all of them.
 
         Raises:
             ValueError: If a placement is given for a single-experiment Study,
@@ -575,14 +575,14 @@ class Study:
                 the processes by the seconds a previous run measured, from its
                 checkpoint: the checkpoint directory of a fit or a bootstrap
                 (or one of its ``attempt-`` or ``population-`` files), a
-                [Ledger][diff_soup.inference.engine.Ledger], or a mapping of
+                [Ledger][diff_soup.optimization.inference.engine.Ledger], or a mapping of
                 lane id to the seconds one evaluation of the lane took. A lane
                 without a measurement is balanced by its modelled cost.
                 ``None`` balances every lane by its modelled cost. Ignored in
                 a run of one process, so the same script runs everywhere.
 
         Returns:
-            The [LoweredStudy][diff_soup.inference.LoweredStudy].
+            The [LoweredStudy][diff_soup.optimization.inference.LoweredStudy].
 
         Raises:
             TypeError: If ``device`` is not a JAX device or ``None``, or
@@ -594,8 +594,8 @@ class Study:
                 ``retry_first_step_factors`` is not a positive finite number,
                 or ``retry_tolerance_factors`` is not empty.
         """
-        from diff_soup.inference import LoweredStudy
-        from diff_soup.inference.statistics.estimation import MLE
+        from diff_soup.optimization.inference import LoweredStudy
+        from diff_soup.optimization.inference.statistics.estimation import MLE
 
         return LoweredStudy(
             self,
@@ -614,7 +614,7 @@ class Study:
         )
 
     def _ds_lower(self, **options: Any) -> Any:
-        """``ds.lower(study, **options)``: the same as [build][diff_soup.inference.Study.build]."""
+        """``ds.lower(study, **options)``: the same as [build][diff_soup.optimization.inference.Study.build]."""
         return self.build(**options)
 
     def _lower_children(

@@ -1,17 +1,17 @@
-"""Abstract base classes for ``diff_soup.inference``.
+"""Abstract base classes for ``diff_soup.optimization.inference``.
 
 This module defines the interfaces shared by the optimization solvers, the
 problems they solve, and the function-approximation bases:
 
-- [OptimizationProblem][diff_soup.inference._abc.OptimizationProblem]: the
+- [OptimizationProblem][diff_soup.optimization._abc.OptimizationProblem]: the
   numerical problem a solver reads, a pytree whose ``structure`` names what
   it provides (a value and gradient, a Hessian, Gauss-Newton statistics, a
   residual and Jacobian, constraints, the lanes of a lowered study).
-- [LeastSquaresProblem][diff_soup.inference._abc.LeastSquaresProblem]: an
+- [LeastSquaresProblem][diff_soup.optimization._abc.LeastSquaresProblem]: an
   optimization problem whose objective is half the squared norm of a
   residual; ``LeastSquaresProblem.from_residual`` builds one from a plain
   residual function.
-- [OptSolver][diff_soup.inference._abc.OptSolver]: a solver, which names in
+- [OptSolver][diff_soup.optimization._abc.OptSolver]: a solver, which names in
   ``requires`` the structure it needs.
 
 Import only this module when you need type annotations: it does not import
@@ -32,17 +32,17 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 
 if TYPE_CHECKING:
-    from diff_soup.inference.fitting.result import OptResult
+    from diff_soup.optimization.inference.fitting.result import OptResult
 
 
-#: The structure an [OptimizationProblem][diff_soup.inference._abc.OptimizationProblem]
+#: The structure an [OptimizationProblem][diff_soup.optimization._abc.OptimizationProblem]
 #: can provide, each key a set of methods it then answers:
 #:
 #: - ``"value_gradient"``: ``value(x)`` and ``value_and_gradient(x)``.
 #: - ``"hessian"``: ``value_gradient_hessian(x)`` and ``hessian_vector(x, v)``.
 #: - ``"gauss_newton"``: ``gauss_newton(x) -> (cost, gradient, matrix, failed)``.
 #: - ``"residual_jacobian"``: ``residual(x)`` and ``residual_and_jacobian(x)``
-#:   (a [LeastSquaresProblem][diff_soup.inference._abc.LeastSquaresProblem]).
+#:   (a [LeastSquaresProblem][diff_soup.optimization._abc.LeastSquaresProblem]).
 #: - ``"constraints"``: ``constraints(x)`` returns at least one equality or
 #:   inequality row.
 #: - ``"batched_lanes"``: the objective is evaluated by the lanes of a lowered
@@ -96,7 +96,7 @@ def _hold(value: Any) -> _Held:
 class OptimizationProblem(eqx.Module):
     """The objective an optimizer minimizes, with its starting point, bounds and derivatives.
 
-    `ds.inference.optsolve` builds one from the problem it is given and passes it to
+    `ds.optimization.optsolve` builds one from the problem it is given and passes it to
     `OptSolver.solve`. `structure` names the functions it provides, and asking for any
     other raises `ConfigurationError`.
 
@@ -394,8 +394,8 @@ def _gauss_newton_of(residual_and_jacobian: Callable) -> Callable:
 class LeastSquaresProblem(OptimizationProblem):
     """An optimization problem whose objective is half the squared norm of a residual vector.
 
-    `ds.inference.optsolve` builds one from an `InferenceProblem`, and `from_residual` poses
-    one from any JAX-traceable residual function. `ds.inference.LevenbergMarquardt` needs
+    `ds.optimization.optsolve` builds one from an `InferenceProblem`, and `from_residual` poses
+    one from any JAX-traceable residual function. `ds.optimization.LevenbergMarquardt` needs
     this form.
     """
 
@@ -478,9 +478,9 @@ class LeastSquaresProblem(OptimizationProblem):
             ```python
             t = jnp.linspace(0.0, 2.0, 20)
             y = 3.0 * jnp.exp(-1.3 * t)
-            problem = ds.inference.LeastSquaresProblem.from_residual(
+            problem = ds.optimization.LeastSquaresProblem.from_residual(
                 jnp.array([1.0, 1.0]), lambda x: x[0] * jnp.exp(-x[1] * t) - y)
-            result = ds.inference.optsolve(problem, ds.inference.LevenbergMarquardt())
+            result = ds.optimization.optsolve(problem, ds.optimization.LevenbergMarquardt())
             ```
         """
         x0 = _as_vector(x0)
@@ -530,9 +530,9 @@ class LeastSquaresProblem(OptimizationProblem):
 
 
 class OptSolver(eqx.Module):
-    """Base class for an optimizer that `ds.inference.optsolve` runs.
+    """Base class for an optimizer that `ds.optimization.optsolve` runs.
 
-    A subclass implements `solve` and sets `requires`. `ds.inference.optsolve` refuses a
+    A subclass implements `solve` and sets `requires`. `ds.optimization.optsolve` refuses a
     problem that cannot provide what the solver requires.
 
     Attributes:
@@ -553,11 +553,11 @@ class OptSolver(eqx.Module):
         """Minimize the problem and return the result.
 
         Args:
-            problem: The [OptimizationProblem][diff_soup.inference.OptimizationProblem] to minimize.
-            callbacks: The [Callback][diff_soup.inference.Callback] objects to call during the run.
+            problem: The [OptimizationProblem][diff_soup.optimization.OptimizationProblem] to minimize.
+            callbacks: The [Callback][diff_soup.optimization.inference.Callback] objects to call during the run.
 
         Returns:
-            The [OptResult][diff_soup.inference.OptResult] of the run.
+            The [OptResult][diff_soup.optimization.OptResult] of the run.
         """
         raise NotImplementedError
 

@@ -4,14 +4,14 @@ An [Observable][] is one measurement channel of a solve: a differentiable
 map ``fn(u, *, t=None, theta=None) -> values`` from the solver state (and
 optionally the frame time and the analyzed parameters) to the quantities an
 instrument reports, bundled with the channel's noise model. The same object
-drives Fisher-information assembly ([diff_soup.inference.design.fisher][])
+drives Fisher-information assembly ([diff_soup.optimization.inference.design.fisher][])
 and, through its ``1/σ`` weights, least-squares fitting.
 
 [DiagonalNoise][] is the independent-Gaussian noise model: one ``σ`` per
 channel entry (scalar, per-channel, or per-frame-per-channel).
 
 Distribution-space channels (soft histograms over a population field) reuse the
-shipped kernels: [SoftHistogram][diff_soup.inference.data.distribution.SoftHistogram]
+shipped kernels: [SoftHistogram][diff_soup.optimization.inference.data.distribution.SoftHistogram]
 is re-exported here so an operando/distribution channel is written with the same
 imports as a scalar channel.
 """
@@ -25,8 +25,8 @@ import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array
 
-from diff_soup.inference.data.base import ObservationOperator
-from diff_soup.inference.data.distribution import CDFBins, Moments, SoftHistogram
+from diff_soup.optimization.inference.data.base import ObservationOperator
+from diff_soup.optimization.inference.data.distribution import CDFBins, Moments, SoftHistogram
 
 __all__ = [
     "Observable",
@@ -103,7 +103,7 @@ class Observable(eqx.Module):
         wrt_theta: Whether ``fn`` reads ``theta``. When ``True``, Fisher
             assembly adds the direct ``∂fn/∂θ`` term to the chain rule, and a
             least-squares fit through
-            [as_series][diff_soup.inference.fitting.observables.as_series]
+            [as_series][diff_soup.optimization.inference.fitting.observables.as_series]
             passes the current
             trial theta to the readout at every residual evaluation.
     """
@@ -229,9 +229,9 @@ def as_series(
         name: Stream name (default: the channel's name).
 
     Returns:
-        A [Series][diff_soup.inference.fitting.series.Series].
+        A [Series][diff_soup.optimization.inference.fitting.series.Series].
     """
-    from diff_soup.inference.fitting.series import Series
+    from diff_soup.optimization.inference.fitting.series import Series
 
     weight = None if observable.noise is None else observable.noise.weights()
     return Series(

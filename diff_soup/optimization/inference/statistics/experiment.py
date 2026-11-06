@@ -1,6 +1,6 @@
-"""Private compiled experiment machinery for [diff_soup.inference][].
+"""Private compiled experiment machinery for [diff_soup.optimization.inference][].
 
-The public declaration is [diff_soup.inference.Experiment][]. Its
+The public declaration is [diff_soup.optimization.inference.Experiment][]. Its
 private `_CompiledExperiment` delegate is a thin immutable lowering:
 one problem, one
 solver, one trajectory window, and a set of measurement `Channel`s,
@@ -12,12 +12,12 @@ declaration never optimizes anything — it lowers:
   the design stage with no data attached;
 * `Experiment.with_data` attaches observed values immutably;
 * `Experiment.as_inference_problem` lowers the data-bearing declaration to
-  the structural [InferenceProblem][diff_soup.inference.fitting.inference_problem.InferenceProblem],
+  the structural [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem],
   which ``optsolve`` solves — the experiment never grows its own
   optimizer.
 * `ExperimentSet` groups declarations under stable IDs and explicit
   owner metadata. It lowers through the existing
-  [JointInferenceProblem][diff_soup.inference.fitting.joint.JointInferenceProblem] engine and adds
+  [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem] engine and adds
   information/log likelihoods only when cross-experiment independence was
   declared (or an explicit joint-likelihood protocol was supplied).
 
@@ -39,11 +39,11 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from diff_soup.inference.data.base import ObservationOperator
-from diff_soup.inference.data.deferred import DeferredValues
-from diff_soup.inference.fitting.observables import Observable, _ObservableOperator
-from diff_soup.inference.fitting.series import Series
-from diff_soup.inference.statistics.likelihoods import (
+from diff_soup.optimization.inference.data.base import ObservationOperator
+from diff_soup.optimization.inference.data.deferred import DeferredValues
+from diff_soup.optimization.inference.fitting.observables import Observable, _ObservableOperator
+from diff_soup.optimization.inference.fitting.series import Series
+from diff_soup.optimization.inference.statistics.likelihoods import (
     CorrelatedGaussian,
     Gaussian,
     Likelihood,
@@ -272,7 +272,7 @@ class Predictor:
 
 def _trajectory_keywords(trajectory: Any, state_prior: Any) -> dict:
     """The leaf keywords a public trajectory declaration and state prior lower to."""
-    from diff_soup.inference.fitting.inference_problem import Multishoot
+    from diff_soup.optimization.inference.fitting.inference_problem import Multishoot
 
     keywords: dict = {}
     if isinstance(trajectory, Multishoot):
@@ -325,7 +325,7 @@ class _CompiledExperiment:
 
     def __post_init__(self):
         """Validate channel uniqueness, data binding, and source overlap."""
-        from diff_soup.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting.inference_problem import (
             InitialState,
             _initial_state_array,
         )
@@ -505,8 +505,8 @@ class _CompiledExperiment:
 
         Only response channels with attached data become residual streams;
         conditioning channels never contribute scored rows. The result is an
-        ordinary [InferenceProblem][diff_soup.inference.InferenceProblem] — fit it with
-        ``diff_soup.inference.optsolve``.
+        ordinary [InferenceProblem][diff_soup.optimization.inference.InferenceProblem] — fit it with
+        ``diff_soup.optimization.optsolve``.
 
         Args:
             parameters: Optional ``ParameterGroups`` choosing the learnable
@@ -531,7 +531,7 @@ class _CompiledExperiment:
                 with `with_data` first), or a scored channel's
                 likelihood has no exact least-squares representation.
         """
-        from diff_soup.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting.inference_problem import (
             InferenceProblem,
             LeastSquares,
             SingleShoot,
@@ -573,19 +573,19 @@ class _CompiledExperiment:
         solve over the union of every channel's observation times.
 
         Args:
-            parameters: Optional [ParameterGroups][diff_soup.inference.fitting.inference_problem.ParameterGroups]
+            parameters: Optional [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
                 choosing the learnable theta; defaults to the problem's declared
                 learnables, matching ``InferenceProblem``'s default.
 
         Returns:
             A `Predictor` carrying ``x0`` and the closure.
         """
-        from diff_soup.inference.fitting._forward_seam import (
+        from diff_soup.optimization.inference.fitting._forward_seam import (
             build_forward_seam,
             resolve_forward_adjoint,
             union_prediction_factory,
         )
-        from diff_soup.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting.inference_problem import (
             _initial_state_array,
             _lowered_schedule,
             _resolve_parameters,
@@ -767,7 +767,7 @@ class ExperimentSet(eqx.Module):
     ``ExperimentSet`` is a declaration/lowering layer, not a second fitting
     engine. `as_joint` lowers every child through
     `Experiment.as_inference_problem` and hands the result to the established
-    [JointInferenceProblem][diff_soup.inference.fitting.joint.JointInferenceProblem], preserving the exact
+    [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem], preserving the exact
     device-layout object. Statistical aggregation is additive only when
     ``independent=True`` was explicitly declared. Correlated experiments must
     provide a ``joint_likelihood`` object exposing the corresponding
@@ -778,7 +778,7 @@ class ExperimentSet(eqx.Module):
     Attributes:
         experiments: Non-empty tuple of experiment declarations.
         ownership: The same mapping/callable vocabulary accepted by
-            [JointInferenceProblem][diff_soup.inference.fitting.joint.JointInferenceProblem].
+            [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem].
         independent: Whether likelihoods are declared independent across
             experiments.
         experiment_ids: One unique, hashable, stable ID per experiment.
@@ -884,7 +884,7 @@ class ExperimentSet(eqx.Module):
         identity so existing vmap/shard-map/multi-GPU behavior composes with
         this declaration layer.
         """
-        from diff_soup.inference.fitting.joint import JointInferenceProblem
+        from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
 
         children = tuple(
             experiment.as_inference_problem(parameters=parameters)
@@ -933,7 +933,7 @@ class ExperimentSet(eqx.Module):
                 parameters=parameters,
             )
 
-        from diff_soup.inference.statistics.information import (
+        from diff_soup.optimization.inference.statistics.information import (
             _resolve_at,
             assemble_information,
             information,
@@ -1047,7 +1047,7 @@ class ExperimentSet(eqx.Module):
                 f"physical coordinate 'x'; got {prior.coordinate!r}."
             )
 
-        from diff_soup.inference.statistics.sample import LogDensity
+        from diff_soup.optimization.inference.statistics.sample import LogDensity
 
         predictors = tuple(exp.predictor(parameters=parameters) for exp in self.experiments)
         theta_names = tuple(predictors[0].theta_names)

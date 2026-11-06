@@ -8,10 +8,10 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
 from diff_soup.domains import cartesian_grid_1d
-from diff_soup.inference.approx import legendre_weights
-from diff_soup.inference.statistics import IdentifiedSubspace, ImproperPosteriorError
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.approx import legendre_weights
+from diff_soup.optimization.inference.statistics import IdentifiedSubspace, ImproperPosteriorError
 from tests.support.inference import (
     TIMES,
     decay_recipe,

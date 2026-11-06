@@ -1,40 +1,40 @@
-"""Experiment design for ``diff_soup.inference``: sensitivities, Fisher information, criteria.
+"""Experiment design for ``diff_soup.optimization.inference``: sensitivities, Fisher information, criteria.
 
-[sensitivity_solve][diff_soup.inference.design.solve.sensitivity_solve] wires a
+[sensitivity_solve][diff_soup.optimization.inference.design.solve.sensitivity_solve] wires a
 problem for sensitivity analysis: ``jax.jacfwd`` of the returned run gives the
 parameter sensitivities ``S = ∂y/∂θ``, and any scalar criterion built from ``S``
 can be reverse-differentiated with respect to design parameters.
-[observable_sensitivities][diff_soup.inference.design.fisher.observable_sensitivities]
+[observable_sensitivities][diff_soup.optimization.inference.design.fisher.observable_sensitivities]
 chains ``S`` through a measurement channel,
-[fisher_information][diff_soup.inference.design.fisher.fisher_information]
+[fisher_information][diff_soup.optimization.inference.design.fisher.fisher_information]
 assembles the Fisher information matrix, and
-[fisher_with_prior][diff_soup.inference.design.criteria.fisher_with_prior] adds
+[fisher_with_prior][diff_soup.optimization.inference.design.criteria.fisher_with_prior] adds
 Gaussian prior precision. The criteria ``d_optimal``, ``ds_optimal``,
 ``e_optimal_smooth``, and ``integrated_variance`` are smooth on every gradient
 path (log-determinants and Cholesky solves; no eigendecomposition is ever
 differentiated). ``t_optimal`` and ``DiscriminationEnsemble`` handle robust
 model discrimination, the ``sequential_*`` verbs run checkpointable local
-sequential design, and [parallel][diff_soup.inference.design.parallel] maps
+sequential design, and [parallel][diff_soup.optimization.inference.design.parallel] maps
 criteria onto batched, multi-device, and multi-process execution.
 """
 
-from diff_soup.inference.design.criteria import (
+from diff_soup.optimization.inference.design.criteria import (
     d_optimal,
     ds_optimal,
     e_optimal_smooth,
     fisher_with_prior,
     integrated_variance,
 )
-from diff_soup.inference.design.discriminate import (
+from diff_soup.optimization.inference.design.discriminate import (
     DiscriminationEnsemble,
     t_optimal,
 )
-from diff_soup.inference.design.fisher import (
+from diff_soup.optimization.inference.design.fisher import (
     fisher_information,
     observable_sensitivities,
     observable_trajectory,
 )
-from diff_soup.inference.design.parallel import (
+from diff_soup.optimization.inference.design.parallel import (
     CampaignFailure,
     CampaignResult,
     CampaignTaskRecord,
@@ -45,7 +45,7 @@ from diff_soup.inference.design.parallel import (
     robust_criterion,
     sharded_robust_gradient,
 )
-from diff_soup.inference.design.sequential import (
+from diff_soup.optimization.inference.design.sequential import (
     CandidateDesign,
     ExperimentSpace,
     NextDesign,
@@ -55,7 +55,7 @@ from diff_soup.inference.design.sequential import (
     sequential_step,
     sequential_update,
 )
-from diff_soup.inference.design.solve import SensitivityRun, sensitivity_solve
+from diff_soup.optimization.inference.design.solve import SensitivityRun, sensitivity_solve
 
 __all__ = [
     # Sensitivity runs

@@ -379,7 +379,7 @@ def fit_posterior(problem: Any, x: Any, *, sigma: Any = None) -> np.ndarray:
         ImproperPosteriorError: If the fit leaves parameter directions
             undetermined (see `gauss_newton_covariance`).
     """
-    from diff_soup.inference.fitting.diagnostics import _theta_jacobian
+    from diff_soup.optimization.inference.fitting.diagnostics import _theta_jacobian
 
     jac = _theta_jacobian(problem, np.asarray(x))
     if jac is None or jac.size == 0:

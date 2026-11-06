@@ -4,19 +4,19 @@ Provides four small ``eqx.Module`` callables for representing a
 time-dependent quantity — a boundary condition, a forcing term, a control
 input — as a differentiable function of a scalar time ``t``:
 
-* [PiecewiseConstant][diff_soup.inference.approx.signals.PiecewiseConstant] — a
+* [PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant] — a
   step function on fixed segments.
-* [PiecewiseLinear][diff_soup.inference.approx.signals.PiecewiseLinear] — a
+* [PiecewiseLinear][diff_soup.optimization.inference.approx.signals.PiecewiseLinear] — a
   continuous, piecewise-linear interpolant.
-* [CubicHermite][diff_soup.inference.approx.signals.CubicHermite] — a smooth,
+* [CubicHermite][diff_soup.optimization.inference.approx.signals.CubicHermite] — a smooth,
   per-segment cubic interpolant with user-supplied slopes at each knot.
-* [Fourier][diff_soup.inference.approx.signals.Fourier] — a truncated Fourier
+* [Fourier][diff_soup.optimization.inference.approx.signals.Fourier] — a truncated Fourier
   series, periodic by construction.
 
 Every class exposes ``__call__(t) -> value`` (a scalar, or an array with a
 trailing channel dimension for multi-component signals) plus a uniform
 ``.knots`` attribute — the segment edges for the three piecewise bases, and
-an empty array for [Fourier][diff_soup.inference.approx.signals.Fourier]
+an empty array for [Fourier][diff_soup.optimization.inference.approx.signals.Fourier]
 (which has none). All coefficient and
 knot leaves are ordinary ``jax.Array`` values (shifting them never triggers a
 recompile), and none of the evaluation logic uses Python control flow that
@@ -36,9 +36,9 @@ Usage example::
 Segment convention
 ------------------
 The three piecewise bases
-([PiecewiseConstant][diff_soup.inference.approx.signals.PiecewiseConstant],
-[PiecewiseLinear][diff_soup.inference.approx.signals.PiecewiseLinear],
-[CubicHermite][diff_soup.inference.approx.signals.CubicHermite]) all select
+([PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant],
+[PiecewiseLinear][diff_soup.optimization.inference.approx.signals.PiecewiseLinear],
+[CubicHermite][diff_soup.optimization.inference.approx.signals.CubicHermite]) all select
 the active segment the same way: a query
 time that lands exactly on an interior knot is treated as belonging to the
 segment *to its left*. Concretely, a numerical solver that has just
@@ -177,7 +177,7 @@ class CubicHermite(eqx.Module):
             ``values``.
 
     Uses the same left-continuous segment-selection convention as
-    [PiecewiseConstant][diff_soup.inference.approx.signals.PiecewiseConstant]:
+    [PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant]:
     a query exactly on an interior knot is evaluated as the end of the left
     segment.
     """
@@ -249,7 +249,7 @@ class Fourier(eqx.Module):
         sin_coeffs: Sine-mode amplitudes, same shape as ``cos_coeffs``.
         mean: The signal's time-average (scalar, or shape ``(m,)``).
         knots: Always an empty array —
-            [Fourier][diff_soup.inference.approx.signals.Fourier] has no
+            [Fourier][diff_soup.optimization.inference.approx.signals.Fourier] has no
             segment structure. Present only so all four bases share the same
             ``.knots`` attribute.
     """

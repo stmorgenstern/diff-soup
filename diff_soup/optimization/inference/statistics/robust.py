@@ -24,7 +24,10 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from diff_soup.inference.statistics.report import IdentifiedSubspace, ImproperPosteriorError
+from diff_soup.optimization.inference.statistics.report import (
+    IdentifiedSubspace,
+    ImproperPosteriorError,
+)
 
 __all__ = ["RobustCovariance", "sandwich_covariance"]
 
@@ -79,7 +82,7 @@ def sandwich_covariance(
         names: Optional parameter labels for the failure report.
 
     Returns:
-        A [RobustCovariance][diff_soup.inference.statistics.robust.RobustCovariance].
+        A [RobustCovariance][diff_soup.optimization.inference.statistics.robust.RobustCovariance].
 
     Raises:
         ImproperPosteriorError: If the bread ``Jᵀ J`` is rank-deficient — the
@@ -143,7 +146,7 @@ def _cluster_sandwich_covariance(
         names: Optional parameter labels for the failure report.
 
     Returns:
-        A [RobustCovariance][diff_soup.inference.statistics.robust.RobustCovariance].
+        A [RobustCovariance][diff_soup.optimization.inference.statistics.robust.RobustCovariance].
 
     Raises:
         ImproperPosteriorError: If the bread is rank-deficient.

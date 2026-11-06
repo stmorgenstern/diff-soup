@@ -13,21 +13,21 @@ import numpy as np
 
 from diff_soup._distributed import any_process, assert_decision_value, local_value
 from diff_soup._errors import ConfigurationError
-from diff_soup.inference._abc import OptSolver
-from diff_soup.inference.fitting._forward_seam import _FAILED_SENTINEL
-from diff_soup.inference.fitting.bounds import projected_gradient_norm
-from diff_soup.inference.fitting.callbacks import StopFit
-from diff_soup.inference.fitting.regularization import NoReg
-from diff_soup.inference.fitting.result import (
+from diff_soup.optimization._abc import OptSolver
+from diff_soup.optimization.inference.fitting._forward_seam import _FAILED_SENTINEL
+from diff_soup.optimization.inference.fitting.bounds import projected_gradient_norm
+from diff_soup.optimization.inference.fitting.callbacks import StopFit
+from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.result import (
     EvalCounts,
     OptResult,
     StepInfo,
     TerminationStatus,
     TrustRegionReport,
 )
-from diff_soup.inference.fitting.scales import HessianScale, JacScale, XScale
-from diff_soup.inference.solvers._loop import cost_threshold, trial_valid
-from diff_soup.inference.solvers._termination import (
+from diff_soup.optimization.inference.fitting.scales import HessianScale, JacScale, XScale
+from diff_soup.optimization.solvers._loop import cost_threshold, trial_valid
+from diff_soup.optimization.solvers._termination import (
     DEFAULT_COST_ATOL,
     DEFAULT_COST_TOL,
     DEFAULT_STEP_TOL,
@@ -38,13 +38,13 @@ from diff_soup.inference.solvers._termination import (
     stall_reason_of,
     step_budget,
 )
-from diff_soup.inference.solvers.factorization import (
+from diff_soup.optimization.solvers.factorization import (
     cholesky_factor,
     qr_normal_factor,
     solve_factorized_half,
     solve_factorized_normal,
 )
-from diff_soup.inference.solvers.tangent import (
+from diff_soup.optimization.solvers.tangent import (
     deferred_value_and_grad,
     normalize_tangent_tile,
     value_and_jacfwd_tiled,
@@ -406,7 +406,7 @@ class NewtonTrustRegion(OptSolver):
 
     It steps on the Gauss-Newton matrix of a least-squares objective and keeps box bounds.
     `hessian="true"` restores the exact Hessian of previous releases. It is the default
-    optimizer of `ds.inference.optsolve`.
+    optimizer of `ds.optimization.optsolve`.
 
     Args:
         max_steps: The step budget.
@@ -426,7 +426,7 @@ class NewtonTrustRegion(OptSolver):
         hessian_refresh: How often the exact Hessian is recomputed, with SR1 updates between: `"adaptive"`, `"every"`, or every `k` steps for an integer `k`.
         hessian_tile: How many directions of the exact Hessian or Gauss-Newton Jacobian are formed at once: 8 to 128, `"full"`, or `"auto"` to fit the free memory.
         cg_max_iter: The conjugate-gradient iteration budget, the parameter count when `None`.
-        callbacks: Callbacks run together with those passed to `ds.inference.optsolve`.
+        callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
     """
 
     max_steps: int = eqx.field(static=True, default=50)
@@ -496,7 +496,7 @@ class NewtonTrustRegion(OptSolver):
             )
         if not isinstance(self.x_scale, XScale):
             raise ConfigurationError(
-                "NewtonTrustRegion x_scale must be a ds.inference XScale object."
+                "NewtonTrustRegion x_scale must be a ds.optimization.inference XScale object."
             )
         if self.radius_init <= 0.0 or self.radius_max < self.radius_init:
             raise ConfigurationError("NewtonTrustRegion requires 0 < radius_init <= radius_max.")
@@ -538,14 +538,14 @@ class NewtonTrustRegion(OptSolver):
             raise ConfigurationError(
                 "NewtonTrustRegion cannot use JacScale with hessian='true' because "
                 "that pairing forms a full forward residual Jacobian only for "
-                "scaling. Use ds.inference.HessianScale() for an exact subproblem "
-                "or ds.inference.ConstantScale(...) for an exact or CG subproblem."
+                "scaling. Use ds.optimization.inference.HessianScale() for an exact subproblem "
+                "or ds.optimization.inference.ConstantScale(...) for an exact or CG subproblem."
             )
         if resolved_subproblem == "cg" and isinstance(self.x_scale, HessianScale):
             raise ConfigurationError(
                 "NewtonTrustRegion cannot use HessianScale with subproblem='cg' "
                 "because a matrix-free Hessian has no available diagonal. Use "
-                "ds.inference.ConstantScale(...) for a CG solve."
+                "ds.optimization.inference.ConstantScale(...) for a CG solve."
             )
         if resolved_subproblem == "cg" and self.linear_solver != "auto":
             raise ConfigurationError(
@@ -592,7 +592,7 @@ class NewtonTrustRegion(OptSolver):
         reuses the compilation; under ``hessian_tile="auto"`` a tile that does
         not fit is narrowed down to 8 directions before the error is raised.
         """
-        from diff_soup.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting.inference_problem import (
             _HESSIAN_GUARD_MIN_WIDTH,
             _HessianMemoryError,
             _MemoryCheckedHessian,
@@ -627,7 +627,9 @@ class NewtonTrustRegion(OptSolver):
         window starts give. Under ``hessian_tile="auto"`` it is formed whole
         when that fits in the free memory, else in tiles of 32, 16 or 8.
         """
-        from diff_soup.inference.fitting.inference_problem import checked_residual_jacobian
+        from diff_soup.optimization.inference.fitting.inference_problem import (
+            checked_residual_jacobian,
+        )
 
         return checked_residual_jacobian(problem, x, self.hessian_tile, knob="hessian_tile")
 

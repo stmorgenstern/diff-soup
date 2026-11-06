@@ -1,14 +1,14 @@
 """The batched backend: compiled programs per bucket and mode, and the evaluation of a request.
 
-A planned study ([build_plan][diff_soup.inference.engine._plan.build_plan])
-sorts its lanes into buckets. [batched_lanes][diff_soup.inference.engine._batched.batched_lanes]
+A planned study ([build_plan][diff_soup.optimization.inference.engine._plan.build_plan])
+sorts its lanes into buckets. [batched_lanes][diff_soup.optimization.inference.engine._batched.batched_lanes]
 builds the numbers of every bucket's lanes on the host.
-[prepare][diff_soup.inference.engine._batched.prepare] holds one program per
+[prepare][diff_soup.optimization.inference.engine._batched.prepare] holds one program per
 bucket and mode, compiling each that no study compiled before with the
-function it is given ([compile_program][diff_soup.inference.engine._prepare.compile_program]
+function it is given ([compile_program][diff_soup.optimization.inference.engine._prepare.compile_program]
 traces the bucket's kernel with the arrays of the bucket's first call, lowers
-it and compiles it). [evaluate][diff_soup.inference.engine._batched.evaluate]
-then runs a [Request][diff_soup.inference.engine._request.Request] through those
+it and compiles it). [evaluate][diff_soup.optimization.inference.engine._batched.evaluate]
+then runs a [Request][diff_soup.optimization.inference.engine._request.Request] through those
 compiled programs only.
 
 A program is known by its key: the bucket's identity, the mode and the chunk
@@ -26,7 +26,7 @@ while the call's lanes are unchanged from the last evaluation. On a plan with a
 mesh, every array of a call is split along its lane axis over the devices of
 the mesh's ``data`` axis, the compiled program runs each device's share, and
 the units of a call are dealt to the devices by their last step counts
-([device_order][diff_soup.inference.engine._balance.device_order]).
+([device_order][diff_soup.optimization.inference.engine._balance.device_order]).
 
 A unit that fails with a kind the study retries is solved again within the same
 evaluation, through the same programs, from a smaller first step: rung ``r``
@@ -58,16 +58,21 @@ import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec
 
 from diff_soup._errors import BackendError
-from diff_soup.inference.engine._balance import device_order
-from diff_soup.inference.engine._capacity import lane_frames
-from diff_soup.inference.engine._inputs import _lane_group
-from diff_soup.inference.engine._kernel import MODES, LaneProgram
-from diff_soup.inference.engine._layout import lane_layout, lane_problems
-from diff_soup.inference.engine._order import StepMemory, canonical_lanes, cut, unit_order
-from diff_soup.inference.engine._plan import Bucket, Plan
-from diff_soup.inference.engine._reducers import TreeTables, tree_tables
-from diff_soup.inference.engine._request import Request
-from diff_soup.inference.engine._result import (
+from diff_soup.optimization.inference.engine._balance import device_order
+from diff_soup.optimization.inference.engine._capacity import lane_frames
+from diff_soup.optimization.inference.engine._inputs import _lane_group
+from diff_soup.optimization.inference.engine._kernel import MODES, LaneProgram
+from diff_soup.optimization.inference.engine._layout import lane_layout, lane_problems
+from diff_soup.optimization.inference.engine._order import (
+    StepMemory,
+    canonical_lanes,
+    cut,
+    unit_order,
+)
+from diff_soup.optimization.inference.engine._plan import Bucket, Plan
+from diff_soup.optimization.inference.engine._reducers import TreeTables, tree_tables
+from diff_soup.optimization.inference.engine._request import Request
+from diff_soup.optimization.inference.engine._result import (
     Batch,
     CallOutput,
     Results,
@@ -75,19 +80,19 @@ from diff_soup.inference.engine._result import (
     merge_calls,
     unit_values,
 )
-from diff_soup.inference.engine._status import KINDS
+from diff_soup.optimization.inference.engine._status import KINDS
 
 
 class ProgramKey(NamedTuple):
     """What one compiled program is: equal keys are one program.
 
     Attributes:
-        identity: The bucket's [identity][diff_soup.inference.engine._identity.LaneIdentity];
+        identity: The bucket's [identity][diff_soup.optimization.inference.engine._identity.LaneIdentity];
             ``str()`` gives its first twelve hexadecimal characters.
         mode: The mode of the lane kernel.
         chunk: ``W``, the units one call evaluates.
         mesh: The mesh whose data axis every call is split over (the plan's
-            [mesh][diff_soup.inference.engine._plan.Plan]); ``None`` for a
+            [mesh][diff_soup.optimization.inference.engine._plan.Plan]); ``None`` for a
             program that runs every call on one device.
     """
 
@@ -102,17 +107,17 @@ class CompiledProgram:
     """One entry of the registry: a program compiled for one key.
 
     Attributes:
-        key: The [ProgramKey][diff_soup.inference.engine._batched.ProgramKey].
-        program: The [LaneProgram][diff_soup.inference.engine._kernel.LaneProgram]
+        key: The [ProgramKey][diff_soup.optimization.inference.engine._batched.ProgramKey].
+        program: The [LaneProgram][diff_soup.optimization.inference.engine._kernel.LaneProgram]
             of the bucket that compiled it.
         kernel: The kernel of one call of
-            [batched_kernel][diff_soup.inference.engine._kernel.batched_kernel].
+            [batched_kernel][diff_soup.optimization.inference.engine._kernel.batched_kernel].
         compiled: The compiled executable; called as
             ``compiled(points, lanes)``.
         lanes_tree: The tree structure of the lane inputs it was traced with.
         lane_leaves: Per leaf of the lane inputs, its shape without the lane
             axis and its dtype.
-        record: The [ProgramRecord][diff_soup.inference.engine._prepare.ProgramRecord]
+        record: The [ProgramRecord][diff_soup.optimization.inference.engine._prepare.ProgramRecord]
             of its compile.
     """
 
@@ -126,7 +131,7 @@ class CompiledProgram:
 
 
 REGISTRY: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
-"""Every compiled program of the process, by [ProgramKey][diff_soup.inference.engine._batched.ProgramKey]."""
+"""Every compiled program of the process, by [ProgramKey][diff_soup.optimization.inference.engine._batched.ProgramKey]."""
 
 
 class PreparedProgram(NamedTuple):
@@ -135,7 +140,7 @@ class PreparedProgram(NamedTuple):
     Attributes:
         bucket: The bucket's index in the plan.
         mode: The mode.
-        program: The [CompiledProgram][diff_soup.inference.engine._batched.CompiledProgram].
+        program: The [CompiledProgram][diff_soup.optimization.inference.engine._batched.CompiledProgram].
         reused: Whether the program was compiled before this call, for this
             study or another one.
     """
@@ -151,8 +156,8 @@ class BucketLanes:
     """The numbers of one bucket's lanes, on the host.
 
     Attributes:
-        bucket: The planned [Bucket][diff_soup.inference.engine._plan.Bucket].
-        program: The bucket's [LaneProgram][diff_soup.inference.engine._kernel.LaneProgram].
+        bucket: The planned [Bucket][diff_soup.optimization.inference.engine._plan.Bucket].
+        program: The bucket's [LaneProgram][diff_soup.optimization.inference.engine._kernel.LaneProgram].
         leaves: The leaves of its stacked lane inputs, as numpy arrays leading
             with the lane axis, in the order of ``bucket.lanes``.
         tree: The tree structure of its lane inputs.
@@ -168,7 +173,7 @@ class BucketLanes:
         state_sizes: Per lane, the size of its initial state; empty when
             not recorded.
 
-    The numbers of the plan alone ([lane_metadata][diff_soup.inference.engine._batched.lane_metadata])
+    The numbers of the plan alone ([lane_metadata][diff_soup.optimization.inference.engine._batched.lane_metadata])
     carry no inputs: ``program`` and ``tree`` are ``None``, ``leaves`` is
     empty and ``dt0_leaf`` is ``-1``.
     """
@@ -191,8 +196,8 @@ class BatchedLanes:
     """The lanes of one planned study, the programs they hold, and what evaluations learn.
 
     Attributes:
-        plan: The study's [Plan][diff_soup.inference.engine._plan.Plan].
-        buckets: One [BucketLanes][diff_soup.inference.engine._batched.BucketLanes]
+        plan: The study's [Plan][diff_soup.optimization.inference.engine._plan.Plan].
+        buckets: One [BucketLanes][diff_soup.optimization.inference.engine._batched.BucketLanes]
             per bucket of the plan, in the plan's order.
         lane_ids: Every experiment id of the study that has a lane or was
             refused one, by experiment index.
@@ -203,7 +208,7 @@ class BatchedLanes:
             block; without an owner tier, one block that holds every lane.
         n_shared: The number of shared coordinates.
         programs: ``(bucket index, mode)`` to the
-            [CompiledProgram][diff_soup.inference.engine._batched.CompiledProgram]
+            [CompiledProgram][diff_soup.optimization.inference.engine._batched.CompiledProgram]
             the study holds; ``prepare`` adds to it.
         memory: The trial steps every unit took when it was last evaluated,
             which order the units of the next evaluation.
@@ -211,7 +216,7 @@ class BatchedLanes:
             evaluation, keyed by their lanes.
 
     ``memory`` and ``resident`` are what one series of evaluations learns;
-    [with_own_state][diff_soup.inference.engine._batched.with_own_state] gives
+    [with_own_state][diff_soup.optimization.inference.engine._batched.with_own_state] gives
     lanes that share everything else and start both afresh, as every fit of a
     lowered study does.
     """
@@ -237,11 +242,11 @@ def batched_lanes(plan: Plan, joint: Any) -> BatchedLanes:
 
     Args:
         plan: The plan of the study, from
-            [build_plan][diff_soup.inference.engine._plan.build_plan].
+            [build_plan][diff_soup.optimization.inference.engine._plan.build_plan].
         joint: The fitted problem the plan was built from.
 
     Returns:
-        The [BatchedLanes][diff_soup.inference.engine._batched.BatchedLanes],
+        The [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes],
         with no program yet.
     """
     layout = lane_layout(joint)
@@ -306,7 +311,7 @@ def replanned_lanes(lanes: BatchedLanes, plan: Plan) -> BatchedLanes:
 
     ``plan`` holds the buckets of ``lanes.plan``, in the same order with the
     same lanes and modes, and cuts their units into calls of other widths, as
-    [population_plan][diff_soup.inference.engine._plan.population_plan] does.
+    [population_plan][diff_soup.optimization.inference.engine._plan.population_plan] does.
     The host numbers of the lanes are shared, not built again; the programs,
     the step memory and the inputs kept on the device start empty, so
     nothing of ``lanes`` changes.
@@ -316,7 +321,7 @@ def replanned_lanes(lanes: BatchedLanes, plan: Plan) -> BatchedLanes:
         plan: The other plan.
 
     Returns:
-        The [BatchedLanes][diff_soup.inference.engine._batched.BatchedLanes]
+        The [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes]
         of ``plan``, with no program yet.
 
     Raises:
@@ -360,7 +365,7 @@ def with_own_state(lanes: BatchedLanes) -> BatchedLanes:
         lanes: The lanes of the study.
 
     Returns:
-        The [BatchedLanes][diff_soup.inference.engine._batched.BatchedLanes]
+        The [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes]
         sharing the programs of ``lanes``.
     """
     return dataclasses.replace(lanes, memory=StepMemory(), resident={})
@@ -379,10 +384,10 @@ def lane_metadata(plan: Plan, joint: Any) -> BatchedLanes:
         joint: The fitted problem the plan was built from.
 
     Returns:
-        The [BatchedLanes][diff_soup.inference.engine._batched.BatchedLanes]
+        The [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes]
         whose buckets carry no inputs.
     """
-    from diff_soup.inference.fitting.joint import _resolve_child_y0
+    from diff_soup.optimization.inference.fitting.joint import _resolve_child_y0
 
     layout = lane_layout(joint)
     problems = lane_problems(joint)
@@ -438,10 +443,10 @@ def restricted_plan(plan: Plan, lanes: Any) -> tuple:
 
     Returns:
         ``(restricted, origin)``: the restricted
-        [Plan][diff_soup.inference.engine.Plan] and, per kept bucket, its
+        [Plan][diff_soup.optimization.inference.engine.Plan] and, per kept bucket, its
         index in ``plan``.
     """
-    from diff_soup.inference.engine._plan import Chunk
+    from diff_soup.optimization.inference.engine._plan import Chunk
 
     keep = set(lanes)
     buckets, origin = [], []
@@ -541,14 +546,14 @@ def prepare(
         lanes: The lanes of the study.
         modes: The modes to compile, among ``MODES``.
         compile_program: ``compile_program(lanes, entry, key)`` returns the
-            [CompiledProgram][diff_soup.inference.engine._batched.CompiledProgram]
+            [CompiledProgram][diff_soup.optimization.inference.engine._batched.CompiledProgram]
             of ``key`` for the bucket ``entry``; a program it raises for is
             not registered.
         buckets: The indices of the buckets to prepare; ``None`` prepares
             every bucket.
 
     Returns:
-        One [PreparedProgram][diff_soup.inference.engine._batched.PreparedProgram]
+        One [PreparedProgram][diff_soup.optimization.inference.engine._batched.PreparedProgram]
         per bucket and mode, buckets in the plan's order.
 
     Raises:
@@ -618,7 +623,7 @@ def _refuse_nodes_without_lanes(lanes: BatchedLanes, hierarchy: Any, experiments
     """
     if not lanes.refused:
         return
-    from diff_soup.inference.statistics.hierarchy import _tree
+    from diff_soup.optimization.inference.statistics.hierarchy import _tree
 
     tree = _tree(hierarchy, experiments)
     for position, level in enumerate(tree.names):
@@ -649,7 +654,7 @@ def level_tables_of(lanes: BatchedLanes, lane_ids: Any, hierarchy: Any, experime
         experiments: Every experiment of the study, in study order.
 
     Returns:
-        The [LevelTables][diff_soup.inference.engine.LevelTables], on the
+        The [LevelTables][diff_soup.optimization.inference.engine.LevelTables], on the
         device of the plan.
 
     Raises:
@@ -657,7 +662,7 @@ def level_tables_of(lanes: BatchedLanes, lane_ids: Any, hierarchy: Any, experime
             narrow width, or the plan refused a lane to every experiment below
             a node of the hierarchy.
     """
-    from diff_soup.inference.engine._levels import level_tables
+    from diff_soup.optimization.inference.engine._levels import level_tables
 
     ids = tuple(lane_ids)
     _one_width(lanes, ids)
@@ -674,7 +679,7 @@ def tables(lanes: BatchedLanes, lane_ids: Any) -> TreeTables:
             results the tables will reduce, as ``Results.lane_ids`` gives it.
 
     Returns:
-        The [TreeTables][diff_soup.inference.engine._reducers.TreeTables], on the
+        The [TreeTables][diff_soup.optimization.inference.engine._reducers.TreeTables], on the
         device of the plan.
 
     Raises:
@@ -756,7 +761,7 @@ def _run_bucket(
     place, for a pass that solves a few units again. ``keep``, of shape
     (members, lanes of the bucket), names the units to run when not every
     unit of that rectangle is evaluated; ``None`` runs every one. The
-    [Batch][diff_soup.inference.engine._result.Batch] counts the units, the
+    [Batch][diff_soup.optimization.inference.engine._result.Batch] counts the units, the
     width and the calls this pass made.
 
     Raises:
@@ -910,14 +915,14 @@ def evaluate(
     Args:
         lanes: The lanes of the study, with the programs of the requested
             mode prepared.
-        request: The [Request][diff_soup.inference.engine._request.Request].
+        request: The [Request][diff_soup.optimization.inference.engine._request.Request].
         retry_kinds: The names of ``KINDS`` whose failures are solved again;
             empty solves nothing again.
         retry_first_step_factors: The factors of the rungs, in the order
             they are tried; empty solves nothing again.
 
     Returns:
-        The [Results][diff_soup.inference.engine._result.Results], with the
+        The [Results][diff_soup.optimization.inference.engine._result.Results], with the
         rung that produced each unit's result in ``status.rung``, one record
         per unit solved again in ``retries``, and per bucket touched the
         units, width and calls of its first pass in ``batches``.

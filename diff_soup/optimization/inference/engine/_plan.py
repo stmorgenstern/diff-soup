@@ -4,9 +4,9 @@ Before anything is compiled, the lanes of a study are sorted into buckets: one
 lane per experiment solved in one shoot, one per window of an experiment
 fitted in windows that start from observed states. The lanes of one bucket
 have equal identities
-([lane_identity][diff_soup.inference.engine._identity.lane_identity]) and one
+([lane_identity][diff_soup.optimization.inference.engine._identity.lane_identity]) and one
 derivative width, fall in one frame class
-([frame_classes][diff_soup.inference.engine._capacity.frame_classes]), and
+([frame_classes][diff_soup.optimization.inference.engine._capacity.frame_classes]), and
 either all follow a schedule or none does; a bucket runs through one compiled
 program per mode. Lanes whose schedules have different numbers of segments
 share a bucket: its segment class is the largest segment count among its
@@ -39,13 +39,13 @@ from typing import Any, NamedTuple
 import jax
 import numpy as np
 
-from diff_soup.inference.engine._capacity import (
+from diff_soup.optimization.inference.engine._capacity import (
     WASTE_BOUND,
     Frames,
     frame_classes,
     lane_frames,
 )
-from diff_soup.inference.engine._identity import (
+from diff_soup.optimization.inference.engine._identity import (
     COMPONENTS,
     LaneIdentity,
     _IdentityRecorder,
@@ -54,8 +54,8 @@ from diff_soup.inference.engine._identity import (
     lane_identity,
     lane_refusal,
 )
-from diff_soup.inference.engine._kernel import MODES
-from diff_soup.inference.engine._layout import (
+from diff_soup.optimization.inference.engine._kernel import MODES
+from diff_soup.optimization.inference.engine._layout import (
     _experiment_problems,
     _lane_ids,
     lane_layout,
@@ -103,7 +103,7 @@ class Bucket:
             identity.
         model: The name of the recipe or model of its lanes.
         lanes: The ids of its lanes, in the study's lane order (see
-            [LaneLayout][diff_soup.inference.engine._layout.LaneLayout]): an
+            [LaneLayout][diff_soup.optimization.inference.engine._layout.LaneLayout]): an
             experiment's id for its one lane, a window's own id for each lane
             of an experiment fitted in observed-start windows.
         owners: The owner of each lane, in the order of ``lanes``; ``None``
@@ -117,15 +117,15 @@ class Bucket:
         padding: The fraction of the bucket's frame slots, over its lanes and
             streams, that are padding.
         chunk: Per mode the program runs in, its
-            [Chunk][diff_soup.inference.engine._plan.Chunk] for one member of
+            [Chunk][diff_soup.optimization.inference.engine._plan.Chunk] for one member of
             a population; in a plan of
-            [population_plan][diff_soup.inference.engine._plan.population_plan],
+            [population_plan][diff_soup.optimization.inference.engine._plan.population_plan],
             for every member of the population.
         children: The index of each lane in the study's lane layout, in the
             order of ``lanes``; the experiment index when every experiment has
             one lane.
         full_identity: The bucket's whole
-            [identity][diff_soup.inference.engine._identity.LaneIdentity].
+            [identity][diff_soup.optimization.inference.engine._identity.LaneIdentity].
     """
 
     index: int
@@ -150,7 +150,7 @@ class Split:
         recipe: The name of the recipe or model.
         buckets: The indices of the buckets that hold its experiments.
         differs: Every component that differs between those buckets, in the
-            order of [COMPONENTS][diff_soup.inference.engine._identity.COMPONENTS].
+            order of [COMPONENTS][diff_soup.optimization.inference.engine._identity.COMPONENTS].
         inputs: The template inputs that separate the buckets: each has one
             value within every bucket and not the same value in all of them.
     """
@@ -166,11 +166,11 @@ class Plan:
     """The buckets of a study's lanes, built before anything is compiled.
 
     Attributes:
-        buckets: The [Bucket][diff_soup.inference.engine._plan.Bucket]
+        buckets: The [Bucket][diff_soup.optimization.inference.engine._plan.Bucket]
             records, by the index of their first lane.
-        refused: One [Refusal][diff_soup.inference.engine._plan.Refusal] per
+        refused: One [Refusal][diff_soup.optimization.inference.engine._plan.Refusal] per
             experiment that gets no bucket, by experiment index.
-        splits: One [Split][diff_soup.inference.engine._plan.Split] per recipe
+        splits: One [Split][diff_soup.optimization.inference.engine._plan.Split] per recipe
             whose experiments land in more than one bucket.
         device: The device the lanes run on; on a mesh, its first device,
             which holds the tables and level systems the lane results are
@@ -483,10 +483,10 @@ def _placement_mesh(joint: Any, device: Any) -> Any:
     number of processes of the run, a mesh placement in a run of several
     processes, and a mesh holding another process's devices are refused. A
     placement over several devices takes backends whose factors are arrays
-    (see [refuse_shared_storage][diff_soup.inference.engine._plan.refuse_shared_storage]).
+    (see [refuse_shared_storage][diff_soup.optimization.inference.engine._plan.refuse_shared_storage]).
     """
     from diff_soup._errors import ConfigurationError
-    from diff_soup.inference.engine._transport import world
+    from diff_soup.optimization.inference.engine._transport import world
 
     layout = getattr(joint, "layout", None)
     size = world().size
@@ -540,7 +540,7 @@ def build_plan(study: Any, joint: Any, *, chunk: Any = None, device: Any = None)
     ``device``.
 
     Args:
-        study: The [Study][diff_soup.inference.Study]; its experiment ids name
+        study: The [Study][diff_soup.optimization.inference.Study]; its experiment ids name
             the lanes: the one lane of an experiment solved in one shoot has
             the experiment's id, the windows of an experiment fitted in
             observed-start windows have ids of their own.
@@ -556,7 +556,7 @@ def build_plan(study: Any, joint: Any, *, chunk: Any = None, device: Any = None)
             its first device.
 
     Returns:
-        The [Plan][diff_soup.inference.engine._plan.Plan].
+        The [Plan][diff_soup.optimization.inference.engine._plan.Plan].
 
     Raises:
         ValueError: If ``chunk`` is not a positive integer, ``joint`` holds
@@ -651,9 +651,9 @@ def population_plan(plan: Plan, members: int, *, chunk: Any = None) -> Plan:
     bucket of ``L`` lanes has ``P L`` units to cut into calls of its program.
     The returned plan has the buckets of ``plan`` (the same lanes, owners,
     frames, identities and modes, in the same order), the same refused lanes
-    and splits; each bucket's [Chunk][diff_soup.inference.engine._plan.Chunk]
+    and splits; each bucket's [Chunk][diff_soup.optimization.inference.engine._plan.Chunk]
     counts the ``P L`` units: the width the rule of
-    [build_plan][diff_soup.inference.engine._plan.build_plan] chooses for
+    [build_plan][diff_soup.optimization.inference.engine._plan.build_plan] chooses for
     them, or ``chunk``, then the calls and the copies that fill the last one.
 
     Args:
@@ -665,7 +665,7 @@ def population_plan(plan: Plan, members: int, *, chunk: Any = None) -> Plan:
             its ``P L`` units, at most 1,024.
 
     Returns:
-        The [Plan][diff_soup.inference.engine._plan.Plan] of the population.
+        The [Plan][diff_soup.optimization.inference.engine._plan.Plan] of the population.
 
     Raises:
         ValueError: If ``members`` is not a positive integer, or ``chunk`` is

@@ -21,8 +21,8 @@ All functions accept ``(n_frames, n_bnd)`` raw boundary values and return
 
 Usage::
 
-    from diff_soup.inference.data import interpolate_image_to_nodes
-    from diff_soup.inference.data.boundary_smoothing import (
+    from diff_soup.optimization.inference.data import interpolate_image_to_nodes
+    from diff_soup.optimization.inference.data.boundary_smoothing import (
         extract_boundary_traces,
         smooth_boundary_spline,
     )
@@ -39,7 +39,7 @@ import numpy as np
 from scipy.interpolate import UnivariateSpline
 from scipy.signal import savgol_filter
 
-from diff_soup.inference.data.pixel_averaging import interpolate_image_to_nodes
+from diff_soup.optimization.inference.data.pixel_averaging import interpolate_image_to_nodes
 
 
 def extract_boundary_traces(

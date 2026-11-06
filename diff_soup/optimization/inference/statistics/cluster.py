@@ -9,15 +9,18 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.fitting.bounds import resolve_decision_bounds
-from diff_soup.inference.fitting.result import OptResult
-from diff_soup.inference.statistics.estimation import MAP, EstimationProblem
-from diff_soup.inference.statistics.identifiability import (
+from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
+from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.statistics.estimation import MAP, EstimationProblem
+from diff_soup.optimization.inference.statistics.identifiability import (
     IdentifiabilityCoordinate,
     _require_problem_schema,
     _schema_coordinates,
 )
-from diff_soup.inference.statistics.robust import _cluster_sandwich_covariance, sandwich_covariance
+from diff_soup.optimization.inference.statistics.robust import (
+    _cluster_sandwich_covariance,
+    sandwich_covariance,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -81,7 +84,7 @@ def _validate_problem_fit(
     if fit.parameter_schema is None:
         raise ValueError(
             f"{where} requires an OptResult with handle-based parameter schema "
-            "provenance; fit the supplied InferenceProblem through diff_soup.inference.optsolve(...)."
+            "provenance; fit the supplied InferenceProblem through diff_soup.optimization.optsolve(...)."
         )
 
     schema = problem.parameter_schema
@@ -190,9 +193,9 @@ def cluster_covariance(
     a `MAP` fit the result is the spread of the estimator, not a posterior.
 
     Args:
-        problem: The [`InferenceProblem`][diff_soup.inference.InferenceProblem] or
-            [`LoweredStudy`][diff_soup.inference.LoweredStudy] the fit was made on.
-        fit: The [`OptResult`][diff_soup.inference.OptResult] of `ds.inference.optsolve` on
+        problem: The [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] or
+            [`LoweredStudy`][diff_soup.optimization.inference.LoweredStudy] the fit was made on.
+        fit: The [`OptResult`][diff_soup.optimization.OptResult] of `ds.optimization.optsolve` on
             `problem`.
         cluster: The name of a cluster of the problem's study, with at least two distinct labels.
         null_tol: The curvature, relative to the largest, at or below which a direction counts

@@ -1,7 +1,7 @@
 """The replicates of a bootstrap: the evaluation at the fit, and every replicate's trust region.
 
 The replicates are the members of a population of points
-([PopulationRoute][diff_soup.inference.hierarchical._population.PopulationRoute]
+([PopulationRoute][diff_soup.optimization.inference.hierarchical._population.PopulationRoute]
 built at the fit): replicate ``q`` is population member ``q`` of every request,
 and the level system and the trial cost of replicate ``q`` weigh its lanes,
 its regularizer blocks and its gauge rows by its own weights, through the same
@@ -34,15 +34,15 @@ from typing import Any, NamedTuple
 import jax
 import numpy as np
 
-from diff_soup.inference.hierarchical import _bounds as box
-from diff_soup.inference.hierarchical import _level_elimination as elimination
-from diff_soup.inference.hierarchical._population import (
+from diff_soup.optimization.inference.hierarchical import _bounds as box
+from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._population import (
     Lockstep,
     PopulationRoute,
     _held_from,
     _NotFinite,
 )
-from diff_soup.inference.hierarchical.level_solvers import (
+from diff_soup.optimization.inference.hierarchical.level_solvers import (
     _LABEL,
     _bounded_gradient,
     _choose,
@@ -56,7 +56,7 @@ from diff_soup.inference.hierarchical.level_solvers import (
     _trial_valid,
     _verdict,
 )
-from diff_soup.inference.solvers._loop import (
+from diff_soup.optimization.solvers._loop import (
     _WINDOW,
     Trials,
     _after_attempt,
@@ -146,7 +146,7 @@ def one_step(system: Any, point: Any, *, x_scale: Any, bounds: Any, fixed: Any) 
         fixed: The fixed coordinates.
 
     Returns:
-        The [OneStep][diff_soup.inference.hierarchical._replicates.OneStep].
+        The [OneStep][diff_soup.optimization.inference.hierarchical._replicates.OneStep].
 
     Raises:
         ArithmeticError: If the system's gradient or diagonal, or the solve at
@@ -288,7 +288,7 @@ class FitProducts:
             is stationary and has no regularizer row on the shared
             coordinates.
         active_bounds: The sides active at the point, ``((index, -1 | 1), ...)``.
-        failures: The [OneStepFailure][diff_soup.inference.hierarchical._replicates.OneStepFailure]
+        failures: The [OneStepFailure][diff_soup.optimization.inference.hierarchical._replicates.OneStepFailure]
             records, replicates first.
         solves: The solves of the compiled elimination, by product.
         seconds: The wall seconds of the ``blocks`` request (``request``),

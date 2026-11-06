@@ -1,9 +1,9 @@
 """Handle-aware, data-only local identifiability analysis.
 
 This module is deliberately a thin facade over
-``diff_soup.inference.statistics.identifiability_report``.  It is responsible for
+``diff_soup.optimization.inference.statistics.identifiability_report``.  It is responsible for
 selecting the *data* Jacobian from an
-[InferenceProblem][diff_soup.inference.InferenceProblem], checking that
+[InferenceProblem][diff_soup.optimization.inference.InferenceProblem], checking that
 the fitted vector still belongs to the same handle-based parameter schema, and
 labelling flat columns with their Recipe handles and cluster owners.  The SVD,
 rank, null-direction, and correlation numerics stay in the existing report
@@ -20,14 +20,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.fitting._layout import require_layout
-from diff_soup.inference.fitting.result import OptResult
-from diff_soup.inference.statistics.estimation import EstimationProblem
-from diff_soup.inference.statistics.measurement import require_likelihoods
-from diff_soup.inference.statistics.report import (
+from diff_soup.optimization.inference.fitting._layout import require_layout
+from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.statistics.estimation import EstimationProblem
+from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
+from diff_soup.optimization.inference.statistics.report import (
     IdentifiabilityReport as SpectrumReport,
 )
-from diff_soup.inference.statistics.report import (
+from diff_soup.optimization.inference.statistics.report import (
     identifiability_report,
 )
 
@@ -305,9 +305,9 @@ def identifiability(
     integrated out.
 
     Args:
-        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] whose measurements
+        problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] whose measurements
             all declare a likelihood.
-        fit: The [`OptResult`][diff_soup.inference.OptResult] of `ds.inference.optsolve` on
+        fit: The [`OptResult`][diff_soup.optimization.OptResult] of `ds.optimization.optsolve` on
             `problem`, or a mapping from every fitted handle to its value.
         parameter_scales: Positive scales per fitted coordinate, as a vector or a mapping from
             handle or `(handle, owner)` to scale, or `None` for all ones.
@@ -323,7 +323,7 @@ def identifiability(
         raise TypeError("identifiability first argument must be an InferenceProblem.")
     require_likelihoods(problem, "identifiability")
     if isinstance(fit, Mapping):
-        from diff_soup.inference.statistics.information import _point
+        from diff_soup.optimization.inference.statistics.information import _point
 
         fit = OptResult(
             params=np.asarray(_point(problem, fit)),
@@ -335,7 +335,7 @@ def identifiability(
     if fit.parameter_schema is None:
         raise ValueError(
             "identifiability requires an OptResult with handle-based parameter schema "
-            "provenance; fit the supplied InferenceProblem through diff_soup.inference.optsolve(...)."
+            "provenance; fit the supplied InferenceProblem through diff_soup.optimization.optsolve(...)."
         )
 
     schema = problem.parameter_schema
@@ -363,7 +363,10 @@ def identifiability(
     if not np.all(np.isfinite(params)):
         raise ValueError("identifiability: fitted parameter vector is non-finite.")
 
-    from diff_soup.inference.statistics.information import _marginal_jacobian, _window_split
+    from diff_soup.optimization.inference.statistics.information import (
+        _marginal_jacobian,
+        _window_split,
+    )
 
     split = _window_split(problem)
     n_theta = params.size if split is None else split[0].size

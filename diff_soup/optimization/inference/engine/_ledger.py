@@ -1,10 +1,10 @@
 """What every lane of a study cost so far: evaluations, trial steps, seconds and last statuses.
 
 A lowered study records every evaluation's results in its
-[Ledger][diff_soup.inference.engine._ledger.Ledger]. A fit's checkpoint saves it
+[Ledger][diff_soup.optimization.inference.engine._ledger.Ledger]. A fit's checkpoint saves it
 after every attempt, and a later run can balance its lanes over its processes
 by the seconds the lanes measured instead of the cost model
-([place][diff_soup.inference.engine._placement.place], ``measured=``). Seconds
+([place][diff_soup.optimization.inference.engine._placement.place], ``measured=``). Seconds
 are the walls of a bucket's calls shared among the bucket's units in
 proportion to their trial steps: a measure of cost, reported, never a
 measurement to compare against.
@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from diff_soup.inference.engine._status import ABSENT
+from diff_soup.optimization.inference.engine._status import ABSENT
 
 KEEP: int = 8
 """The last statuses the ledger keeps per lane."""

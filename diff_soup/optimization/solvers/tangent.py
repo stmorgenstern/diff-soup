@@ -9,7 +9,7 @@ The primal is not linearized separately and replayed.  For a function that
 runs an adaptive time integrator, ``jax.linearize`` cannot save the primal
 trajectory; its staged push-forward integrates the primal a second time
 beside the tangents, so a separately linearized primal would be paid twice.
-[linearize_value][diff_soup.inference.solvers.tangent.linearize_value]
+[linearize_value][diff_soup.optimization.solvers.tangent.linearize_value]
 therefore materializes the Jacobian with the value, and the push-forward it
 returns applies that matrix.
 
@@ -106,7 +106,7 @@ def linearize_value(
     """Evaluate a vector function once and return its reusable push-forward.
 
     The Jacobian is materialized with the value, in tiles of ``tile`` columns;
-    [jacfwd_from_pushforward][diff_soup.inference.solvers.tangent.jacfwd_from_pushforward]
+    [jacfwd_from_pushforward][diff_soup.optimization.solvers.tangent.jacfwd_from_pushforward]
     returns it without further evaluation.
     """
     point = jnp.asarray(point)
@@ -122,7 +122,7 @@ def deferred_value_and_grad(
     """Evaluate a scalar function once and defer its gradient sweep.
 
     With ``ad="forward"`` the gradient is computed with the value (see
-    [linearize_value][diff_soup.inference.solvers.tangent.linearize_value]).
+    [linearize_value][diff_soup.optimization.solvers.tangent.linearize_value]).
     """
     point = jnp.asarray(point)
     if point.ndim != 1:
@@ -146,7 +146,7 @@ def jacfwd_from_pushforward(
     """Materialize a tiled Jacobian from an existing forward linearization.
 
     A push-forward returned by
-    [linearize_value][diff_soup.inference.solvers.tangent.linearize_value]
+    [linearize_value][diff_soup.optimization.solvers.tangent.linearize_value]
     already holds its Jacobian, which is returned as is; any other linear map
     is applied to the basis in tiles of ``tile`` columns.
     """

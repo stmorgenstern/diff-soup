@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.inference.engine._status import ABSENT, LaneStatus, failures
+from diff_soup.optimization.inference.engine._status import ABSENT, LaneStatus, failures
 
 Array = jax.Array
 
@@ -140,7 +140,7 @@ def tree_tables(
         device: The JAX device of the tables; ``None`` for the default device.
 
     Returns:
-        The [TreeTables][diff_soup.inference.engine._reducers.TreeTables].
+        The [TreeTables][diff_soup.optimization.inference.engine._reducers.TreeTables].
     """
     owner_of_lane = np.asarray(owner_of_lane, dtype=np.int64).reshape(-1)
     local_positions = np.asarray(local_positions, dtype=np.int32)
@@ -180,7 +180,7 @@ def tree_tables(
 
 
 def refuse_failed(status: LaneStatus, lane_ids: tuple, weights: Any = None) -> None:
-    """Raise [LaneFailure][diff_soup.inference.engine._reducers.LaneFailure] if a lane failed.
+    """Raise [LaneFailure][diff_soup.optimization.inference.engine._reducers.LaneFailure] if a lane failed.
 
     Args:
         status: The status of the lanes, one entry per lane.
@@ -320,7 +320,7 @@ def reduce_blocks(tables: TreeTables, results: Any, lane_ids: tuple, weights: An
         weights: One weight per owner; one when omitted.
 
     Returns:
-        The [OwnerBlocks][diff_soup.inference.engine._reducers.OwnerBlocks].
+        The [OwnerBlocks][diff_soup.optimization.inference.engine._reducers.OwnerBlocks].
 
     Raises:
         LaneFailure: If a lane of the set failed whose owner's weight is not
@@ -354,7 +354,7 @@ def reduce_gradient(tables: TreeTables, results: Any, lane_ids: tuple, weights: 
         weights: One weight per owner; one when omitted.
 
     Returns:
-        The [OwnerGradients][diff_soup.inference.engine._reducers.OwnerGradients].
+        The [OwnerGradients][diff_soup.optimization.inference.engine._reducers.OwnerGradients].
 
     Raises:
         LaneFailure: If a lane of the set failed whose owner's weight is not

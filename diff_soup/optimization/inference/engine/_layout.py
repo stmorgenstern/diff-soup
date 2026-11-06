@@ -80,7 +80,7 @@ def _experiment_problems(problem: Any) -> tuple:
 
 def _window_count(child: Any) -> int:
     """The observed-start windows of one experiment's fitted problem; ``0`` when it has none."""
-    from diff_soup.inference.fitting.joint import _child_mode
+    from diff_soup.optimization.inference.fitting.joint import _child_mode
 
     return int(child.n_segments) if _child_mode(child) == "observed_ic" else 0
 
@@ -91,7 +91,7 @@ def _lane_ids(names: tuple, problems: tuple) -> tuple:
     ``names`` are the identifiers of the experiments of ``problems``. An
     experiment solved in one shoot has one lane, of its identifier; one fitted
     in observed-start windows has one lane per window, in time order, named as
-    [LaneLayout][diff_soup.inference.engine._layout.LaneLayout] says.
+    [LaneLayout][diff_soup.optimization.inference.engine._layout.LaneLayout] says.
     """
     lanes, experiments = [], []
     for index, (name, child) in enumerate(zip(names, problems)):
@@ -122,7 +122,7 @@ def lane_layout(problem: Any) -> LaneLayout:
             every coordinate of the fitted vector as a shared one.
 
     Returns:
-        The [LaneLayout][diff_soup.inference.engine._layout.LaneLayout].
+        The [LaneLayout][diff_soup.optimization.inference.engine._layout.LaneLayout].
     """
     start = np.asarray(problem.x0)
     every = _experiment_problems(problem)

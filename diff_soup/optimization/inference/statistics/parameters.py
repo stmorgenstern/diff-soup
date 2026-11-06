@@ -2,36 +2,36 @@
 
 Statistical work on a fitted model happens in a flat *inference coordinate*
 ``z`` while the model itself consumes the *physical coordinate* ``x`` (the
-learnable theta vector of a [InferenceProblem][diff_soup.inference.InferenceProblem]).
+learnable theta vector of a [InferenceProblem][diff_soup.optimization.inference.InferenceProblem]).
 This module makes the map between the two explicit and keeps every result
 labeled with the coordinate it lives in:
 
-* [Transform][diff_soup.inference.statistics.parameters.Transform] and its concrete maps [Identity][diff_soup.inference.statistics.parameters.Identity], [Log][diff_soup.inference.statistics.parameters.Log],
-  [Logit][diff_soup.inference.statistics.parameters.Logit], [BoundedAffine][diff_soup.inference.statistics.parameters.BoundedAffine], and [ScaledTransform][diff_soup.inference.statistics.parameters.ScaledTransform] are
+* [Transform][diff_soup.optimization.inference.statistics.parameters.Transform] and its concrete maps [Identity][diff_soup.optimization.inference.statistics.parameters.Identity], [Log][diff_soup.optimization.inference.statistics.parameters.Log],
+  [Logit][diff_soup.optimization.inference.statistics.parameters.Logit], [BoundedAffine][diff_soup.optimization.inference.statistics.parameters.BoundedAffine], and [ScaledTransform][diff_soup.optimization.inference.statistics.parameters.ScaledTransform] are
   smooth elementwise changes of variables ``x = forward(z)`` with exact
   ``log |dx/dz|`` bookkeeping.
-* [ParamBlock][diff_soup.inference.statistics.parameters.ParamBlock] binds one named slice of the inference vector to its
+* [ParamBlock][diff_soup.optimization.inference.statistics.parameters.ParamBlock] binds one named slice of the inference vector to its
   transform plus metadata (shape, problem leaf path, parameter group, scale,
   and the coordinate its prior density is declared in).
-* [Parameterization][diff_soup.inference.statistics.parameters.Parameterization] assembles blocks into the full ``z <-> x`` map,
+* [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization] assembles blocks into the full ``z <-> x`` map,
   sums the change-of-variables correction, and is built from a
-  [InferenceProblem][diff_soup.inference.InferenceProblem] via [Parameterization.from_inference_problem][diff_soup.inference.statistics.parameters.Parameterization.from_inference_problem]. Identity is the default; ``transforms="auto"`` infers a
+  [InferenceProblem][diff_soup.optimization.inference.InferenceProblem] via [Parameterization.from_inference_problem][diff_soup.optimization.inference.statistics.parameters.Parameterization.from_inference_problem]. Identity is the default; ``transforms="auto"`` infers a
   transform from the problem's declared bounds but always stores and
   displays the resolved choice. There is no global log default.
-* [Parameterization.convert_covariance][diff_soup.inference.statistics.parameters.Parameterization.convert_covariance] is a *local delta-method*
+* [Parameterization.convert_covariance][diff_soup.optimization.inference.statistics.parameters.Parameterization.convert_covariance] is a *local delta-method*
   conversion of a covariance between coordinates; it returns a
-  [ConvertedCovariance][diff_soup.inference.statistics.parameters.ConvertedCovariance] carrying the linearization point and the
+  [ConvertedCovariance][diff_soup.optimization.inference.statistics.parameters.ConvertedCovariance] carrying the linearization point and the
   source/target labels, never a bare array.
-* [ModeLabel][diff_soup.inference.statistics.parameters.ModeLabel] pairs a mode (e.g. a MAP point) with the coordinate of
+* [ModeLabel][diff_soup.optimization.inference.statistics.parameters.ModeLabel] pairs a mode (e.g. a MAP point) with the coordinate of
   the density it maximizes — a MAP is not invariant under reparameterization,
   so a mode without its coordinate is meaningless.
-* [LinearConstraint][diff_soup.inference.statistics.parameters.LinearConstraint], [Gauge][diff_soup.inference.statistics.parameters.Gauge], and [constrained][diff_soup.inference.statistics.parameters.constrained] impose
+* [LinearConstraint][diff_soup.optimization.inference.statistics.parameters.LinearConstraint], [Gauge][diff_soup.optimization.inference.statistics.parameters.Gauge], and [constrained][diff_soup.optimization.inference.statistics.parameters.constrained] impose
   hard linear equalities ``A x = b`` (physical constraints and gauge fixes)
   by exact null-space elimination: the returned
-  [ConstrainedParameterization][diff_soup.inference.statistics.parameters.ConstrainedParameterization] works in a reduced coordinate ``u``
+  [ConstrainedParameterization][diff_soup.optimization.inference.statistics.parameters.ConstrainedParameterization] works in a reduced coordinate ``u``
   entering through ``x_particular + null_basis @ u`` — the equalities are
   eliminated exactly, never through penalty or ridge terms.
-* [non_centered][diff_soup.inference.statistics.parameters.non_centered] replaces one named block coordinate by its standardized
+* [non_centered][diff_soup.optimization.inference.statistics.parameters.non_centered] replaces one named block coordinate by its standardized
   coordinate while preserving the same physical parameter space. It composes
   with the block's existing transform and records the declared scale.
 
@@ -97,7 +97,7 @@ class Transform(eqx.Module):
     coordinate ``x``; ``inverse`` maps back. ``log_abs_det_jacobian`` returns
     the **elementwise** ``log |dx/dz|`` with the same shape as ``z`` — callers
     that need the total correction sum it (as
-    [Parameterization.log_abs_det_jacobian][diff_soup.inference.statistics.parameters.Parameterization.log_abs_det_jacobian] does).
+    [Parameterization.log_abs_det_jacobian][diff_soup.optimization.inference.statistics.parameters.Parameterization.log_abs_det_jacobian] does).
 
     All methods must be pure ``jax.numpy`` functions, safe under ``jax.jit``
     and ``jax.vmap``.
@@ -254,7 +254,7 @@ class ScaledTransform(Transform):
 
     The map is bijective whenever ``base`` is, and its elementwise Jacobian
     correction is the base correction at ``scale * z`` plus ``log(scale)``.
-    This is the zero-offset affine composition used by [non_centered][diff_soup.inference.statistics.parameters.non_centered];
+    This is the zero-offset affine composition used by [non_centered][diff_soup.optimization.inference.statistics.parameters.non_centered];
     keeping it as an explicit transform means covariance conversion, priors,
     and normalized posterior densities all see the same coordinate map.
 
@@ -320,7 +320,7 @@ class ParamBlock(eqx.Module):
     Attributes:
         name: The block name (a parameter scalar name, or a leaf/field name
             for multi-element blocks).
-        transform: The block's [Transform][diff_soup.inference.statistics.parameters.Transform] (applied elementwise to the
+        transform: The block's [Transform][diff_soup.optimization.inference.statistics.parameters.Transform] (applied elementwise to the
             flat slice).
         shape: The original array shape of the parameter leaf; ``()`` for a
             scalar. Its element count must equal the slice length.
@@ -332,7 +332,7 @@ class ParamBlock(eqx.Module):
             block's prior density is declared. Defaults to ``"x"`` (a prior
             on the physical value).
 
-    The block's position is exposed as the [`index`][diff_soup.inference.statistics.parameters.ParamBlock.index] property (a
+    The block's position is exposed as the [`index`][diff_soup.optimization.inference.statistics.parameters.ParamBlock.index] property (a
     contiguous ``slice``); it is stored internally as a ``(start, stop)``
     tuple so the module stays hashable.
     """
@@ -363,7 +363,7 @@ class ParamBlock(eqx.Module):
         Args:
             name: Non-empty block name.
             index: Contiguous ``slice(start, stop)`` with ``0 <= start < stop``.
-            transform: The block's [Transform][diff_soup.inference.statistics.parameters.Transform] instance.
+            transform: The block's [Transform][diff_soup.optimization.inference.statistics.parameters.Transform] instance.
             shape: Original leaf shape; element count must match the slice.
             path: Problem leaf path string (may be ``""``).
             group: Owning parameter-group name, or ``None``.
@@ -502,12 +502,12 @@ class ConvertedCovariance(eqx.Module):
 class Parameterization(eqx.Module):
     """The full map between the flat inference vector ``z`` and physical ``x``.
 
-    A tuple of [ParamBlock][diff_soup.inference.statistics.parameters.ParamBlock] covering the inference vector contiguously
+    A tuple of [ParamBlock][diff_soup.optimization.inference.statistics.parameters.ParamBlock] covering the inference vector contiguously
     from index ``0``. Each block's transform is applied elementwise to its
-    slice; [log_abs_det_jacobian][diff_soup.inference.statistics.parameters.Parameterization.log_abs_det_jacobian] sums the elementwise corrections into
+    slice; [log_abs_det_jacobian][diff_soup.optimization.inference.statistics.parameters.Parameterization.log_abs_det_jacobian] sums the elementwise corrections into
     the scalar total used by change-of-variables density evaluation.
 
-    Build one from a fit declaration with [from_inference_problem][diff_soup.inference.statistics.parameters.Parameterization.from_inference_problem] (identity
+    Build one from a fit declaration with [from_inference_problem][diff_soup.optimization.inference.statistics.parameters.Parameterization.from_inference_problem] (identity
     transforms by default), or assemble blocks directly.
 
     Attributes:
@@ -521,10 +521,10 @@ class Parameterization(eqx.Module):
         """Validate that the blocks tile the inference vector contiguously.
 
         Args:
-            blocks: An iterable of [ParamBlock][diff_soup.inference.statistics.parameters.ParamBlock].
+            blocks: An iterable of [ParamBlock][diff_soup.optimization.inference.statistics.parameters.ParamBlock].
 
         Raises:
-            TypeError: If any entry is not a [ParamBlock][diff_soup.inference.statistics.parameters.ParamBlock].
+            TypeError: If any entry is not a [ParamBlock][diff_soup.optimization.inference.statistics.parameters.ParamBlock].
             ValueError: If no blocks are given, block names collide, or the
                 index slices do not cover ``0..n`` contiguously in order.
         """
@@ -611,7 +611,7 @@ class Parameterization(eqx.Module):
         multishoot window states) are outside the inference vector.
 
         Args:
-            problem: An [InferenceProblem][diff_soup.inference.InferenceProblem] (or an
+            problem: An [InferenceProblem][diff_soup.optimization.inference.InferenceProblem] (or an
                 object exposing ``theta_names`` and, optionally,
                 ``param_group_names``/``param_group_cols`` and the bounds
                 surface used by ``transforms="auto"``).
@@ -620,19 +620,19 @@ class Parameterization(eqx.Module):
                 * ``"identity"`` (default) — every parameter is inferred on
                   its physical scale.
                 * a dict mapping parameter names and/or group names to
-                  [Transform][diff_soup.inference.statistics.parameters.Transform] instances; a parameter-name key takes
+                  [Transform][diff_soup.optimization.inference.statistics.parameters.Transform] instances; a parameter-name key takes
                   precedence over its group's key, and unnamed parameters
                   stay identity.
                 * ``"auto"`` — infer from the problem's declared bounds:
-                  a ``(0, inf)`` bound gives [Log][diff_soup.inference.statistics.parameters.Log], a finite
-                  ``(lo, hi)`` bound gives [BoundedAffine][diff_soup.inference.statistics.parameters.BoundedAffine], and
+                  a ``(0, inf)`` bound gives [Log][diff_soup.optimization.inference.statistics.parameters.Log], a finite
+                  ``(lo, hi)`` bound gives [BoundedAffine][diff_soup.optimization.inference.statistics.parameters.BoundedAffine], and
                   anything else (including no declared bound) stays
-                  [Identity][diff_soup.inference.statistics.parameters.Identity]. The resolved choice is stored on each
+                  [Identity][diff_soup.optimization.inference.statistics.parameters.Identity]. The resolved choice is stored on each
                   block and shown by ``repr`` and
-                  [resolved_transforms][diff_soup.inference.statistics.parameters.Parameterization.resolved_transforms].
+                  [resolved_transforms][diff_soup.optimization.inference.statistics.parameters.Parameterization.resolved_transforms].
 
         Returns:
-            The assembled [Parameterization][diff_soup.inference.statistics.parameters.Parameterization].
+            The assembled [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization].
 
         Raises:
             ValueError: If the problem has no learnable theta scalars, a
@@ -641,7 +641,7 @@ class Parameterization(eqx.Module):
                 there is no global log mode: a log scale must be chosen per
                 parameter (or inferred from a declared ``(0, inf)`` bound) so
                 the choice stays visible.
-            TypeError: If a dict value is not a [Transform][diff_soup.inference.statistics.parameters.Transform] instance.
+            TypeError: If a dict value is not a [Transform][diff_soup.optimization.inference.statistics.parameters.Transform] instance.
         """
         names = tuple(getattr(problem, "theta_names", ()) or ())
         if not names:
@@ -678,7 +678,7 @@ class Parameterization(eqx.Module):
         group_of: dict,
         problem: Any,
     ) -> tuple:
-        """Resolve the per-scalar transforms for [from_inference_problem][diff_soup.inference.statistics.parameters.Parameterization.from_inference_problem]."""
+        """Resolve the per-scalar transforms for [from_inference_problem][diff_soup.optimization.inference.statistics.parameters.Parameterization.from_inference_problem]."""
         n = len(names)
         if isinstance(transforms, str):
             if transforms == "identity":
@@ -728,13 +728,13 @@ class Parameterization(eqx.Module):
         """Infer per-scalar transforms from the problem's declared bounds.
 
         Recognized patterns per parameter: a ``(0, inf)`` bound gives
-        [Log][diff_soup.inference.statistics.parameters.Log]; a finite ``(lo, hi)`` bound gives
-        [BoundedAffine][diff_soup.inference.statistics.parameters.BoundedAffine]. Any other bound — including a positive lower
+        [Log][diff_soup.optimization.inference.statistics.parameters.Log]; a finite ``(lo, hi)`` bound gives
+        [BoundedAffine][diff_soup.optimization.inference.statistics.parameters.BoundedAffine]. Any other bound — including a positive lower
         bound with no upper bound, a one-sided upper bound, or no declared
-        bound at all — stays [Identity][diff_soup.inference.statistics.parameters.Identity]; use an explicit transforms
+        bound at all — stays [Identity][diff_soup.optimization.inference.statistics.parameters.Identity]; use an explicit transforms
         dict for those.
         """
-        from diff_soup.inference.fitting.bounds import resolve_decision_bounds
+        from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
 
         resolved = resolve_decision_bounds(problem)
         n = len(names)
@@ -781,7 +781,7 @@ class Parameterization(eqx.Module):
             target: The coordinate to convert to (``"z"`` or ``"x"``).
 
         Returns:
-            A [ConvertedCovariance][diff_soup.inference.statistics.parameters.ConvertedCovariance] carrying the converted matrix, the
+            A [ConvertedCovariance][diff_soup.optimization.inference.statistics.parameters.ConvertedCovariance] carrying the converted matrix, the
             linearization point, and the coordinate labels.
 
         Raises:
@@ -819,16 +819,16 @@ class LinearConstraint(eqx.Module):
     """Rows of ``A x = b`` on the flat physical coordinate ``x``.
 
     Coefficients are addressed through named blocks of a
-    [Parameterization][diff_soup.inference.statistics.parameters.Parameterization]: ``coefficients`` maps a block name to that
+    [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization]: ``coefficients`` maps a block name to that
     block's coefficient array, and every entry of ``x`` outside the named
-    blocks has coefficient zero. One [LinearConstraint][diff_soup.inference.statistics.parameters.LinearConstraint] may carry
+    blocks has coefficient zero. One [LinearConstraint][diff_soup.optimization.inference.statistics.parameters.LinearConstraint] may carry
     several rows — give each block a ``(n_rows, block_size)`` coefficient
     array (a scalar or 1-D array means one row) and an ``rhs`` with one entry
     per row (a scalar right-hand side is broadcast to every row).
 
-    The rows are eliminated *exactly* by [constrained][diff_soup.inference.statistics.parameters.constrained]; they are never
+    The rows are eliminated *exactly* by [constrained][diff_soup.optimization.inference.statistics.parameters.constrained]; they are never
     turned into penalty or ridge terms. Because the rows are linear in ``x``,
-    they may only address blocks whose transform is [Identity][diff_soup.inference.statistics.parameters.Identity] — a
+    they may only address blocks whose transform is [Identity][diff_soup.optimization.inference.statistics.parameters.Identity] — a
     linear relation in ``x`` is nonlinear in the inference coordinate of a
     transformed block.
 
@@ -853,7 +853,7 @@ class LinearConstraint(eqx.Module):
                 array for several rows. All named blocks must describe the
                 same number of rows. Widths are checked against the block
                 sizes by
-                [constrained][diff_soup.inference.statistics.parameters.constrained].
+                [constrained][diff_soup.optimization.inference.statistics.parameters.constrained].
             rhs: Scalar (broadcast to every row) or length-``n_rows`` vector.
 
         Raises:
@@ -935,7 +935,7 @@ class LinearConstraint(eqx.Module):
 
 
 class Gauge(eqx.Module):
-    """A linear equality that fixes a direction the data leave free, for `gauges=` of [TrustRegion][diff_soup.inference.TrustRegion].
+    """A linear equality that fixes a direction the data leave free, for `gauges=` of [TrustRegion][diff_soup.optimization.inference.TrustRegion].
 
     Build one with `Gauge.pin`, `Gauge.zero_mean`, `Gauge.zero_mean_across` or `Gauge.declared`.
     """
@@ -1230,9 +1230,9 @@ def _null_space_elimination(A: np.ndarray, b: np.ndarray, scalar_names: tuple) -
 
 
 class ConstrainedParameterization(Parameterization):
-    """A [Parameterization][diff_soup.inference.statistics.parameters.Parameterization] with hard linear equalities eliminated.
+    """A [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization] with hard linear equalities eliminated.
 
-    Built by [constrained][diff_soup.inference.statistics.parameters.constrained]. Writing ``z`` for the full inference
+    Built by [constrained][diff_soup.optimization.inference.statistics.parameters.constrained]. Writing ``z`` for the full inference
     coordinate of the underlying blocks, the reduced coordinate ``u`` enters
     through ``z = x_particular + null_basis @ u`` and the physical ``x`` is
     the usual blockwise transform of ``z``. ``x_particular`` is the
@@ -1242,14 +1242,14 @@ class ConstrainedParameterization(Parameterization):
     regularization are involved. Because every constrained block is
     identity-transformed, rows that hold in ``z`` hold identically in ``x``.
 
-    The object keeps the full [Parameterization][diff_soup.inference.statistics.parameters.Parameterization] surface over the
-    reduced coordinate: [transform][diff_soup.inference.statistics.parameters.Parameterization.transform] maps ``u`` to ``x``,
-    [inverse][diff_soup.inference.statistics.parameters.Parameterization.inverse] maps ``x`` back (orthogonally projecting onto the
-    constraint subspace if ``x`` violates a row), [`n_parameters`][diff_soup.inference.statistics.parameters.Parameterization.n_parameters] is the
-    reduced dimension, [names][diff_soup.inference.statistics.parameters.Parameterization.names] labels the reduced coordinates
+    The object keeps the full [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization] surface over the
+    reduced coordinate: [transform][diff_soup.optimization.inference.statistics.parameters.Parameterization.transform] maps ``u`` to ``x``,
+    [inverse][diff_soup.optimization.inference.statistics.parameters.Parameterization.inverse] maps ``x`` back (orthogonally projecting onto the
+    constraint subspace if ``x`` violates a row), [`n_parameters`][diff_soup.optimization.inference.statistics.parameters.Parameterization.n_parameters] is the
+    reduced dimension, [names][diff_soup.optimization.inference.statistics.parameters.Parameterization.names] labels the reduced coordinates
     (coordinates no row touches keep their scalar names, in their original
     order, followed by one ``"nullspace[i]"`` label per mixed null-space
-    direction), and [convert_covariance][diff_soup.inference.statistics.parameters.Parameterization.convert_covariance] converts between the reduced
+    direction), and [convert_covariance][diff_soup.optimization.inference.statistics.parameters.Parameterization.convert_covariance] converts between the reduced
     ``"z"`` coordinate and the full physical ``"x"`` coordinate.
 
     ``x_particular`` and ``null_basis`` are stored as ``jax.numpy`` arrays,
@@ -1261,8 +1261,8 @@ class ConstrainedParameterization(Parameterization):
         x_particular: The minimum-norm particular solution of the rows, in
             the full inference coordinate.
         null_basis: The ``(n_full, n_reduced)`` orthonormal null-space basis.
-        constraints: The [LinearConstraint][diff_soup.inference.statistics.parameters.LinearConstraint] declarations, as given.
-        gauges: Every [Gauge][diff_soup.inference.statistics.parameters.Gauge] declaration, including ``declared``
+        constraints: The [LinearConstraint][diff_soup.optimization.inference.statistics.parameters.LinearConstraint] declarations, as given.
+        gauges: Every [Gauge][diff_soup.optimization.inference.statistics.parameters.Gauge] declaration, including ``declared``
             metadata.
     """
 
@@ -1282,12 +1282,12 @@ class ConstrainedParameterization(Parameterization):
         constraints: Any = (),
         gauges: Any = (),
     ):
-        """Assemble from prepared pieces; use [constrained][diff_soup.inference.statistics.parameters.constrained] to build one.
+        """Assemble from prepared pieces; use [constrained][diff_soup.optimization.inference.statistics.parameters.constrained] to build one.
 
         Raises:
             ValueError: If the array shapes do not match the blocks, or the
                 reduced names do not match the null-basis width (in addition
-                to everything [Parameterization][diff_soup.inference.statistics.parameters.Parameterization] validates).
+                to everything [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization] validates).
         """
         super().__init__(blocks)
         x_particular = jnp.asarray(x_particular)
@@ -1327,7 +1327,7 @@ class ConstrainedParameterization(Parameterization):
 
     @property
     def declared_gauges(self) -> tuple:
-        """Directions asserted as gauge via [Gauge.declared][diff_soup.inference.statistics.parameters.Gauge.declared] (metadata)."""
+        """Directions asserted as gauge via [Gauge.declared][diff_soup.optimization.inference.statistics.parameters.Gauge.declared] (metadata)."""
         return tuple(g.name for g in self.gauges if g.kind == "declared")
 
     def names(self) -> tuple:
@@ -1356,7 +1356,7 @@ class ConstrainedParameterization(Parameterization):
 
         If ``x`` violates a constraint row, the offending component is
         removed by orthogonal projection onto the constraint subspace; for
-        feasible ``x`` the round trip with [transform][diff_soup.inference.statistics.parameters.Parameterization.transform] is exact.
+        feasible ``x`` the round trip with [transform][diff_soup.optimization.inference.statistics.parameters.Parameterization.transform] is exact.
         """
         z = super().inverse(jnp.asarray(x))
         return self.null_basis.T @ (z - self.x_particular)
@@ -1392,10 +1392,10 @@ class ConstrainedParameterization(Parameterization):
     ) -> ConvertedCovariance:
         """Convert a covariance between the reduced and physical coordinates.
 
-        Identical to [Parameterization.convert_covariance][diff_soup.inference.statistics.parameters.Parameterization.convert_covariance] except that
+        Identical to [Parameterization.convert_covariance][diff_soup.optimization.inference.statistics.parameters.Parameterization.convert_covariance] except that
         here ``"z"`` labels the *reduced* coordinate ``u`` (dimension
-        [`n_parameters`][diff_soup.inference.statistics.parameters.Parameterization.n_parameters]) while ``"x"`` keeps the full physical dimension
-        ([`n_full_parameters`][diff_soup.inference.statistics.parameters.ConstrainedParameterization.n_full_parameters]): a reduced covariance pushed to ``x`` is
+        [`n_parameters`][diff_soup.optimization.inference.statistics.parameters.Parameterization.n_parameters]) while ``"x"`` keeps the full physical dimension
+        ([`n_full_parameters`][diff_soup.optimization.inference.statistics.parameters.ConstrainedParameterization.n_full_parameters]): a reduced covariance pushed to ``x`` is
         the ``(n_full, n_full)`` covariance supported on the constraint
         subspace, and an ``x`` covariance pulled back to ``"z"`` is its
         restriction to that subspace.
@@ -1436,38 +1436,38 @@ def constrained(
 ) -> Parameterization:
     """Eliminate hard linear equalities from a parameterization, exactly.
 
-    Lowers every [Gauge][diff_soup.inference.statistics.parameters.Gauge] (``pin``/``zero_mean``) and every
-    [LinearConstraint][diff_soup.inference.statistics.parameters.LinearConstraint] into rows of one system ``A x = b`` on the flat
+    Lowers every [Gauge][diff_soup.optimization.inference.statistics.parameters.Gauge] (``pin``/``zero_mean``) and every
+    [LinearConstraint][diff_soup.optimization.inference.statistics.parameters.LinearConstraint] into rows of one system ``A x = b`` on the flat
     physical coordinate, computes the minimum-norm particular solution and an
     orthonormal null-space basis host-side (via SVD), and returns a
-    [ConstrainedParameterization][diff_soup.inference.statistics.parameters.ConstrainedParameterization] over the reduced coordinate ``u``:
+    [ConstrainedParameterization][diff_soup.optimization.inference.statistics.parameters.ConstrainedParameterization] over the reduced coordinate ``u``:
     the equalities hold to numerical precision for every ``u``, and nothing is
     penalized or ridge-regularized. Redundant (linearly dependent) rows are
     detected by the SVD rank tolerance and simply do not reduce the dimension
     further; rows that admit no common solution raise ``ValueError``.
 
-    Every block addressed by a row must use the [Identity][diff_soup.inference.statistics.parameters.Identity] transform —
+    Every block addressed by a row must use the [Identity][diff_soup.optimization.inference.statistics.parameters.Identity] transform —
     a linear relation in ``x`` is nonlinear in the inference coordinate of a
     transformed block. Unconstrained blocks may use any transform and keep
     their coordinates unchanged.
 
     Args:
-        parameterization: The [Parameterization][diff_soup.inference.statistics.parameters.Parameterization] to constrain. It must
+        parameterization: The [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization] to constrain. It must
             not already be constrained — declare every row in a single call.
-        constraints: An iterable of [LinearConstraint][diff_soup.inference.statistics.parameters.LinearConstraint] (a single
+        constraints: An iterable of [LinearConstraint][diff_soup.optimization.inference.statistics.parameters.LinearConstraint] (a single
             instance is also accepted).
-        gauges: An iterable of [Gauge][diff_soup.inference.statistics.parameters.Gauge] (a single instance is also
+        gauges: An iterable of [Gauge][diff_soup.optimization.inference.statistics.parameters.Gauge] (a single instance is also
             accepted). ``Gauge.declared`` entries are recorded on the result
             but eliminate nothing.
 
     Returns:
-        A [ConstrainedParameterization][diff_soup.inference.statistics.parameters.ConstrainedParameterization] (still a
-        [Parameterization][diff_soup.inference.statistics.parameters.Parameterization]) whose ``n_parameters`` is the full size
+        A [ConstrainedParameterization][diff_soup.optimization.inference.statistics.parameters.ConstrainedParameterization] (still a
+        [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization]) whose ``n_parameters`` is the full size
         minus the number of independent rows.
 
     Raises:
-        TypeError: If the inputs are not a [Parameterization][diff_soup.inference.statistics.parameters.Parameterization],
-            [LinearConstraint][diff_soup.inference.statistics.parameters.LinearConstraint] instances, and [Gauge][diff_soup.inference.statistics.parameters.Gauge] instances.
+        TypeError: If the inputs are not a [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization],
+            [LinearConstraint][diff_soup.optimization.inference.statistics.parameters.LinearConstraint] instances, and [Gauge][diff_soup.optimization.inference.statistics.parameters.Gauge] instances.
         ValueError: If a name addresses no block, an addressed block is not
             identity-transformed, a coefficient or weight width does not
             match its block size, a pin does not resolve to a single scalar,
@@ -1643,13 +1643,13 @@ def non_centered(
     public scalar names are unchanged.
 
     Args:
-        parameterization: An unconstrained [Parameterization][diff_soup.inference.statistics.parameters.Parameterization].
+        parameterization: An unconstrained [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization].
         block: The selected block name, or the corresponding
-            [ParamBlock][diff_soup.inference.statistics.parameters.ParamBlock] instance from ``parameterization.blocks``.
+            [ParamBlock][diff_soup.optimization.inference.statistics.parameters.ParamBlock] instance from ``parameterization.blocks``.
         scale: Positive finite scalar standard deviation/characteristic scale.
 
     Returns:
-        A new [Parameterization][diff_soup.inference.statistics.parameters.Parameterization]; the input remains unchanged.
+        A new [Parameterization][diff_soup.optimization.inference.statistics.parameters.Parameterization]; the input remains unchanged.
 
     Raises:
         TypeError: If the arguments do not identify a parameter block.

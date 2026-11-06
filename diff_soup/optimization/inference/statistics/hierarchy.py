@@ -1,6 +1,6 @@
 """Nested levels of parameters: the study, its intermediate levels, and its experiments.
 
-A [Hierarchy][diff_soup.inference.Hierarchy] declares which learnable Recipe
+A [Hierarchy][diff_soup.optimization.inference.Hierarchy] declares which learnable Recipe
 parameters take one value for the whole study, one value per member of an
 intermediate level (a cell, a particle), or one value per experiment. The
 levels nest: every member of an inner level sits under one member of the level
@@ -37,7 +37,7 @@ def _levels_text(levels: tuple) -> str:
 class Hierarchy:
     """Declare which parameters of a study are shared and which take one value per member of a level.
 
-    Pass it as `parameters=` of a [`Study`][diff_soup.inference.Study]. Each handle appears once,
+    Pass it as `parameters=` of a [`Study`][diff_soup.optimization.inference.Study]. Each handle appears once,
     in `shared` or under one level of `per`, and experiments that name the same member share its
     values.
 
@@ -186,7 +186,7 @@ class Hierarchy:
         raise KeyError(f"Hierarchy does not contain handle {getattr(handle, 'name', handle)!r}.")
 
     def cluster_for(self, handle: Any) -> str | None:
-        """The same as [level_for][diff_soup.inference.Hierarchy.level_for]."""
+        """The same as [level_for][diff_soup.optimization.inference.Hierarchy.level_for]."""
         return self.level_for(handle)
 
 

@@ -9,7 +9,7 @@ compression (noise induced by transforming an already noisy observation).
 Two induced-likelihood modes are explicit:
 
 * ``"analytic"`` supports
-  [AffineSummary][diff_soup.inference.statistics.compression.AffineSummary] applied to fixed-covariance
+  [AffineSummary][diff_soup.optimization.inference.statistics.compression.AffineSummary] applied to fixed-covariance
   Gaussian source channels. The induced mean and covariance are exact.
 * ``"simulate"`` fits a labeled Gaussian synthetic likelihood to paired source
   simulations. Its Fisher information includes derivatives of both the
@@ -31,12 +31,12 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from diff_soup.inference.statistics.experiment import _channel_likelihood_view
-from diff_soup.inference.statistics.information import (
+from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
+from diff_soup.optimization.inference.statistics.information import (
     _expected_information_core,
     _resolve_at,
 )
-from diff_soup.inference.statistics.likelihoods import CorrelatedGaussian, Gaussian
+from diff_soup.optimization.inference.statistics.likelihoods import CorrelatedGaussian, Gaussian
 
 __all__ = ["AffineSummary", "CompressionReport", "compare_compression"]
 
@@ -128,7 +128,7 @@ class CompressionReport:
 
     @property
     def direction_retention(self) -> dict:
-        """Backward-friendly alias of [per_direction_retention][diff_soup.inference.statistics.compression.CompressionReport.per_direction_retention]."""
+        """Backward-friendly alias of [per_direction_retention][diff_soup.optimization.inference.statistics.compression.CompressionReport.per_direction_retention]."""
         return self.per_direction_retention
 
 
@@ -685,7 +685,7 @@ def compare_compression(
             shared predictor.
         summaries: Non-empty mapping of report names to summary maps. Analytic
             mode requires
-            [AffineSummary][diff_soup.inference.statistics.compression.AffineSummary]; simulation mode accepts JAX-
+            [AffineSummary][diff_soup.optimization.inference.statistics.compression.AffineSummary]; simulation mode accepts JAX-
             traceable callables receiving ``{channel_name: observation}``.
         at: Flat physical evaluation point, named overrides, or ``None`` for
             the predictor's declared point.
@@ -697,7 +697,7 @@ def compare_compression(
         parameters: Optional parameter groups passed to the experiment predictor.
 
     Returns:
-        A frozen [CompressionReport][diff_soup.inference.statistics.compression.CompressionReport]
+        A frozen [CompressionReport][diff_soup.optimization.inference.statistics.compression.CompressionReport]
         with full/summary information,
         common-direction retention, optional prior/posterior metrics, DPI
         diagnostics, approximation errors, notes, and flags.

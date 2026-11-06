@@ -12,31 +12,31 @@ and [identifiability](../../overview/inference/identifiability.md).
 
 ### Local analysis
 
-::: diff_soup.inference.information
+::: diff_soup.optimization.inference.information
 
-::: diff_soup.inference.laplace
+::: diff_soup.optimization.inference.laplace
 
-::: diff_soup.inference.evidence
+::: diff_soup.optimization.inference.evidence
 
-::: diff_soup.inference.identifiability
+::: diff_soup.optimization.inference.identifiability
 
-::: diff_soup.inference.profile
+::: diff_soup.optimization.inference.profile
 
-::: diff_soup.inference.residual_report
+::: diff_soup.optimization.inference.residual_report
 
-::: diff_soup.inference.practical_report
+::: diff_soup.optimization.inference.practical_report
 
-::: diff_soup.inference.function_report
+::: diff_soup.optimization.inference.function_report
 
-::: diff_soup.inference.cluster_covariance
+::: diff_soup.optimization.inference.cluster_covariance
 
 ---
 
 ### Bootstrap
 
-::: diff_soup.inference.bootstrap
+::: diff_soup.optimization.inference.bootstrap
 
-::: diff_soup.inference.BootstrapResult
+::: diff_soup.optimization.inference.BootstrapResult
     options:
       members:
         - values
@@ -46,11 +46,11 @@ and [identifiability](../../overview/inference/identifiability.md).
         - n_kept
         - n_failed
 
-::: diff_soup.inference.BootstrapInterval
+::: diff_soup.optimization.inference.BootstrapInterval
     options:
       members: false
 
-::: diff_soup.inference.BootstrapBand
+::: diff_soup.optimization.inference.BootstrapBand
     options:
       members: false
 
@@ -58,12 +58,12 @@ and [identifiability](../../overview/inference/identifiability.md).
 
 ### Prediction
 
-::: diff_soup.inference.predict
+::: diff_soup.optimization.inference.predict
 
-::: diff_soup.inference.Prediction
+::: diff_soup.optimization.inference.Prediction
     options:
       members: false
 
-::: diff_soup.inference.PredictionBand
+::: diff_soup.optimization.inference.PredictionBand
     options:
       members: false

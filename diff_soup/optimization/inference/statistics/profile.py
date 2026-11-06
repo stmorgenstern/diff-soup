@@ -8,11 +8,11 @@ Where the Laplace ellipsoid linearizes, the profile walks the true objective,
 so it exposes curved valleys, one-sided intervals, and practically
 unidentified (open) directions that a covariance matrix cannot represent.
 
-Three target kinds are supported by [profile][diff_soup.inference.statistics.profile.profile]:
+Three target kinds are supported by [profile][diff_soup.optimization.inference.statistics.profile.profile]:
 
 * a parameter name (one flat-theta scalar),
 * a direction vector in flat-theta space (the profiled scalar is ``vᵀx``),
-* [At][diff_soup.inference.statistics.profile.At] — the value of a learnable function block at a point, e.g.
+* [At][diff_soup.optimization.inference.statistics.profile.At] — the value of a learnable function block at a point, e.g.
   ``At("j0", c=0.4)`` (linear in the block's coefficients).
 
 Nuisance re-optimization runs through the standard ``fit`` engine on a
@@ -35,20 +35,20 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.stats import chi2
 
-from diff_soup.inference.approx.legendre import Legendre
-from diff_soup.inference.fitting._forward_seam import _path_key_tokens
-from diff_soup.inference.fitting.bounds import resolve_decision_bounds
-from diff_soup.inference.fitting.regularization import NoReg
-from diff_soup.inference.fitting.result import OptResult
-from diff_soup.inference.hierarchical.level_solvers import TrustRegion
-from diff_soup.inference.solvers.levenberg_marquardt import LevenbergMarquardt
-from diff_soup.inference.statistics.estimation import MAP, EstimationProblem
-from diff_soup.inference.statistics.experiment import _CompiledExperiment
-from diff_soup.inference.statistics.identifiability import (
+from diff_soup.optimization.inference.approx.legendre import Legendre
+from diff_soup.optimization.inference.fitting._forward_seam import _path_key_tokens
+from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
+from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.hierarchical.level_solvers import TrustRegion
+from diff_soup.optimization.inference.statistics.estimation import MAP, EstimationProblem
+from diff_soup.optimization.inference.statistics.experiment import _CompiledExperiment
+from diff_soup.optimization.inference.statistics.identifiability import (
     _require_problem_schema,
     _schema_coordinates,
 )
-from diff_soup.inference.statistics.measurement import require_likelihoods
+from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
+from diff_soup.optimization.solvers.levenberg_marquardt import LevenbergMarquardt
 
 __all__ = ["At", "ProfileRefit", "ProfileResult", "profile"]
 
@@ -66,10 +66,10 @@ class At(eqx.Module):
     The evaluation row is resolved in this order:
 
     1. ``row`` — an explicit coefficient row, used verbatim;
-    2. ``basis`` — a [Legendre][diff_soup.inference.approx.legendre.Legendre]
+    2. ``basis`` — a [Legendre][diff_soup.optimization.inference.approx.legendre.Legendre]
        whose interval scaling maps ``c`` onto the Legendre argument;
     3. discovery — the inference problem's model pytree is searched for a single
-       [Legendre][diff_soup.inference.approx.legendre.Legendre] leaf reached through a path containing ``name``.
+       [Legendre][diff_soup.optimization.inference.approx.legendre.Legendre] leaf reached through a path containing ``name``.
 
     Attributes:
         name: The parameter block whose coefficients are targeted.
@@ -147,15 +147,15 @@ class ProfileResult:
             likelihood-ratio statistic is ``2 * (nll - reference_nll)``.
         levels: The confidence levels the walk was asked to cover.
         refits: One
-            [ProfileRefit][diff_soup.inference.statistics.profile.ProfileRefit]
+            [ProfileRefit][diff_soup.optimization.inference.statistics.profile.ProfileRefit]
             per non-center grid point, in walk order (lower wing
             outward, then upper wing outward).
         open_directions: The sides (``"lower"``/``"upper"``) whose walk ended
             before the curve reached the largest requested threshold — the data
             do not close the interval on that side, and
-            [interval][diff_soup.inference.statistics.profile.ProfileResult.interval]
+            [interval][diff_soup.optimization.inference.statistics.profile.ProfileResult.interval]
             reports it infinite.
-            [wing_end][diff_soup.inference.statistics.profile.ProfileResult]
+            [wing_end][diff_soup.optimization.inference.statistics.profile.ProfileResult]
             says why each side ended.
         wing_end: Why each direction's walk ended, keyed ``"lower"`` and
             ``"upper"``, with one of:
@@ -178,7 +178,7 @@ class ProfileResult:
             the retries each side spent.
         provenance: How this curve was produced: the target, the
             likelihood-ratio assumptions behind
-            [threshold][diff_soup.inference.statistics.profile.ProfileResult.threshold],
+            [threshold][diff_soup.optimization.inference.statistics.profile.ProfileResult.threshold],
             each wing's end reason and retry count, the multistart policy, and
             whether the objective includes regularization rows.
     """
@@ -216,7 +216,7 @@ class ProfileResult:
         in ``t`` for a quadratic objective — so quadratic problems reproduce
         the Wald interval exactly. A side whose curve never reaches the
         threshold is reported as infinite (see
-        [open_directions][diff_soup.inference.statistics.profile.ProfileResult.open_directions]).
+        [open_directions][diff_soup.optimization.inference.statistics.profile.ProfileResult.open_directions]).
         """
         _check_level(level)
         z = float(np.sqrt(chi2.ppf(level, 1)))
@@ -304,7 +304,7 @@ def _discover_basis(problem: Any, name: str) -> Optional[Legendre]:
 
 
 def _at_row(target: At, problem: Any, n_cols: int) -> np.ndarray:
-    """The evaluation row of an [At][diff_soup.inference.statistics.profile.At] target.
+    """The evaluation row of an [At][diff_soup.optimization.inference.statistics.profile.At] target.
 
     The row spans the target's block columns.
     """
@@ -626,17 +626,17 @@ def _profile_engine(
     from the last certified point with half the step and twice that budget,
     at most twice per direction. When those retries are spent the direction
     ends as ``"nonconvergence"`` or ``"solver_failure"`` in
-    [wing_end][diff_soup.inference.statistics.profile.ProfileResult],
+    [wing_end][diff_soup.optimization.inference.statistics.profile.ProfileResult],
     and every attempt stays in ``refits`` with ``converged=False`` for
     diagnosis.
 
     Args:
         problem_or_experiment: An inference problem, or an
-            [Experiment][diff_soup.inference.statistics.experiment.Channel] with
+            [Experiment][diff_soup.optimization.inference.statistics.experiment.Channel] with
             response data attached (lowered through ``as_inference_problem``).
         target: A flat-theta scalar name, a direction vector (the profiled
             scalar is ``vᵀx``), or an
-            [At][diff_soup.inference.statistics.profile.At] function-value target.
+            [At][diff_soup.optimization.inference.statistics.profile.At] function-value target.
         fit: An existing fit result for this problem (its ``params`` and
             ``cost`` seed the walk); ``None`` runs the base fit here.
         optimizer: The engine for every (re)fit; ``None`` uses the default
@@ -656,7 +656,7 @@ def _profile_engine(
         multistart_scale: Relative scale of the start jitter.
 
     Returns:
-        A [ProfileResult][diff_soup.inference.statistics.profile.ProfileResult].
+        A [ProfileResult][diff_soup.optimization.inference.statistics.profile.ProfileResult].
 
     Raises:
         ValueError: If the target cannot be resolved, the levels or bounds
@@ -669,7 +669,7 @@ def _profile_engine(
 
     warn_if_float32_default()
 
-    from diff_soup.inference.fitting._optsolve import optsolve as run_fit
+    from diff_soup.optimization.inference.fitting._optsolve import optsolve as run_fit
 
     if isinstance(problem_or_experiment, _CompiledExperiment):
         problem = problem_or_experiment.as_inference_problem(parameters=parameters)
@@ -918,7 +918,7 @@ def _validate_fit(problem: EstimationProblem, fit: OptResult) -> None:
     if fit.parameter_schema is None:
         raise ValueError(
             "profile requires an OptResult with handle-based parameter schema "
-            "provenance; fit the supplied InferenceProblem through diff_soup.inference.optsolve(...)."
+            "provenance; fit the supplied InferenceProblem through diff_soup.optimization.optsolve(...)."
         )
 
     _require_problem_schema(problem, fit.parameter_schema, where="profile")
@@ -1051,7 +1051,7 @@ def _profile_facade(
     refit is retried, up to twice per direction, with half the step and twice
     the per-refit budget; a direction that still cannot certify ends as
     ``"nonconvergence"`` or ``"solver_failure"`` in
-    [wing_end][diff_soup.inference.statistics.profile.ProfileResult],
+    [wing_end][diff_soup.optimization.inference.statistics.profile.ProfileResult],
     which distinguishes an empty or short wing from a genuinely open one.
     """
     if not isinstance(fit, OptResult):
@@ -1168,17 +1168,17 @@ def profile(
     a bound, or `max_steps`. A side that stays below the threshold is an open direction.
 
     Args:
-        problem: An [`InferenceProblem`][diff_soup.inference.InferenceProblem] or
-            [`LoweredStudy`][diff_soup.inference.LoweredStudy] whose measurements all declare a
+        problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] or
+            [`LoweredStudy`][diff_soup.optimization.inference.LoweredStudy] whose measurements all declare a
             likelihood.
-        fit: The [`OptResult`][diff_soup.inference.OptResult] of `ds.inference.optsolve` on
+        fit: The [`OptResult`][diff_soup.optimization.OptResult] of `ds.optimization.optsolve` on
             `problem`.
         handle: A scalar handle from `spec.param`.
         owner: The member whose value is walked, required for a handle that varies by member
             and refused for a shared one.
         optimizer: The optimizer of the refits,
-            [`LevenbergMarquardt`][diff_soup.inference.LevenbergMarquardt], or
-            [`TrustRegion`][diff_soup.inference.TrustRegion] on a lowered study, or `None` for
+            [`LevenbergMarquardt`][diff_soup.optimization.LevenbergMarquardt], or
+            [`TrustRegion`][diff_soup.optimization.inference.TrustRegion] on a lowered study, or `None` for
             `LevenbergMarquardt()`.
         levels: The confidence levels whose likelihood-ratio thresholds the result uses.
         bounds: An optional range `(lo, hi)` for the walked value, which must contain the fit.

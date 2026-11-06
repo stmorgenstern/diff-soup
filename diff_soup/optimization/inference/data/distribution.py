@@ -5,18 +5,18 @@ through a distribution-space summary of one member field.  This is the
 inversion pattern for XRD / MPM problems where the goal is to recover
 the distribution parameters of a family.
 
-* [PopulationObservable][diff_soup.inference.data.distribution.PopulationObservable] ([ObservationOperator][diff_soup.inference.data.base.ObservationOperator] subclass):
+* [PopulationObservable][diff_soup.optimization.inference.data.distribution.PopulationObservable] ([ObservationOperator][diff_soup.optimization.inference.data.base.ObservationOperator] subclass):
   gathers the family member slab from the state, reduces each member to
   a scalar value (``member_reduce``) or pools a member field across all
   members, then maps the value sample to an observation vector through a
   *kernel*.
-* [SoftHistogram][diff_soup.inference.data.distribution.SoftHistogram] (kernel): a differentiable Gaussian-KDE-at-bin-centers
+* [SoftHistogram][diff_soup.optimization.inference.data.distribution.SoftHistogram] (kernel): a differentiable Gaussian-KDE-at-bin-centers
   density (or soft counts).  XRD peak-shape forward models can be implemented
   as a kernel plug-in using the same protocol.
-* [Moments][diff_soup.inference.data.distribution.Moments] (kernel): smooth raw moments.  Cheap, but low moments
+* [Moments][diff_soup.optimization.inference.data.distribution.Moments] (kernel): smooth raw moments.  Cheap, but low moments
   cannot detect bimodality, so ``Moments`` is recommended for diagnostics /
   auxiliary rows rather than as the primary misfit.
-* [CDFBins][diff_soup.inference.data.distribution.CDFBins] (kernel, submodule-level): a smooth empirical CDF on a
+* [CDFBins][diff_soup.optimization.inference.data.distribution.CDFBins] (kernel, submodule-level): a smooth empirical CDF on a
   fixed grid (Cramér-von-Mises / W₁-flavored rows — better-conditioned tails
   than density bins).
 
@@ -41,7 +41,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from diff_soup.inference.data.base import ObservationOperator
+from diff_soup.optimization.inference.data.base import ObservationOperator
 
 # A small additive floor for histogram/CDF normalization (keeps the density finite
 # when the soft counts sum to ~0).  Derived from the sample dtype, not a literal cast.
@@ -182,7 +182,7 @@ class PopulationObservable(ObservationOperator):
     ``predict(u, t, theta)`` (``t``/``theta`` unused):
 
     1. Gather the family member slab — via the ``problem.family_view(name)``
-       accessor (when bound through [with_family_view][diff_soup.inference.data.distribution.PopulationObservable.with_family_view]) or the
+       accessor (when bound through [with_family_view][diff_soup.optimization.inference.data.distribution.PopulationObservable.with_family_view]) or the
        `extract_fn` fallback (``(u) -> (count, member_state)``).
     2. Reduce the slab to a value sample — ``vmap(member_reduce)`` over members,
        or pool the `field` column across all members.
@@ -190,8 +190,8 @@ class PopulationObservable(ObservationOperator):
 
     Attributes:
         family: The Family IR node name — the accessor key.
-        kernel: A distribution kernel ([SoftHistogram][diff_soup.inference.data.distribution.SoftHistogram] / [Moments][diff_soup.inference.data.distribution.Moments] /
-            [CDFBins][diff_soup.inference.data.distribution.CDFBins]) mapping ``(values, weights) -> obs``.
+        kernel: A distribution kernel ([SoftHistogram][diff_soup.optimization.inference.data.distribution.SoftHistogram] / [Moments][diff_soup.optimization.inference.data.distribution.Moments] /
+            [CDFBins][diff_soup.optimization.inference.data.distribution.CDFBins]) mapping ``(values, weights) -> obs``.
         member_reduce: ``(member_state,) -> scalar(s)`` per member; ``None`` pools
             every value (the `field` column).
         field: Which member field column to pool (index) when ``member_reduce`` is
@@ -278,7 +278,7 @@ class PopulationObservable(ObservationOperator):
                 ``.field_slice(f)``, and ``.member_weights``).
 
         Returns:
-            A bound [PopulationObservable][diff_soup.inference.data.distribution.PopulationObservable].
+            A bound [PopulationObservable][diff_soup.optimization.inference.data.distribution.PopulationObservable].
         """
         field = self.field
         if isinstance(self.field, str) and hasattr(family_view, "field_slice"):

@@ -46,8 +46,12 @@ import jax
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
-from diff_soup.inference.engine._request import Request
-from diff_soup.inference.hierarchical.level_solvers import TrustRegion, _hold_rungs, _LaneRoute
+from diff_soup.optimization.inference.engine._request import Request
+from diff_soup.optimization.inference.hierarchical.level_solvers import (
+    TrustRegion,
+    _hold_rungs,
+    _LaneRoute,
+)
 
 _MODES = ("value", "blocks")
 _WORK = ("lane_ids", "lane_rungs", "lane_first_steps")
@@ -425,7 +429,7 @@ class PopulationRoute:
                 ``absent`` (``Request(units=)``). ``None`` evaluates every unit.
 
         Returns:
-            The study's [Results][diff_soup.inference.engine.Results], whose
+            The study's [Results][diff_soup.optimization.inference.engine.Results], whose
             ``members`` are the population indices of the members that took
             part.
 

@@ -5,7 +5,7 @@
 # splitting it would scatter the residual-stack pieces that must stay co-located.
 """_windows_dv.py — decision-variable multishoot machinery.
 
-A decision-variable [Multishoot][diff_soup.inference.fitting.inference_problem.Multishoot] optimizes
+A decision-variable [Multishoot][diff_soup.optimization.inference.fitting.inference_problem.Multishoot] optimizes
 ``x = [θ̃ | s̃₁ … s̃_{W−1}]`` where ``s̃_w`` are the *differential* components
 of the window-start state (window 0 starts at the fixed IC ``y0``).  The
 residual stack is:
@@ -20,10 +20,10 @@ Key design decisions:
 
 * **One solve per window.**  Because every window start is a decision
   variable, the windows are mutually independent:
-  [build_segment_plan][diff_soup.inference.fitting._windows_dv.build_segment_plan]
+  [build_segment_plan][diff_soup.optimization.inference.fitting._windows_dv.build_segment_plan]
   plans, host-side, one solve per window that saves the window's observed frames
   and its end, and
-  [DecisionWindowBuild.residual][diff_soup.inference.fitting._windows_dv.DecisionWindowBuild.residual]
+  [DecisionWindowBuild.residual][diff_soup.optimization.inference.fitting._windows_dv.DecisionWindowBuild.residual]
   runs them all through a single ``jax.vmap`` over windows.  The traced program
   is then independent of the window count, and the integrated time is the
   horizon once, however many frames a window holds.  Rows are gathered from one
@@ -51,7 +51,7 @@ Key design decisions:
   the integration cannot be accepted on the strength of rows that survived it.
 
 * **Reduced window coordinate.**  A declared
-  [StateBasis][diff_soup.inference.fitting.windows.StateBasis] represents a window start
+  [StateBasis][diff_soup.optimization.inference.fitting.windows.StateBasis] represents a window start
   as ``anchor + B a`` for an orthonormal ``B``, so each window contributes ``B``'s
   column count to the decision vector instead of the full differential dimension.
   The anchors are the manifold-init sweep states, so zero coefficients reproduce
@@ -61,7 +61,7 @@ Key design decisions:
 
 * **Window-block Jacobian.**  A window's solve reads only the parameters and
   its own start, so
-  [residual_and_jacobian][diff_soup.inference.fitting._windows_dv.DecisionWindowBuild.residual_and_jacobian]
+  [residual_and_jacobian][diff_soup.optimization.inference.fitting._windows_dv.DecisionWindowBuild.residual_and_jacobian]
   pushes ``n_theta + n_state`` tangents through the solves, each block
   coordinate seeded in every window at once, instead of one tangent per
   decision variable.
@@ -85,9 +85,9 @@ import numpy as np
 
 from diff_soup._logging import log as logger
 from diff_soup._warnings import warn_user
-from diff_soup.inference.fitting._forward_seam import _solution_failed
-from diff_soup.inference.fitting._lane_map import folds_enclosing_batches, lane_map
-from diff_soup.inference.fitting.dependencies import (
+from diff_soup.optimization.inference.fitting._forward_seam import _solution_failed
+from diff_soup.optimization.inference.fitting._lane_map import folds_enclosing_batches, lane_map
+from diff_soup.optimization.inference.fitting.dependencies import (
     ResidualDependencyBlock,
     ResidualDependencyBucket,
 )
@@ -118,7 +118,7 @@ class WindowLayout:
     of the first window carrying a decision-state block (``1`` fixed, ``0`` learned).
 
     A block is ``n_diff`` wide in the full coordinate and ``n_state`` wide when a
-    reduced [StateBasis][diff_soup.inference.fitting.windows.StateBasis] is declared, in
+    reduced [StateBasis][diff_soup.optimization.inference.fitting.windows.StateBasis] is declared, in
     which case the block holds subspace coefficients rather than state values.
 
     Attributes:
@@ -199,7 +199,7 @@ def observation_row_scale(series: Any) -> float:
     reproduces the data. A stream with neither reports one.
 
     Args:
-        series: The scored [Series][diff_soup.inference.fitting.series.Series].
+        series: The scored [Series][diff_soup.optimization.inference.fitting.series.Series].
 
     Returns:
         A positive finite scale for the stream's observation rows.
@@ -233,7 +233,7 @@ def resolve_continuity_weight(
     *,
     observation_weight_scale: float = 1.0,
 ) -> jax.Array:
-    """Resolve a [Continuity][diff_soup.inference.fitting.windows.Continuity] weight spec to per-row ``√W_c`` factors.
+    """Resolve a [Continuity][diff_soup.optimization.inference.fitting.windows.Continuity] weight spec to per-row ``√W_c`` factors.
 
     * A plain float ``W_c`` → the un-referenced ``√W_c`` row factor.
     * ``"auto"`` → the reference-scaled WRMS factor:
@@ -267,10 +267,10 @@ def resolve_continuity_weight(
 
 
 def boundaries_from_windows(windows: Any, ts: np.ndarray, t0: float) -> np.ndarray:
-    """Resolve a [Windows][diff_soup.inference.fitting.windows.Windows] spec to the ``(W+1,)`` boundary times.
+    """Resolve a [Windows][diff_soup.optimization.inference.fitting.windows.Windows] spec to the ``(W+1,)`` boundary times.
 
     Args:
-        windows: A decision-variable [Windows][diff_soup.inference.fitting.windows.Windows] (``uniform`` / ``at``).
+        windows: A decision-variable [Windows][diff_soup.optimization.inference.fitting.windows.Windows] (``uniform`` / ``at``).
         ts: The data frame times (the horizon end is ``ts[-1]``).
         t0: The IC time (the horizon start; the state ``y0`` is at ``t0``).
 
@@ -419,7 +419,7 @@ def build_segment_plan(win_frames: list, ts: np.ndarray, boundaries: np.ndarray)
         boundaries: Window boundary times, length ``n_windows + 1``.
 
     Returns:
-        The [SegmentPlan][diff_soup.inference.fitting._windows_dv.SegmentPlan] for this
+        The [SegmentPlan][diff_soup.optimization.inference.fitting._windows_dv.SegmentPlan] for this
         window configuration.
     """
     ts = np.asarray(ts, dtype=float)
@@ -506,7 +506,7 @@ def warn_if_over_ceiling(n_decision: int) -> Optional[str]:
 
 
 class DecisionWindowBuild:
-    """Built closures + host metadata for a decision-variable [Multishoot][diff_soup.inference.fitting.inference_problem.Multishoot].
+    """Built closures + host metadata for a decision-variable [Multishoot][diff_soup.optimization.inference.fitting.inference_problem.Multishoot].
 
     Encapsulates the residual stack so ``inference_problem.py`` stays thin: the
     per-window propagation through ``pdesolve`` (theta threaded for AD,
@@ -536,7 +536,7 @@ class DecisionWindowBuild:
     ):
         """Build the decision-variable window closures (eager, outside any trace)."""
         from diff_soup import SaveAt
-        from diff_soup.inference.fitting.windows import StateBasis
+        from diff_soup.optimization.inference.fitting.windows import StateBasis
 
         self.seam = seam
         self.solver = solver
@@ -770,7 +770,7 @@ class DecisionWindowBuild:
 
         This is the single implementation of the window residual algebra. The leaf
         problem calls it with its own arrays through
-        [residual][diff_soup.inference.fitting._windows_dv.DecisionWindowBuild.residual]; a
+        [residual][diff_soup.optimization.inference.fitting._windows_dv.DecisionWindowBuild.residual]; a
         homogeneous joint maps the same function over its child axis, passing each
         child's initial state, anchors, targets, and weights. Keeping one algebra
         with two callers is what stops the joint and leaf paths from drifting.
@@ -845,7 +845,7 @@ class DecisionWindowBuild:
         The rows are then differentiated along every decision variable, each
         with its own window's part of the solve tangents, which needs no solve.
         The result equals ``jacfwd`` of
-        [residual][diff_soup.inference.fitting._windows_dv.DecisionWindowBuild.residual].
+        [residual][diff_soup.optimization.inference.fitting._windows_dv.DecisionWindowBuild.residual].
 
         Args:
             x: The decision vector.
@@ -855,7 +855,7 @@ class DecisionWindowBuild:
         Returns:
             ``(residual, jacobian)`` with the Jacobian of shape ``(n_rows, x.size)``.
         """
-        from diff_soup.inference.solvers.tangent import normalize_tangent_tile
+        from diff_soup.optimization.solvers.tangent import normalize_tangent_tile
 
         layout = self.layout
         plan = self._plan
@@ -1591,7 +1591,7 @@ class DecisionWindowBuild:
         window instead of ``n_diff``.  Because ``B`` is orthonormal the projected
         rows carry exactly the norm of the mismatch's in-subspace part, and what the
         subspace cannot represent is reported by
-        [window_diagnostics][diff_soup.inference.fitting._windows_dv.DecisionWindowBuild.window_diagnostics]
+        [window_diagnostics][diff_soup.optimization.inference.fitting._windows_dv.DecisionWindowBuild.window_diagnostics]
         rather than silently dropped.
         """
         plan = self._plan
@@ -1698,7 +1698,7 @@ class DecisionWindowBuild:
 
     def initialization(self):
         """Return the exact anchors/coordinates needed to rebuild without solves."""
-        from diff_soup.inference.fitting.windows import WindowInitialization
+        from diff_soup.optimization.inference.fitting.windows import WindowInitialization
 
         coordinates = np.asarray(self._x0)[self.layout.n_theta :].reshape(
             (self.layout.n_decision_windows, self.layout.n_state)
