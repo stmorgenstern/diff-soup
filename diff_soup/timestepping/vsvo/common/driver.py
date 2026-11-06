@@ -74,7 +74,7 @@ from diff_soup.timestepping.events import (
     resolve_in_loop,
 )
 from diff_soup.timestepping.saveat import _build_save_plan, default_output_plan, output_emitter
-from diff_soup.utils.lanes import lane_cond, lane_where
+from diff_soup.utils.lanes import _lane_where, lane_cond
 from diff_soup.utils.weights import wrms_norm
 
 from ..interpolation import CubicHermiteInterpolation
@@ -574,7 +574,7 @@ def _select_no_buffer(pred, new, old):
     saved = _buffer_fields(new)
     keep = jnp.logical_not(pred)
     picked = jax.tree_util.tree_map(
-        lambda n, o: lane_where(keep, n, o), _strip_buffers(new), _strip_buffers(old)
+        lambda n, o: _lane_where(keep, n, o), _strip_buffers(new), _strip_buffers(old)
     )
     return eqx.tree_at(_buffer_fields, picked, saved, is_leaf=lambda x: x is None)
 

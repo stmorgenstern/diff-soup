@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.utils.lanes import lane_cond, lane_where, live_lane_cond
+from diff_soup.utils.lanes import _lane_where, lane_cond, live_lane_cond
 
 _PRED = jnp.asarray([True, False, True, False])
 _TAKEN = jnp.arange(12.0).reshape(4, 3)
@@ -24,7 +24,7 @@ def _per_lane_where(pred, taken, other):
 def test_unbatched_lane_where_returns_the_taken_operand_whatever_the_predicate():
     """Unbatched, the select is its taken operand: a false predicate does not pick the other
     operand, under jit as eagerly."""
-    for select in (lane_where, jax.jit(lane_where)):
+    for select in (_lane_where, jax.jit(_lane_where)):
         np.testing.assert_array_equal(select(False, _TAKEN[0], _OTHER[0]), _TAKEN[0])
 
 
@@ -32,9 +32,9 @@ def test_lane_where_under_vmap_selects_each_lane_at_every_nesting():
     """Under vmap over a per-lane predicate each lane keeps its own side, with an unbatched
     operand broadcast to the lanes, and an outer vmap's per-lane predicate still selects
     through an inner vmap that batches only the operands."""
-    single = jax.vmap(lane_where, in_axes=(0, 0, None))(_PRED, _TAKEN, _OTHER[0])
+    single = jax.vmap(_lane_where, in_axes=(0, 0, None))(_PRED, _TAKEN, _OTHER[0])
     np.testing.assert_array_equal(single, jnp.where(_PRED[:, None], _TAKEN, _OTHER[0]))
-    inner = jax.vmap(lane_where, in_axes=(None, 0, 0))
+    inner = jax.vmap(_lane_where, in_axes=(None, 0, 0))
     nested = jax.vmap(inner)(_PRED, _TAKEN[:, :, None], _OTHER[:, :, None])
     np.testing.assert_array_equal(nested[..., 0], jnp.where(_PRED[:, None], _TAKEN, _OTHER))
 
@@ -58,8 +58,8 @@ def test_lane_where_tangent_and_transpose_follow_each_lane_choice():
 
     args = (_PRED, _TAKEN, _OTHER)
     for derived, reference in (
-        (jvp(lane_where)(*args, *tangents), jvp(_per_lane_where)(*args, *tangents)),
-        (vjp(lane_where)(*args, _TAKEN + 0.5), vjp(_per_lane_where)(*args, _TAKEN + 0.5)),
+        (jvp(_lane_where)(*args, *tangents), jvp(_per_lane_where)(*args, *tangents)),
+        (vjp(_lane_where)(*args, _TAKEN + 0.5), vjp(_per_lane_where)(*args, _TAKEN + 0.5)),
     ):
         for got, want in zip(derived, reference):
             np.testing.assert_array_equal(got, want)
