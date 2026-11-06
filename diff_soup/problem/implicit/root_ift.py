@@ -60,7 +60,7 @@ from diff_soup.linear import (
     solve_checked,
 )
 from diff_soup.linear._context import DEFAULT_CONTEXT
-from diff_soup.linear._krylov import exact_analysis, report_outcome
+from diff_soup.linear._krylov import exact_analysis
 from diff_soup.nonlinear._kkt import linear_route, transposable_solve
 from diff_soup.utils.lanes import lane_cond
 
@@ -392,19 +392,13 @@ def _inexact_cotangent_solver(route, values):
         """Cotangent solve against the held preconditioner, rebuilt where it fails."""
         x, solved, report = solve_checked(current, rhs, tol=lagged)
         stale = jnp.logical_not(report.converged)
-        first = (x, report.status, report.iterations, report.residual)
 
         def rebuild(_):
             fresh_factor = refactor(solved, values, stale)
             start = jnp.where(jnp.isfinite(x), x, jnp.zeros_like(x))
-            x_new, _, again = solve_checked(fresh_factor, rhs, tol=fresh, x0=start)
-            return x_new, again.status, report.iterations + again.iterations, again.residual
+            return solve_checked(fresh_factor, rhs, tol=fresh, x0=start)[0]
 
-        x, status, iterations, residual = lane_cond(
-            stale, rebuild, lambda _: first, None, false_is_free=True
-        )
-        report_outcome("cotangent", "AT", False, status, iterations, residual, rebuilt=stale)
-        return x
+        return lane_cond(stale, rebuild, lambda _: x, None, false_is_free=True)
 
     return solve
 
