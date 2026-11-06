@@ -1,6 +1,42 @@
 # Changelog
 
-## 1.1.0 (unreleased)
+## 1.2.0 (unreleased)
+
+Complex linear solves on every exact backend, a public schedule solve, and fixes to JIDA and consistent initialization found on large battery models.
+
+### Breaking changes
+
+- JIDA with algebraic rows out of the error test, its stock setting, now takes a second Newton iteration when a step's first correction exceeds weighted norm 1. Previously a stale convergence rate could accept it, leaving an algebraic state far off its constraint and its gradients wrong. Results on DAEs change at the level of the solver tolerance.
+- Consistent initialization now accepts a final residual within `ic_atol + ic_rtol` times the starting residual, plus a componentwise round-off term, after Newton has tried the absolute target. Previously a start at the rounding floor of large states failed with `INCONSISTENT_IC`. `ToleranceSpec(ic_rtol=0.0)` keeps the absolute gate, as does `ic_atol=` without `ic_rtol=`.
+
+### Features
+
+- `ds.linear.{KLU,SuperLU,CuDSS}` now factor and solve complex matrices (`complex128`, and `complex64` on `CuDSS`) on the real symbolic analysis, solve a complex right-hand side on a real factor, and differentiate both ways.
+- Added `ds.solve_schedule` and `ds.schedule_arrays`, which run a `Schedule` against a model's operating table, with `max_steps` per segment and derivatives with respect to segment durations. See [Events and protocols](https://stmorgenstern.github.io/diff-soup/reference/simulation/events/).
+- Added a `"resistance"` row to `spec.control.operational` and `Segment(resistance=)`, which hold `voltage = target * current`.
+- `Event` conditions now receive the solve's `theta` as `args`, so a condition can read and differentiate a parameter. Previously `args` was `None`.
+- Added `spec.build(exact_sparsity=True)`, which declares only the Jacobian entries a tangent can reach. A default build is unchanged.
+- Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.problem.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
+- Under `jax.default_device`, `linear="auto"` and consistent initialization choose their backend by that device's platform, and native factors are kept per device, so one process can run lanes on a GPU and on CPUs. `checkpointed_map(device_groups=)` accepts groups of another platform than the default backend's.
+- `KLU.native_stats` reports `live_lu_entries`.
+
+### Bugfixes
+
+- Fixed consistent initialization of a family problem whose step backend is a `MemberBlock` over the full state, which raised a `ConfigurationError`. Initialization now solves its smaller system with Dense.
+- Fixed `SaveAt(output="projected")` rows that came back `NaN` at a tight `atol`. Projected samples now pass the same gate as the solve's own initialization.
+- Fixed JIDA solves that stalled at a tight `atol` after a short step, where Newton's corrections are pure rounding. A correction within twice the rounding floor on a fresh matrix is now accepted as the root.
+- Fixed the derivative of consistent initialization with respect to the start time.
+- Fixed `SolveContext.resident_bytes` on `KLU`, which read uninitialized memory for any factor with a singleton block.
+
+### Performance
+
+- A vmapped solve no longer keeps extra copies of its saved output, and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
+- JIDA does its whole-array work only on the path an attempt takes, with identical results.
+- Member rows that read every site of their member are recovered by shared pullbacks instead of one color per site: an LFP half cell with 50 volumes of 10 particles needs 8 colors instead of 108.
+
+**Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.2.0
+
+## 1.1.0 (2026-10-29)
 
 New [tutorials](https://stmorgenstern.github.io/diff-soup/tutorials/) and [worked examples](https://stmorgenstern.github.io/diff-soup/examples/), and the fixes and features found and added while writing them.
 
