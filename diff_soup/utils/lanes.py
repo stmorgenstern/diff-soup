@@ -177,7 +177,7 @@ ad.primitive_jvps[_lane_where_p] = _lane_where_jvp
 ad.primitive_transposes[_lane_where_p] = _lane_where_transpose
 
 
-def lane_where(pred: Any, taken: Any, other: Any) -> Any:
+def _lane_where(pred: Any, taken: Any, other: Any) -> Any:
     """``where(pred, taken, other)`` whose unbatched form is ``taken`` and reads nothing else.
 
     For a selection whose predicate can differ from true only on a lane of a batch: a lane
@@ -503,4 +503,4 @@ def live_lane_cond(
     return _lane_cond(pred, true_fun, false_fun, operands, live, false_is_free)
 
 
-__all__ = ["any_lane", "lane_cond", "lane_where", "live_lane_cond"]
+__all__ = ["any_lane", "lane_cond", "live_lane_cond"]
