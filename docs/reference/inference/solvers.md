@@ -65,33 +65,10 @@ The `x_scale=` setting of a solver takes one of these.
 
 ---
 
-??? abstract "Custom solvers and problems"
+??? abstract "Custom solvers and scales"
 
     A solver of your own implements `OptSolver` and receives an
-    `OptimizationProblem`, or a `LeastSquaresProblem` when the objective
-    is half a squared residual norm.
-
-    ::: diff_soup.optimization.OptSolver
-        options:
-          members:
-            - requires
-            - solve
-
-    ::: diff_soup.optimization.OptimizationProblem
-        options:
-          members:
-            - x0
-            - value
-            - value_and_gradient
-            - gauss_newton
-            - from_value
-
-    ::: diff_soup.optimization.LeastSquaresProblem
-        options:
-          members:
-            - residual
-            - residual_and_jacobian
-            - from_residual
+    `OptimizationProblem` ([problems and constraints](../optimization/problems.md)).
 
     ::: diff_soup.optimization.inference.XScale
         options:

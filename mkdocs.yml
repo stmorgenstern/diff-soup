@@ -180,3 +180,5 @@ nav:
           - Statistics: reference/inference/statistics.md
           - Posterior sampling: reference/inference/sampling.md
           - Cohorts: reference/inference/cohorts.md
+      - Optimization:
+          - Problems and constraints: reference/optimization/problems.md
