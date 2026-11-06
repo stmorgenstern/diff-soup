@@ -7,16 +7,14 @@ the provider's ``analyze`` to construct the [SparseTopology][diff_soup._lowering
 
 This module lives under ``diff_soup/_lowering`` and may import
 ``diff_soup.problem._ir`` IR nodes.  The family self-block stamps ONE member
-stencil ``count`` times via ``SparseJacobian.from_tiled_coo`` (no dense
-fallback), and the family<->component cross-blocks are resolved once per
-coupling.
+stencil ``count`` times (no dense fallback), and the family<->component
+cross-blocks are resolved once per coupling.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from diff_soup.problem._ad.sparse_jac import SparseJacobian
 from diff_soup.problem._ir.bc import FluxBC
 from diff_soup.problem._ir.equation import MultiEquation
 from diff_soup.problem._ir.equation_set import EquationSet
@@ -205,9 +203,9 @@ def _sparsity(
 
     Walks the per-equation node-field stencils + coupling cross-blocks + the
     mandatory diagonal completion, then (when families are present) stamps each
-    family's self-block via ``SparseJacobian.from_tiled_coo`` and adds the
-    family<->component cross-blocks.  On a no-family single-component eqset this
-    is the per-equation node-field block plus the diagonal.
+    family's self-block and adds the family<->component cross-blocks.  On a
+    no-family single-component eqset this is the per-equation node-field block
+    plus the diagonal.
 
     ``stencil_offsets`` carries the probe-inferred stencils (see
     [_infer_stencil_offsets][diff_soup._lowering.stencil_infer._infer_stencil_offsets]): a
@@ -365,9 +363,9 @@ def _sparsity(
     # (ii) family<->component CROSS-blocks for couplings touching the family.
     # Both are emitted AFTER the Component loop (families live strictly after all
     # components in the layout).  The self-block stamps ONE
-    # member stencil ``count`` times via ``SparseJacobian.from_tiled_coo`` (no
-    # dense fallback, no per-member ``sparsity_pattern`` call); the cross-blocks
-    # resolve ONCE per coupling (not ``count`` times).
+    # member stencil ``count`` times (no dense fallback, no per-member
+    # ``sparsity_pattern`` call); the cross-blocks resolve ONCE per coupling
+    # (not ``count`` times).
     families = getattr(eqset, "families", ())
     if families:
         fam_cross_rows, fam_cross_cols = _family_cross_block_sparsity(eqset, layout)
@@ -381,23 +379,23 @@ def _sparsity(
                 all_cols.append(graph_cols)
         # Border = macro (components) ∪ coupling (family cross-blocks) ∪ Schur
         # (globals contribute nothing to the sparse df/du topology) ∪ diagonal,
-        # i.e. everything accumulated so far.  ``from_tiled_coo`` stamps each
-        # family's tiles and unions with this border, deduping row-major to
-        # match the component-path canonicalisation.
+        # i.e. everything accumulated so far.
         border_rows = (
             np.concatenate(all_rows).astype(np.int32) if all_rows else np.zeros(0, dtype=np.int32)
         )
         border_cols = (
             np.concatenate(all_cols).astype(np.int32) if all_cols else np.zeros(0, dtype=np.int32)
         )
-        for fam in families:
-            sj = _family_self_block_sparsity(fam, layout, border_rows, border_cols, n_state)
-            # Accumulate the prior family's tiles into the border for the next
-            # family so the final union covers every family's self-block.
-            border_rows = np.asarray(sj.rows, dtype=np.int32)
-            border_cols = np.asarray(sj.cols, dtype=np.int32)
-        # ``from_tiled_coo`` already deduped the full union row-major.
-        return border_rows.astype(np.int32), border_cols.astype(np.int32)
+        # One union of every family's stamped self-block with the border, each
+        # entry kept where it first appears: the last family's tiles first, the
+        # border last. That is the entry order the topology has always had, and
+        # building it once keeps the work and memory proportional to the states.
+        stamped = [_family_self_block_sparsity(fam, layout) for fam in reversed(families)]
+        rows = np.concatenate([*(r for r, _ in stamped), border_rows]).astype(np.int64)
+        cols = np.concatenate([*(c for _, c in stamped), border_cols]).astype(np.int64)
+        _unique, first = np.unique(rows * np.int64(n_state) + cols, return_index=True)
+        keep = np.sort(first)
+        return rows[keep].astype(np.int32), cols[keep].astype(np.int32)
 
     if not all_rows:
         return np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32)
@@ -440,22 +438,15 @@ def _declared_member_stencil_offsets(fam) -> np.ndarray | None:
     return np.stack([g.reshape(-1) for g in grids], axis=1)
 
 
-def _family_self_block_sparsity(
-    fam,
-    layout: _BlockLayout,
-    border_rows: np.ndarray,
-    border_cols: np.ndarray,
-    n_dofs: int,
-) -> SparseJacobian:
+def _family_self_block_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, np.ndarray]:
     """Batched per-member self-block topology via a single stamped tile.
 
     Builds the ONE-member stencil (host-side, once — not per member) in the
     member's BLOCKED per-field coordinates and stamps it ``count`` times at
-    member-major offsets ``fam_base + member * member_state_size`` through
-    [SparseJacobian.from_tiled_coo][diff_soup._lowering.sparsity.SparseJacobian.from_tiled_coo], unioned with the supplied border
-    (macro ∪ coupling ∪ Schur ∪ diagonal).  Returns the resulting
-    [SparseJacobian][diff_soup._lowering.sparsity.SparseJacobian] (its ``.rows`` / ``.cols`` carry the full deduped
-    COO topology).
+    member-major offsets ``fam_base + member * member_state_size``.  Returns
+    the stamped ``(rows, cols)`` in global indexing, member by member;
+    [_sparsity][diff_soup._lowering.sparsity._sparsity] unions them with the
+    rest of the topology.
 
     One member's slab blocks its fields in declaration order: member field
     ``v`` occupies the contiguous band ``[var_local_off : var_local_off +
@@ -560,8 +551,8 @@ def _family_self_block_sparsity(
     r1 = np.concatenate(tile_r_list) if tile_r_list else np.empty((0,), dtype=np.int64)
     c1 = np.concatenate(tile_c_list) if tile_c_list else np.empty((0,), dtype=np.int64)
     # Reject only an implicit dense fallback. An explicitly declared dense
-    # member stencil remains a genuine repeated block when ``count > 1`` and
-    # ``from_tiled_coo`` colors the stamped blocks together.
+    # member stencil remains a genuine repeated block when ``count > 1``, and
+    # the solver's coloring shares colors across the stamped blocks.
     if used_dense_fallback and int(r1.size) >= member_state_size * member_state_size:
         raise ValueError(
             f"family {fam.name!r}: member stencil declares the dense product "
@@ -570,16 +561,9 @@ def _family_self_block_sparsity(
         )
     fam_base = layout.offset_of((fam.name, fam.member_variables[0].name))
     base = fam_base + np.arange(int(fam.count), dtype=np.int64) * member_state_size
-    return SparseJacobian.from_tiled_coo(
-        tile_rows=r1,
-        tile_cols=c1,
-        tile_size=member_state_size,
-        tile_count=int(fam.count),
-        tile_offsets=base,
-        border_rows=border_rows,
-        border_cols=border_cols,
-        n_dofs=int(n_dofs),
-    )
+    rows = (r1[None, :] + base[:, None]).reshape(-1).astype(np.int32)
+    cols = (c1[None, :] + base[:, None]).reshape(-1).astype(np.int32)
+    return rows, cols
 
 
 def _family_graph_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, np.ndarray]:
