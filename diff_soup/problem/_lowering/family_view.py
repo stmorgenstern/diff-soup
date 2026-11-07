@@ -18,7 +18,7 @@ This view is built from host-side offsets (``base``, ``member_state_size``,
 ``count``) and a ``{field -> slice}`` map, all plain Python / numpy scalars,
 plus an optional ``(count,)`` weights array.
 
-This module lives under ``diff_soup/_lowering``.
+This module lives under ``diff_soup/problem/_lowering``.
 """
 
 from __future__ import annotations

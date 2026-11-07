@@ -15,7 +15,7 @@ Each member field emits ONE entry keyed ``(fam.name, field_name)`` of size
 family records a per-entry stride so [unpack][diff_soup.problem._lowering.layout._BlockLayout.unpack] reconstructs
 the member-major interleave (``[m0_f0, m0_f1, m1_f0, m1_f1, ...]``).
 
-This module lives under ``diff_soup/_lowering`` and may import
+This module lives under ``diff_soup/problem/_lowering`` and may import
 ``diff_soup.problem._ir`` IR nodes.
 """
 
