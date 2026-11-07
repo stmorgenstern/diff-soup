@@ -33,7 +33,8 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from numbers import Real
+from typing import Literal, Optional
 
 import numpy as np
 from scipy.interpolate import UnivariateSpline
@@ -228,7 +229,7 @@ def smooth_boundary(
     method: Literal["raw", "savgol", "spline"] = "spline",
     c_lo: float = 0.0126,
     c_hi: float = 0.9874,
-    **kwargs: Any,
+    **kwargs: Real,
 ) -> np.ndarray:
     """Dispatch to a boundary smoothing method.
 

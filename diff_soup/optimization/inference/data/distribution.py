@@ -39,7 +39,7 @@ from typing import Any, Optional, Union
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, ArrayLike, Float, PyTree
 
 from diff_soup.optimization.inference.data.base import ObservationOperator
 
@@ -204,13 +204,15 @@ class PopulationObservable(ObservationOperator):
     """
 
     family: str = eqx.field(static=True)
-    kernel: Any  # a kernel eqx.Module (its array leaves, e.g. edges, ride as leaves)
+    kernel: Callable[
+        ..., Array
+    ]  # a kernel eqx.Module (its array leaves, e.g. edges, ride as leaves)
     member_reduce: Optional[Callable] = eqx.field(static=True, default=None)
     field: Optional[Union[int, slice]] = eqx.field(static=True, default=None)
     extract_fn: Optional[Callable] = eqx.field(static=True, default=None)
-    member_weights: Optional[Any] = None
+    member_weights: ArrayLike | list | tuple | None = None
 
-    def _slab(self, u: Array) -> tuple[Any, Optional[Array]]:
+    def _slab(self, u: Array) -> tuple[PyTree, Optional[Array]]:
         """Gather ``(member_state, member_weights)`` from the state ``u``.
 
         Returns:
@@ -231,7 +233,7 @@ class PopulationObservable(ObservationOperator):
             "exposes a family_view accessor."
         )
 
-    def _values(self, slab: Any) -> Array:
+    def _values(self, slab: PyTree) -> Array:
         """Reduce a member slab to the ``(n_values,)`` value sample."""
         if self.member_reduce is not None:
             return jnp.reshape(jax.vmap(self.member_reduce)(slab), (-1,))
@@ -240,7 +242,7 @@ class PopulationObservable(ObservationOperator):
             arr = arr[:, self.field]
         return jnp.reshape(arr, (-1,))
 
-    def predict(self, nodal_field: Array, t: Any, theta: Any) -> Array:
+    def predict(self, nodal_field: Array, t: ArrayLike | None, theta: PyTree) -> Array:
         """Map a state to the distribution-space observation.
 
         Args:

@@ -58,6 +58,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import PyTree
 
 from diff_soup._distributed import (
     _decision_scope,
@@ -67,6 +68,7 @@ from diff_soup._distributed import (
     mesh_groups,
     owns,
 )
+from diff_soup._jax_compat import internal_core
 from diff_soup._logging import log
 
 __all__ = [
@@ -128,7 +130,7 @@ class CampaignTaskRecord:
     attempt: int
     input_fingerprint: str
     device_group: Optional[tuple]
-    result: Any = None
+    result: dict | list | str | bool | int | float | None = None
     failure: Optional[CampaignFailure] = None
 
 
@@ -166,7 +168,7 @@ class CampaignResult:
         return self.results[index]
 
 
-def batched_criterion(criterion: Callable, batch: Any, *args: Any) -> Any:
+def batched_criterion(criterion: Callable, batch: PyTree, *args: PyTree) -> PyTree:
     """Evaluate a per-sample function over a leading sample axis with ``vmap``.
 
     Args:
@@ -183,7 +185,7 @@ def batched_criterion(criterion: Callable, batch: Any, *args: Any) -> Any:
     return jax.vmap(criterion, in_axes=in_axes)(batch, *args)
 
 
-def robust_criterion(criterion: Callable, batch: Any, *args: Any) -> jax.Array:
+def robust_criterion(criterion: Callable, batch: PyTree, *args: PyTree) -> jax.Array:
     """Mean of a scalar per-sample criterion over the sample axis.
 
     The robust (average-case) design objective: differentiate this with
@@ -205,7 +207,7 @@ def robust_criterion(criterion: Callable, batch: Any, *args: Any) -> jax.Array:
     return jnp.mean(values)
 
 
-def _native_factor_residencies(jaxpr: Any) -> set:
+def _native_factor_residencies(jaxpr: internal_core.Jaxpr | internal_core.ClosedJaxpr) -> set:
     """The factor residencies other than ``"arrays"`` of the linear backends ``jaxpr`` solves with.
 
     Reads the linear-solver calls of ``jaxpr`` and of the jaxprs its
@@ -235,7 +237,7 @@ def _native_factor_residencies(jaxpr: Any) -> set:
 def sharded_robust_gradient(
     criterion: Callable,
     design: jax.Array,
-    batch: Any,
+    batch: PyTree,
     *,
     devices: Optional[Sequence] = None,
 ) -> tuple:
@@ -340,7 +342,7 @@ def sharded_robust_gradient(
     return jax.jit(reduce)(batch, design)
 
 
-def _json_value(value: Any) -> Any:
+def _json_value(value: Any) -> dict | list | str | bool | int | float | None:
     """Convert a campaign declaration/result to strict deterministic JSON data."""
     if dataclasses.is_dataclass(value):
         return _json_value(dataclasses.asdict(value))
@@ -612,7 +614,7 @@ def checkpointed_map(
     fn: Callable,
     items: Sequence[Any],
     *,
-    ledger_path: Any,
+    ledger_path: str | os.PathLike[str],
     resume: bool = True,
     execution: str = "serial",
     device_groups: Any = None,
@@ -807,7 +809,7 @@ def checkpointed_map(
     )
 
 
-def deterministic_weighted_reduce(values: Any, weights: Any) -> Any:
+def deterministic_weighted_reduce(values: Any, weights: Any) -> PyTree:
     """Return a fixed-order weighted mean of every leaf in a pytree.
 
     Each leaf has a leading sample axis. Weighted products are sorted along

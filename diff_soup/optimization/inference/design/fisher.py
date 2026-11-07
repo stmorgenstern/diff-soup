@@ -33,11 +33,12 @@ solve.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from collections.abc import Callable
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup.optimization.inference.design.criteria import fisher_with_prior
 from diff_soup.optimization.inference.fitting.observables import DiagonalNoise
@@ -51,11 +52,11 @@ __all__ = [
 
 
 def observable_trajectory(
-    observable: Any,
+    observable: Callable[..., ArrayLike],
     ys: Array,
     *,
     ts: Optional[Array] = None,
-    theta: Any = None,
+    theta: PyTree = None,
 ) -> Array:
     """Evaluate a channel on every frame of a solve: ``h(ys[f], ts[f], theta)``.
 
@@ -76,13 +77,13 @@ def observable_trajectory(
 
 
 def observable_sensitivities(
-    observable: Any,
+    observable: Callable[..., ArrayLike],
     ys: Array,
     S: Array,
     *,
     ts: Optional[Array] = None,
-    theta: Any = None,
-    theta_tangents: Any = None,
+    theta: PyTree = None,
+    theta_tangents: PyTree = None,
 ) -> Array:
     """Chain state sensitivities through a channel: ``dh/dθ`` per frame and direction.
 
@@ -153,7 +154,9 @@ def observable_sensitivities(
     return jax.vmap(per_direction, in_axes=(2, 0), out_axes=2)(S, theta_tangents)
 
 
-def fisher_information(sens: Array, noise: Any = None) -> Array:
+def fisher_information(
+    sens: Array, noise: DiagonalNoise | ArrayLike | list | tuple | None = None
+) -> Array:
     """Assemble the Fisher information matrix from channel sensitivities.
 
     ``F[i, j] = sum_{f, c} sens[f, c, i] sens[f, c, j] / sigma[f, c]^2``, one
