@@ -18,7 +18,7 @@ block.
 Values flow through as traced leaves, so the assembled state is differentiable
 with respect to them.
 
-This module lives under ``diff_soup/_lowering``.
+This module lives under ``diff_soup/problem/_lowering``.
 """
 
 from __future__ import annotations

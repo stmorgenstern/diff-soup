@@ -5,7 +5,7 @@ constraint kind (Galvanostatic / DomainIntegral / ReduceResidual / DifferentialG
 BoundaryIntegral / OperationalControlConstraint) flows through.  Called from inside the residual kernel in
 ``provider.py``; kept separate because the dispatch logic is dense.
 
-This module lives under ``diff_soup/_lowering`` and may import
+This module lives under ``diff_soup/problem/_lowering`` and may import
 ``diff_soup.problem._ir`` IR nodes.  A volumetric integral always carries the
 domain measure its lowering resolved (grid cell volumes, or the lumped nodal
 volumes ``∫ N_i dV`` of a mesh), so ``domain_measure`` is required.  A boundary

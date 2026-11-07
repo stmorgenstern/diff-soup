@@ -38,7 +38,7 @@ Jacobian entries shrink.  Dividing the residual alone would instead integrate
 ``M du/dt = f / S`` — a different trajectory.  Algebraic rows have ``M == 0``
 and stay exactly zero under the scaling.
 
-This module lives under ``diff_soup/_lowering``.
+This module lives under ``diff_soup/problem/_lowering``.
 """
 
 from __future__ import annotations
