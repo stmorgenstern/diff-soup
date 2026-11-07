@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 483,
-    "collected_tests": 829,
-    "source_lines": 16986
+    "test_functions": 484,
+    "collected_tests": 830,
+    "source_lines": 17008
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 22,
-      "functions": 219,
-      "collected": 425,
-      "lines": 6887
+      "functions": 220,
+      "collected": 426,
+      "lines": 6909
     },
     "performance_contracts": {
       "files": 2,
@@ -320,7 +320,7 @@
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",
-      "feature": "Second-order AD through solves: Hessians under the checkpoint adjoint against the composable reverse-over-forward reference, reverse over reverse against forward over reverse, the replay guard, run-time failures on an asynchronous device, a declared reverse-sweep dtype"
+      "feature": "Second-order AD through solves: Hessians under the checkpoint adjoint against the composable reverse-over-forward reference, reverse over reverse against forward over reverse, alone and through lanes sharing theta, the replay guard, run-time failures on an asynchronous device, a declared reverse-sweep dtype"
     },
     {
       "file": "tests/contracts/test_second_order_ad_precision.py",
