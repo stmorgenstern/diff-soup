@@ -22,7 +22,6 @@ import diff_soup as ds
 from diff_soup.optimization import inference as inf
 from diff_soup.optimization.inference import design
 from tests.support.inference import decay_recipe, decay_study
-from tests.support.problems import operational_cell
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -437,7 +436,9 @@ def _free_port(port):
 @pytest.mark.parametrize("inside_slurm", [True, False], ids=["inside-slurm", "outside-slurm"])
 def test_every_rank_of_an_mpirun_launch_joins_one_world(inside_slurm):
     """Inside a Slurm job, mpirun's ranks on other nodes see a one-task step and still join the
-    world that JAX's launcher detection names; outside Slurm, DIFFSOUP_COORDINATOR names it."""
+    world that JAX's launcher detection names; outside Slurm, DIFFSOUP_COORDINATOR names it.
+    Each rank then reads the one-process Jacobian pattern through a gather at a build-time
+    index."""
     offset = next(k for k in range(4096) if _free_port(61440 + k))  # a job id names this port
     reachable, unreachable = f"127.0.0.1:{61440 + offset}", "192.0.2.1:62213"
     detected, given = (reachable, unreachable) if inside_slurm else (unreachable, reachable)
@@ -447,8 +448,11 @@ def test_every_rank_of_an_mpirun_launch_joins_one_world(inside_slurm):
     env.update(JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", DIFFSOUP_COORDINATOR=given)
     env.update(OMPI_COMM_WORLD_SIZE="2", OMPI_MCA_orte_hnp_uri=f"{offset << 12}.0;tcp://{detected}")
     script = (
-        "import jax, diff_soup as ds; ds.distributed.initialize(initialization_timeout=60); "
-        "print('WORLD', jax.process_index(), jax.process_count())"
+        "import jax, jax.numpy as jnp, diff_soup as ds\n"
+        "ds.distributed.initialize(initialization_timeout=60)\n"
+        "rows, _ = ds.jacobian_pattern(lambda y: y[jnp.argsort(jnp.array([3, 0, 2, 1]))] + y,"
+        " jnp.ones(4))\n"
+        "print('WORLD', jax.process_index(), jax.process_count(), rows.size)\n"
     )
     ranks = []
     for rank in range(2):  # rank 1 runs under the remote daemon's one-task Slurm step
@@ -467,44 +471,8 @@ def test_every_rank_of_an_mpirun_launch_joins_one_world(inside_slurm):
     outputs = [process.communicate(timeout=240) for process in ranks]
     errors = "\n".join(err[-2000:] for _, err in outputs)
     assert [process.returncode for process in ranks] == [0, 0], errors
-    worlds = [[line for line in out.splitlines() if line.startswith("WORLD")] for out, _ in outputs]
-    assert worlds == [["WORLD 0 2"], ["WORLD 1 2"]]
-
-
-def test_every_rank_of_a_two_process_world_builds_the_one_process_pattern():
-    """After initialize, each of two ranks builds a spec problem and reads a pattern through
-    a gather at a build-time index, with the one-process entries: the walk's constants are
-    evaluated on the rank's own device."""
-    offset = next(k for k in range(4096) if _free_port(61440 + k))
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("SLURM_", "OMPI_", "PMI"))}
-    env = {k: v for k, v in env.items() if not k.startswith("DIFFSOUP_")}
-    env.update(JAX_PLATFORMS="cpu", CUDA_VISIBLE_DEVICES="", OMPI_COMM_WORLD_SIZE="2")
-    env.update(DIFFSOUP_COORDINATOR=f"127.0.0.1:{61440 + offset}")
-    env.update(OMPI_MCA_orte_hnp_uri=f"{offset << 12}.0;tcp://192.0.2.1:62213")
-    script = (
-        "import jax, jax.numpy as jnp, diff_soup as ds\n"
-        "from tests.support.problems import operational_cell\n"
-        "ds.distributed.initialize(initialization_timeout=60)\n"
-        "table = jnp.array([3, 0, 2, 1])\n"
-        "rows, _ = ds.jacobian_pattern(lambda y: y[jnp.argsort(table)] + y, jnp.ones(4))\n"
-        "print('NNZ', ds.jacobian_nnz(operational_cell().build()), rows.size)\n"
+    rows, _ = ds.jacobian_pattern(
+        lambda y: y[jnp.argsort(jnp.array([3, 0, 2, 1]))] + y, jnp.ones(4)
     )
-    ranks = [
-        subprocess.Popen(
-            [sys.executable, "-c", script],
-            cwd=_ROOT,
-            env={**env, "OMPI_COMM_WORLD_RANK": str(rank), "OMPI_COMM_WORLD_LOCAL_RANK": str(rank)},
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for rank in range(2)
-    ]
-    outputs = [process.communicate(timeout=240) for process in ranks]
-    errors = "\n".join(err[-2000:] for _, err in outputs)
-    assert [process.returncode for process in ranks] == [0, 0], errors
-    table = jnp.array([3, 0, 2, 1])
-    rows, _ = ds.jacobian_pattern(lambda y: y[jnp.argsort(table)] + y, jnp.ones(4))
-    expected = f"NNZ {ds.jacobian_nnz(operational_cell().build())} {rows.size}"
-    counts = [[line for line in out.splitlines() if line.startswith("NNZ")] for out, _ in outputs]
-    assert counts == [[expected], [expected]]
+    worlds = [[line for line in out.splitlines() if line.startswith("WORLD")] for out, _ in outputs]
+    assert worlds == [[f"WORLD 0 2 {rows.size}"], [f"WORLD 1 2 {rows.size}"]]

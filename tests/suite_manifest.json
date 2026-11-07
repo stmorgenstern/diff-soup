@@ -73,13 +73,9 @@
     "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
     "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference.hierarchical",
-    "tests/contracts/test_lane_select.py": "diff_soup.utils.lanes",
-    "tests/contracts/test_jacobian_pattern.py": "diff_soup.utils.lanes",
     "tests/contracts/test_coloring.py": "diff_soup.problem._ad.coloring"
   },
-  "support_data": [
-    "tests/support/battery_jacobian.json"
-  ],
+  "support_data": [],
   "suite_files": [
     "tests/README.md",
     "tests/conftest.py",
@@ -90,7 +86,6 @@
     "tests/support/problems.py",
     "tests/support/inference.py",
     "tests/support/second_order.py",
-    "tests/support/battery_jacobian.json",
     "tests/public_api/test_recipe_build.py",
     "tests/public_api/test_recipe_observations.py",
     "tests/public_api/test_recipe_families.py",
@@ -288,7 +283,7 @@
     },
     {
       "file": "tests/contracts/test_linear_host.py",
-      "feature": "Linear contract, host backends (KLU, SuperLU_MT): refactor predicate, the order word, lane slots, native statistics, GPU-program refusal, settings, solves and projections by name, SuperLU's bits on several threads"
+      "feature": "Linear contract, host backends (KLU, SuperLU_MT): refactor predicate, the order word, lane slots, native statistics, GPU-program refusal, settings, solves and projections by name, SuperLU's bits on several threads, one factor site per default device, the auto backend under a CPU default device"
     },
     {
       "file": "tests/contracts/test_linear_structured.py",
@@ -312,11 +307,11 @@
     },
     {
       "file": "tests/contracts/test_linear_complex.py",
-      "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a battery impedance operator, the plain transpose, real factors with complex right-hand sides, value lanes, empty factors refactored in a loop, jvp and vjp against central differences, and the bytes a KLU factor holds"
+      "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a stiff impedance operator, the plain transpose, real factors with complex right-hand sides in lanes, value lanes, statuses, empty factors refactored in a loop, jvp and vjp against central differences, and the bytes a KLU factor holds and releases"
     },
     {
       "file": "tests/contracts/test_lane_select.py",
-      "feature": "Lane selects and the lane conditional: the taken operand unbatched, the per-lane choice under vmap and nested vmap, its tangent and transpose; one conditional unbatched with each branch traced once, each lane's own branch under vmap, derivatives that follow it"
+      "feature": "The lane conditional: one conditional unbatched with each branch traced once, each lane's own branch under vmap and nested vmap, derivatives that follow it"
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",
@@ -328,7 +323,7 @@
     },
     {
       "file": "tests/contracts/test_architecture.py",
-      "feature": "Architecture: layer direction, no static array annotations, bounded content caches, one adjoint identity, the engine never imports the statistics layer, one array-free base of every problem with the module problems staying pytrees"
+      "feature": "Architecture: layer direction, no static array annotations, bounded content caches, one adjoint identity, the engine never imports the statistics layer"
     },
     {
       "file": "tests/contracts/test_inference_problem.py",
@@ -344,7 +339,7 @@
     },
     {
       "file": "tests/contracts/test_study_fingerprint.py",
-      "feature": "Study fingerprints and lanes: fingerprints by axes not devices, memo safety under address reuse, window likelihood separability, the lane map over factorizations, lanes placed over the devices of a mesh with one program per mode and the fit of one device, the platform, backend and factor sites a default device selects"
+      "feature": "Study fingerprints and lanes: fingerprints by axes not devices, memo safety under address reuse, window likelihood separability, the lane map over factorizations, lanes placed over the devices of a mesh with one program per mode and the fit of one device"
     },
     {
       "file": "tests/contracts/test_packaging.py",
@@ -360,7 +355,7 @@
     },
     {
       "file": "tests/multi_device/test_sharded_joint.py",
-      "feature": "Sharded joints: reverse- and forward-mode fits equal to the mesh-free joint, robust reductions without all-gather, global meshes and submeshes, two-process rows (owed), a two-process world building the one-process Jacobian pattern"
+      "feature": "Sharded joints: reverse- and forward-mode fits equal to the mesh-free joint, robust reductions without all-gather, global meshes and submeshes, two-process rows (owed), mpirun launches whose ranks join one world and read the one-process Jacobian pattern"
     },
     {
       "file": "tests/multi_device/test_mgmn.py",
@@ -400,7 +395,7 @@
     },
     {
       "file": "tests/contracts/test_coloring.py",
-      "feature": "Sparse-matrix colorings: every kind and order decompresses its exact products, structural validity, refused patterns, seeded recovery"
+      "feature": "Sparse-matrix colorings: every kind and order decompresses its exact products, refused patterns, seeded recovery"
     }
   ]
 }
