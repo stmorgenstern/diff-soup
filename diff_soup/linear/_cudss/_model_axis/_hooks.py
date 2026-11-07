@@ -52,7 +52,7 @@ from diff_soup.linear._factor import (
     SolveStatus,
     effective_transpose,
 )
-from diff_soup.linear._primitive import _jax_level
+from diff_soup.linear._phased_impl import _jax_level
 
 __all__ = [
     "SOLVE_TARGET",
