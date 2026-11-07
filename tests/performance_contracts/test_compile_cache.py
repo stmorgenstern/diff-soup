@@ -3,13 +3,14 @@ arguments leave an exact solve's program unchanged, batched solves keep their co
 branches, a checkpoint stores the iteration matrix once, a reverse sweep assembles a root's
 matrix inside the solve that factors it, an undifferentiated checkpoint solve keeps its
 compiled temporaries at their measured size, saved output holds a bounded number of copies
-of the trajectory, a problem lowered twice compiles once, and a control grid is static while its
-targets are traced."""
+of the trajectory, and a control problem or a receding horizon of one configuration compiles
+once."""
 
 from __future__ import annotations
 
 import functools
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -306,3 +307,63 @@ def test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory():
     # buffers and 5.01 with two (the JIDA review's run C), workstation 2026-11-06,
     # .ports/run_c_solves.py and the review's run_c.out
     assert rows <= 2.5
+
+
+@pytest.fixture(scope="module")
+def charging():
+    """Two-interval charging problems from a level, sharing one cost that records its traces."""
+    model, solver, traces = operational_cell().build(), ds.JIDA(linear="dense"), []
+    control = ds.optimization.control
+
+    def cost(solution, u, args):
+        traces.append(None)
+        return jnp.mean(u**2) + (jnp.mean(solution.ys[-1]) - args[2]["charge"]) ** 2
+
+    def problem(level, charge=2.5):
+        return control.ControlProblem(
+            problem=model,
+            controls=control.PiecewiseConstant(mode="current", intervals=2, duration=0.25),
+            cost=cost,
+            bounds=(0.0, 5.0),
+            save_times=np.array([0.25, 0.5]),
+            initial_state=jnp.concatenate([jnp.full((4,), level), jnp.zeros((1,))]),
+            limits={"charge": jnp.asarray(charge, jnp.float64)},
+            solver=solver,
+        )
+
+    return problem, traces
+
+
+_IP = ds.optimization.InteriorPoint()
+
+
+@eqx.filter_jit
+def _control_solve(problem):
+    numeric = problem.numeric_problem(_IP)
+    return _IP.run(numeric, numeric.x0, numeric.args)[0]
+
+
+def test_a_second_control_problem_of_one_configuration_traces_nothing(charging):
+    """A control problem that differs from a solved one only in its initial state and limits
+    has equal static parts, so the compiled solve serves it without tracing its horizon."""
+    problem, traces = charging
+    _control_solve(problem(2.0))
+    before = len(traces)
+    _control_solve(problem(1.8, charge=2.4))
+    assert len(traces) == before
+
+
+def _hold(state, u, interval):
+    """A plant that holds its state."""
+    return state, state
+
+
+def test_a_second_receding_horizon_of_one_configuration_traces_nothing(charging):
+    """The receding horizon is one program under `lax.scan`: called again with a new initial
+    state, it runs without tracing its horizon."""
+    problem, traces = charging
+    loop = ds.optimization.control.receding_horizon
+    loop(problem(2.0), _hold, ds.optimization.control.FullState(), 2, solver=_IP)
+    before = len(traces)
+    loop(problem(1.9), _hold, ds.optimization.control.FullState(), 2, solver=_IP)
+    assert len(traces) == before

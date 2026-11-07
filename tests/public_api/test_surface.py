@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import diff_soup as ds
@@ -143,7 +144,8 @@ def test_a_float32_cpu_solve_warns_at_the_users_own_line(tmp_path):
 
 
 def test_static_public_configuration_is_hashable_and_equal_to_itself():
-    """Layouts, precisions, stock solvers and output policies hash and compare by value."""
+    """Layouts, precisions, stock solvers, output policies and control grids hash and compare by
+    value."""
     for build in (
         ds.Layout,
         ds.Precision,
@@ -151,6 +153,9 @@ def test_static_public_configuration_is_hashable_and_equal_to_itself():
         lambda: ds.JNDF.stock(linear="dense"),
         lambda: ds.JIDA.stock(linear="dense"),
         lambda: ds.SaveAt(output=ds.DenseOutputPolicy(mode="projected")),
+        lambda: ds.optimization.control.PiecewiseConstant(
+            mode="current", intervals=2, duration=np.array([1.0, 3.0]), scale=np.float64(-2.0)
+        ),
     ):
         first, second = build(), build()
         assert first == second and hash(first) == hash(second)

@@ -75,11 +75,9 @@ def test_an_interior_point_fit_under_a_rate_ceiling_ends_on_the_ceiling(single):
         constraints=ceiling,
         args={"rate_max": jnp.asarray(0.3)},
     )
+    # the solver's tolerance; measured 1e-12 off the ceiling below
     fit = ds.optimization.optsolve(
-        # measured at 1e-12 off the ceiling below, workstation CPU 2026-11-06
-        problem,
-        ds.optimization.InteriorPoint(tol=1e-12),
-        diagnostics=False,
+        problem, ds.optimization.InteriorPoint(tol=1e-12), diagnostics=False
     )
     # measured 1e-12 off the ceiling 0.3 (rate at 0.3 to 12 digits), workstation CPU 2026-11-06,
     # pytest tests/public_api/test_fits.py

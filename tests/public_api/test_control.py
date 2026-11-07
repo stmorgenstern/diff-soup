@@ -1,5 +1,5 @@
-"""Control: a control problem over a schedule solve, its numeric problem and compiles, the
-receding horizon under scan and from the host, the estimators."""
+"""Control: a control problem over a schedule solve and its numeric problem, the receding
+horizon under scan and from the host, the estimators."""
 
 from __future__ import annotations
 
@@ -52,12 +52,10 @@ def _closed_form(level, charge):
 
 @pytest.fixture(scope="module")
 def toy():
-    """The toy's model, a cost that records each of its traces, and the plant one interval at a time."""
+    """The toy's model, its cost, and the plant one interval at a time."""
     model = operational_cell().build()
-    traces = []
 
     def cost(solution, u, args):
-        traces.append(None)
         return jnp.mean(u**2)
 
     @jax.jit
@@ -74,9 +72,7 @@ def toy():
         new = advance(state, u)
         return new, new
 
-    return types.SimpleNamespace(
-        model=model, cost=cost, traces=traces, advance=advance, plant=plant
-    )
+    return types.SimpleNamespace(model=model, cost=cost, advance=advance, plant=plant)
 
 
 def charging(toy, level=STARTS_AT, charge=CHARGE):
@@ -108,8 +104,8 @@ def closed_loop(toy):
 
 
 def test_a_last_save_time_at_the_grids_end_is_the_horizons_end():
-    """A grid scaled by a reference time ends one rounding past the sum of its durations; the
-    last save time there is the horizon's end, so the horizon evaluates."""
+    """A save time at the end of a grid of durations scaled by a reference time is the
+    horizon's end, though the durations sum to one rounding short of it."""
     # Three intervals of a (k/3)**0.25 grid over 1 s, in units of 0.3 s: the grid's end,
     # 3.3333333333333335, lies one ulp past its durations added in order, 3.333333333333333.
     grid = np.linspace(0.0, 1.0, 4) ** 0.25
@@ -135,15 +131,6 @@ def test_the_interior_point_reaches_the_charging_problems_closed_form(toy):
     np.testing.assert_allclose(result.params, _closed_form(STARTS_AT, CHARGE), rtol=0, atol=1e-8)
 
 
-def test_a_second_control_problem_of_one_configuration_traces_nothing(toy):
-    """A control problem that differs from a solved one only in its initial state and limits
-    has equal static parts, so the compiled solve serves it without tracing its horizon."""
-    _solve(charging(toy))
-    before = len(toy.traces)
-    _solve(charging(toy, level=1.8, charge=2.4))
-    assert len(toy.traces) == before
-
-
 def test_a_batch_of_control_problems_is_one_vmap(toy):
     """Control problems batched along their initial states and limits solve as one `vmap`,
     each lane at its own closed form."""
@@ -152,14 +139,6 @@ def test_a_batch_of_control_problems_is_one_vmap(toy):
     # measured 3.2e-9 off the closed forms, workstation CPU 2026-11-06,
     # pytest tests/public_api/test_control.py
     np.testing.assert_allclose(eqx.filter_vmap(_solve)(batch), expected, rtol=0, atol=1e-8)
-
-
-def test_a_second_receding_horizon_of_one_configuration_traces_nothing(toy, closed_loop):
-    """The receding horizon is one program under `lax.scan`: called again with a new initial
-    state, it runs without tracing its horizon."""
-    before = len(toy.traces)
-    control.receding_horizon(charging(toy, level=1.9), toy.plant, control.FullState(), 3, solver=IP)
-    assert len(toy.traces) == before
 
 
 def test_the_host_loop_applies_the_scan_loops_moves(toy, closed_loop):
