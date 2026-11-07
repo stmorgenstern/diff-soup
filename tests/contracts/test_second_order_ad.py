@@ -1,6 +1,6 @@
 """Second-order AD through solves: the composable forward rule, Hessians under the checkpoint
-adjoint, the replay guard, run-time failures on an asynchronous device, and a declared
-reverse-sweep dtype under the checkpoint gradient and Hessian."""
+adjoint, reverse over reverse under it, the replay guard, run-time failures on an asynchronous
+device, and a declared reverse-sweep dtype under the checkpoint gradient and Hessian."""
 
 from __future__ import annotations
 
@@ -56,6 +56,22 @@ def test_the_checkpoint_hessian_equals_the_composable_reverse_over_forward_hessi
     hessian = jax.hessian(loss(ds.CheckpointAdjoint(), linear))(THETA)
     np.testing.assert_allclose(reference, reference.T, rtol=_HESSIAN)
     np.testing.assert_allclose(hessian, reference, rtol=_HESSIAN)
+
+
+# measured 1.2e-16 relative between the two routes (and 3.7e-16 against reverse over the
+# composable forward rule), workstation CPU 2026-11-06,
+# pytest tests/contracts/test_second_order_ad.py::test_reverse_over_reverse_equals_forward_over_reverse
+_REVERSE_OVER_REVERSE = 1e-10
+
+
+def test_reverse_over_reverse_equals_forward_over_reverse():
+    """Under CheckpointAdjoint(reverse_over_reverse=True) jax.grad of a jax.grad through the solve
+    is the Hessian-vector product that forward mode over the gradient gives."""
+    gradient = jax.grad(loss(ds.CheckpointAdjoint(reverse_over_reverse=True)))
+    direction = jnp.asarray([0.3, -0.7])
+    by_reverse = jax.grad(lambda theta: jnp.vdot(gradient(theta), direction))(THETA)
+    by_forward = jax.jvp(gradient, (THETA,), (direction,))[1]
+    np.testing.assert_allclose(by_reverse, by_forward, rtol=_REVERSE_OVER_REVERSE)
 
 
 def _drifting_engine():

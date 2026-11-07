@@ -3034,6 +3034,7 @@ def _solve_core(
             max_steps=int(cfg.max_steps),
             checkpoints=int(checkpoints) if checkpoints is not None else None,
             buffers=_loop_buffers(cfg, record_decisions, init_state.outputs_buffered),
+            reverse_over_reverse=getattr(adjoint, "reverse_over_reverse", False),
         )
 
     return _finalize(

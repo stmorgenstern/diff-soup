@@ -25,6 +25,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - `ds.topology_report` adds `pullback_count`, and its `color_count` is now the solver's own: the colors of the rows the solver colors, with the rows it holds out recovered by pullback. Previously it colored the whole pattern.
 - `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.
 - Added `hessian_composition=` to `OptimizationProblem.from_value` and `LeastSquaresProblem.from_residual`. Under `"forward-over-forward"` the gradient, the Hessians and the Lagrangian Hessians `with_constraints` adds are all forward mode, so `InteriorPoint`, `SQP`, `AugmentedLagrangian` and their implicit derivative take an objective whose inner solve supports forward mode only, such as a DAE solve under `ForwardAdjoint`. The default, `"forward-over-reverse"`, is unchanged.
+- Added `CheckpointAdjoint(reverse_over_reverse=True)`, under which a gradient through a solve can itself be differentiated in reverse mode, as in `jax.grad` of `jax.grad`, and the solve also takes `jax.jvp`. Forward mode over the gradient then costs about twice as much, so the default, `False`, keeps the previous rule.
 
 ### Bugfixes
 
