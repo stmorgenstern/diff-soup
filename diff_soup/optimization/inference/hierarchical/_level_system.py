@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
+from numpy.typing import DTypeLike
+
+from diff_soup.optimization.inference.engine._levels import LevelBlocks, LevelTables
 
 # ---------------------------------------------------------------------------
 # The system
@@ -52,19 +57,19 @@ class LevelSystem(eqx.Module):
     host.
     """
 
-    root: Any
-    root_gradient: Any
+    root: jax.Array
+    root_gradient: jax.Array
     diagonal: tuple
     cross: tuple
     gradient: tuple
-    point: Any
-    constraint_matrix: Any
-    constraint_rhs: Any
-    cost: Any
+    point: jax.Array
+    constraint_matrix: jax.Array
+    constraint_rhs: jax.Array
+    cost: jax.Array
     ancestors: tuple
     descendants: tuple
     present: tuple
-    fixed_mask: Any
+    fixed_mask: jax.Array
     held_mask: tuple
     counts: tuple = eqx.field(static=True)
     widths: tuple = eqx.field(static=True)
@@ -149,7 +154,7 @@ def _tree_indices(counts: tuple, parents: tuple) -> tuple:
     return tuple(ancestors), tuple(descendants), tuple(present)
 
 
-def _device(tables: tuple, device: Any = None) -> tuple:
+def _device(tables: tuple, device: jax.Device | jax.sharding.Sharding | None = None) -> tuple:
     """Nested host tables as arrays on ``device`` (the default device for ``None``), ``None`` kept."""
     return tuple(
         None
@@ -185,7 +190,13 @@ class LevelLayout:
     # The distinct arrays kept on the device; beyond it the oldest is dropped.
     KEPT = 64
 
-    def __init__(self, counts: tuple, widths: tuple, parents: tuple, device: Any = None):
+    def __init__(
+        self,
+        counts: tuple,
+        widths: tuple,
+        parents: tuple,
+        device: jax.Device | jax.sharding.Sharding | None = None,
+    ):
         """Build the index tables of a hierarchy of ``counts`` nodes and ``widths`` coordinates."""
         self.counts = tuple(int(count) for count in counts)
         self.widths = tuple(int(width) for width in widths)
@@ -198,7 +209,7 @@ class LevelLayout:
         self.device_present = _device(present, device)
         self._kept: dict = {}
 
-    def constant(self, name: str, value: np.ndarray) -> Any:
+    def constant(self, name: str, value: np.ndarray) -> jax.Array:
         """``value`` on the device, placed once per distinct value of ``name``."""
         value = np.ascontiguousarray(value)
         key = (name, value.dtype.str, value.shape, value.tobytes())
@@ -210,7 +221,9 @@ class LevelLayout:
         return placed
 
 
-def level_layout(tables: Any, device: Any = None) -> LevelLayout:
+def level_layout(
+    tables: LevelTables, device: jax.Device | jax.sharding.Sharding | None = None
+) -> LevelLayout:
     """The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_system.LevelLayout] of ``tables``.
 
     Args:
@@ -227,7 +240,7 @@ def level_layout(tables: Any, device: Any = None) -> LevelLayout:
 # ---------------------------------------------------------------------------
 
 
-def _listed(values: Any, limit: int = 8) -> str:
+def _listed(values: Iterable, limit: int = 8) -> str:
     """``values`` separated by commas, cut after ``limit`` with the number left."""
     values = tuple(values)
     text = ", ".join(str(value) for value in values[:limit])
@@ -243,11 +256,11 @@ def _regularizer_blocks(
     widths: tuple,
     offsets: tuple,
     ancestors: tuple,
-    dtype: Any,
+    dtype: DTypeLike,
     names: Any,
     members: Any,
     block_weights: Any = None,
-    device: Any = None,
+    device: jax.Device | jax.sharding.Sharding | None = None,
 ) -> tuple:
     """The regularizer's Gauss-Newton blocks per node, their cost, and the nodes they touch.
 
@@ -377,7 +390,7 @@ def regularizer_blocks_at(
     regularizer: Any,
     point: np.ndarray,
     layout: LevelLayout,
-    dtype: Any,
+    dtype: DTypeLike,
     names: Any = None,
     members: Any = None,
     block_weights: Any = None,
@@ -408,7 +421,12 @@ def regularizer_blocks_at(
     )
 
 
-def _held_nodes(blocks: Any, tables: Any, lane_weights: Any, touched: frozenset) -> tuple:
+def _held_nodes(
+    blocks: LevelBlocks,
+    tables: LevelTables,
+    lane_weights: ArrayLike | Sequence | None,
+    touched: frozenset,
+) -> tuple:
     """The nodes without data: no residual rows or no weight below them, and no regularizer row.
 
     ``touched`` holds the nodes a regularizer block of nonzero weight addresses;
@@ -430,8 +448,12 @@ def _held_nodes(blocks: Any, tables: Any, lane_weights: Any, touched: frozenset)
 
 
 def regularizer_block_members(
-    regularizer: Any, point: Any, tables: Any, level: int, device: Any = None
-) -> Any:
+    regularizer: Any,
+    point: ArrayLike,
+    tables: LevelTables,
+    level: int,
+    device: jax.Device | jax.sharding.Sharding | None = None,
+) -> np.ndarray | None:
     """The node of ``level`` that each regularizer block is attributed to, or -1.
 
     A block of ``regularizer.block_rows(point)`` belongs to the node of
@@ -529,20 +551,20 @@ def _assemble(blocks, keep, extra, ancestors):
 
 
 def level_system(
-    blocks: Any,
-    tables: Any,
+    blocks: LevelBlocks,
+    tables: LevelTables,
     point: Any,
     *,
-    constraint_matrix: Any = None,
-    constraint_rhs: Any = None,
+    constraint_matrix: ArrayLike | Sequence | None = None,
+    constraint_rhs: ArrayLike | Sequence | None = None,
     fixed_indices: Any = (),
     regularizer: Any = None,
-    lane_weights: Any = None,
+    lane_weights: ArrayLike | Sequence | None = None,
     members: Any = None,
     block_weights: Any = None,
-    device: Any = None,
+    device: jax.Device | jax.sharding.Sharding | None = None,
     layout: LevelLayout | None = None,
-    regularizer_blocks: Any = None,
+    regularizer_blocks: tuple | None = None,
 ) -> LevelSystem:
     """The system of the whole objective at ``point`` from the level blocks.
 
@@ -698,7 +720,7 @@ def _dtype(system: LevelSystem) -> np.dtype:
     return np.dtype(system.root.dtype)
 
 
-def _addition(system: LevelSystem, addition: Any) -> np.ndarray:
+def _addition(system: LevelSystem, addition: ArrayLike | Sequence | None) -> np.ndarray:
     """The diagonal addition as an ``(n,)`` host array of the system's dtype; zeros for ``None``."""
     if addition is None:
         return np.zeros((system.size,), dtype=_dtype(system))

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+from collections.abc import Sequence
+from numbers import Real
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.hierarchical._level_solve import (
     _ancestor_values,
@@ -47,7 +50,7 @@ def _inner_solve(system, damping, *, level):
     dtype = system.root.dtype
     offsets = _offsets(counts, widths)
 
-    def own_damping(at: int) -> Any:
+    def own_damping(at: int) -> jax.Array:
         return damping if at == level else damping[system.ancestors[at][level]]
 
     diagonal = list(system.diagonal)
@@ -217,7 +220,11 @@ def _response(system, scale, damping, outer_step, addition, *, level):
 
 
 def inner_solve_scaled(
-    system: LevelSystem, scale: Any, level: int, *, addition: Any = None
+    system: LevelSystem,
+    scale: ArrayLike | Sequence[Real],
+    level: int,
+    *,
+    addition: ArrayLike | Sequence | None = None,
 ) -> tuple:
     """Every member of ``level`` solves its subtree at zero damping, in ``z = scale * s``.
 
@@ -246,7 +253,13 @@ def inner_solve_scaled(
 
 
 def _lockstep_search(
-    scaled: LevelSystem, level: int, radii: Any, active: Any, first: Any, *, hold: bool = False
+    scaled: LevelSystem,
+    level: int,
+    radii: ArrayLike,
+    active: ArrayLike,
+    first: tuple[ArrayLike, ArrayLike] | None,
+    *,
+    hold: bool = False,
 ) -> tuple:
     """The multiplier searches of the active members of ``level`` on a scaled system.
 
@@ -313,13 +326,13 @@ def _lockstep_search(
 
 def inner_secular_step(
     system: LevelSystem,
-    scale: Any,
-    radii: Any,
+    scale: ArrayLike | Sequence[Real],
+    radii: ArrayLike,
     level: int,
-    active: Any,
+    active: ArrayLike,
     *,
-    first: Any = None,
-    addition: Any = None,
+    first: tuple[ArrayLike, ArrayLike] | None = None,
+    addition: ArrayLike | Sequence | None = None,
     hold: bool = False,
 ) -> tuple:
     """The trust-region step of every active member of ``level`` over its own subtree.
@@ -374,7 +387,9 @@ def inner_secular_step(
     return delta, predicted, multipliers, solves
 
 
-def inner_predicted(system: LevelSystem, delta: Any, level: int) -> np.ndarray:
+def inner_predicted(
+    system: LevelSystem, delta: ArrayLike | Sequence[Real], level: int
+) -> np.ndarray:
     """``-(g_n . delta_n + delta_n^T H_n delta_n / 2)`` for every member ``n`` of ``level``.
 
     ``H_n`` and ``g_n`` are the blocks and the gradient of the member's subtree;
@@ -385,7 +400,7 @@ def inner_predicted(system: LevelSystem, delta: Any, level: int) -> np.ndarray:
     return -(np.asarray(linear, dtype=np.float64) + 0.5 * np.asarray(quadratic, dtype=np.float64))
 
 
-def model_split(system: LevelSystem, delta: Any, level: int) -> tuple:
+def model_split(system: LevelSystem, delta: ArrayLike | Sequence[Real], level: int) -> tuple:
     """The decrease the Gauss-Newton model predicts for ``delta``, split by member of ``level``.
 
     Returns ``(members, rest)``: ``members`` ``(N_level,)``, for every member ``n``
@@ -428,7 +443,9 @@ def model_split(system: LevelSystem, delta: Any, level: int) -> tuple:
     return members, float(-full - np.sum(members))
 
 
-def inner_quadratic(system: LevelSystem, delta: Any, level: int) -> np.ndarray:
+def inner_quadratic(
+    system: LevelSystem, delta: ArrayLike | Sequence[Real], level: int
+) -> np.ndarray:
     """``delta_n^T H_n delta_n`` for every member ``n`` of ``level``, ``(N_level,)``.
 
     ``H_n`` is the matrix of the member's subtree; the columns of ``delta``
@@ -439,7 +456,9 @@ def inner_quadratic(system: LevelSystem, delta: Any, level: int) -> np.ndarray:
     return np.asarray(quadratic, dtype=np.float64)
 
 
-def inner_added(system: LevelSystem, addition: Any, scaled_step: Any, level: int) -> np.ndarray:
+def inner_added(
+    system: LevelSystem, addition: ArrayLike | Sequence | None, scaled_step: ArrayLike, level: int
+) -> np.ndarray:
     """``z_n^T diag(addition_n) z_n`` for every member ``n`` of ``level``, ``(N_level,)``.
 
     ``z`` is a scaled step in joint columns; the columns above ``level`` do
@@ -514,7 +533,12 @@ def _response_level(system: LevelSystem, outer_step: np.ndarray) -> int:
 
 
 def inner_response_parts(
-    system: LevelSystem, scale: Any, damping: Any, outer_step: Any, *, addition: Any = None
+    system: LevelSystem,
+    scale: ArrayLike | Sequence[Real],
+    damping: Real | ArrayLike,
+    outer_step: Any,
+    *,
+    addition: ArrayLike | Sequence | None = None,
 ) -> tuple:
     """``inner_response`` with the scaled inner step and the inner gradient it answers.
 
@@ -557,12 +581,12 @@ def _shifted_system(scaled: LevelSystem, shifted: tuple, level: int) -> LevelSys
 
 def inner_bounded_response(
     system: LevelSystem,
-    scale: Any,
-    damping: Any,
+    scale: ArrayLike | Sequence[Real],
+    damping: Real | ArrayLike,
     outer_step: Any,
     radii: Any,
     *,
-    addition: Any = None,
+    addition: ArrayLike | Sequence | None = None,
 ) -> tuple:
     """``inner_response_parts`` with every member's response bounded by its radius.
 
@@ -646,11 +670,11 @@ def inner_bounded_response(
 
 def inner_response(
     system: LevelSystem,
-    scale: Any,
-    damping: Any,
+    scale: ArrayLike | Sequence[Real],
+    damping: Real | ArrayLike,
     outer_step: Any,
     *,
-    addition: Any = None,
+    addition: ArrayLike | Sequence | None = None,
     radii: Any = None,
 ) -> np.ndarray:
     """The step whose outer part is ``outer_step`` and whose inner part responds to it.
