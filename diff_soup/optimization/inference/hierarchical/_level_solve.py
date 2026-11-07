@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-from typing import Any, NamedTuple
+from collections.abc import Callable, Sequence
+from numbers import Real
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.hierarchical._level_system import (
     LevelSystem,
@@ -22,7 +25,7 @@ from diff_soup.optimization.inference.hierarchical._level_system import (
 # ---------------------------------------------------------------------------
 
 
-def _split(system: LevelSystem, vector: Any) -> list:
+def _split(system: LevelSystem, vector: ArrayLike) -> list:
     """A joint vector as the root part and one ``(N_l, v_l)`` part per level."""
     offsets = _offsets(system.counts, system.widths)
     parts = [vector[: system.widths[0]]]
@@ -35,7 +38,7 @@ def _split(system: LevelSystem, vector: Any) -> list:
     return parts
 
 
-def _node_sum(system: LevelSystem, values: Any, level: int, above: int) -> Any:
+def _node_sum(system: LevelSystem, values: ArrayLike, level: int, above: int) -> jax.Array:
     """Sum per-node values of ``level`` over the nodes below each node of ``above``."""
     if above == 0:
         return jnp.sum(values, axis=0)
@@ -46,24 +49,26 @@ def _node_sum(system: LevelSystem, values: Any, level: int, above: int) -> Any:
     return jnp.sum(jnp.where(keep, gathered, jnp.zeros((), values.dtype)), axis=1)
 
 
-def _ancestor_values(system: LevelSystem, values: Any, level: int, above: int) -> Any:
+def _ancestor_values(system: LevelSystem, values: ArrayLike, level: int, above: int) -> ArrayLike:
     """The values of each node's level-``above`` ancestor, one row per node of ``level``."""
     return values[system.ancestors[level][above]]
 
 
-def _lower_solve(factor: Any, right: Any) -> Any:
+def _lower_solve(factor: ArrayLike, right: ArrayLike) -> jax.Array:
     """``L^-1 B`` for a batch of lower factors."""
     return jax.vmap(lambda f, b: jax.scipy.linalg.solve_triangular(f, b, lower=True))(factor, right)
 
 
-def _upper_solve(factor: Any, right: Any) -> Any:
+def _upper_solve(factor: ArrayLike, right: ArrayLike) -> jax.Array:
     """``L^-T B`` for a batch of lower factors."""
     return jax.vmap(lambda f, b: jax.scipy.linalg.solve_triangular(f, b, lower=True, trans="T"))(
         factor, right
     )
 
 
-def _fold(system: LevelSystem, damping: Any, rhs: Any, lowest: int) -> tuple:
+def _fold(
+    system: LevelSystem, damping: Real | ArrayLike, rhs: Sequence[ArrayLike] | None, lowest: int
+) -> tuple:
     """Eliminate the levels ``D .. lowest`` from the experiments up.
 
     Every node of a level is factored at once, ``L_n = chol(diag~_n + damping I)``;
@@ -272,15 +277,21 @@ _BRACKETS = 80
 _NEWTONS = 30
 
 
-def _norm(vector: Any) -> Any:
+def _norm(vector: ArrayLike) -> jax.Array:
     return jnp.sqrt(jnp.dot(vector, vector))
 
 
-def _all_finite(vector: Any) -> Any:
+def _all_finite(vector: ArrayLike) -> jax.Array:
     return jnp.all(jnp.isfinite(vector))
 
 
-def _search(solve: Any, zero: tuple, radius: Any, eps: float, tiny: float) -> tuple:
+def _search(
+    solve: Callable[..., tuple[jax.Array, jax.Array]],
+    zero: tuple,
+    radius: Real | ArrayLike,
+    eps: float,
+    tiny: float,
+) -> tuple:
     """``_secular_search`` on the device: every branch and limit of the host generator.
 
     ``solve(damping)`` gives ``(z, q_squared)``; ``zero`` is its answer at
@@ -508,7 +519,7 @@ def _reduce(system, *, level):
     )
 
 
-def _added_quadratic(addition: Any, scaled_step: np.ndarray) -> float:
+def _added_quadratic(addition: ArrayLike | Sequence | None, scaled_step: np.ndarray) -> float:
     """``z^T diag(addition) z`` for a scaled step ``z``; 0 without an addition."""
     if addition is None:
         return 0.0
@@ -516,7 +527,11 @@ def _added_quadratic(addition: Any, scaled_step: np.ndarray) -> float:
         return float(np.asarray(addition, dtype=np.float64) @ (scaled_step * scaled_step))
 
 
-def scaled_system(system: LevelSystem, scale: Any, addition: Any = None) -> LevelSystem:
+def scaled_system(
+    system: LevelSystem,
+    scale: ArrayLike | Sequence[Real],
+    addition: ArrayLike | Sequence | None = None,
+) -> LevelSystem:
     """The system in the coordinates ``z = scale * s``, ``addition`` added to its diagonal.
 
     Its matrix is ``D H D + diag(addition)`` and its gradient ``D g``, with
@@ -535,7 +550,7 @@ def scaled_system(system: LevelSystem, scale: Any, addition: Any = None) -> Leve
     return _scaled(system, np.asarray(scale, dtype=_dtype(system)), _addition(system, addition))
 
 
-def solve_damped(system: LevelSystem, damping: Any) -> tuple:
+def solve_damped(system: LevelSystem, damping: Real | ArrayLike) -> tuple:
     """Solve ``(H + damping I) s = -g`` along the tree, under the system's equality rows.
 
     Args:
@@ -550,7 +565,12 @@ def solve_damped(system: LevelSystem, damping: Any) -> tuple:
     return _solve(system, np.asarray(damping, dtype=_dtype(system)))
 
 
-def solve_scaled(system: LevelSystem, scale: Any, damping: Any, addition: Any = None) -> tuple:
+def solve_scaled(
+    system: LevelSystem,
+    scale: ArrayLike | Sequence[Real],
+    damping: Real | ArrayLike,
+    addition: ArrayLike | Sequence | None = None,
+) -> tuple:
     """One damped solve in the coordinates ``z = scale * s``, on the host.
 
     The matrix is the scaled one with ``addition`` on its diagonal
@@ -564,7 +584,7 @@ def solve_scaled(system: LevelSystem, scale: Any, damping: Any, addition: Any = 
     return np.asarray(step), float(q_squared)
 
 
-def level_quadratic(system: LevelSystem, delta: Any) -> float:
+def level_quadratic(system: LevelSystem, delta: ArrayLike | Sequence[Real]) -> float:
     """``delta^T H delta`` from the blocks, without a dense matrix.
 
     Args:
@@ -584,7 +604,12 @@ def level_vectors(system: LevelSystem) -> tuple:
 
 
 def level_secular_step(
-    system: LevelSystem, scale: Any, radius: Any, *, first: Any = None, addition: Any = None
+    system: LevelSystem,
+    scale: ArrayLike | Sequence[Real],
+    radius: Real | ArrayLike,
+    *,
+    first: tuple[ArrayLike, Real | ArrayLike] | AttemptSolve | None = None,
+    addition: ArrayLike | Sequence | None = None,
 ) -> tuple:
     """The trust-region step of radius ``radius`` in the scaled norm ``||scale * s||``.
 
@@ -679,10 +704,15 @@ class AttemptSolve(NamedTuple):
     solves: int
     radius: float
     scale: np.ndarray
-    addition: Any
+    addition: np.ndarray | None
     failed: bool = False
 
-    def answers(self, scale: Any, radius: Any, addition: Any = None) -> bool:
+    def answers(
+        self,
+        scale: ArrayLike | Sequence[Real],
+        radius: Real | ArrayLike,
+        addition: ArrayLike | Sequence | None = None,
+    ) -> bool:
         """Whether this attempt was solved for ``scale``, ``radius`` and ``addition``."""
         if float(radius) != self.radius or not np.array_equal(np.asarray(scale), self.scale):
             return False
@@ -692,7 +722,10 @@ class AttemptSolve(NamedTuple):
 
 
 def attempt_solve(
-    system: LevelSystem, scale: Any, radius: Any, addition: Any = None
+    system: LevelSystem,
+    scale: ArrayLike | Sequence[Real],
+    radius: Real | ArrayLike,
+    addition: ArrayLike | Sequence | None = None,
 ) -> AttemptSolve:
     """One attempt's solve at zero damping, its predicted decrease and its trust-region step.
 

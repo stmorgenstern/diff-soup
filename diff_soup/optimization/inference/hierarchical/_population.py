@@ -37,17 +37,19 @@ import os
 import re
 import time
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 import jax
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.inference.engine._request import Request
 from diff_soup.optimization.inference.hierarchical._lane_route import _LaneRoute
+from diff_soup.optimization.inference.hierarchical._level_system import LevelSystem
 from diff_soup.optimization.inference.hierarchical._work import _hold_rungs
 from diff_soup.optimization.inference.hierarchical.level_solvers import TrustRegion
 
@@ -400,9 +402,9 @@ class PopulationRoute:
         *,
         active: Any = None,
         lanes: Any = None,
-        rungs: Any = None,
-        first_steps: Any = None,
-        units: Any = None,
+        rungs: ArrayLike | Sequence | None = None,
+        first_steps: ArrayLike | Sequence | None = None,
+        units: ArrayLike | Sequence | None = None,
     ) -> Any:
         """One request of ``mode`` over the whole population; the members ``active`` take part.
 
@@ -495,7 +497,7 @@ class PopulationRoute:
 
     # One member's objective --------------------------------------------------------------
 
-    def _weighted(self, weights: Any, weight_priors: Any = None) -> _LaneRoute:
+    def _weighted(self, weights: Any, weight_priors: bool | None = None) -> _LaneRoute:
         """The fit's route weighed by one member's weights (kept for the next call).
 
         ``weight_priors`` is ``True`` or ``False`` to weigh the regularizer
@@ -523,7 +525,7 @@ class PopulationRoute:
             self._weighed[key] = route
         return route
 
-    def system(self, results: Any, point: Any, *, member: int, weights: Any) -> Any:
+    def system(self, results: Any, point: ArrayLike, *, member: int, weights: Any) -> LevelSystem:
         """Population member ``member``'s level system at ``point`` under ``weights``.
 
         Args:
@@ -539,7 +541,7 @@ class PopulationRoute:
         """
         return self._weighted(weights).system(results, np.asarray(point), member=int(member))
 
-    def trial_cost(self, results: Any, point: Any, *, member: int, weights: Any) -> float:
+    def trial_cost(self, results: Any, point: ArrayLike, *, member: int, weights: Any) -> float:
         """Population member ``member``'s cost at ``point`` under ``weights``.
 
         ``sum_l w_l c_l + sum_b w_b 0.5 |r_b|^2``: its lanes' costs from a
@@ -611,7 +613,7 @@ class Lockstep:
         active[[member.index for member in chosen]] = True
         return active
 
-    def _host(self, member: Any, work: Any) -> Any:
+    def _host(self, member: Any, work: Callable[..., Any]) -> Any:
         """Run one member's host work, timed; an exception ends that member failed, not the run."""
         mark = time.perf_counter()
         try:
@@ -622,7 +624,7 @@ class Lockstep:
         finally:
             member.seconds += time.perf_counter() - mark
 
-    def run(self, callbacks: tuple = (), *, checkpoint: Any = None) -> None:
+    def run(self, callbacks: tuple = (), *, checkpoint: PopulationCheckpoint | None = None) -> None:
         """Make lockstep iterations until no member runs; one event per iteration.
 
         Iterations are numbered on from the last one made (a restored
@@ -743,7 +745,9 @@ class PopulationCheckpoint:
         fingerprint: Item to text: what the population was declared with.
     """
 
-    def __init__(self, directory: Any, *, keep: str, every: int, fingerprint: Mapping):
+    def __init__(
+        self, directory: str | os.PathLike[str], *, keep: str, every: int, fingerprint: Mapping
+    ):
         """Open ``directory`` (made when missing) for a population declared with ``fingerprint``."""
         self.directory = Path(directory)
         self.keep = str(keep)
@@ -766,12 +770,12 @@ class PopulationCheckpoint:
                 found.append((int(match.group(1)), path))
         return sorted(found)
 
-    def latest(self) -> Any:
+    def latest(self) -> Path | None:
         """The path of the newest population file, or ``None``."""
         found = self.files()
         return found[-1][1] if found else None
 
-    def read(self, path: Any) -> dict:
+    def read(self, path: str | os.PathLike[str]) -> dict:
         """What a population file holds: ``iteration``, ``fingerprint``, ``arrays``, ``texts``, ``products``.
 
         Raises:
@@ -849,7 +853,7 @@ class PopulationCheckpoint:
         partial.write_text("".join(f"{line}\n" for line in kept))
         os.replace(partial, self.events)
 
-    def record(self, stepper: Any, event: Mapping) -> None:
+    def record(self, stepper: Lockstep, event: Mapping) -> None:
         """Log one iteration's event; write the population's state when the iteration is due.
 
         ``stepper`` is the population's ``Lockstep``: its ``members[*].running``
