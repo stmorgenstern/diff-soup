@@ -19,6 +19,7 @@ from tests.support.second_order import (
     PROBLEM,
     SPAN,
     THETA,
+    TIGHT,
     Y0,
     composable_reference,
     gradient_and_hessian,
@@ -71,6 +72,27 @@ def test_reverse_over_reverse_equals_forward_over_reverse():
     direction = jnp.asarray([0.3, -0.7])
     by_reverse = jax.grad(lambda theta: jnp.vdot(gradient(theta), direction))(THETA)
     by_forward = jax.jvp(gradient, (THETA,), (direction,))[1]
+    np.testing.assert_allclose(by_reverse, by_forward, rtol=_REVERSE_OVER_REVERSE)
+
+
+def test_reverse_over_reverse_through_lanes_that_share_a_parameter():
+    """With theta shared by vmap lanes over two start states, jax.grad of a jax.grad of the lane
+    sum under CheckpointAdjoint(reverse_over_reverse=True) equals forward mode over the gradient."""
+    solver = ds.JNDF.stock(linear="dense", **TIGHT)
+    adjoint = ds.CheckpointAdjoint(reverse_over_reverse=True)
+
+    def lane_sum(theta):
+        def lane(y0):
+            solution = ds.pdesolve(PROBLEM, solver, SPAN, y0, theta=theta, adjoint=adjoint)
+            return jnp.sum(solution.ys[-1] ** 2)
+
+        return jnp.sum(jax.vmap(lane)(jnp.stack([Y0, 1.1 * Y0])))
+
+    gradient = jax.grad(lane_sum)
+    direction = jnp.asarray([0.3, -0.7])
+    by_reverse = jax.grad(lambda theta: jnp.vdot(gradient(theta), direction))(THETA)
+    by_forward = jax.jvp(gradient, (THETA,), (direction,))[1]
+    # measured 4.4e-16 relative, workstation CPU 2026-11-06, .ports/m3_lanes_rr.py (RP9)
     np.testing.assert_allclose(by_reverse, by_forward, rtol=_REVERSE_OVER_REVERSE)
 
 
