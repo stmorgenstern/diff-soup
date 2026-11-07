@@ -47,11 +47,9 @@ import numpy as np
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.inference.engine._request import Request
-from diff_soup.optimization.inference.hierarchical.level_solvers import (
-    TrustRegion,
-    _hold_rungs,
-    _LaneRoute,
-)
+from diff_soup.optimization.inference.hierarchical._lane_route import _LaneRoute
+from diff_soup.optimization.inference.hierarchical._work import _hold_rungs
+from diff_soup.optimization.inference.hierarchical.level_solvers import TrustRegion
 
 _MODES = ("value", "blocks")
 _WORK = ("lane_ids", "lane_rungs", "lane_first_steps")

@@ -17,9 +17,9 @@ import pytest
 import diff_soup as ds
 from diff_soup.optimization import inference as inf
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
-from diff_soup.optimization.inference.hierarchical.level_solvers import (
+from diff_soup.optimization.inference.hierarchical._lane_route import _LaneRoute
+from diff_soup.optimization.inference.hierarchical._trust_step import (
     _full_step_decrease,
-    _LaneRoute,
     _scale_candidate,
     _subproblem,
     _trial_point,
