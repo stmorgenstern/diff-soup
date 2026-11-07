@@ -12,6 +12,7 @@ from diff_soup.optimization.inference.fitting.result import (
 from diff_soup.optimization.inference.hierarchical._lane_route import _listed
 
 NONFINITE_BLOCKS = "nonfinite_blocks_at_finite_cost"
+"""The failure kind of a lane whose solve reached a finite cost with non-finite Gauss-Newton blocks."""
 
 
 def _rungs_text(rungs: Any) -> str:

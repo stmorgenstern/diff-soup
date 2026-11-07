@@ -21,8 +21,6 @@ from diff_soup.optimization.solvers._loop import (
 )
 from diff_soup.optimization.solvers._termination import step_budget
 
-"""The failure kind of a lane whose solve reached a finite cost with non-finite Gauss-Newton blocks."""
-
 
 def _refuse_state(state: Any, *, solver: str, mode: str, nested_at: Any, n: int) -> None:
     """Refuse a saved state this solver cannot continue, naming both settings."""
