@@ -244,7 +244,7 @@ def _lane_streams(child: Any) -> tuple:
 
 def _components(child: Any, recorder: _IdentityRecorder) -> tuple:
     """The record of every component of ``child``, in the order of ``LANE_COMPONENTS``."""
-    from diff_soup.optimization.inference.fitting.joint import _child_mode
+    from diff_soup.optimization.inference.fitting._joint_structure import _child_mode
 
     seam = child._seam
     view = seam.problem
@@ -380,7 +380,7 @@ def lane_refusal(child: Any) -> str | None:
         The reason, a sentence that names what the lanes cannot take, or
         ``None``.
     """
-    from diff_soup.optimization.inference.fitting.joint import _child_mode
+    from diff_soup.optimization.inference.fitting._joint_structure import _child_mode
 
     mode = _child_mode(child)
     if mode not in ("single", "observed_ic"):

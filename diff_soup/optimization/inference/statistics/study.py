@@ -11,13 +11,13 @@ import jax
 import numpy as np
 
 from diff_soup._layout import Layout
-from diff_soup.optimization.inference.fitting.bounds import Bounds
-from diff_soup.optimization.inference.fitting.inference_problem import ParameterGroups
-from diff_soup.optimization.inference.fitting.joint import (
-    JointInferenceProblem,
+from diff_soup.optimization.inference.fitting._joint_structure import (
     _sharding_requested,
     plan_child_data_owners,
 )
+from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.inference_problem import ParameterGroups
+from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
 from diff_soup.optimization.inference.statistics._fingerprint import study_content_fingerprint
 from diff_soup.optimization.inference.statistics.hierarchy import EXPERIMENT, Hierarchy, _tree
 from diff_soup.optimization.inference.statistics.measurement import Experiment

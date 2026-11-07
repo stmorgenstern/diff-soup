@@ -387,7 +387,7 @@ def lane_metadata(plan: Plan, joint: Any) -> BatchedLanes:
         The [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes]
         whose buckets carry no inputs.
     """
-    from diff_soup.optimization.inference.fitting.joint import _resolve_child_y0
+    from diff_soup.optimization.inference.fitting._joint_residual import _resolve_child_y0
 
     layout = lane_layout(joint)
     problems = lane_problems(joint)
