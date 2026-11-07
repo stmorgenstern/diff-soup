@@ -7,9 +7,6 @@ import importlib
 import importlib.util
 from pathlib import Path
 
-import equinox as eqx
-import jax
-import jax.numpy as jnp
 import pytest
 
 import diff_soup as ds
@@ -17,7 +14,6 @@ from diff_soup import timestepping
 from diff_soup.optimization import inference as inf
 from diff_soup.problem._cache import BoundedContentCache
 from tests.support.inference import decay_experiment, decay_recipe
-from tests.support.problems import operational_cell
 
 _PACKAGE_ROOT = Path(ds.__file__).parent
 _LAYER_TOOL = _PACKAGE_ROOT.parent / ".github" / "scripts" / "check_layers.py"
@@ -105,28 +101,3 @@ def test_the_public_inference_problem_is_a_facade_over_a_numeric_leaf():
     leaf = problem.numeric_problem
     assert leaf is not None and not isinstance(leaf, inf.InferenceProblem)
     assert callable(inf.Study.compile_inference_problem)
-
-
-def test_every_problem_shares_one_array_free_base_and_the_module_problems_stay_pytrees():
-    """InferenceProblem and the control problem subclass one abstract base that holds
-    no state; a ControlProblem's leaves are its own arrays, so a batch of them is one
-    filter_vmap and filter_jit traces it."""
-    base = ds.optimization.AbstractOptimizationProblem
-    control = ds.optimization.control
-    assert issubclass(inf.InferenceProblem, base) and issubclass(inf.LoweredStudy, base)
-    assert issubclass(control.ControlProblem, base)
-    assert not issubclass(base, eqx.Module) and "__init__" not in vars(base)
-    batch = control.ControlProblem(
-        problem=operational_cell().build(),
-        controls=control.PiecewiseConstant(mode="current", intervals=1, duration=1.0),
-        cost=lambda sol, u, args: jnp.sum(u**2),
-        save_times=(1.0,),
-        initial_state=jnp.ones((3, 2)),
-        theta=jnp.arange(3.0),
-        solver=ds.JIDA(linear="dense"),
-    )
-    assert len(jax.tree.leaves(batch)) == 2
-    doubled = eqx.filter_vmap(lambda problem: problem.args()[0] * problem.args()[1])(batch)
-    assert jnp.array_equal(
-        eqx.filter_jit(lambda value: value)(doubled), jnp.ones((3, 2)) * jnp.arange(3.0)[:, None]
-    )

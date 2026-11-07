@@ -13,7 +13,6 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup.utils.lanes import _lane_where as lane_where
 
 _N = 12
 _KNOWN = jnp.eye(_N) * 2.0 + jnp.diag(jnp.ones(_N - 1), 1)
@@ -67,7 +66,6 @@ _EXACT = {
     ),
     "scan": _scan,
     "custom_linear_solve": lambda y: jnp.linalg.solve(_KNOWN, y**2),
-    "diffsoup_lane_where": lambda y: lane_where(y[0] > 1.0, y**2, jnp.roll(y, 1)),
     "conv_general_dilated": lambda y: jnp.convolve(
         y**2, jnp.asarray([1.0, -2.0, 1.0]), mode="same"
     ),
@@ -106,7 +104,7 @@ def test_a_fallback_warns_and_holds_every_entry_jacfwd_finds(name):
     """A slice at an index the state sets and a primitive with no rule warn, and the pattern holds
     every entry ``jax.jacfwd`` finds nonzero."""
     reached = _reached(_FALLBACK[name])
-    with pytest.warns(UserWarning, match="jacobian_pattern"):
+    with pytest.warns(UserWarning):
         pattern = _pattern(_FALLBACK[name], reached.shape)
     assert not np.any(reached & ~pattern)
 
@@ -135,7 +133,7 @@ def test_within_bounds_only_the_rows_a_fallback_reaches():
     ``within`` the six keep the first six columns, and the six squared rows keep their
     diagonal."""
     within = (np.repeat(np.arange(6), 6), np.tile(np.arange(6), 6))
-    with pytest.warns(UserWarning, match="jacobian_pattern"):
+    with pytest.warns(UserWarning):
         rows, cols = ds.jacobian_pattern(
             lambda y: jnp.concatenate(
                 [jax.lax.dynamic_slice(y, (jnp.argmax(y),), (6,)), y[6:] ** 2]

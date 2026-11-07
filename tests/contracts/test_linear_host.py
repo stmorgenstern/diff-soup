@@ -31,7 +31,7 @@ from diff_soup.linear import (
     solve,
     solve_checked,
 )
-from tests.support.problems import reaction_diffusion_recipe
+from tests.support.problems import SparseChainDAE, reaction_diffusion_recipe
 
 BACKENDS = {"klu": KLU, "superlu": SuperLU}
 MARKS = {"klu": pytest.mark.requires_klu, "superlu": pytest.mark.requires_superlu}
@@ -309,71 +309,6 @@ def test_a_host_backend_refuses_a_program_compiled_for_a_gpu(name):
             traced.lower(lowering_platforms=("cuda",))
 
 
-#: On two forced host devices: KLU lanes committed over both devices, and a shard_map body over
-#: both, each lowered with a native factor; the refusal each raises.
-_TWO_DEVICE_WORKER = r"""
-import json
-
-import jax
-import jax.numpy as jnp
-import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
-
-from diff_soup.linear import KLU, FactorContractError, SolveContext, SparseTopology, analyze
-from diff_soup.linear import factor, solve
-
-index = np.arange(6)
-pattern = SparseTopology(
-    rows=np.concatenate([index, index[1:]]), cols=np.concatenate([index, index[:-1]]), n_dofs=6
-)
-lanes = jnp.asarray(np.tile(np.concatenate([np.full(6, 4.0), np.full(5, -1.0)]), (2, 1)))
-mesh = Mesh(np.asarray(jax.devices()), ("data",))
-refusals = []
-with SolveContext() as ctx:
-    analysis = analyze(pattern, backend=KLU())
-    one = lambda v: solve(factor(analysis, v, ctx=ctx), jnp.ones(6))[0]
-    placed = jax.device_put(lanes, NamedSharding(mesh, PartitionSpec("data")))
-    for program in (
-        jax.jit(jax.vmap(one)),
-        jax.jit(jax.shard_map(jax.vmap(one), mesh=mesh, in_specs=PartitionSpec("data"),
-                              out_specs=PartitionSpec("data"))),
-    ):
-        try:
-            program(placed)
-            refusals.append(None)
-        except FactorContractError as exc:
-            refusals.append(str(exc))
-print("REPORT " + json.dumps(refusals))
-"""
-
-
-@pytest.mark.requires_klu
-def test_a_native_factor_over_two_devices_of_the_process_is_refused():
-    """A KLU factor lowered into a program over two devices of the process, lanes committed over
-    both or a ``shard_map`` body over both, raises FactorContractError naming the two devices,
-    since its slots do not tell devices apart."""
-    env = {key: value for key, value in os.environ.items() if "proxy" not in key.lower()}
-    env.update(
-        JAX_PLATFORMS="cpu",
-        XLA_FLAGS="--xla_force_host_platform_device_count=2",
-        OMP_NUM_THREADS="1",
-        CUDA_VISIBLE_DEVICES="",
-        JAX_ENABLE_X64="1",
-    )
-    run = subprocess.run(
-        [sys.executable, "-c", _TWO_DEVICE_WORKER],
-        cwd=Path(__file__).resolve().parents[2],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=110,
-    )
-    assert run.returncode == 0, run.stderr[-4000:]
-    line = next(item for item in run.stdout.splitlines() if item.startswith("REPORT "))
-    refusals = json.loads(line.removeprefix("REPORT "))
-    assert [("over 2 devices of this process" in (text or "")) for text in refusals] == [True] * 2
-
-
 # Forty SuperLU factors of a 24-unknown sparse system, each solved plain and transposed: the
 # threads the extension used and a digest of every solution's bytes. The thread count is fixed
 # per process (OMP_NUM_THREADS), so each count runs in its own process.
@@ -400,37 +335,114 @@ print("REPORT", SuperLU.threads(), digest.hexdigest())
 """
 
 
-def _superlu_rounds(threads):
-    """``(threads used, digest)`` of the SuperLU worker run with ``OMP_NUM_THREADS=threads``."""
-    env = {key: value for key, value in os.environ.items() if "proxy" not in key.lower()}
-    env.update(
-        JAX_PLATFORMS="cpu",
-        OMP_NUM_THREADS=str(threads),
-        CUDA_VISIBLE_DEVICES="",
-        JAX_ENABLE_X64="1",
-    )
+def _report(worker, **env):
+    """The line ``worker`` prints after ``REPORT`` in a host-only subprocess under ``env``."""
+    base = {key: value for key, value in os.environ.items() if "proxy" not in key.lower()}
+    base.update(JAX_PLATFORMS="cpu", OMP_NUM_THREADS="1", CUDA_VISIBLE_DEVICES="")
+    base.update(JAX_ENABLE_X64="1", **env)
     run = subprocess.run(
-        [sys.executable, "-c", _THREADS_WORKER],
+        [sys.executable, "-c", worker],
         cwd=Path(__file__).resolve().parents[2],
-        env=env,
+        env=base,
         capture_output=True,
         text=True,
         timeout=110,
     )
     assert run.returncode == 0, run.stderr[-4000:]
     line = next(item for item in run.stdout.splitlines() if item.startswith("REPORT "))
-    used, digest = line.split()[1:]
+    return line.removeprefix("REPORT ")
+
+
+def _superlu_rounds(threads):
+    """``(threads used, digest)`` of the SuperLU worker run with ``OMP_NUM_THREADS=threads``."""
+    used, digest = _report(_THREADS_WORKER, OMP_NUM_THREADS=str(threads)).split()
     return int(used), digest
 
 
 @pytest.mark.requires_superlu
 def test_superlu_solves_on_five_threads_equal_one_threads_bit_for_bit():
-    """SuperLU's factors and solves on five threads are the bits of one thread's: the patched
-    SuperLU_MT (``superlu_ffi/patches``) neither races nor reorders its updates by schedule."""
+    """SuperLU's factors and solves on up to five threads, at least two, are the bits of one
+    thread's: the factorization neither races nor reorders its updates by schedule. The row
+    needs a host that gives the process two CPUs, as every host the suite runs on does."""
     (_, single), (used, several) = _superlu_rounds(1), _superlu_rounds(5)
-    if used < 2:
-        pytest.skip("this host gives the process fewer than two CPUs")
-    assert several == single
+    assert used >= 2 and several == single
+
+
+#: Run on two forced host CPU devices: one jitted KLU factor and solve, run under each device as
+#: the default device; the slots each run takes and the two solutions.
+_SITES_WORKER = r"""
+import json
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from diff_soup.linear import KLU, SolveContext, SparseTopology, analyze, factor, solve
+
+index = np.arange(12)
+pattern = SparseTopology(
+    rows=np.concatenate([index, index[1:], index[:-1]]),
+    cols=np.concatenate([index, index[:-1], index[1:]]),
+    n_dofs=12,
+)
+values = jnp.asarray(np.concatenate([np.full(12, 4.0), np.full(22, -1.0)]))
+backend, slots, solutions = KLU(), [], []
+with SolveContext() as ctx:
+    analysis = analyze(pattern, backend=backend)
+    program = jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), jnp.linspace(-1.0, 2.0, 12))[0])
+    for device in jax.devices():
+        with jax.default_device(device):
+            before = backend.native_stats()["live_slots"]
+            solutions.append(np.asarray(program(values)).tolist())
+            slots.append(backend.native_stats()["live_slots"] - before)
+print("REPORT " + json.dumps({"slots": slots, "same": solutions[0] == solutions[1]}))
+"""
+
+
+@pytest.mark.requires_klu
+def test_one_program_under_two_default_devices_factors_at_one_site_per_device():
+    """A jitted KLU factor and solve run under ``jax.default_device`` set to each of two host
+    devices takes a factor slot in each run, one site per device rather than one shared, and
+    both runs return the same solution."""
+    assert json.loads(
+        _report(_SITES_WORKER, XLA_FLAGS="--xla_force_host_platform_device_count=2")
+    ) == {
+        "slots": [1, 1],
+        "same": True,
+    }
+
+
+@pytest.mark.requires_cuda
+@pytest.mark.requires_klu
+def test_an_auto_solve_under_a_cpu_default_device_runs_klu_on_that_device():
+    """In a process whose default backend is a GPU, a jitted ``linear="auto"`` JIDA solve of a
+    25-unknown DAE that initializes consistently, run under ``jax.default_device`` set to a CPU
+    device, runs KLU on that device and stores bitwise what the same solve with ``linear="klu"``
+    stores."""
+    chain, cpu = SparseChainDAE(n=12), jax.devices("cpu")[0]
+
+    def solve(linear):
+        solver = ds.JIDA.stock(linear=linear, **{"rtol": 1e-8, "atol": 1e-10})
+
+        def run(rate):
+            solution = ds.pdesolve(
+                chain.problem,
+                solver,
+                (0.0, 0.5),
+                chain.initial_state(),
+                theta=rate,
+                saveat=ds.SaveAt(t1=True),
+                consistent_ic=True,
+            )
+            return solution.ys, solution.lambdas, solution.stats
+
+        with jax.default_device(cpu):
+            return jax.jit(run)(jnp.asarray(0.7))
+
+    auto, klu = solve("auto"), solve("klu")
+    assert (auto[2].linear_backend, auto[0].devices()) == ("klu", {cpu})
+    for got, expected in zip(auto[:2], klu[:2]):
+        np.testing.assert_array_equal(got, expected)
 
 
 _DIFFUSION = reaction_diffusion_recipe(n=12)
