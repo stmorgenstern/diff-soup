@@ -60,8 +60,9 @@ from diff_soup.linear import (
     solve_checked,
 )
 from diff_soup.linear._context import DEFAULT_CONTEXT
-from diff_soup.linear._krylov import exact_analysis, report_outcome
+from diff_soup.linear._krylov import exact_analysis
 from diff_soup.nonlinear._kkt import linear_route, transposable_solve
+from diff_soup.problem.implicit.tangent_gates import poison, zero_where_not
 from diff_soup.utils.lanes import lane_cond
 
 __all__ = [
@@ -392,42 +393,15 @@ def _inexact_cotangent_solver(route, values):
         """Cotangent solve against the held preconditioner, rebuilt where it fails."""
         x, solved, report = solve_checked(current, rhs, tol=lagged)
         stale = jnp.logical_not(report.converged)
-        first = (x, report.status, report.iterations, report.residual)
 
         def rebuild(_):
             fresh_factor = refactor(solved, values, stale)
             start = jnp.where(jnp.isfinite(x), x, jnp.zeros_like(x))
-            x_new, _, again = solve_checked(fresh_factor, rhs, tol=fresh, x0=start)
-            return x_new, again.status, report.iterations + again.iterations, again.residual
+            return solve_checked(fresh_factor, rhs, tol=fresh, x0=start)[0]
 
-        x, status, iterations, residual = lane_cond(
-            stale, rebuild, lambda _: first, None, false_is_free=True
-        )
-        report_outcome("cotangent", "AT", False, status, iterations, residual, rebuilt=stale)
-        return x
+        return lane_cond(stale, rebuild, lambda _: x, None, false_is_free=True)
 
     return solve
-
-
-def _poison(x, valid):
-    """Replace ``x`` with NaN when the root or its sensitivity solve is invalid."""
-    return jnp.where(valid, x, jnp.full_like(x, jnp.nan))
-
-
-def _zero_where_not(keep, tree):
-    """Replace every inexact leaf of ``tree`` with exact zeros where ``keep`` is false.
-
-    A selection, not a product: an infinite or NaN leaf that is not kept
-    becomes zero instead of NaN. Integer (``float0``) leaves pass unchanged.
-    """
-    keep = jnp.asarray(keep)
-
-    def gate(leaf):
-        if getattr(leaf, "dtype", None) == jax.dtypes.float0:
-            return leaf
-        return jnp.where(keep, leaf, jnp.zeros_like(leaf))
-
-    return jax.tree_util.tree_map(gate, tree)
 
 
 @functools.partial(jax.custom_jvp, nondiff_argnums=(0, 1, 2, 3, 4, 12))
@@ -543,7 +517,7 @@ def _implicit_step_root_jvp(
     # rule then gives a discarded attempt exact zero input cotangents, even
     # where the step residual's partials at its failed iterate are infinite
     # (zero times infinity would be NaN).
-    dq, dtheta, dcontrol = _zero_where_not(ok, (dq, dtheta, dcontrol))
+    dq, dtheta, dcontrol = zero_where_not(ok, (dq, dtheta, dcontrol))
     offering = _offering_from(certificate_extractor, aux, t, cj, theta, control, primal_args)
 
     def step_residual(q_in, theta_in, control_in):
@@ -566,7 +540,7 @@ def _implicit_step_root_jvp(
         certificate=offering,
     )
     return out, (
-        _poison(dy, jnp.asarray(ok)),
+        poison(dy, jnp.asarray(ok)),
         _zero_cotangent(ok),
         _zero_cotangent(aux),
     )

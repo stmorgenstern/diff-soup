@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
 from diff_soup import timestepping
+from diff_soup.optimization import inference as inf
 from diff_soup.problem._cache import BoundedContentCache
 from tests.support.inference import decay_experiment, decay_recipe
 
@@ -36,12 +36,13 @@ def test_package_imports_follow_the_declared_layer_direction(layers):
 
 
 def test_the_fitting_engine_never_imports_the_statistics_layer(layers):
-    """No module of inference.fitting or inference.solvers but the facade imports statistics."""
-    facade = _PACKAGE_ROOT / "inference" / "fitting" / "problem.py"
-    statistics = "diff_soup.inference.statistics"
+    """No module of inference.fitting or optimization.solvers but the facade imports statistics."""
+    optimization = _PACKAGE_ROOT / "optimization"
+    facade = optimization / "inference" / "fitting" / "problem.py"
+    statistics = "diff_soup.optimization.inference.statistics"
     back_edges = []
-    for subpackage in ("fitting", "solvers"):
-        for path in sorted((_PACKAGE_ROOT / "inference" / subpackage).rglob("*.py")):
+    for subpackage in (optimization / "inference" / "fitting", optimization / "solvers"):
+        for path in sorted(subpackage.rglob("*.py")):
             if path == facade:
                 continue
             module, is_package = layers._module_name(path, _PACKAGE_ROOT)

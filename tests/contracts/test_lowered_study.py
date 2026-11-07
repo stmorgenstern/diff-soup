@@ -15,11 +15,11 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
-from diff_soup.inference.hierarchical import _level_elimination as elimination
-from diff_soup.inference.hierarchical.level_solvers import (
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._lane_route import _LaneRoute
+from diff_soup.optimization.inference.hierarchical._trust_step import (
     _full_step_decrease,
-    _LaneRoute,
     _scale_candidate,
     _subproblem,
     _trial_point,
@@ -489,7 +489,7 @@ def test_a_replicate_without_a_step_is_kept_where_it_needs_none(stop, sigma, wei
     (the fit is then its own answer); otherwise it fails with no_step."""
     from types import SimpleNamespace
 
-    from diff_soup.inference.hierarchical._replicates import _Member, _Settings
+    from diff_soup.optimization.inference.hierarchical._replicates import _Member, _Settings
 
     member = SimpleNamespace(
         accepted=0,

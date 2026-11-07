@@ -43,7 +43,7 @@ class ParameterSet:
     """The learnable parameters of a fit, split into those shared by every experiment and those varying by cluster.
 
     Pass it as `parameters=` of
-    [`InferenceProblem`][diff_soup.inference.InferenceProblem]. Every parameter
+    [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem]. Every parameter
     must be learnable, come from one recipe, and appear once.
 
     Args:
@@ -120,10 +120,16 @@ class ParameterSet:
 
 @dataclasses.dataclass(frozen=True)
 class ParameterOccurrence:
-    """One shared or owner-specific occurrence in a flat decision vector."""
+    """One shared or owner-specific occurrence in a flat decision vector.
+
+    ``declarations`` holds the declaration of the parameter in the build of each
+    experiment behind the columns, in experiment order. A MAP reads the
+    occurrence's prior from them. It is empty where only the handle is known.
+    """
 
     owner: Any
     columns: tuple[int, ...]
+    declarations: tuple = dataclasses.field(default=(), compare=False, repr=False)
 
 
 @dataclasses.dataclass(frozen=True)

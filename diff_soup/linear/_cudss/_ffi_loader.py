@@ -47,13 +47,13 @@ from __future__ import annotations
 
 import ctypes
 import importlib
-import os
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
 import jax
 
+from diff_soup._environment import prepend_library_path
 from diff_soup._errors import ConfigurationError
 
 # CUDA lines the extension is built for, keyed by the JAX plugin package that
@@ -253,15 +253,8 @@ def _prepend_nvidia_wheel_libs(libraries: tuple[tuple[str, str, str], ...]) -> N
         lib_dir = _wheel_lib_dir(package)
         if lib_dir is not None and str(lib_dir) not in lib_dirs:
             lib_dirs.append(str(lib_dir))
-    if not lib_dirs:
-        return
-
-    existing = [p for p in os.environ.get("LD_LIBRARY_PATH", "").split(":") if p]
-    merged: list[str] = []
-    for p in lib_dirs + existing:
-        if p and p not in merged:
-            merged.append(p)
-    os.environ["LD_LIBRARY_PATH"] = ":".join(merged)
+    if lib_dirs:
+        prepend_library_path(lib_dirs)
 
 
 def _build_hint(line: int) -> str:

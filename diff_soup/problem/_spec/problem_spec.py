@@ -17,7 +17,7 @@ wired.  ``couple`` is the smart auto-phantom verb (GATHER / SCATTER direction
 inferred from arg-0's kind), the explicit ``source=/target=/via=`` escape
 hatch, and the NO-DOF read-through form ``couple(..., as_=)``.  ``family`` registers a [Family][] population via the
 [diff_soup.problem._spec.family_builder][].  The lowering arms (residual /
-sparsity / Schur) live in [diff_soup._lowering][].
+sparsity / Schur) live in [diff_soup.problem._lowering][].
 """
 
 from __future__ import annotations
@@ -1468,15 +1468,16 @@ class ProblemSpec:
 
         return _build_equation_set(self)
 
-    def build(self, *, layout=None, precision=None, exact_sparsity=False):
+    def build(self, *, layout=None, precision=None, exact_sparsity=None):
         """Validate the recipe and lower it into a solve-ready problem.
 
-        Recipes equal in structure and values return the same problem.
+        Recipes equal in structure and values, bounds and priors included,
+        return the same problem.
 
         Args:
             layout: Device placement, a [`Layout`][diff_soup.Layout], or `None` for the default.
             precision: [`Precision`][diff_soup.Precision], or `None` for the default.
-            exact_sparsity: If `True`, the solver's Jacobian holds only the entries a tangent can reach, read from the residual with no state probes, plus the diagonal. Needs a residual with an explicit mass, so no `q.dt`. If `False`, it holds the declared blocks and a dense border for each global.
+            exact_sparsity: If `True`, the solver's Jacobian holds only the entries a tangent can reach, read from the residual with no state probes, plus the diagonal. Needs a residual with an explicit mass, so no `q.dt`. If `False`, it holds the declared blocks, measured at probe states, and a dense border for each global. `None` (the default) is `True` unless an equation uses `q.dt`, and `False` then.
 
         Returns:
             The [`LoweredProblem`][diff_soup.problem.LoweredProblem].
@@ -1490,8 +1491,8 @@ class ProblemSpec:
             (ps, ps.bounds, ps.learnable) for ps in self._params.values() if ps.bounds is not None
         )
         handles = tuple(self._params.values()) + tuple(self._functions.values())
-        # Bounds are values, not structure: they take part in the returned
-        # problem's identity. The geometry names are the parameters that scale a
+        # Bounds and priors are values, not structure: they take part in the
+        # returned problem's identity. The geometry names are the parameters that scale a
         # grid; an experiment checks the values it gives them.
         problem = lower_declared(
             self.to_equation_set(),
@@ -1566,7 +1567,7 @@ class ProblemSpec:
         # Family-field IC keys are ``"<fam.name>.<field>"``.
         families = getattr(eqset, "families", ())
         if families:
-            from diff_soup._lowering.family_assemble import assemble_family_pieces
+            from diff_soup.problem._lowering.family_assemble import assemble_family_pieces
 
             pieces.extend(assemble_family_pieces(families, values, default))
         return jnp.concatenate(pieces) if pieces else jnp.zeros(0)

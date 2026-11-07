@@ -39,23 +39,23 @@ mismatches vanish and the windows join into one trajectory.
 
 ## Two window modes
 
-`ds.inference.Multishoot(windows, continuity=None, states=None)` is passed
-as `ds.inference.Experiment(trajectory=)`, or as
-`ds.inference.InferenceProblem(trajectory=)` to apply it to every
+`ds.optimization.inference.Multishoot(windows, continuity=None, states=None)` is passed
+as `ds.optimization.inference.Experiment(trajectory=)`, or as
+`ds.optimization.inference.InferenceProblem(trajectory=)` to apply it to every
 experiment, and the `windows` constructor selects the mode.
 
-- `ds.inference.Windows.from_data(source=None)` starts every window from
+- `ds.optimization.inference.Windows.from_data(source=None)` starts every window from
   a measured state, one window per consecutive pair of frames. Only the
   parameters are fitted, and there is no continuity term. This needs a
   data stream that observes the full state, named by `source=` when
   there are several.
 
 ```python
-experiment = ds.inference.Experiment(problem, solver, (0.0, 0.1), y0, (measurement,),
-                                     trajectory=ds.inference.Multishoot(ds.inference.Windows.from_data(source="u")))
-infproblem = ds.inference.InferenceProblem(experiment, parameters=D)
+experiment = ds.optimization.inference.Experiment(problem, solver, (0.0, 0.1), y0, (measurement,),
+                                     trajectory=ds.optimization.inference.Multishoot(ds.optimization.inference.Windows.from_data(source="u")))
+infproblem = ds.optimization.inference.InferenceProblem(experiment, parameters=D)
 infproblem.n_segments      # 4, one window per consecutive pair of frames
-result = ds.inference.optsolve(infproblem)
+result = ds.optimization.optsolve(infproblem)
 result[D]            # 0.298
 result.diagnostics.per_series_cost   # one cost per window
 ```
@@ -65,18 +65,18 @@ result.diagnostics.per_series_cost   # one cost per window
 measurement with the default readout (no `observe=`) seeds the windows,
 and a partial readout is refused.
 
-- `ds.inference.Windows.at(ts)` places window boundaries at the times
+- `ds.optimization.inference.Windows.at(ts)` places window boundaries at the times
   `ts`, from the initial time to the last frame, and fits the window
-  starts beside the parameters. `ds.inference.Windows.uniform(n)` places
+  starts beside the parameters. `ds.optimization.inference.Windows.uniform(n)` places
   `n` equal windows over the same horizon.
 
 ```python
-windows = ds.inference.Windows.at(jnp.concatenate([jnp.array([0.0]), ts]))
-experiment = ds.inference.Experiment(problem, solver, (0.0, 0.1), y0, (measurement,),
-                                     trajectory=ds.inference.Multishoot(windows, ds.inference.Continuity(weight="auto")))
-infproblem = ds.inference.InferenceProblem(experiment, parameters=D)
+windows = ds.optimization.inference.Windows.at(jnp.concatenate([jnp.array([0.0]), ts]))
+experiment = ds.optimization.inference.Experiment(problem, solver, (0.0, 0.1), y0, (measurement,),
+                                     trajectory=ds.optimization.inference.Multishoot(windows, ds.optimization.inference.Continuity(weight="auto")))
+infproblem = ds.optimization.inference.InferenceProblem(experiment, parameters=D)
 infproblem.n_params        # 121, one diffusivity and four window starts of 30 differential values
-result = ds.inference.optsolve(infproblem)
+result = ds.optimization.optsolve(infproblem)
 result[D]            # 0.2993
 result.window_states.shape               # (4, 30)
 result.diagnostics.window_obs_rank       # (30, 30, 30, 30)
@@ -94,7 +94,7 @@ differential part of the state is fitted per window and the algebraic
 part is recovered from it
 ([consistent initialization](../simulation/consistent-init.md)).
 
-`ds.inference.NewtonTrustRegion` steps on the Gauss-Newton matrix here, as
+`ds.optimization.NewtonTrustRegion` steps on the Gauss-Newton matrix here, as
 it does for every fit with residual rows
 ([solvers](solvers.md#newton-trust-region)). The memory of the exact
 Hessian grows with the square of the decision vector, and a few hundred
@@ -104,12 +104,12 @@ entries can already exceed the device.
 
 The options, with their defaults:
 
-- `continuity=ds.inference.Continuity(weight="auto")` weights the
+- `continuity=ds.optimization.inference.Continuity(weight="auto")` weights the
   continuity term at the scale of the data misfit, from the solver's
   tolerances and the observation weights. A positive float `weight=W`
   weights every continuity row by \(\sqrt{W}\) instead.
-- `states=ds.inference.StateBasis.full()` fits every differential entry
-  of a window start. `ds.inference.StateBasis.from_modes(B)` fits only a
+- `states=ds.optimization.inference.StateBasis.full()` fits every differential entry
+  of a window start. `ds.optimization.inference.StateBasis.from_modes(B)` fits only a
   coefficient vector in the column-orthonormal basis `B`, which shrinks
   the decision vector when the state is large.
 
@@ -124,7 +124,7 @@ The options, with their defaults:
   decision variable.
 - The windows solve as one batch. A `jax.vmap` over parameter values
   of the likelihood joins that batch, and so do the chains of
-  [`ds.inference.sample`](mcmc.md#run-the-sampler).
+  [`ds.optimization.inference.sample`](mcmc.md#run-the-sampler).
 - `jax.grad` of the likelihood runs with the solver's reverse adjoint,
   `ds.CheckpointAdjoint()` by default. Take the gradient of a function
   that calls the likelihood, not of a `jax.jit` around it.
@@ -146,6 +146,6 @@ The options, with their defaults:
   stops before it starts with an error naming `hessian_tile=`.
 - Windows with fitted starts take exactly one measurement. A second
   measurement is refused.
-- `ds.inference.Experiment(..., initial_state=ds.inference.LearnedInitialState(guess))`
+- `ds.optimization.inference.Experiment(..., initial_state=ds.optimization.inference.LearnedInitialState(guess))`
   adds the start of the first window to the decision vector
   ([data assimilation](data-assimilation.md#estimating-the-initial-condition)).

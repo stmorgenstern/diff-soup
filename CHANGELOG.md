@@ -6,35 +6,71 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Breaking changes
 
+- Removed `diff_soup.problem.implicit.get_or_build_solver_view`. Use `ds.solver_view`, which returns the same cached view.
+- Removed `ds.inference.constrained_optsolve` and `ds.inference.InequalityConstraints`. Declare the constraints as `ds.optimization.Constraints` on an `InferenceProblem` and solve it with `ds.optimization.InteriorPoint` or `ds.optimization.AugmentedLagrangian`.
 - JIDA with algebraic rows out of the error test, its stock setting, now takes a second Newton iteration when a step's first correction exceeds weighted norm 1. Previously a stale convergence rate could accept it, leaving an algebraic state far off its constraint and its gradients wrong. Results on DAEs change at the level of the solver tolerance.
-- Consistent initialization now accepts a final residual within `ic_atol + ic_rtol` times the starting residual, plus a componentwise round-off term, after Newton has tried the absolute target. Previously a start at the rounding floor of large states failed with `INCONSISTENT_IC`. `ToleranceSpec(ic_rtol=0.0)` keeps the absolute gate, as does `ic_atol=` without `ic_rtol=`.
+- Consistent initialization now accepts a final residual within `ic_atol + ic_rtol * S`, with `S = ‖|F_y| |y| + |F_ydot| |ydot|‖` the size of the residual's terms at the final iterate, plus the rounding bound of its longest row, after Newton has tried the absolute target. Previously a start at the rounding floor of large states failed with `INCONSISTENT_IC`. `ToleranceSpec(ic_rtol=0.0)` keeps the absolute gate, as does `ic_atol=` without `ic_rtol=`, and so does an engine built with `ic_tol=` and no `ic_rtol=`, which previously took the step's `rtol`.
+- While a crossing is located, `Event` conditions now receive the solve's `theta` as `args`, as they do when the event is detected, so a condition can read and differentiate a parameter. Previously they received `None` there, and a condition that tests `args is None` now takes the other branch.
+- `spec.build()` now declares only the Jacobian entries a tangent can reach, unless an equation uses `q.dt` (`exact_sparsity=None`, the new default). Pass `exact_sparsity=False` for the declared blocks with a dense border per global.
 
 ### Features
 
 - `ds.linear.{KLU,SuperLU,CuDSS}` now factor and solve complex matrices (`complex128`, and `complex64` on `CuDSS`) on the real symbolic analysis, solve a complex right-hand side on a real factor, and differentiate both ways.
-- Added `ds.solve_schedule` and `ds.schedule_arrays`, which run a `Schedule` against a model's operating table, with `max_steps` per segment and derivatives with respect to segment durations. See [Events and protocols](https://stmorgenstern.github.io/diff-soup/reference/simulation/events/).
+- Added `ds.solve_schedule` and `ds.schedule_arrays`, which run a `Schedule` against a model's operating table, with `max_steps` per segment and first and second derivatives with respect to segment durations. See [Events and protocols](https://stmorgenstern.github.io/diff-soup/reference/simulation/events/).
 - Added a `"resistance"` row to `spec.control.operational` and `Segment(resistance=)`, which hold `voltage = target * current`.
-- `Event` conditions now receive the solve's `theta` as `args`, so a condition can read and differentiate a parameter. Previously `args` was `None`.
-- Added `spec.build(exact_sparsity=True)`, which declares only the Jacobian entries a tangent can reach. A default build is unchanged.
-- Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.problem.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
+- Added `spec.build(exact_sparsity=True)`, which declares only the Jacobian entries a tangent can reach.
+- Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - Under `jax.default_device`, `linear="auto"` and consistent initialization choose their backend by that device's platform, and native factors are kept per device, so one process can run lanes on a GPU and on CPUs. `checkpointed_map(device_groups=)` accepts groups of another platform than the default backend's.
 - `KLU.native_stats` reports `live_lu_entries`.
+- Added `ds.jacobian_pattern(fn, y, *args, within=None)`, the entries of a Jacobian that can be nonzero, read from the function's tangent map without evaluating it. Rules cover loops, branches, gathers, scatters at known indices, cumulative sums, convolutions, linear solves, `jax.checkpoint`, and `jax.custom_vjp` functions, read through their `bwd`; an operation without one falls back to every entry with a warning, bounded by `within`. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
+- `ds.topology_report` adds `pullback_count`, and its `color_count` is now the solver's own: the colors of the rows the solver colors, with the rows it holds out recovered by pullback. Previously it colored the whole pattern.
+- `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.
+- Added `hessian_composition=` to `OptimizationProblem.from_value` and `LeastSquaresProblem.from_residual`. Under `"forward-over-forward"` the gradient, the Hessians and the Lagrangian Hessians `with_constraints` adds are all forward mode, so `InteriorPoint`, `SQP`, `AugmentedLagrangian` and their implicit derivative take an objective whose inner solve supports forward mode only, such as a DAE solve under `ForwardAdjoint`. The default, `"forward-over-reverse"`, is unchanged.
+- Added `CheckpointAdjoint(reverse_over_reverse=True)`, under which a gradient through a solve can itself be differentiated in reverse mode, as in `jax.grad` of `jax.grad`, and the solve also takes `jax.jvp`. Forward mode over the gradient then costs about twice as much, so the default, `False`, keeps the previous rule.
+- Added `adjoint=` to `InteriorPoint`, `SQP` and `AugmentedLagrangian`. `ds.nonlinear.ImplicitAdjoint()` differentiates the solution in `args` by one reverse rule, a transposed KKT solve, so `jax.grad` costs one solve however large `args` is and runs through closures that differentiate in reverse mode only. The default, `ds.ForwardAdjoint()`, keeps the forward rule.
+- `InteriorPoint`, `SQP` and `AugmentedLagrangian` run in float32 and return float32 records. Their default tolerances are set for float64, so pass ones float32 can reach, such as `tol=1e-5` (and `qp_tol=1e-5` for `SQP`).
 
 ### Bugfixes
 
-- Fixed consistent initialization of a family problem whose step backend is a `MemberBlock` over the full state, which raised a `ConfigurationError`. Initialization now solves its smaller system with Dense.
+- Fixed consistent initialization of a family problem whose step backend is a `MemberBlock` over the full state, which raised a `ConfigurationError`. Initialization now solves its smaller system on the backend `linear="auto"` chooses for its size.
 - Fixed `SaveAt(output="projected")` rows that came back `NaN` at a tight `atol`. Projected samples now pass the same gate as the solve's own initialization.
 - Fixed JIDA solves that stalled at a tight `atol` after a short step, where Newton's corrections are pure rounding. A correction within twice the rounding floor on a fresh matrix is now accepted as the root.
 - Fixed the derivative of consistent initialization with respect to the start time.
 - Fixed `SolveContext.resident_bytes` on `KLU`, which read uninitialized memory for any factor with a singleton block.
+- Fixed a MAP fit of a joint problem, which read every shared parameter's prior from one handle. Each occurrence now takes its prior from the declarations of the experiments behind it, and a MAP refuses an occurrence whose schema records none.
+- A `KLU`, `SuperLU` or `CuDSS` factor lowered into a program over several devices of one process now raises `FactorContractError`. Previously XLA failed with an internal error, or, in a `shard_map` body, the devices shared one native factor.
+- Complex values on an analysis declared `spd=True`, and on a `CuDSS` analysis with `downcast_factors` or `emulation_mantissa_bits`, now raise `FactorContractError`. Previously cuDSS factored them as a real symmetric positive definite matrix, or ignored the option.
+- Fixed `SuperLU` on more than one thread, which returned a wrong solution for a few factors in a hundred with a success status. Its factors on any number of threads now equal one thread's, bit for bit; the build patches SuperLU_MT 4.0.2 (`diff_soup/_internal/superlu_ffi/patches/`).
 
 ### Performance
 
-- A vmapped solve no longer keeps extra copies of its saved output, and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
+- A vmapped solve keeps fewer copies of its saved output (two state rows per save time, from five), and `ds.topology_report` no longer builds an n-by-n adjacency for a problem with a full row. An LFP half cell with 206,518 states and 1,001 saved times now completes on a 12 GB GPU.
 - JIDA does its whole-array work only on the path an attempt takes, with identical results.
+- Outside `vmap`, the branches of an implicit step (JIDA's history update, the Jacobian refreshes, the retries) compile to one conditional and are traced once. Under `vmap` a branch still runs only when some lane takes it, with one compiled copy of each branch.
+- Consistent initialization's derivative skips the start-time term when the start time is constant, and its relative gate evaluates the residual's scale only where the absolute target was missed, on the algebraic rows alone on the reduced route.
+- `spec.build(exact_sparsity=True)` reads its pattern with one compiled program instead of one per operation, 0.85 s instead of 3.6 s at 18 families, and neither build colors the declared pattern unless `physics_jacobian_blocks` is called. Loops, cumulative sums, convolutions and linear solves in a residual keep their pattern instead of filling it.
 - Member rows that read every site of their member are recovered by shared pullbacks instead of one color per site: an LFP half cell with 50 volumes of 10 particles needs 8 colors instead of 108.
 
+### Other
+
+- Three undocumented module paths moved: `diff_soup.timestepping.consistent_ic` and `diff_soup.problem.consistent_init` are now `diff_soup.problem.implicit.consistent_init`, and `diff_soup.timestepping.vsvo.common.weights` is now `diff_soup.utils.weights`.
+- `ds.optimization.inference.approx.FluxNet` raises `AttributeError` like any other missing name. It raised a `TypeError` naming `eqx.nn.MLP` since its removal.
+- A diff-soup environment variable set to an empty string now counts as unset and takes its default; the variables and the changes `import diff_soup` makes are listed on the installation page. Previously an empty `DIFFSOUP_PROCESSES` or `DIFFSOUP_NODES` raised `ValueError`.
+- `diff_soup.inference` is now `diff_soup.optimization.inference`, and `optsolve`, `OptResult`, the optimization problems and the solvers are also at the top of `ds.optimization`. `ds.inference` and every `diff_soup.inference` import path still work for this release, return the same objects and warn once with a `DeprecationWarning`; they will be removed in 1.3.
+
 **Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.2.0
+
+## 1.1.1 (unreleased)
+
+A bugfix release: each build of a recipe template is now fitted under its own priors.
+
+### Bugfixes
+
+- Fixed MAP fits of a `@ds.recipe` template, which took every prior from the template's first build in the process, so a later build with another prior was fitted under the first one's without a word. Each fit now takes each prior from its own experiments' builds (per owner for a parameter that varies by owner), and a `GaussianCoefficientPrior` centers on its own build's coefficients. Results change only where one process built a template with different priors.
+- Builds that differ only in a prior now return two problems. Previously they returned one problem, whose declarations followed the latest build.
+- A MAP fit now refuses a parameter shared by experiments whose builds declare different priors. Previously it used the first build's prior.
+
+**Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.1.1
 
 ## 1.1.0 (2026-10-29)
 

@@ -1,7 +1,7 @@
 # Posterior sampling
 
 This page provides an overview of sampling the posterior of a
-statistical fit with `ds.inference.sample`. Throughout, we sample the posterior of an adsorption-diffusion model,
+statistical fit with `ds.optimization.inference.sample`. Throughout, we sample the posterior of an adsorption-diffusion model,
 a rod that loses solute to a saturating sink,
 
 $$
@@ -87,9 +87,9 @@ spec = ds.problem("adsorption")
 spec.domain("rod", cartesian_grid_1d(n, 0.0, 1.0, method="fvm"))
 spec.field("u", mass="differential", scale=1.0, init=lambda x: x)
 D = spec.param("D", value=0.1, learnable=True, bounds=(0.01, 2.0),
-               prior=ds.inference.NormalPrior(mean=0.3, scale=0.3))        # the learnable diffusivity and its prior
+               prior=ds.optimization.inference.NormalPrior(mean=0.3, scale=0.3))        # the learnable diffusivity and its prior
 a = spec.param("a", value=0.5, learnable=True, bounds=(0.0, 5.0),
-               prior=ds.inference.NormalPrior(mean=1.0, scale=1.0))        # the learnable adsorption rate and its prior
+               prior=ds.optimization.inference.NormalPrior(mean=1.0, scale=1.0))        # the learnable adsorption rate and its prior
 
 
 @spec.equation(writes="u", reads=("u",))
@@ -102,27 +102,27 @@ spec.bc.dirichlet("u", node_indices=np.array([n - 1]), value=1.0)
 problem = spec.build()
 y0 = spec.assemble_state({})
 
-measurement = ds.inference.Measurement("u", times=ts, values=data,
-                                       likelihood=ds.inference.Gaussian(sigma=1e-1))
-experiment = ds.inference.Experiment(model=problem, solver=solver, t_span=(0.0, 1.5),
+measurement = ds.optimization.inference.Measurement("u", times=ts, values=data,
+                                       likelihood=ds.optimization.inference.Gaussian(sigma=1e-1))
+experiment = ds.optimization.inference.Experiment(model=problem, solver=solver, t_span=(0.0, 1.5),
                                      initial_state=y0, measurements=(measurement,))
-est = ds.inference.InferenceProblem(experiment, parameters=(D, a), objective=ds.inference.MAP())   # the MAP problem
-fit = ds.inference.optsolve(est, ds.inference.LevenbergMarquardt())                            # its mode
+est = ds.optimization.inference.InferenceProblem(experiment, parameters=(D, a), objective=ds.optimization.inference.MAP())   # the MAP problem
+fit = ds.optimization.optsolve(est, ds.optimization.LevenbergMarquardt())                            # its mode
 
-draws = ds.inference.sample(est, fit, key=jax.random.PRNGKey(0), chains=2, draws=1000, warmup=300)   # draw from the posterior
-report = ds.inference.mcmc_report(draws)                                                 # check the draws
+draws = ds.optimization.inference.sample(est, fit, key=jax.random.PRNGKey(0), chains=2, draws=1000, warmup=300)   # draw from the posterior
+report = ds.optimization.inference.mcmc_report(draws)                                                 # check the draws
 draws[D]                                                                                 # the draws of D
 ```
 
 ## Sampling the posterior
 
 To sample the posterior, we run a sampler on the MAP problem and its
-fit with `ds.inference.sample`, and check the draws with
-`ds.inference.mcmc_report`.
+fit with `ds.optimization.inference.sample`, and check the draws with
+`ds.optimization.inference.mcmc_report`.
 
 ### Run the sampler
 
-`ds.inference.sample(problem, fit, *, kernel="nuts", chains=4,
+`ds.optimization.inference.sample(problem, fit, *, kernel="nuts", chains=4,
 draws=1000, warmup=200, adapt="pooled", mass="diag", step_size=None,
 max_tree_depth=10, key, preconditioner="laplace", curvature="observed",
 nuts_target_acceptance=0.8, chain_map=None)` runs one chain
@@ -130,7 +130,7 @@ per `chains` on the posterior of the MAP problem and returns the draws.
 An MLE problem is refused, since it has no prior.
 
 ```python
-draws = ds.inference.sample(est, fit, key=jax.random.PRNGKey(0), chains=2, draws=1000, warmup=300)
+draws = ds.optimization.inference.sample(est, fit, key=jax.random.PRNGKey(0), chains=2, draws=1000, warmup=300)
 ```
 
 - `fit` is the MAP fit the chains start from.
@@ -188,7 +188,7 @@ draws.values.shape       # (2, 1000, 2), the chains, the draws, and the paramete
 draws[D]                 # the draws of D, over the chains and the draws
 draws.names              # the parameter labels
 draws.info               # the acceptance rate and, for NUTS, the divergences per draw
-predictive = ds.inference.predict(est, draws, kind="predictive")["u"]   # the solution over the draws, with noise
+predictive = ds.optimization.inference.predict(est, draws, kind="predictive")["u"]   # the solution over the draws, with noise
 ```
 
 - `draws.values` holds the draws and `draws.names` labels them.
@@ -200,7 +200,7 @@ predictive = ds.inference.predict(est, draws, kind="predictive")["u"]   # the so
   `draws.info["adaptation"]` records the `method` that ran, the adapted
   `step_size` of each chain, the `mass`, the `max_tree_depth`, the
   `warmup` and the mean `acceptance_rate` of the kept draws.
-- `ds.inference.predict(problem, draws, kind=)` solves the model at
+- `ds.optimization.inference.predict(problem, draws, kind=)` solves the model at
   every draw and summarizes the predicted values, the sampled
   counterpart of the
   [prediction bands](statistical-estimation.md#prediction-bands).
@@ -214,12 +214,12 @@ A chain represents the posterior only once it has forgotten its
 starting point and visited the posterior in proportion to its
 density, and a finite number of correlated draws carries less
 information than the same number of independent ones.
-`ds.inference.mcmc_report(draws, *, rhat_max=1.01, ess_floor=400.0)`
+`ds.optimization.inference.mcmc_report(draws, *, rhat_max=1.01, ess_floor=400.0)`
 checks both and flags the failures in words. Each chain needs at
 least eight draws.
 
 ```python
-report = ds.inference.mcmc_report(draws)
+report = ds.optimization.inference.mcmc_report(draws)
 report.rhat              # near one when the chains agree
 report.ess_bulk          # the number of independent draws the chains are worth
 report.flags             # the failed checks in words, empty here
@@ -255,17 +255,17 @@ coordinate from the Laplace approximation of
 the affine map \(w \mapsto c + A w\) with \(c\) the mode and
 \(AA^\top\) the covariance, and runs the chains in \(w\). A Laplace
 approximation with an undetermined direction, from
-`ds.inference.laplace(on_singular="subspace")`, cannot precondition
+`ds.optimization.inference.laplace(on_singular="subspace")`, cannot precondition
 the chains ([identifiability](identifiability.md)). For example, the
 random-walk kernel with and without it:
 
 ```python
-draws_rmh = ds.inference.sample(est, fit, key=jax.random.PRNGKey(0), kernel="rmh",
+draws_rmh = ds.optimization.inference.sample(est, fit, key=jax.random.PRNGKey(0), kernel="rmh",
                                 chains=2, draws=300, warmup=100)
-draws_raw = ds.inference.sample(est, fit, key=jax.random.PRNGKey(0), kernel="rmh",
+draws_raw = ds.optimization.inference.sample(est, fit, key=jax.random.PRNGKey(0), kernel="rmh",
                                 chains=2, draws=300, warmup=100, preconditioner=None)
-ds.inference.mcmc_report(draws_rmh).acceptance_rate      # the fraction of proposals accepted
-ds.inference.mcmc_report(draws_raw).acceptance_rate
+ds.optimization.inference.mcmc_report(draws_rmh).acceptance_rate      # the fraction of proposals accepted
+ds.optimization.inference.mcmc_report(draws_raw).acceptance_rate
 ```
 
 ## Credible bands for fitted functions
@@ -278,16 +278,16 @@ example, with the diffusivity of the adsorption model allowed to vary
 along the rod as a Legendre expansion:
 
 ```python
-from diff_soup.inference.approx import Legendre
+from diff_soup.optimization.inference.approx import Legendre
 
 spec_f = ds.problem("adsorption_function")
 spec_f.domain("rod", cartesian_grid_1d(n, 0.0, 1.0, method="fvm"))
 spec_f.field("u", mass="differential", scale=1.0, init=lambda x: x)
 D_of_x = spec_f.function("D_of_x", Legendre(jnp.array([np.log(0.3), 0.0, 0.0]), interval=(0.0, 1.0),
                                              transform=lambda x, p: jnp.exp(p)),
-                         learnable=True, prior=ds.inference.GaussianCoefficientPrior(scale=1.0))   # a diffusivity along the rod and its prior
+                         learnable=True, prior=ds.optimization.inference.GaussianCoefficientPrior(scale=1.0))   # a diffusivity along the rod and its prior
 a_f = spec_f.param("a", value=0.5, learnable=True, bounds=(0.0, 5.0),
-                   prior=ds.inference.NormalPrior(mean=1.0, scale=1.0))
+                   prior=ds.optimization.inference.NormalPrior(mean=1.0, scale=1.0))
 
 
 @spec_f.equation(writes="u", reads=("u",))
@@ -298,11 +298,11 @@ def adsorption_f(q):
 spec_f.bc.dirichlet("u", node_indices=np.array([0]), value=0.0)
 spec_f.bc.dirichlet("u", node_indices=np.array([n - 1]), value=1.0)
 problem_f = spec_f.build()
-est_f = ds.inference.InferenceProblem(
-    ds.inference.Experiment(problem_f, solver, (0.0, 1.5), spec_f.assemble_state({}), (measurement,)),
-    parameters=(D_of_x, a_f), objective=ds.inference.MAP())
-fit_f = ds.inference.optsolve(est_f, ds.inference.LevenbergMarquardt())
-draws_f = ds.inference.sample(est_f, fit_f, key=jax.random.PRNGKey(0), chains=2, draws=500, warmup=300)
+est_f = ds.optimization.inference.InferenceProblem(
+    ds.optimization.inference.Experiment(problem_f, solver, (0.0, 1.5), spec_f.assemble_state({}), (measurement,)),
+    parameters=(D_of_x, a_f), objective=ds.optimization.inference.MAP())
+fit_f = ds.optimization.optsolve(est_f, ds.optimization.LevenbergMarquardt())
+draws_f = ds.optimization.inference.sample(est_f, fit_f, key=jax.random.PRNGKey(0), chains=2, draws=500, warmup=300)
 
 coeffs = draws_f[D_of_x].reshape(-1, 3)                                              # one coefficient vector per draw
 xs = jnp.linspace(0.0, 1.0, 101)

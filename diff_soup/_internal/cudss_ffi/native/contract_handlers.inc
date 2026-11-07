@@ -308,6 +308,7 @@
 #include <utility>
 
 #include "assembly_kernels.h"
+#include "slot_registry.h"
 #include "status_kernels.h"
 
 namespace cudss_contract {
@@ -320,11 +321,6 @@ constexpr int32_t kEmpty = 7;  // the handle holds no factorization
 
 // The slot id and generation of an empty handle, which holds no factor.
 constexpr int32_t kEmptySlot = -1;
-
-std::mutex& ContractMutex() {
-    static std::mutex mutex;
-    return mutex;
-}
 
 struct Stats {
     int64_t cold_analyses = 0;              // cuDSS analyses that ran the reordering
@@ -378,7 +374,7 @@ struct Stats {
 };
 
 // A slot's address at its site: (context id, lane token or held slot id).
-using SiteKey = std::pair<int32_t, int64_t>;
+using slot_registry::SiteKey;
 
 // The device copies of an analysis's CSR pattern and assembly map on one device; null where
 // nothing was uploaded.
@@ -701,20 +697,14 @@ struct BatchSide {
     }
 };
 
-struct Slot {
-    int32_t id = 0;        // the first of the slot's ids
+// The registry's fields (slot_registry.h): the first of the slot's ids, its site, context,
+// address, storage key and analysis, and the run of the latest refactor of a shared-storage
+// slot, which a solve of the same execution trusts to hold its factor's matrix; any other solve
+// applies the generation rule, and one that factors the primary again from its own values
+// resets it to -1.
+struct Slot : slot_registry::SlotBase<Analysis> {
     int32_t lanes = 1;     // ids [id, id + lanes) name the slot's lanes
     bool batch = false;    // built from values with a lane axis
-    int64_t site = 0;      // the key of the site that created the slot
-    int32_t context = -1;  // the owning SolveContext's id
-    SiteKey key{};         // the slot's address at its site (unused for shared storage)
-    int64_t storage = 0;   // the storage key of a shared-storage slot, 0 for a site's slot
-    // The XLA execution (run id) of the latest refactor of a shared-storage slot: a solve of the
-    // same execution trusts the storage to hold its factor's matrix; any other applies the
-    // generation rule. -1 once a solve that applies the generation rule has factored the
-    // primary again from its own values.
-    int64_t trusted_run = -1;
-    std::shared_ptr<Analysis> analysis;
     int device = -1;
     cudaDataType_t dtype = CUDA_R_64F;
     size_t value_size = sizeof(double);
@@ -888,10 +878,7 @@ inline int StatusRefinementSteps(const Analysis& a, const Slot& slot) {
     return Downcast(a, slot) ? RefinementSteps(a, slot) : 0;
 }
 
-struct Site {
-    int64_t id = 0;
-    std::shared_ptr<Analysis> analysis;
-    std::map<SiteKey, int32_t> slot_of_key;
+struct Site : slot_registry::SiteBase<Analysis> {
     // (context id, held slot) -> held slot, while the site's latest call for that held slot
     // returned it unchanged.
     std::map<SiteKey, int32_t> forward_of_key;
@@ -925,36 +912,33 @@ struct ScanScratch {
     size_t host_bytes = 0;
 };
 
-struct Registry {
-    std::unordered_map<int64_t, std::shared_ptr<Analysis>> analyses;
-    std::map<int32_t, std::unique_ptr<Slot>> slots;  // by the slot's first id
-    std::unordered_map<int64_t, std::unique_ptr<Site>> sites;
-    // Shared storage: the slot each (context id, device, analysis id, dtype, lanes (0 for a
-    // single slot), storage key) names, and the contexts that declared each (analysis id,
-    // storage key). The device keeps the slots of the devices that run one program apart.
-    std::map<std::tuple<int32_t, int, int64_t, int, int64_t, int64_t>, int32_t> storage_slots;
+// Shared storage: the slot each (context id, device, analysis id, dtype, lanes (0 for a single
+// slot), storage key) names. The device keeps the slots of the devices that run one program
+// apart.
+using StorageKey = std::tuple<int32_t, int, int64_t, int, int64_t, int64_t>;
+
+struct Registry : slot_registry::RegistryBase<Analysis, Slot, Site, Stats, StorageKey> {
+    static constexpr const char* kName = "cuDSS";
+    static constexpr const char* kStorage = "device storage";
+    // The contexts that declared each (analysis id, storage key).
     std::map<std::pair<int64_t, int64_t>, std::set<int32_t>> storage_contexts;
-    std::unordered_set<int32_t> released_contexts;
     std::vector<std::unique_ptr<Staging>> staging;
     std::map<int, ScanScratch> scan;       // one per device, created on first use
     std::map<int, ScanScratch> flags;      // per-lane value-check words, one per device
     std::map<int, ScanScratch> settle;     // pinned host words and diagonal of a settle, per device
     int32_t check_tag = 0;                 // the tag of the latest value check (1 .. 2^28 - 1)
-    int64_t next_analysis = 1;
-    int32_t next_slot = 1;
-    int64_t next_site = 1;  // ids of sites made by contract_site_create
     int64_t device_analyses = 0;  // analyses whose patterns are uploaded
     int64_t batch_tile_lanes = 0;  // lanes per batch tile at most; 0 for the int32 limits only
     bool seeding = true;
-    Stats stats;
 };
 
-// The registry is never destroyed, so no cuDSS or CUDA object is freed during process
-// teardown after the CUDA context is gone.
-Registry& Reg() {
-    static Registry* registry = new Registry();
-    return *registry;
-}
+Registry& Reg() { return slot_registry::Instance<Registry>(); }
+
+using slot_registry::CheckAnalysis;
+using slot_registry::CheckContext;
+using slot_registry::FindSite;
+using slot_registry::FindSlot;
+using slot_registry::SiteFor;
 
 // --------------------------------------------------------------------------
 // Errors
@@ -1287,12 +1271,6 @@ ffi::Error HandleLanes(ffi::Span<const int64_t> context, ffi::Span<const int64_t
 // Registry lookups and checks
 // --------------------------------------------------------------------------
 
-// The slot whose first id is `id`.
-Slot* FindSlot(Registry& reg, int32_t id) {
-    auto it = reg.slots.find(id);
-    return it == reg.slots.end() ? nullptr : it->second.get();
-}
-
 // The slot one of whose ids is `id`, and the lane `id` names in it.
 Slot* FindSlotOf(Registry& reg, int32_t id, int32_t* lane) {
     auto it = reg.slots.upper_bound(id);
@@ -1305,100 +1283,10 @@ Slot* FindSlotOf(Registry& reg, int32_t id, int32_t* lane) {
     return slot;
 }
 
-Site* FindSite(Registry& reg, int64_t id) {
-    auto it = reg.sites.find(id);
-    return it == reg.sites.end() ? nullptr : it->second.get();
-}
-
-// Refuse a context that cannot own factors: none (a negative id) or one that was released.
-ffi::Error CheckContext(Registry& reg, int32_t context) {
-    if (context < 0) {
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "cuDSS keeps its factors in device storage that a SolveContext owns, "
-                          "but this call carries no context (context id " +
-                              std::to_string(context) +
-                              "); pass ctx=diff_soup.linear.SolveContext() to factor().");
-    }
-    if (reg.released_contexts.count(context) != 0) {
-        ++reg.stats.released_context_errors;
-        return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
-                          "cuDSS: the SolveContext with context_id " + std::to_string(context) +
-                              " was released, so the factors built in it no longer exist; "
-                              "build the factor again in an open SolveContext.");
-    }
-    return ffi::Error::Success();
-}
-
 // The slot a handle (context, slot id) names and the lane the id names in it, after checking
 // that its context is open, the slot exists and belongs to that context.
 ffi::Error FindHeld(Registry& reg, int32_t context, int32_t id, Slot** held, int32_t* lane) {
-    CONTRACT_TRY(CheckContext(reg, context));
-    Slot* slot = FindSlotOf(reg, id, lane);
-    if (slot == nullptr) {
-        return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
-                          "cuDSS factor slot " + std::to_string(id) +
-                              " does not exist in the SolveContext with context_id " +
-                              std::to_string(context) +
-                              "; pass a handle that diff_soup.linear.factor or refactor "
-                              "returned in an open SolveContext of this process.");
-    }
-    if (slot->context != context) {
-        return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
-                          "cuDSS factor slot " + std::to_string(id) +
-                              " belongs to the SolveContext with context_id " +
-                              std::to_string(slot->context) +
-                              ", but the handle names context_id " + std::to_string(context) +
-                              "; pass the handle unchanged as factor or refactor returned it.");
-    }
-    *held = slot;
-    return ffi::Error::Success();
-}
-
-// Refuse a slot built for another analysis than the call's.
-ffi::Error CheckAnalysis(const Slot& slot, int64_t analysis_id) {
-    if (slot.analysis->id != analysis_id) {
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "cuDSS: the handle names a factor slot built for a different sparsity "
-                          "pattern (slot " +
-                              std::to_string(slot.id) + " belongs to analysis " +
-                              std::to_string(slot.analysis->id) + "; this call's analysis is " +
-                              std::to_string(analysis_id) +
-                              "); solve and refactor a factor with the Analysis it was built "
-                              "with.");
-    }
-    return ffi::Error::Success();
-}
-
-// The site of a lowered factor or refactor call: the site under `key`, created on the first call
-// that carries the key, on the call's analysis. A site key is a deterministic hash of the lowered
-// call, so two lowerings of one program share their sites, or an id contract_site_create made.
-ffi::Error SiteFor(Registry& reg, int64_t key, int64_t analysis_id, Site** out) {
-    Site* site = FindSite(reg, key);
-    if (site == nullptr) {
-        auto found = reg.analyses.find(analysis_id);
-        if (found == reg.analyses.end()) {
-            return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
-                              "cuDSS analysis " + std::to_string(analysis_id) +
-                                  " does not exist in this process (its Analysis was "
-                                  "collected); analyze the pattern again and trace the call "
-                                  "again.");
-        }
-        auto made = std::make_unique<Site>();
-        made->id = key;
-        made->analysis = found->second;
-        site = made.get();
-        reg.sites.emplace(key, std::move(made));
-    }
-    if (site->analysis->id != analysis_id) {
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "cuDSS factor site " + std::to_string(key) +
-                              " was created for analysis " +
-                              std::to_string(site->analysis->id) +
-                              ", but the call names analysis " + std::to_string(analysis_id) +
-                              "; a site serves the analysis of the call that created it.");
-    }
-    *out = site;
-    return ffi::Error::Success();
+    return slot_registry::CheckHeld(reg, context, id, FindSlotOf(reg, id, lane), held);
 }
 
 ffi::Error CheckDtype(const Slot& slot, cudaDataType_t dtype) {
@@ -1657,10 +1545,7 @@ ffi::Error SiteSlot(Registry& reg, Site& site, int32_t context, int64_t key,
             return ffi::Error::Success();
         }
     }
-    if (lanes < 1 || reg.next_slot > std::numeric_limits<int32_t>::max() - lanes) {
-        return ffi::Error(ffi::ErrorCode::kResourceExhausted,
-                          "cuDSS slot identifiers are exhausted in this process.");
-    }
+    CONTRACT_TRY(slot_registry::CheckSlotIds(reg, lanes));
     auto slot = std::make_unique<Slot>();
     slot->site = site.id;
     slot->context = context;
@@ -1680,10 +1565,7 @@ ffi::Error SiteSlot(Registry& reg, Site& site, int32_t context, int64_t key,
                   "cudaEventCreateWithFlags (slot order)");
     CONTRACT_CUDA(cudaEventCreateWithFlags(&slot->handoff, cudaEventDisableTiming),
                   "cudaEventCreateWithFlags (factor stream handoff)");
-    slot->id = reg.next_slot;
-    reg.next_slot += static_cast<int32_t>(lanes);
-    Slot* raw = slot.get();
-    reg.slots.emplace(raw->id, std::move(slot));
+    Slot* raw = slot_registry::AddSlot(reg, std::move(slot), lanes);
     site.slot_of_key[address] = raw->id;
     raw->analysis->contexts.insert(context);
     *out = raw;
@@ -5006,7 +4888,7 @@ ffi::Error FactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyB
                       ffi::ResultBuffer<ffi::S32> out_generation,
                       ffi::ResultBuffer<ffi::S32> out_status,
                       ffi::Dictionary attrs) {
-    std::lock_guard<std::mutex> lock(ContractMutex());
+    std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
     CallAttrs at;
     CONTRACT_TRY(DecodeAttrs(attrs, CallKind::kFactor, &at));
@@ -5116,7 +4998,7 @@ ffi::Error SolveImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyBu
                      ffi::Result<ffi::Token>, ffi::ResultBuffer<T> x,
                      ffi::ResultBuffer<ffi::S32> out_status,
                      ffi::Dictionary attrs) {
-    std::lock_guard<std::mutex> lock(ContractMutex());
+    std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
     CallAttrs at;
     CONTRACT_TRY(DecodeAttrs(attrs, CallKind::kSolve, &at));
@@ -5236,7 +5118,7 @@ ffi::Error SolveImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyBu
     }
 
     const auto check = [&](const Slot& s) -> ffi::Error {
-        CONTRACT_TRY(CheckAnalysis(s, at.analysis_id));
+        CONTRACT_TRY(CheckAnalysis(reg, s, at.analysis_id));
         CONTRACT_TRY(CheckDtype(s, get_cuda_data_type<T>()));
         CONTRACT_TRY(CheckDevice(s, device));
         CONTRACT_TRY(CheckRaw(*s.analysis, raw));
@@ -5376,7 +5258,7 @@ ffi::Error RefactorStorageCall(cudaStream_t stream, ffi::RunId run, const CallAt
     bool kept_written = false;
     bool result_written = false;
     if (filled) {
-        CONTRACT_TRY(CheckAnalysis(*slot, at.analysis_id));
+        CONTRACT_TRY(CheckAnalysis(reg, *slot, at.analysis_id));
         CONTRACT_TRY(CheckDtype(*slot, get_cuda_data_type<T>()));
         CONTRACT_TRY(CheckDevice(*slot, device));
         CONTRACT_TRY(CheckStorageSpec(*slot, spec));
@@ -5462,7 +5344,7 @@ ffi::Error RefactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::An
                         ffi::ResultBuffer<ffi::S32> out_generation,
                         ffi::ResultBuffer<ffi::S32> out_status,
                         ffi::Dictionary attrs) {
-    std::lock_guard<std::mutex> lock(ContractMutex());
+    std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
     CallAttrs at;
     CONTRACT_TRY(DecodeAttrs(attrs, CallKind::kRefactor, &at));
@@ -5602,7 +5484,7 @@ ffi::Error RefactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::An
     CONTRACT_TRY(CheckRaw(*site->analysis, raw));
     const SlotSpec spec = SpecFor<T>(at.transposed, at.symmetric, at.spd);
     const auto check = [&](const Slot& s) -> ffi::Error {
-        CONTRACT_TRY(CheckAnalysis(s, at.analysis_id));
+        CONTRACT_TRY(CheckAnalysis(reg, s, at.analysis_id));
         CONTRACT_TRY(CheckDtype(s, get_cuda_data_type<T>()));
         CONTRACT_TRY(CheckDevice(s, device));
         return ffi::Error::Success();
@@ -5659,7 +5541,7 @@ ffi::Error InvalidateImpl(cudaStream_t stream, ffi::RunId run, ffi::Token,
                           ffi::Buffer<ffi::S32> held_generation, ffi::Buffer<ffi::S32> /*order*/,
                           ffi::Result<ffi::Token>, ffi::ResultBuffer<ffi::S32> /*order_out*/,
                           ffi::Dictionary attrs) {
-    std::lock_guard<std::mutex> lock(ContractMutex());
+    std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
     CallAttrs at;
     CONTRACT_TRY(DecodeAttrs(attrs, CallKind::kInvalidate, &at));
@@ -5755,7 +5637,7 @@ ffi::Error InvalidateImpl(cudaStream_t stream, ffi::RunId run, ffi::Token,
         }
     }
     for (Slot* slot : named) {
-        CONTRACT_TRY(CheckAnalysis(*slot, at.analysis_id));
+        CONTRACT_TRY(CheckAnalysis(reg, *slot, at.analysis_id));
         if (slot->dtype != OtherKind(get_cuda_data_type<T>())) {
             CONTRACT_TRY(CheckDtype(*slot, get_cuda_data_type<T>()));
         }
@@ -6025,18 +5907,12 @@ int64_t AnalysisCreate(int64_t n, IndexArray csr_offsets, IndexArray csr_columns
         a->downcast_factors = static_cast<int>(downcast_factors);
         a->emulation_mantissa_bits = static_cast<int>(emulation_mantissa_bits);
         a->batch_layout = static_cast<int>(batch_layout);
-        std::lock_guard<std::mutex> lock(ContractMutex());
+        std::lock_guard<std::mutex> lock(Reg().mutex);
         Registry& reg = Reg();
         a->id = reg.next_analysis++;
         reg.analyses[a->id] = a;
     }
     return a->id;
-}
-
-void AnalysisRelease(int64_t analysis_id) {
-    nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(ContractMutex());
-    Reg().analyses.erase(analysis_id);  // sites and slots that use it keep it alive
 }
 
 std::shared_ptr<Analysis> FindAnalysis(Registry& reg, int64_t analysis_id) {
@@ -6068,7 +5944,7 @@ void AnalysisSetModelGroups(int64_t analysis_id, IndexArray mg_devices, int64_t 
     }
     std::vector<int> devices(mg_devices.data(), mg_devices.data() + count);
     nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(ContractMutex());
+    std::lock_guard<std::mutex> lock(Reg().mutex);
     std::shared_ptr<Analysis> a = FindAnalysis(Reg(), analysis_id);
     if (!a->contexts.empty() || a->DeviceResident()) {
         throw std::invalid_argument("cuDSS analysis " + std::to_string(analysis_id) +
@@ -6088,7 +5964,7 @@ nb::dict AnalysisInfo(int64_t analysis_id) {
     int tree_seed = -1;  // -1 no unmatched cold analysis yet, 1 tree kept, 0 none reported
     {
         nb::gil_scoped_release release;
-        std::lock_guard<std::mutex> lock(ContractMutex());
+        std::lock_guard<std::mutex> lock(Reg().mutex);
         std::shared_ptr<Analysis> a = FindAnalysis(Reg(), analysis_id);
         resident = a->DeviceResident();
         contexts = static_cast<int64_t>(a->contexts.size());
@@ -6163,23 +6039,9 @@ nb::dict AnalysisInfo(int64_t analysis_id) {
     return d;
 }
 
-int64_t SiteCreate(int64_t analysis_id) {
-    nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(ContractMutex());
-    Registry& reg = Reg();
-    std::shared_ptr<Analysis> a = FindAnalysis(reg, analysis_id);
-    while (reg.sites.count(reg.next_site) != 0) ++reg.next_site;
-    auto site = std::make_unique<Site>();
-    site->id = reg.next_site++;
-    site->analysis = std::move(a);
-    const int64_t id = site->id;
-    reg.sites.emplace(id, std::move(site));
-    return id;
-}
-
 void StorageDeclare(int64_t analysis_id, int64_t context_id, int64_t storage) {
     nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(ContractMutex());
+    std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
     if (storage == 0) return;
     reg.storage_contexts[{analysis_id, storage}].insert(static_cast<int32_t>(context_id));
@@ -6187,7 +6049,7 @@ void StorageDeclare(int64_t analysis_id, int64_t context_id, int64_t storage) {
 
 void ContextRelease(int64_t context_id) {
     nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(ContractMutex());
+    std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
     const int32_t context = static_cast<int32_t>(context_id);
     int current = -1;
@@ -6201,23 +6063,12 @@ void ContextRelease(int64_t context_id) {
     for (int device : devices) {
         if (cudaSetDevice(device) == cudaSuccess) cudaDeviceSynchronize();
     }
+    // Each slot frees its cuDSS objects and buffers.
     std::set<Analysis*> touched;
-    for (auto it = reg.slots.begin(); it != reg.slots.end();) {
-        Slot& slot = *it->second;
-        if (slot.context != context) {
-            ++it;
-            continue;
-        }
-        if (Site* site = FindSite(reg, slot.site); site != nullptr && slot.storage == 0) {
-            site->slot_of_key.erase(slot.key);
-        }
+    slot_registry::ReleaseContextSlots(reg, context, [&](Slot& slot) {
         slot.analysis->contexts.erase(context);
         touched.insert(slot.analysis.get());
-        it = reg.slots.erase(it);  // the slot frees its cuDSS objects and buffers
-    }
-    for (auto it = reg.storage_slots.begin(); it != reg.storage_slots.end();) {
-        it = std::get<0>(it->first) == context ? reg.storage_slots.erase(it) : std::next(it);
-    }
+    });
     for (auto& entry : reg.storage_contexts) entry.second.erase(context);
     for (auto& entry : reg.sites) {
         auto& forwards = entry.second->forward_of_key;
@@ -6230,21 +6081,15 @@ void ContextRelease(int64_t context_id) {
             --reg.device_analyses;
         }
     }
-    reg.released_contexts.insert(context);
     if (current >= 0) cudaSetDevice(current);
     (void)cudaGetLastError();
 }
 
-int64_t ResidentBytes(int64_t context_id) {
-    nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(ContractMutex());
+// Device bytes a slot holds: those of its single side or its batch side.
+int64_t SlotBytes(const Slot& slot) {
     int64_t total = 0;
-    for (const auto& entry : Reg().slots) {
-        const Slot& slot = *entry.second;
-        if (slot.context != context_id) continue;
-        if (slot.primary) total += slot.primary->ResidentBytes();
-        if (slot.batch_primary) total += slot.batch_primary->ResidentBytes();
-    }
+    if (slot.primary) total += slot.primary->ResidentBytes();
+    if (slot.batch_primary) total += slot.batch_primary->ResidentBytes();
     return total;
 }
 
@@ -6278,7 +6123,7 @@ nb::dict StatsDict() {
     int64_t live_device_analyses = 0;
     {
         nb::gil_scoped_release release;
-        std::lock_guard<std::mutex> lock(ContractMutex());
+        std::lock_guard<std::mutex> lock(Reg().mutex);
         Registry& reg = Reg();
         SettleAll(reg);
         s = reg.stats;
@@ -6370,7 +6215,8 @@ static void BindContract(nb::module_& m) {
           "ordinals of this process's model groups, mg_group_size (at least 2) consecutive "
           "ordinals per group; each factor spreads over the group that holds the device of its "
           "first call, that device first. Call before the analysis's first factor.");
-    m.def("contract_analysis_release", &cc::AnalysisRelease, nb::arg("analysis_id"),
+    m.def("contract_analysis_release", &slot_registry::AnalysisRelease<cc::Registry>,
+          nb::arg("analysis_id"),
           "Drop the registry's reference to an analysis; sites and slots that use it keep it "
           "alive.");
     m.def("contract_analysis_info", &cc::AnalysisInfo, nb::arg("analysis_id"),
@@ -6393,7 +6239,7 @@ static void BindContract(nb::module_& m) {
         "contract_set_seeding",
         [](bool enabled) {
             nb::gil_scoped_release release;
-            std::lock_guard<std::mutex> lock(cc::ContractMutex());
+            std::lock_guard<std::mutex> lock(cc::Reg().mutex);
             cc::Reg().seeding = enabled;
         },
         nb::arg("enabled"),
@@ -6403,7 +6249,7 @@ static void BindContract(nb::module_& m) {
         "contract_seeding",
         []() {
             nb::gil_scoped_release release;
-            std::lock_guard<std::mutex> lock(cc::ContractMutex());
+            std::lock_guard<std::mutex> lock(cc::Reg().mutex);
             return cc::Reg().seeding;
         },
         "Whether later cuDSS analyses of a pattern are seeded with the permutation of its first "
@@ -6418,7 +6264,7 @@ static void BindContract(nb::module_& m) {
                     std::to_string(lanes) + ".");
             }
             nb::gil_scoped_release release;
-            std::lock_guard<std::mutex> lock(cc::ContractMutex());
+            std::lock_guard<std::mutex> lock(cc::Reg().mutex);
             cc::Reg().batch_tile_lanes = lanes;
         },
         nb::arg("lanes"),
@@ -6430,11 +6276,12 @@ static void BindContract(nb::module_& m) {
         "contract_batch_tile_lanes",
         []() {
             nb::gil_scoped_release release;
-            std::lock_guard<std::mutex> lock(cc::ContractMutex());
+            std::lock_guard<std::mutex> lock(cc::Reg().mutex);
             return cc::Reg().batch_tile_lanes;
         },
         "The cap on lanes per batch tile set by contract_set_batch_tile_lanes (0 for none).");
-    m.def("contract_site_create", &cc::SiteCreate, nb::arg("analysis_id"),
+    m.def("contract_site_create", &slot_registry::SiteCreate<cc::Registry>,
+          nb::arg("analysis_id"),
           "Create a factor site on an analysis with an id of its own (a lowered call names its "
           "site by a key computed from the call, and the site is created on the first call "
           "that carries it); its slots are keyed by the context id and lane token (or held "
@@ -6450,7 +6297,8 @@ static void BindContract(nb::module_& m) {
           "and batch slot of that context, drop its references to the device patterns of its "
           "analyses (freed at zero), and record the id as released, so a later call that "
           "carries it fails.");
-    m.def("contract_resident_bytes", &cc::ResidentBytes, nb::arg("context_id"),
+    m.def("contract_resident_bytes", &slot_registry::ResidentBytes<cc::Registry>,
+          nb::arg("context_id"),
           "Device bytes held by the slots of the given SolveContext id, batch slots included: "
           "the value copies, the scratch vectors, the single factors of batch lanes (rescues, "
           "and every lane of a batch that runs lane by lane) and the permanent factor storage "
@@ -6498,7 +6346,7 @@ static void BindContract(nb::module_& m) {
         "contract_reset_stats",
         []() {
             nb::gil_scoped_release release;
-            std::lock_guard<std::mutex> lock(cc::ContractMutex());
+            std::lock_guard<std::mutex> lock(cc::Reg().mutex);
             cc::SettleAll(cc::Reg());
             cc::Reg().stats = cc::Stats{};
         },

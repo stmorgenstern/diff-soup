@@ -72,8 +72,15 @@
 // allocation surfaces as an error of the FFI call.
 //
 // pdgstrf runs on every core the process may use (its CPU affinity, capped
-// by OMP_NUM_THREADS when that is set). One mutex serialises every call into
-// the library; the Python-facing functions release the GIL before taking it.
+// by OMP_NUM_THREADS when that is set). SuperLU_MT is built with the patches
+// in ../patches/ (build_superlu_mt.sh applies them): unpatched, its parallel
+// factorization returned a wrong L or U with info = 0 for a few factors in a
+// hundred on more than one thread, because fixupL compacted L's subscripts in
+// supernode order while threads allocate them in another order, and because a
+// parent panel read its children's columns while they were being written.
+// Patched, a factor on any number of threads equals one thread's bit for bit.
+// One mutex serialises every call into the library; the Python-facing
+// functions release the GIL before taking it.
 
 #include <sched.h>
 #include <omp.h>
@@ -103,22 +110,8 @@
 #include "xla/ffi/api/ffi.h"
 
 #include "slu_mt_ddefs.h"
-// The complex128 routines. slu_mt_zdefs.h cannot share a translation unit with
-// slu_mt_ddefs.h (both define GlobalLU_t), so the few entry points used here are
-// declared from it directly; every other type they take is precision-free.
-#include "slu_dcomplex.h"
-extern "C" {
-void zCreate_CompCol_Matrix(SuperMatrix*, int_t, int_t, int_t, doublecomplex*, int_t*, int_t*,
-                            Stype_t, Dtype_t, Mtype_t);
-void zCreate_Dense_Matrix(SuperMatrix*, int_t, int_t, doublecomplex*, int_t, Stype_t, Dtype_t,
-                          Mtype_t);
-void pzgstrf(superlumt_options_t*, SuperMatrix*, int_t*, SuperMatrix*, SuperMatrix*, Gstat_t*,
-             int_t*);
-void pzgstrf_init(int_t, fact_t, trans_t, yes_no_t, int_t, int_t, double, yes_no_t, double,
-                  int_t*, int_t*, void*, int_t, SuperMatrix*, SuperMatrix*,
-                  superlumt_options_t*, Gstat_t*);
-void zgstrs(trans_t, SuperMatrix*, SuperMatrix*, int_t*, int_t*, SuperMatrix*, Gstat_t*, int_t*);
-}
+#include "superlu_z_prototypes.h"
+#include "slot_registry.h"
 
 namespace ffi = xla::ffi;
 namespace nb = nanobind;
@@ -129,11 +122,6 @@ namespace {
 constexpr int32_t kSuccess = 0;
 constexpr int32_t kSingular = 1;
 constexpr int32_t kNonfinite = 2;
-
-std::mutex& LibraryMutex() {
-    static std::mutex mutex;
-    return mutex;
-}
 
 int ComputeNprocs() {
     int count = 0;
@@ -169,18 +157,8 @@ struct Stats {
     int64_t released_context_errors = 0;  // calls refused because their context was released
 };
 
-// A slot's address at its site: (context id, slot token or held slot id).
-using SiteKey = std::pair<int32_t, int64_t>;
-
-struct Analysis {
-    int64_t id = 0;
-    int_t n = 0;
-    int64_t nnz_entries = 0;           // caller's coordinate entries
-    std::vector<int_t> colptr;         // n + 1
-    std::vector<int_t> rowind;         // compressed-column row indices
-    std::vector<int64_t> entry_to_csc; // coordinate entry -> compressed position
-    std::vector<uint8_t> zeroed;       // coordinate entry lies in a Dirichlet row
-    std::vector<int64_t> unit_diagonal;// compressed positions that receive +1
+// The pattern (slot_registry.h), the column ordering and the factorization's parameters.
+struct Analysis : slot_registry::HostPattern<int_t> {
     std::vector<int_t> perm_c;         // column ordering from get_perm_c
     int_t panel_size = 0;
     int_t relax = 0;
@@ -191,17 +169,10 @@ struct Analysis {
     int64_t lsub_bound = 0;
 };
 
-struct Slot {
-    int32_t id = 0;
-    int64_t site = 0;         // the key of the site that created the slot
-    int64_t storage = 0;      // the storage key of a shared-storage slot, 0 for a site's slot
-    // The XLA execution (run id) of the latest refactor of a shared-storage slot: a solve of the
-    // same execution trusts the slot to hold its factor's matrix; any other compares values.
-    // -1 once a solve that does not trust the slot has factored it again from its own values.
-    int64_t trusted_run = -1;
-    int32_t context = -1;              // the owning SolveContext's id
-    SiteKey key{};                     // the slot's address at its site
-    std::shared_ptr<Analysis> analysis;
+struct Slot;
+void FreeStorage(Slot& slot);
+
+struct Slot : slot_registry::SlotBase<Analysis> {
     bool has_storage = false;          // L, U and the refactorization structure exist
     bool has_values = false;           // `values` holds the operand of the last factor request
     bool complex = false;              // values, csc, L and U are complex128
@@ -214,34 +185,35 @@ struct Slot {
     superlumt_options_t options{};
     SuperMatrix L{};
     SuperMatrix U{};
+
+    Slot() = default;
+    Slot(const Slot&) = delete;
+    Slot& operator=(const Slot&) = delete;
+    ~Slot() { FreeStorage(*this); }
 };
 
-struct Site {
-    int64_t id = 0;
-    std::shared_ptr<Analysis> analysis;
-    std::map<SiteKey, int32_t> slot_of_key;
-};
+using Site = slot_registry::SiteBase<Analysis>;
 
-struct Registry {
-    std::unordered_map<int64_t, std::shared_ptr<Analysis>> analyses;
-    std::unordered_map<int32_t, std::unique_ptr<Slot>> slots;
-    std::unordered_map<int64_t, std::unique_ptr<Site>> sites;
-    // Shared storage: the slot each (context id, device ordinal, analysis id, storage key,
-    // empty-lane marker) names.
-    std::map<std::tuple<int32_t, int32_t, int64_t, int64_t, int64_t>, int32_t> storage_slots;
-    std::unordered_set<int32_t> released_contexts;
-    int64_t next_analysis = 1;
-    int32_t next_slot = 1;
-    int64_t next_site = 1;  // ids of sites made by site_create
+struct Registry
+    : slot_registry::RegistryBase<Analysis, Slot, Site, Stats, slot_registry::HostStorageKey> {
+    static constexpr const char* kName = "SuperLU";
+    static constexpr const char* kStorage = "host storage";
     int64_t last_factored_analysis = 0;          // of the latest pdgstrf
     int64_t last_factored_complex_analysis = 0;  // of the latest pzgstrf
-    Stats stats;
 };
 
-Registry& Reg() {
-    static Registry registry;
-    return registry;
-}
+Registry& Reg() { return slot_registry::Instance<Registry>(); }
+
+using slot_registry::CheckAnalysis;
+using slot_registry::CheckContext;
+using slot_registry::CheckValues;
+using slot_registry::Doubles;
+using slot_registry::FindHeld;
+using slot_registry::kComplex;
+using slot_registry::SameValues;
+using slot_registry::SiteFor;
+using slot_registry::SiteSlot;
+using slot_registry::StorageSlot;
 
 void FreeStorage(Slot& slot) {
     if (!slot.has_storage) {
@@ -432,170 +404,6 @@ int32_t FactorSlot(Slot& slot, const double* values) {
     return slot.status;
 }
 
-// Whether `slot` was last asked to factor exactly `values`, of the kind `complex`.
-bool SameValues(const Slot& slot, const double* values, bool complex) {
-    if (!slot.has_values || slot.complex != complex) {
-        return false;
-    }
-    const size_t bytes = slot.values.size() * sizeof(double);
-    return std::memcmp(slot.values.data(), values, bytes) == 0;
-}
-
-Slot* FindSlot(int32_t id) {
-    auto& slots = Reg().slots;
-    auto it = slots.find(id);
-    return it == slots.end() ? nullptr : it->second.get();
-}
-
-Site* FindSite(int64_t id);
-
-// The site of a lowered factor or refactor call: the site under `key`, created on the first
-// call that carries the key, on the call's analysis. A site key is a deterministic hash of the
-// lowered call, so two lowerings of one program share their sites. Caller holds the library
-// mutex.
-ffi::Error SiteFor(int64_t key, int64_t analysis_id, Site** out) {
-    Registry& reg = Reg();
-    Site* site = FindSite(key);
-    if (site == nullptr) {
-        auto found = reg.analyses.find(analysis_id);
-        if (found == reg.analyses.end()) {
-            return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
-                              "SuperLU analysis " + std::to_string(analysis_id) +
-                                  " does not exist in this process (its Analysis was "
-                                  "collected); analyze the pattern again and trace the call "
-                                  "again.");
-        }
-        auto made = std::make_unique<Site>();
-        made->id = key;
-        made->analysis = found->second;
-        site = made.get();
-        reg.sites.emplace(key, std::move(made));
-    }
-    if (site->analysis->id != analysis_id) {
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "SuperLU factor site " + std::to_string(key) +
-                              " was created for analysis " +
-                              std::to_string(site->analysis->id) + ", but the call names "
-                              "analysis " + std::to_string(analysis_id) +
-                              "; a site serves the analysis of the call that created it.");
-    }
-    *out = site;
-    return ffi::Error::Success();
-}
-
-Site* FindSite(int64_t id) {
-    auto& sites = Reg().sites;
-    auto it = sites.find(id);
-    return it == sites.end() ? nullptr : it->second.get();
-}
-
-// The slot of `site` for `key` in `context`, created empty on first use.
-// Caller holds the library mutex. Returns nullptr when slot identifiers are
-// exhausted.
-Slot* SiteSlot(Site& site, int32_t context, int64_t key) {
-    Registry& reg = Reg();
-    const SiteKey address{context, key};
-    auto it = site.slot_of_key.find(address);
-    if (it != site.slot_of_key.end()) {
-        if (Slot* slot = FindSlot(it->second)) {
-            return slot;
-        }
-    }
-    if (reg.next_slot == std::numeric_limits<int32_t>::max()) {
-        return nullptr;
-    }
-    auto slot = std::make_unique<Slot>();
-    slot->id = reg.next_slot++;
-    slot->site = site.id;
-    slot->context = context;
-    slot->key = address;
-    slot->analysis = site.analysis;
-    Slot* raw = slot.get();
-    reg.slots.emplace(raw->id, std::move(slot));
-    site.slot_of_key[address] = raw->id;
-    return raw;
-}
-
-// The shared-storage slot of `storage` in `context` on device `device` for `marker` (the empty
-// handle's slot id, which tells the lanes of a sequential batch apart), created empty on first
-// use with `site` as its creator and kept in the registry's storage map instead of a site's. Caller holds the
-// library mutex. Returns nullptr when slot identifiers are exhausted.
-Slot* StorageSlot(Site& site, int32_t context, int32_t device, int64_t storage, int64_t marker) {
-    Registry& reg = Reg();
-    const auto key = std::make_tuple(context, device, site.analysis->id, storage, marker);
-    auto it = reg.storage_slots.find(key);
-    if (it != reg.storage_slots.end()) {
-        if (Slot* slot = FindSlot(it->second)) {
-            return slot;
-        }
-    }
-    if (reg.next_slot == std::numeric_limits<int32_t>::max()) {
-        return nullptr;
-    }
-    auto slot = std::make_unique<Slot>();
-    slot->id = reg.next_slot++;
-    slot->site = site.id;
-    slot->storage = storage;
-    slot->context = context;
-    slot->key = SiteKey{context, std::numeric_limits<int64_t>::min()};
-    slot->analysis = site.analysis;
-    Slot* raw = slot.get();
-    reg.slots.emplace(raw->id, std::move(slot));
-    reg.storage_slots[key] = raw->id;
-    return raw;
-}
-
-const char* kSlotsExhausted = "SuperLU slot identifiers are exhausted in this process.";
-
-// Refuse a context that cannot own factors: none (a negative id) or one that
-// was released. Caller holds the library mutex.
-ffi::Error CheckContext(int32_t context) {
-    Registry& reg = Reg();
-    if (context < 0) {
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "SuperLU keeps its factors in host storage that a SolveContext owns, "
-                          "but this call carries no context (context id " +
-                              std::to_string(context) +
-                              "); pass ctx=diff_soup.linear.SolveContext() to factor().");
-    }
-    if (reg.released_contexts.count(context) != 0) {
-        ++reg.stats.released_context_errors;
-        return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
-                          "SuperLU: the SolveContext with context_id " + std::to_string(context) +
-                              " was released, so the factors built in it no longer exist; build "
-                              "the factor again in an open SolveContext.");
-    }
-    return ffi::Error::Success();
-}
-
-// The slot a handle (context, slot id) names, after checking that its
-// context is open, the slot exists and belongs to that context. Caller holds
-// the library mutex.
-ffi::Error FindHeld(int32_t context, int32_t id, Slot** held) {
-    if (auto err = CheckContext(context); err.failure()) {
-        return err;
-    }
-    Slot* slot = FindSlot(id);
-    if (slot == nullptr) {
-        return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
-                          "SuperLU factor slot " + std::to_string(id) +
-                              " does not exist in the SolveContext with context_id " +
-                              std::to_string(context) +
-                              "; pass a handle that diff_soup.linear.factor or refactor returned "
-                              "in an open SolveContext.");
-    }
-    if (slot->context != context) {
-        return ffi::Error(ffi::ErrorCode::kFailedPrecondition,
-                          "SuperLU factor slot " + std::to_string(id) +
-                              " belongs to the SolveContext with context_id " +
-                              std::to_string(slot->context) + ", but the handle names context_id " +
-                              std::to_string(context) +
-                              "; pass the handle unchanged as factor or refactor returned it.");
-    }
-    *held = slot;
-    return ffi::Error::Success();
-}
-
 ffi::Error AllocationError(const Analysis& a) {
     const double gib = static_cast<double>(a.ucol_bound) * (sizeof(double) + sizeof(int_t)) /
                        (1024.0 * 1024.0 * 1024.0);
@@ -638,43 +446,6 @@ int64_t SlotBytes(const Slot& slot) {
 // XLA FFI handlers
 // --------------------------------------------------------------------------
 
-// Whether a buffer of element type T holds complex128 entries.
-template <ffi::DataType T>
-constexpr bool kComplex = T == ffi::C128;
-
-// The entries of a value or right-hand-side buffer as doubles (two per complex entry).
-template <ffi::DataType T>
-const double* Doubles(ffi::Buffer<T>& buffer) {
-    return reinterpret_cast<const double*>(buffer.typed_data());
-}
-
-template <ffi::DataType T>
-ffi::Error CheckValues(const Slot& slot, ffi::Buffer<T>& values) {
-    if (static_cast<int64_t>(values.element_count()) != slot.analysis->nnz_entries) {
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "SuperLU values operand has " + std::to_string(values.element_count()) +
-                              " entries; the analysed pattern has " +
-                              std::to_string(slot.analysis->nnz_entries) + ".");
-    }
-    return ffi::Error::Success();
-}
-
-// Refuse a slot built for another analysis than the call's (a handle passed
-// with the parameters of a different sparsity pattern).
-ffi::Error CheckAnalysis(const Slot& slot, int64_t analysis_id) {
-    if (slot.analysis->id != analysis_id) {
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "SuperLU: the handle names a factor slot built for a different sparsity "
-                          "pattern (slot " +
-                              std::to_string(slot.id) + " belongs to analysis " +
-                              std::to_string(slot.analysis->id) + "; this call's analysis is " +
-                              std::to_string(analysis_id) +
-                              "); solve and refactor a factor with the Analysis it was built "
-                              "with.");
-    }
-    return ffi::Error::Success();
-}
-
 // Every handler takes the factor's order word as its last buffer operand and never reads it:
 // the word makes the call a data dependency of the operation that produced it, and the call's
 // status result becomes the next order word.
@@ -688,23 +459,24 @@ ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<T>
                       int64_t site_id, int64_t analysis_id, int64_t storage) {
     const int32_t context = context_id.typed_data()[0];
     const int64_t token = key.typed_data()[0];
-    std::lock_guard<std::mutex> lock(LibraryMutex());
-    if (auto err = CheckContext(context); err.failure()) {
+    Registry& reg = Reg();
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    if (auto err = CheckContext(reg, context); err.failure()) {
         return err;
     }
     Site* site = nullptr;
-    if (auto err = SiteFor(site_id, analysis_id, &site); err.failure()) {
+    if (auto err = SiteFor(reg, site_id, analysis_id, &site); err.failure()) {
         return err;
     }
     // A factor of shared storage (the fill of an empty factor that names it) goes to the
     // storage's slot, keyed by the empty handle's slot id; any other to the site's slot.
-    Slot* slot =
-        storage != 0 ? StorageSlot(*site, context, device, storage, token)
-                     : SiteSlot(*site, context, token);
-    if (slot == nullptr) {
-        return ffi::Error(ffi::ErrorCode::kResourceExhausted, kSlotsExhausted);
+    Slot* slot = nullptr;
+    if (auto err = storage != 0 ? StorageSlot(reg, *site, context, device, storage, token, &slot)
+                                : SiteSlot(reg, *site, context, token, &slot);
+        err.failure()) {
+        return err;
     }
-    if (auto err = CheckValues(*slot, values); err.failure()) {
+    if (auto err = CheckValues(reg, *slot, values); err.failure()) {
         return err;
     }
     if (auto err = FactorInto<kComplex<T>>(*slot, Doubles(values), status->typed_data());
@@ -730,12 +502,13 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
     const bool refactor = predicate.typed_data()[0];
     const int32_t context = held_context.typed_data()[0];
     const int32_t held_id = held_slot.typed_data()[0];
-    std::lock_guard<std::mutex> lock(LibraryMutex());
+    Registry& reg = Reg();
+    std::lock_guard<std::mutex> lock(reg.mutex);
     Slot* held = nullptr;
-    if (auto err = FindHeld(context, held_id, &held); err.failure()) {
+    if (auto err = FindHeld(reg, context, held_id, &held); err.failure()) {
         return err;
     }
-    if (auto err = CheckAnalysis(*held, analysis_id); err.failure()) {
+    if (auto err = CheckAnalysis(reg, *held, analysis_id); err.failure()) {
         return err;
     }
     handle_context->typed_data()[0] = context;
@@ -749,16 +522,18 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
         return ffi::Error::Success();
     }
     Site* site = nullptr;
-    if (auto err = SiteFor(site_id, analysis_id, &site); err.failure()) {
+    if (auto err = SiteFor(reg, site_id, analysis_id, &site); err.failure()) {
         return err;
     }
     // In place when the held factor is already this site's or names shared storage; otherwise
     // the site's slot for that held factor, so other holders of it keep it.
-    Slot* slot = held->site == site_id || storage != 0 ? held : SiteSlot(*site, context, held_id);
-    if (slot == nullptr) {
-        return ffi::Error(ffi::ErrorCode::kResourceExhausted, kSlotsExhausted);
+    Slot* slot = held;
+    if (held->site != site_id && storage == 0) {
+        if (auto err = SiteSlot(reg, *site, context, held_id, &slot); err.failure()) {
+            return err;
+        }
     }
-    if (auto err = CheckValues(*slot, values); err.failure()) {
+    if (auto err = CheckValues(reg, *slot, values); err.failure()) {
         return err;
     }
     if (auto err = FactorInto<kComplex<T>>(*slot, Doubles(values), status->typed_data());
@@ -780,16 +555,16 @@ ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
                      bool transpose, int64_t analysis_id, int64_t storage) {
     const int32_t context = held_context.typed_data()[0];
     const int32_t id = held_slot.typed_data()[0];
-    std::lock_guard<std::mutex> lock(LibraryMutex());
     Registry& reg = Reg();
+    std::lock_guard<std::mutex> lock(reg.mutex);
     Slot* slot = nullptr;
-    if (auto err = FindHeld(context, id, &slot); err.failure()) {
+    if (auto err = FindHeld(reg, context, id, &slot); err.failure()) {
         return err;
     }
-    if (auto err = CheckAnalysis(*slot, analysis_id); err.failure()) {
+    if (auto err = CheckAnalysis(reg, *slot, analysis_id); err.failure()) {
         return err;
     }
-    if (auto err = CheckValues(*slot, values); err.failure()) {
+    if (auto err = CheckValues(reg, *slot, values); err.failure()) {
         return err;
     }
     const int_t n = slot->analysis->n;
@@ -948,85 +723,25 @@ int64_t AnalysisCreate(int64_t n, IndexArray rows, IndexArray cols, MaskArray ze
                        IndexArray unit_rows, int64_t ordering, int64_t panel_size, int64_t relax,
                        double pivot_threshold) {
     const int64_t nnz = static_cast<int64_t>(rows.shape(0));
-    if (static_cast<int64_t>(cols.shape(0)) != nnz || static_cast<int64_t>(zeroed.shape(0)) != nnz) {
-        throw std::invalid_argument(
-            "SuperLU analysis needs rows, cols and the Dirichlet mask of equal length.");
-    }
-    if (n <= 0 || n > std::numeric_limits<int_t>::max()) {
-        throw std::invalid_argument("SuperLU analysis needs 0 < n <= 2**31 - 1; got n = " +
-                                    std::to_string(n) + ".");
-    }
+    const int32_t* r = rows.data();
+    const int32_t* c = cols.data();
+    slot_registry::CheckCoordinates<Registry>(n, nnz, r, c, static_cast<int64_t>(cols.shape(0)),
+                                              static_cast<int64_t>(zeroed.shape(0)));
     if (ordering < 0 || ordering > 3) {
         throw std::invalid_argument("SuperLU column ordering code must be 0, 1, 2 or 3; got " +
                                     std::to_string(ordering) + ".");
     }
-    const int32_t* r = rows.data();
-    const int32_t* c = cols.data();
-    for (int64_t k = 0; k < nnz; ++k) {
-        if (r[k] < 0 || r[k] >= n || c[k] < 0 || c[k] >= n) {
-            throw std::invalid_argument("SuperLU analysis: pattern entry " + std::to_string(k) +
-                                        " lies outside the " + std::to_string(n) + " x " +
-                                        std::to_string(n) + " operator.");
-        }
-    }
 
     auto a = std::make_shared<Analysis>();
-    a->n = static_cast<int_t>(n);
-    a->nnz_entries = nnz;
     a->panel_size = panel_size > 0 ? static_cast<int_t>(panel_size) : sp_ienv(1);
     a->relax = relax > 0 ? static_cast<int_t>(relax) : sp_ienv(2);
     a->pivot_threshold = pivot_threshold;
-    a->zeroed.assign(zeroed.data(), zeroed.data() + nnz);
 
     {
         nb::gil_scoped_release release;
-        // Unique (row, col) pairs in column-major order.
-        std::vector<int64_t> order(static_cast<size_t>(nnz));
-        std::iota(order.begin(), order.end(), 0);
-        std::stable_sort(order.begin(), order.end(), [&](int64_t x, int64_t y) {
-            return c[x] != c[y] ? c[x] < c[y] : r[x] < r[y];
-        });
-        a->entry_to_csc.assign(static_cast<size_t>(nnz), 0);
-        a->colptr.assign(static_cast<size_t>(n) + 1, 0);
-        a->rowind.clear();
-        a->rowind.reserve(static_cast<size_t>(nnz));
-        int64_t prev_r = -1, prev_c = -1;
-        for (int64_t k : order) {
-            if (r[k] != prev_r || c[k] != prev_c) {
-                a->rowind.push_back(static_cast<int_t>(r[k]));
-                a->colptr[static_cast<size_t>(c[k]) + 1] += 1;
-                prev_r = r[k];
-                prev_c = c[k];
-            }
-            a->entry_to_csc[k] = static_cast<int64_t>(a->rowind.size()) - 1;
-        }
-        for (int64_t j = 0; j < n; ++j) {
-            a->colptr[j + 1] += a->colptr[j];
-        }
-        if (a->rowind.size() > static_cast<size_t>(std::numeric_limits<int_t>::max())) {
-            throw std::invalid_argument(
-                "SuperLU analysis: the pattern has more than 2**31 - 1 distinct entries.");
-        }
-        // Compressed position of each Dirichlet row's diagonal.
-        const int32_t* u = unit_rows.data();
-        for (size_t i = 0; i < unit_rows.shape(0); ++i) {
-            const int_t row = u[i];
-            if (row < 0 || row >= n) {
-                throw std::invalid_argument("SuperLU analysis: Dirichlet row " +
-                                            std::to_string(row) + " lies outside the operator.");
-            }
-            const int_t* begin = a->rowind.data() + a->colptr[row];
-            const int_t* end = a->rowind.data() + a->colptr[row + 1];
-            const int_t* hit = std::lower_bound(begin, end, row);
-            if (hit == end || *hit != row) {
-                throw std::invalid_argument("SuperLU analysis: Dirichlet row " +
-                                            std::to_string(row) +
-                                            " has no diagonal entry in the pattern.");
-            }
-            a->unit_diagonal.push_back(static_cast<int64_t>(hit - a->rowind.data()));
-        }
-
-        std::lock_guard<std::mutex> lock(LibraryMutex());
+        slot_registry::BuildPattern<Registry>(*a, n, nnz, r, c, zeroed.data(), unit_rows.data(),
+                                              unit_rows.shape(0));
+        std::lock_guard<std::mutex> lock(Reg().mutex);
         // get_perm_c reads the structure only; the values pointer is never read.
         std::vector<double> dummy(a->rowind.size(), 0.0);
         SuperMatrix A{};
@@ -1043,64 +758,6 @@ int64_t AnalysisCreate(int64_t n, IndexArray rows, IndexArray cols, MaskArray ze
     return a->id;
 }
 
-void AnalysisRelease(int64_t id) {
-    nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(LibraryMutex());
-    Reg().analyses.erase(id);  // slots keep their analysis alive
-}
-
-int64_t SiteCreate(int64_t analysis_id) {
-    nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(LibraryMutex());
-    Registry& reg = Reg();
-    auto it = reg.analyses.find(analysis_id);
-    if (it == reg.analyses.end()) {
-        throw std::invalid_argument("SuperLU analysis " + std::to_string(analysis_id) +
-                                    " does not exist; analyse the pattern again.");
-    }
-    while (reg.sites.count(reg.next_site) != 0) ++reg.next_site;
-    auto site = std::make_unique<Site>();
-    site->id = reg.next_site++;
-    site->analysis = it->second;
-    const int64_t id = site->id;
-    reg.sites.emplace(id, std::move(site));
-    return id;
-}
-
-void ContextRelease(int64_t context) {
-    nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(LibraryMutex());
-    Registry& reg = Reg();
-    for (auto it = reg.slots.begin(); it != reg.slots.end();) {
-        Slot& slot = *it->second;
-        if (slot.context != context) {
-            ++it;
-            continue;
-        }
-        if (Site* site = FindSite(slot.site); site != nullptr && slot.storage == 0) {
-            site->slot_of_key.erase(slot.key);
-        }
-        FreeStorage(slot);
-        it = reg.slots.erase(it);
-    }
-    for (auto it = reg.storage_slots.begin(); it != reg.storage_slots.end();) {
-        it = std::get<0>(it->first) == context ? reg.storage_slots.erase(it) : std::next(it);
-    }
-    reg.released_contexts.insert(static_cast<int32_t>(context));
-}
-
-int64_t ResidentBytes(int64_t context) {
-    nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(LibraryMutex());
-    int64_t total = 0;
-    for (const auto& entry : Reg().slots) {
-        if (entry.second->context == context) {
-            total += SlotBytes(*entry.second);
-        }
-    }
-    return total;
-}
-
 }  // namespace
 
 NB_MODULE(_native_superlu, m) {
@@ -1111,17 +768,17 @@ NB_MODULE(_native_superlu, m) {
           nb::arg("relax"), nb::arg("pivot_threshold"),
           "Analyse a sparsity pattern: compressed-column structure, Dirichlet rows and the "
           "column ordering. Returns the analysis id.");
-    m.def("analysis_release", &AnalysisRelease, nb::arg("analysis_id"),
+    m.def("analysis_release", &slot_registry::AnalysisRelease<Registry>, nb::arg("analysis_id"),
           "Drop the registry's reference to an analysis; slots that use it keep it alive.");
-    m.def("site_create", &SiteCreate, nb::arg("analysis_id"),
+    m.def("site_create", &slot_registry::SiteCreate<Registry>, nb::arg("analysis_id"),
           "Create a factor site on an analysis with an id of its own (a lowered call names its "
           "site by a key computed from the call, and the site is created on the first call "
           "that carries it); its slots are keyed by the context id each execution carries. "
           "Returns the site id.");
-    m.def("context_release", &ContextRelease, nb::arg("context_id"),
+    m.def("context_release", &slot_registry::ContextRelease<Registry>, nb::arg("context_id"),
           "Free every slot of the given SolveContext id and record the id as released, so a "
           "later call that carries it fails.");
-    m.def("resident_bytes", &ResidentBytes, nb::arg("context_id"),
+    m.def("resident_bytes", &slot_registry::ResidentBytes<Registry>, nb::arg("context_id"),
           "Bytes held by the slots of the given SolveContext id: values, permutations and the "
           "nonzeros of L and U.");
     m.def("nprocs", []() { return Nprocs(); },
@@ -1136,7 +793,7 @@ NB_MODULE(_native_superlu, m) {
             int64_t live_sites = 0;
             {
                 nb::gil_scoped_release release;
-                std::lock_guard<std::mutex> lock(LibraryMutex());
+                std::lock_guard<std::mutex> lock(Reg().mutex);
                 s = Reg().stats;
                 live_slots = static_cast<int64_t>(Reg().slots.size());
                 live_analyses = static_cast<int64_t>(Reg().analyses.size());
@@ -1161,7 +818,7 @@ NB_MODULE(_native_superlu, m) {
         "reset_stats",
         []() {
             nb::gil_scoped_release release;
-            std::lock_guard<std::mutex> lock(LibraryMutex());
+            std::lock_guard<std::mutex> lock(Reg().mutex);
             Reg().stats = Stats{};
         },
         "Zero the counters reported by stats().");

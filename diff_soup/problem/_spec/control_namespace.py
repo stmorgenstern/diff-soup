@@ -45,9 +45,8 @@ import math
 from collections.abc import Callable, Sequence
 from numbers import Real
 
+from .operating_modes import operating_mode_names
 from .specs import ControlSpec, OperationalControlSpec
-
-_OPERATIONAL_MODES = ("current", "voltage", "power", "resistance")
 
 
 class _ControlNamespace:
@@ -112,7 +111,7 @@ class _ControlNamespace:
         current: str | None = None,
         voltage: str,
         current_unknown: str,
-        modes: Sequence[str] = _OPERATIONAL_MODES,
+        modes: Sequence[str] = operating_mode_names(),
         seed_voltage_threshold: float = 1e-6,
         current_from_residual: str | None = None,
     ) -> None:
@@ -141,17 +140,18 @@ class _ControlNamespace:
                 "assembled residual rows sum to the current>"
             )
         modes = tuple(modes)
+        supported = operating_mode_names()
         if not modes:
             raise ValueError(
                 f"operational control {name!r} declares an empty mode tuple; "
-                f"list at least one mode from {_OPERATIONAL_MODES!r}"
+                f"list at least one mode from {supported!r}"
             )
         seen: set = set()
         for m in modes:
-            if m not in _OPERATIONAL_MODES:
+            if m not in supported:
                 raise ValueError(
                     f"operational control {name!r} declares unknown mode {m!r}; "
-                    f"supported modes are {_OPERATIONAL_MODES!r}"
+                    f"supported modes are {supported!r}"
                 )
             if m in seen:
                 raise ValueError(
