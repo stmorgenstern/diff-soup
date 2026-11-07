@@ -134,6 +134,7 @@ from jax._src import array as internal_array  # noqa: E402
 from jax._src import core as internal_core  # noqa: E402
 from jax._src import dispatch  # noqa: E402
 from jax._src import flattree as internal_flattree  # noqa: E402
+from jax._src.config import eager_constant_folding  # noqa: E402
 from jax._src.interpreters import batching as internal_batching  # noqa: E402
 from jax._src.interpreters import mlir as internal_mlir  # noqa: E402
 from jax._src.interpreters import partial_eval as internal_partial_eval  # noqa: E402
@@ -153,6 +154,9 @@ __all__ = [
     # trace the branches of a conditional primitive the way ``lax.cond`` does,
     # and ``internal_batching`` batches them)
     "dispatch",
+    # ``eager_constant_folding`` is the configuration ``jax.ensure_compile_time_eval``
+    # sets; set to ``False`` it switches compile-time evaluation off in a block
+    "eager_constant_folding",
     "internal_api_util",
     "internal_array",
     "internal_batching",

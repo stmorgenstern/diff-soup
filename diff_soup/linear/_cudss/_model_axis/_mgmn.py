@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import atexit
 import hashlib
-import os
 
 import jax
 import numpy as np
 from jax.sharding import AxisType, Mesh
 
+from diff_soup._environment import MPI_LIBRARY
 from diff_soup._errors import ConfigurationError
 from diff_soup.linear._cudss._ffi_loader import _wheel_library, detect_cuda_line, native_solver
 
@@ -165,4 +165,4 @@ def finalize_mpi_at_exit() -> None:
 
 def _mpi_library() -> str:
     """The Open MPI library the native extension loads (``DIFFSOUP_MPI_LIBRARY``)."""
-    return os.environ.get("DIFFSOUP_MPI_LIBRARY", "libmpi.so.40")
+    return MPI_LIBRARY.get()

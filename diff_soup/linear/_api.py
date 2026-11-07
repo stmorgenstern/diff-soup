@@ -1228,7 +1228,8 @@ def empty_factor(
         tol: As for `factor`.
         dtype: The dtype of the values, by default float64 or float32 to match the analysis.
         storage: A name of 1 to 64 characters, and the factors of one name in one context share
-            one storage.
+            one storage. Two factors of one name in one program run in no set order unless
+            `after=` orders them.
         after: A factor, or a sequence of factors, whose operations this one must follow.
 
     Returns:
