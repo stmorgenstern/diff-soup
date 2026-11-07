@@ -12,14 +12,12 @@ import pytest
 import diff_soup as ds
 from diff_soup.optimization import inference as inf
 from diff_soup.optimization.inference.approx import KLBasis
-from diff_soup.optimization.solvers._loop import (
-    Trials,
-    _after_attempt,
+from diff_soup.optimization.solvers._loop import Trials, _after_attempt, cost_threshold
+from diff_soup.optimization.solvers._loop_judge import (
     _floor_sample,
     _floor_sigma,
     _judge,
     cost_scale,
-    cost_threshold,
 )
 from diff_soup.optimization.solvers.tangent import (
     jacfwd_from_pushforward,

@@ -49,16 +49,18 @@ from diff_soup.optimization.inference.hierarchical._work import _record, _Work
 from diff_soup.optimization.solvers._loop import (
     LoopState,
     _after_attempt,
+    _stop_after,
+    loop_tolerances,
+    step_small,
+)
+from diff_soup.optimization.solvers._loop_judge import (
     _floor_level,
     _floor_parameter_radius,
     _floor_sigma,
     _judge,
     _jump_level,
     _median,
-    _stop_after,
     cost_scale,
-    loop_tolerances,
-    step_small,
 )
 
 if TYPE_CHECKING:

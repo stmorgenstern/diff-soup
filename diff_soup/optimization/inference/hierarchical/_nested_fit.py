@@ -40,9 +40,17 @@ from diff_soup.optimization.inference.hierarchical._verdicts import (
 from diff_soup.optimization.inference.hierarchical._work import _record
 from diff_soup.optimization.solvers._loop import (
     _NOISE_RUN,
-    _TINY,
     LoopState,
     _after_attempt,
+    _saved_count,
+    _stop_after,
+    cost_small,
+    cost_threshold,
+    loop_tolerances,
+    step_small,
+)
+from diff_soup.optimization.solvers._loop_judge import (
+    _TINY,
     _floor_level,
     _floor_sigma,
     _gain_ratio,
@@ -50,13 +58,7 @@ from diff_soup.optimization.solvers._loop import (
     _median,
     _next_radius,
     _noise_dominated,
-    _saved_count,
-    _stop_after,
     cost_scale,
-    cost_small,
-    cost_threshold,
-    loop_tolerances,
-    step_small,
 )
 
 if TYPE_CHECKING:
