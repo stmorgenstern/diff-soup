@@ -11,7 +11,9 @@ from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import PyTree
 
+from diff_soup.optimization.inference.hierarchical._replicates import FitProducts
 from diff_soup.optimization.inference.statistics._bootstrap_saved import (
     _AtFit,
     _inverse_arrays,
@@ -19,6 +21,7 @@ from diff_soup.optimization.inference.statistics._bootstrap_saved import (
     _saved_at_fit,
     _saved_decode,
     _SavedHandle,
+    _SavedInverse,
     _SavedSchema,
 )
 from diff_soup.optimization.inference.statistics.bootstrap_intervals import (
@@ -33,7 +36,7 @@ from diff_soup.optimization.inference.statistics.bootstrap_intervals import (
     _summarize,
 )
 from diff_soup.optimization.inference.statistics.bootstrap_outcomes import _KEPT, BootstrapOutcomes
-from diff_soup.problem.parameters import ParameterEntry, ParameterOccurrence
+from diff_soup.problem.parameters import ParameterEntry, ParameterOccurrence, ParameterSchema
 
 _FORMAT = "diff_soup bootstrap result, version 1"
 _OUTCOME_ARRAYS = (
@@ -106,8 +109,8 @@ class BootstrapResult:
     fit_stationarity: float | None
     score_balance: float
     work: Mapping
-    parameter_schema: Any
-    _products: Any = dataclasses.field(repr=False)
+    parameter_schema: ParameterSchema | _SavedSchema
+    _products: FitProducts | _SavedInverse = dataclasses.field(repr=False)
     shard: tuple[int, int] | None = None
     replicate_indices: np.ndarray | None = None
     jackknife_indices: np.ndarray | None = None
@@ -267,7 +270,7 @@ class BootstrapResult:
             )
         function = getattr(entry.handle, "kind", None) == "function"
 
-        def decoded(point: np.ndarray, occurrence: ParameterOccurrence) -> Any:
+        def decoded(point: np.ndarray, occurrence: ParameterOccurrence) -> PyTree:
             columns = np.asarray(occurrence.columns, dtype=np.int64)
             return entry.decode(jnp.asarray(point[columns]))
 

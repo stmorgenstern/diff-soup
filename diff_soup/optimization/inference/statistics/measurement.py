@@ -10,10 +10,11 @@ from typing import Any
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import ArrayLike, PyTree
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup.optimization.inference.data.deferred import DeferredValues
 from diff_soup.optimization.inference.fitting.formulation import Trajectory
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 from diff_soup.optimization.inference.fitting.observables import Observable
 from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics.experiment import Channel, _CompiledExperiment
@@ -67,7 +68,7 @@ class _NamedObservation:
 
     name: str
     model: Any = dataclasses.field(metadata={"fingerprint": False})
-    static: Any = dataclasses.field(metadata={"fingerprint": False})
+    static: PyTree = dataclasses.field(metadata={"fingerprint": False})
     key: Any = dataclasses.field(metadata={"fingerprint": False})
 
     @classmethod
@@ -169,7 +170,9 @@ class Measurement:
     mask: Any = None
     shape: tuple | None = None
     dtype: Any = None
-    _deferred: Any = dataclasses.field(init=False, repr=False, compare=False, default=None)
+    _deferred: DeferredValues | None = dataclasses.field(
+        init=False, repr=False, compare=False, default=None
+    )
 
     def __post_init__(self):
         """Normalize arrays and validate the ordinary response-data contract."""
@@ -263,7 +266,7 @@ class Measurement:
         """Whether ``values`` is a callable that loads on the owning process."""
         return self._deferred is not None
 
-    def _data(self) -> Any:
+    def _data(self) -> Array | DeferredValues:
         """The value passed to the compiled experiment: an array or its deferred loader."""
         return self.values if self._deferred is None else self._deferred
 
@@ -412,9 +415,9 @@ class Experiment:
     # A mapping from level name to member, or None; annotated Any so that a
     # wrong value reaches the refusal that explains the field.
     parameters: Any = None
-    _delegate: Any = dataclasses.field(init=False, repr=False, compare=False)
-    _fixed_inputs: Any = dataclasses.field(init=False, repr=False, compare=False)
-    _declarations: Any = dataclasses.field(init=False, repr=False, compare=False)
+    _delegate: _CompiledExperiment = dataclasses.field(init=False, repr=False, compare=False)
+    _fixed_inputs: dict[str, object] = dataclasses.field(init=False, repr=False, compare=False)
+    _declarations: dict[str, Any] = dataclasses.field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         """Validate the declaration and prepare the existing prediction lowering."""
@@ -544,9 +547,9 @@ class Experiment:
         bounds: Any = None,
         t0: float | None = None,
         load_data: bool = True,
-        reuse: Any = None,
+        reuse: InferenceProblem | None = None,
         state_prior: Any = None,
-    ) -> Any:
+    ) -> InferenceProblem:
         """Lower this declaration through its private optimization delegate.
 
         Args:

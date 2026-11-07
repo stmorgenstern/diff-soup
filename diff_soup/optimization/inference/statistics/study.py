@@ -16,6 +16,7 @@ from diff_soup.optimization.inference.fitting._joint_structure import (
     plan_child_data_owners,
 )
 from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
 from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics._fingerprint import study_content_fingerprint
@@ -78,7 +79,9 @@ def _experiment_rows(experiment: Experiment) -> int:
     )
 
 
-def balance_owners(experiments: Any, lanes: int, *, weight: Callable | None = None) -> Any:
+def balance_owners(
+    experiments: Any, lanes: int, *, weight: Callable | None = None
+) -> Study | tuple[Experiment, ...]:
     """Reorder a study's experiments so that equal consecutive blocks of owners carry balanced loads.
 
     The owners are the members of the study's outermost level or cluster, or else the
@@ -403,7 +406,7 @@ class Study:
 
     def compile_inference_problem(
         self, *, layout: Layout | None = None, state_prior: Any = None
-    ) -> Any:
+    ) -> InferenceProblem | JointInferenceProblem:
         """Lower this Study to one existing leaf or owner-aware joint problem.
 
         Args:
@@ -469,7 +472,7 @@ class Study:
             data_holders=holders,
         )
 
-    def _compile_hierarchy(self, layout: Layout | None, state_prior: Any) -> Any:
+    def _compile_hierarchy(self, layout: Layout | None, state_prior: Any) -> JointInferenceProblem:
         """The joint problem of a hierarchy study: one block per member, level by level."""
         hierarchy = self.parameters
         tied = self._tied_clusters()

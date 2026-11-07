@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional
 
 import equinox as eqx
@@ -62,11 +62,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import solve_triangular
-from jaxtyping import Array, ArrayLike
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._warnings import warn_user
 from diff_soup.optimization.inference.data.deferred import DeferredValues
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
+from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
 from diff_soup.optimization.inference.statistics.laplace import (
     LaplacePosterior,
@@ -77,6 +79,7 @@ from diff_soup.optimization.inference.statistics.parameters import Transform
 from diff_soup.optimization.inference.statistics.priors import GaussianPrior, Prior
 from diff_soup.optimization.inference.statistics.report import IdentifiedSubspace
 from diff_soup.optimization.solvers.tangent import deferred_value_and_grad
+from diff_soup.problem.parameters import ParameterSchema
 
 __all__ = [
     "Draws",
@@ -215,9 +218,9 @@ class LogDensity:
     # log_posterior when built with a parameterization) so downstream results
     # can be reported in the physical coordinate.
     _to_physical: Optional[Callable] = None
-    _parameter_schema: Any = None
+    _parameter_schema: ParameterSchema | None = None
     _problem: Any = None
-    _fit: Any = None
+    _fit: OptResult | ArrayLike | Mapping | None = None
     # ``z -> (value, gradient)`` from one pass of the gradient's own mode (see
     # _build_value_and_gradient); ``None`` falls back to two evaluations.
     _value_and_grad: Optional[Callable] = None
@@ -559,7 +562,7 @@ def log_posterior(
     prior: Optional[Prior],
     parameterization: Any = None,
     gradient: Optional[str] = "forward",
-    parameters: Any = None,
+    parameters: ParameterGroups | None = None,
 ) -> LogDensity:
     """Build the normalized log posterior of a data-bearing experiment.
 
@@ -888,7 +891,7 @@ class Draws:
     values: Array
     names: tuple
     info: dict
-    _parameter_schema: Any = None
+    _parameter_schema: ParameterSchema | None = None
     _problem: Any = None
     chain_map: str = "vmap"
 
@@ -998,7 +1001,7 @@ def _refuse_shared_storage_on_devices(problem: Any) -> None:
         ) from None
 
 
-def _run_chains(run_chain: Callable, chain_keys: Array, starts: Array, chain_map: str) -> Any:
+def _run_chains(run_chain: Callable, chain_keys: Array, starts: Array, chain_map: str) -> PyTree:
     """Run one chain per ``(key, start)`` pair and stack the per-chain results.
 
     Every mode returns what ``jax.vmap(run_chain)`` returns: the same pytree,
@@ -1027,7 +1030,7 @@ def _run_chains(run_chain: Callable, chain_keys: Array, starts: Array, chain_map
         (chain_keys, starts),
     )
 
-    def device_chains(keys: Array, positions: Array) -> Any:
+    def device_chains(keys: Array, positions: Array) -> PyTree:
         return jax.lax.map(lambda chain: run_chain(*chain), (keys, positions))
 
     placed = jax.pmap(device_chains)(device_keys, device_starts)
@@ -1533,7 +1536,7 @@ def _run_nuts(
             max_num_doublings=max_tree_depth,
         )
 
-    def draw(algorithm: Any, state: Any, rng_key: Array) -> tuple:
+    def draw(algorithm: Any, state: PyTree, rng_key: Array) -> tuple:
         def step(st, k):
             st, step_info = algorithm.step(k, st)
             return st, (
@@ -1714,7 +1717,7 @@ def sbc(
     num_steps: int = 495,
     num_warmup: int = 200,
     thin: int = 5,
-    proposal_scale: Any = None,
+    proposal_scale: ArrayLike | Sequence | None = None,
     alpha: float = 0.005,
 ) -> SbcReport:
     """Run simulation-based calibration of a model, prior, and sampler.

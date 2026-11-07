@@ -34,7 +34,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import ArrayLike
+from jaxtyping import Array, ArrayLike
 from scipy.stats import chi2
 
 from diff_soup.optimization.inference.approx.legendre import Legendre
@@ -419,7 +419,7 @@ class _PinnedView:
         lift: Callable,
         basis_matrix: np.ndarray,
         u0: np.ndarray,
-        reduced_bounds: Any,
+        reduced_bounds: tuple[Array, Array] | None,
     ):
         self._inner = inner
         self._lift = lift
@@ -462,7 +462,7 @@ class _PinnedView:
             self.prob_static = getattr(inner, "prob_static", None)
 
 
-def _chain(inner_rj: Callable, lift: Callable, basis: Any, u: ArrayLike) -> tuple:
+def _chain(inner_rj: Callable, lift: Callable, basis: Array, u: ArrayLike) -> tuple:
     r, jac = inner_rj(lift(u))
     return r, jac @ basis
 
@@ -494,7 +494,7 @@ def _make_view(
     coord_index: Optional[int],
     t: float,
     x_warm: np.ndarray,
-    reduced_bounds: Any,
+    reduced_bounds: tuple[Array, Array] | None,
 ) -> _PinnedView:
     """Build the reduced view pinning ``a @ x = t``, warm-started at ``x_warm``."""
     n = a.shape[0]

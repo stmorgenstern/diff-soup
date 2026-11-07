@@ -8,6 +8,10 @@ from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import PyTree
+
+from diff_soup.optimization.inference.statistics._bootstrap_saved import _SavedSchema
+from diff_soup.problem.parameters import ParameterSchema
 
 _KINDS = ("bca", "percentile")
 # An interval is withheld when more than this share of the requested replicates failed, and
@@ -92,7 +96,7 @@ class BootstrapBand:
 class _Context(NamedTuple):
     """What every interval of one bootstrap reads besides its estimates."""
 
-    schema: Any
+    schema: ParameterSchema | _SavedSchema
     point: np.ndarray
     scheme: str
     members: tuple
@@ -130,7 +134,7 @@ def _member_refusal(name: str) -> str:
 class _Entries:
     """The schema's entries of the handles a statistic reads, each looked up once."""
 
-    def __init__(self, schema: Any):
+    def __init__(self, schema: ParameterSchema | _SavedSchema):
         """Look handles up in ``schema``; ``read_members`` records a member handle read."""
         self.schema = schema
         self.cache: dict = {}
@@ -171,7 +175,7 @@ class _View:
         self._entries = entries
         self._members = members
 
-    def __getitem__(self, handle: Any) -> Any:
+    def __getitem__(self, handle: Any) -> PyTree:
         entry, shared, columns, _ = self._entries(handle)
         if shared:
             return entry.decode(jnp.asarray(self._point[columns[0]]))
