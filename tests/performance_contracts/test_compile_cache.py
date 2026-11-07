@@ -303,9 +303,9 @@ def test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory():
         return jax.jit(run).lower(jnp.asarray(1.0)).compile().memory_analysis().temp_size_in_bytes
 
     rows = (temporaries(450) - temporaries(250)) / (200 * 8 * y0.size)
-    # measured 2.01 state rows per added save time, 3.00 with one fill branch selecting whole
-    # buffers and 5.01 with two (the JIDA review's run C), workstation 2026-11-06,
-    # .ports/run_c_solves.py and the review's run_c.out
+    # measured 2.01 state rows per added save time (a fill branch that selects whole buffers
+    # holds a third), workstation 2026-11-07,
+    # pytest tests/performance_contracts/test_compile_cache.py::test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory
     assert rows <= 2.5
 
 

@@ -136,6 +136,22 @@ class SparseChainDAE:
         return jnp.concatenate([u, w_sq + lam * w_one, lam[None]])
 
 
+def thirds_dae():
+    """``y' = -y`` and ``0 = 3 z - y``: from ``y`` near 2e8 no float ``z`` brings the algebraic
+    residual below about 7.5e-9."""
+    return ds.MassProblem(
+        rhs=lambda t, y, theta, control: jnp.stack([-y[0], 3.0 * y[1] - y[0]]),
+        mass=ds.MassOperator.sparse(
+            [0],
+            [0],
+            lambda t, y, theta, control: jnp.ones((1,), y.dtype),
+            n=2,
+            dependencies=_CONSTANT,
+        ),
+        structure=ds.DAEStructure(differential_vars=np.array([True, False])),
+    )
+
+
 def endpoint(problem, solver, theta, y0, t1=0.05, **keywords):
     """The augmented state at ``t1`` of one solve (``ys`` then ``lambdas``)."""
     solution = ds.pdesolve(
