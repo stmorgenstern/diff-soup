@@ -21,7 +21,7 @@ from diff_soup.optimization.inference.fitting.callbacks import (
     StopFit,
 )
 from diff_soup.optimization.inference.fitting.diagnostics import OptDiagnostics
-from diff_soup.optimization.inference.fitting.inference_problem import (
+from diff_soup.optimization.inference.fitting.formulation import (
     FixedInitialState,
     LearnedInitialState,
     LeastSquares,
@@ -49,12 +49,12 @@ from diff_soup.optimization.inference.fitting.windows import (
     Windows,
 )
 from diff_soup.optimization.inference.hierarchical.level_solvers import TrustRegion
-from diff_soup.optimization.inference.statistics.bootstrap import (
+from diff_soup.optimization.inference.statistics.bootstrap import bootstrap
+from diff_soup.optimization.inference.statistics.bootstrap_intervals import (
     BootstrapBand,
     BootstrapInterval,
-    BootstrapResult,
-    bootstrap,
 )
+from diff_soup.optimization.inference.statistics.bootstrap_result import BootstrapResult
 from diff_soup.optimization.inference.statistics.cluster import cluster_covariance
 from diff_soup.optimization.inference.statistics.diagnostics import mcmc_report, residual_report
 from diff_soup.optimization.inference.statistics.estimation import MAP, MLE

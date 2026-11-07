@@ -17,12 +17,13 @@ entities independent).
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Optional
+from collections.abc import Callable, Sequence
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 from diff_soup.optimization.inference.statistics.report import (
     IdentifiedSubspace,
@@ -54,10 +55,10 @@ class RobustCovariance:
 
 
 def sandwich_covariance(
-    residual: Any,
+    residual: Callable[[Array], ArrayLike],
     x: Array,
     *,
-    clusters: Optional[Any] = None,
+    clusters: Optional[ArrayLike | Sequence] = None,
     null_tol: float = 1e-10,
     names: tuple = (),
 ) -> RobustCovariance:
@@ -122,8 +123,8 @@ def sandwich_covariance(
 
 
 def _cluster_sandwich_covariance(
-    bread: Any,
-    scores: Any,
+    bread: ArrayLike,
+    scores: ArrayLike,
     *,
     n_rows: int,
     null_tol: float = 1e-10,

@@ -28,20 +28,25 @@ refuses nothing: a member with such a failed lane gets a NaN cost and gradient.
 from __future__ import annotations
 
 import functools
+from collections.abc import Iterable
 from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
+from numpy.typing import DTypeLike
 
+from diff_soup.optimization.inference.engine._kernel import LaneResult
 from diff_soup.optimization.inference.engine._reducers import refuse_failed
 from diff_soup.optimization.inference.engine._status import ABSENT
+from diff_soup.optimization.inference.statistics.hierarchy import Hierarchy
 
 Array = jax.Array
 
 
-def _listed(values: Any, limit: int = 8) -> str:
+def _listed(values: Iterable, limit: int = 8) -> str:
     """Representations of ``values``, cut after ``limit`` with the number left."""
     values = tuple(values)
     text = ", ".join(repr(value) for value in values[:limit])
@@ -238,8 +243,8 @@ class LevelTables(eqx.Module):
     present: tuple
     counts: tuple = eqx.field(static=True)
     widths: tuple = eqx.field(static=True)
-    names: Any = eqx.field(static=True)
-    lane_ids: Any = eqx.field(static=True)
+    names: tuple | None = eqx.field(static=True)
+    lane_ids: tuple | None = eqx.field(static=True)
 
     def __init__(
         self,
@@ -252,7 +257,7 @@ class LevelTables(eqx.Module):
         present: Any,
         names: Any = None,
         lane_ids: Any = None,
-        device: Any = None,
+        device: jax.Device | None = None,
     ):
         """Check that the tables describe a tree, then store them on ``device``.
 
@@ -349,7 +354,11 @@ class LevelGradients(eqx.Module):
 
 
 def level_tables(
-    hierarchy: Any, experiments: Any, *, lanes: Any = None, device: Any = None
+    hierarchy: Hierarchy,
+    experiments: Iterable,
+    *,
+    lanes: Any = None,
+    device: jax.Device | None = None,
 ) -> LevelTables:
     """Build the level tables of a hierarchy study on the host and place them on ``device``.
 
@@ -503,7 +512,7 @@ def _reduce_member_gradients(lanes, present, gradient, cost, rows, weight, *, wi
     return jax.vmap(one)(gradient, cost, rows, weight)
 
 
-def _lane_weights(tables: LevelTables, weights: Any, n_lanes: int, dtype: Any) -> np.ndarray:
+def _lane_weights(tables: LevelTables, weights: Any, n_lanes: int, dtype: DTypeLike) -> np.ndarray:
     """Each lane's weight on the host: one, or that of its node at the weighted level."""
     if weights is None:
         return np.ones((n_lanes,), dtype=dtype)
@@ -576,7 +585,9 @@ def _fits(tables: LevelTables, n_lanes: int, lane_ids: tuple, width: int) -> Non
         )
 
 
-def _checked(tables: LevelTables, results: Any, lane_ids: tuple, width: int, weights: Any, dtype):
+def _checked(
+    tables: LevelTables, results: LaneResult, lane_ids: tuple, width: int, weights: Any, dtype
+):
     """Refuse results that do not fit the tables; return the lane weights (host)."""
     n_lanes = int(np.shape(results.cost)[0])
     _fits(tables, n_lanes, lane_ids, width)
@@ -587,7 +598,7 @@ def _checked(tables: LevelTables, results: Any, lane_ids: tuple, width: int, wei
 
 
 def reduce_levels(
-    tables: LevelTables, results: Any, lane_ids: Any, weights: Any = None
+    tables: LevelTables, results: LaneResult, lane_ids: Iterable, weights: Any = None
 ) -> LevelBlocks:
     """Sum the blocks of a set of lanes into the blocks of every node of every level.
 
@@ -631,7 +642,7 @@ def reduce_levels(
 
 
 def reduce_level_gradients(
-    tables: LevelTables, results: Any, lane_ids: Any, weights: Any = None
+    tables: LevelTables, results: LaneResult, lane_ids: Iterable, weights: Any = None
 ) -> LevelGradients:
     """Sum the gradients of a set of lanes into the gradient of every node of every level.
 
@@ -669,7 +680,7 @@ def reduce_level_gradients(
 
 
 def reduce_member_gradients(
-    tables: LevelTables, results: Any, lane_ids: Any, lane_weights: Any = None
+    tables: LevelTables, results: Any, lane_ids: Iterable, lane_weights: Any = None
 ) -> tuple:
     """The cost and the joint gradient of every population member of a result, in one reduction.
 
@@ -749,7 +760,9 @@ def reduce_member_gradients(
 # ---------------------------------------------------------------------------------------
 
 
-def partial_levels(tables: LevelTables, results: Any, device: Any = None) -> Any:
+def partial_levels(
+    tables: LevelTables, results: Any, device: jax.Device | None = None
+) -> LevelBlocks | LevelGradients:
     """Every member's sums of these lanes over the level tables, every lane weighing one.
 
     The sums of a set of lanes that is part of a study's lanes: ``tables`` are
@@ -823,7 +836,9 @@ def _level_one_of_nodes(tables: LevelTables) -> tuple:
     return tuple(above)
 
 
-def weigh_levels(tables: LevelTables, sums: Any, weights: Any) -> Any:
+def weigh_levels(
+    tables: LevelTables, sums: LevelBlocks | LevelGradients, weights: Any
+) -> LevelBlocks | LevelGradients:
     """One member's sums over the levels, weighed by one weight per member of level 1.
 
     The sums of [partial_levels][diff_soup.optimization.inference.engine._levels.partial_levels]
@@ -868,7 +883,7 @@ def weigh_levels(tables: LevelTables, sums: Any, weights: Any) -> Any:
     above = _level_one_of_nodes(tables)
     blocks = isinstance(sums, LevelBlocks)
 
-    def scaled(array: Any, level: int) -> np.ndarray:
+    def scaled(array: ArrayLike, level: int) -> np.ndarray:
         array = np.asarray(array)
         factor = values[above[level]].astype(array.dtype)
         return factor.reshape(factor.shape + (1,) * (array.ndim - 1)) * array
@@ -898,7 +913,7 @@ def weigh_levels(tables: LevelTables, sums: Any, weights: Any) -> Any:
     )
 
 
-def member_row(sums: Any, row: int) -> Any:
+def member_row(sums: LevelBlocks | LevelGradients, row: int) -> LevelBlocks | LevelGradients:
     """The sums of row ``row`` of sums whose leaves lead with the member axis."""
     return jax.tree_util.tree_map(lambda leaf: np.asarray(leaf)[row], sums)
 
@@ -911,7 +926,7 @@ def _joint_offsets(tables: LevelTables) -> tuple:
     return tuple(offsets)
 
 
-def joint_gradient(tables: LevelTables, sums: Any) -> tuple:
+def joint_gradient(tables: LevelTables, sums: LevelBlocks | LevelGradients) -> tuple:
     """``(cost, gradient)`` of one member's sums, the gradient laid out as one joint vector.
 
     The layout is that of

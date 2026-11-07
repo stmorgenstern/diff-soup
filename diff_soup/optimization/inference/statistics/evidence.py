@@ -24,7 +24,9 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
+from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.optimization.inference.statistics.estimation import EstimationProblem
 from diff_soup.optimization.inference.statistics.laplace import (
     LaplacePosterior,
@@ -53,7 +55,7 @@ _DEFAULT_NULL_TOL = 1e-10
 _FACTOR_EPS = 100.0
 
 
-def _eps(*arrays: Any) -> float:
+def _eps(*arrays: ArrayLike) -> float:
     """The machine epsilon of the narrowest floating dtype among ``arrays``."""
     return max(float(np.finfo(np.asarray(a).dtype).eps) for a in arrays)
 
@@ -110,7 +112,7 @@ class EvidenceResult:
     warnings: tuple[str, ...]
 
 
-def _scalar(value: Any, *, what: str) -> float:
+def _scalar(value: ArrayLike, *, what: str) -> float:
     array = np.asarray(value, dtype=float)
     if array.ndim != 0:
         raise ValueError(f"laplace_evidence: {what} must be a scalar; got shape {array.shape}.")
@@ -120,7 +122,7 @@ def _scalar(value: Any, *, what: str) -> float:
     return result
 
 
-def _prior_declarations(prior: Any) -> None:
+def _prior_declarations(prior: object) -> None:
     """Refuse unknown declarations for duck priors; built-ins own the contract."""
     if isinstance(prior, Prior):
         return
@@ -230,7 +232,7 @@ def _direction_name(posterior: LaplacePosterior, loading: np.ndarray, index: int
     return f"data-null[{index}] " + " ".join(visible)
 
 
-def _null_tolerance(provenance: Any) -> float:
+def _null_tolerance(provenance: object) -> float:
     if not isinstance(provenance, Mapping):
         return _DEFAULT_NULL_TOL
     tolerances = provenance.get("tolerances", {})
@@ -462,7 +464,9 @@ def laplace_evidence(posterior: LaplacePosterior, prior: Any) -> EvidenceResult:
     )
 
 
-def evidence(problem: Any, fit: Any, *, curvature: str = "observed") -> EvidenceResult:
+def evidence(
+    problem: Any, fit: OptResult | ArrayLike | Mapping, *, curvature: str = "observed"
+) -> EvidenceResult:
     """Approximate the log marginal likelihood of the data at a MAP fit, by Laplace's method.
 
     The value is `log p(y | mode) + log p(mode) + d/2 log(2 pi) - 1/2 log det H`, with `H` the

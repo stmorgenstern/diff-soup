@@ -32,16 +32,19 @@ unless deliberately acknowledged, and every acknowledgment is recorded.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional
 
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup.optimization.inference.data.base import ObservationOperator
 from diff_soup.optimization.inference.data.deferred import DeferredValues
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 from diff_soup.optimization.inference.fitting.observables import Observable, _ObservableOperator
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.fitting.series import Series
 from diff_soup.optimization.inference.statistics.likelihoods import (
     CorrelatedGaussian,
@@ -96,7 +99,7 @@ class Channel(eqx.Module):
     source_id: Optional[str] = eqx.field(static=True, default=None)
     mask: Optional[Array] = None
     kernel: Any = None
-    context: Any = None
+    context: PyTree = None
 
     def __post_init__(self):
         """Validate the declared role and observation-kernel protocol."""
@@ -202,7 +205,7 @@ class _ChannelOperator(ObservationOperator):
         """
         return self.kernel is None and self.observable.is_full_state
 
-    def predict(self, u: Array, t: Any, theta: Any) -> Array:
+    def predict(self, u: Array, t: PyTree, theta: PyTree) -> Array:
         """Thread time/theta through the observable, then apply the kernel."""
         return _apply_kernel(self.kernel, self.observable.predict(u, t, theta))
 
@@ -259,7 +262,7 @@ class Predictor:
         channel_names: The channels predicted, in declaration order.
     """
 
-    x0: Any
+    x0: ArrayLike
     theta_names: tuple
     channel_names: tuple
     _predict: Callable
@@ -272,7 +275,7 @@ class Predictor:
 
 def _trajectory_keywords(trajectory: Any, state_prior: Any) -> dict:
     """The leaf keywords a public trajectory declaration and state prior lower to."""
-    from diff_soup.optimization.inference.fitting.inference_problem import Multishoot
+    from diff_soup.optimization.inference.fitting.formulation import Multishoot
 
     keywords: dict = {}
     if isinstance(trajectory, Multishoot):
@@ -312,7 +315,7 @@ class _CompiledExperiment:
     problem: Any
     solver: Any
     t_span: tuple
-    initial_state: Any
+    initial_state: PyTree
     channels: tuple
     controls: dict = dataclasses.field(default_factory=dict)
     data: dict = dataclasses.field(default_factory=dict)
@@ -325,7 +328,7 @@ class _CompiledExperiment:
 
     def __post_init__(self):
         """Validate channel uniqueness, data binding, and source overlap."""
-        from diff_soup.optimization.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting.formulation import (
             InitialState,
             _initial_state_array,
         )
@@ -432,7 +435,7 @@ class _CompiledExperiment:
 
     # -- lowering -----------------------------------------------------------
 
-    def observed(self, name: str) -> Any:
+    def observed(self, name: str) -> ArrayLike:
         """Observed values of one channel, loading a deferred measurement once."""
         values = self.data[name]
         return values.materialize() if isinstance(values, DeferredValues) else values
@@ -491,16 +494,16 @@ class _CompiledExperiment:
     def as_inference_problem(
         self,
         *,
-        parameters: Any = None,
+        parameters: ParameterGroups | None = None,
         objective: Any = None,
         trajectory: Any = None,
         regularizer: Any = None,
         bounds: Any = None,
         t0: Optional[float] = None,
         load_data: bool = True,
-        reuse: Any = None,
+        reuse: InferenceProblem | None = None,
         state_prior: Any = None,
-    ) -> Any:
+    ) -> InferenceProblem:
         """Lower the data-bearing declaration to a standard ``InferenceProblem``.
 
         Only response channels with attached data become residual streams;
@@ -531,12 +534,12 @@ class _CompiledExperiment:
                 with `with_data` first), or a scored channel's
                 likelihood has no exact least-squares representation.
         """
-        from diff_soup.optimization.inference.fitting.inference_problem import (
-            InferenceProblem,
+        from diff_soup.optimization.inference.fitting.formulation import (
             LeastSquares,
             SingleShoot,
             _initial_state_policy,
         )
+        from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 
         series = self._response_series(load_data=load_data)
         if reuse is not None and series:
@@ -565,7 +568,7 @@ class _CompiledExperiment:
             **_trajectory_keywords(trajectory, state_prior),
         )
 
-    def predictor(self, *, parameters: Any = None) -> Predictor:
+    def predictor(self, *, parameters: ParameterGroups | None = None) -> Predictor:
         """Build the one pure prediction closure over every channel.
 
         Works with or without attached data: predictions are a function of
@@ -573,7 +576,7 @@ class _CompiledExperiment:
         solve over the union of every channel's observation times.
 
         Args:
-            parameters: Optional [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
+            parameters: Optional [ParameterGroups][diff_soup.optimization.inference.fitting.parameter_groups.ParameterGroups]
                 choosing the learnable theta; defaults to the problem's declared
                 learnables, matching ``InferenceProblem``'s default.
 
@@ -585,11 +588,9 @@ class _CompiledExperiment:
             resolve_forward_adjoint,
             union_prediction_factory,
         )
-        from diff_soup.optimization.inference.fitting.inference_problem import (
-            _initial_state_array,
-            _lowered_schedule,
-            _resolve_parameters,
-        )
+        from diff_soup.optimization.inference.fitting.formulation import _initial_state_array
+        from diff_soup.optimization.inference.fitting.inference_problem import _lowered_schedule
+        from diff_soup.optimization.inference.fitting.parameter_groups import _resolve_parameters
 
         theta_spec, groups = _resolve_parameters(parameters, self.problem)
         # Resolved group records contain names and frozensets of selected leaf
@@ -663,7 +664,9 @@ def _validated_experiment_ids(experiments: tuple, experiment_ids: Any) -> tuple:
     return experiment_ids
 
 
-def _normalized_ownership(ownership: Any, n_experiments: int) -> Any:
+def _normalized_ownership(
+    ownership: Any, n_experiments: int
+) -> dict[str, dict[int, Hashable]] | Callable[..., Hashable]:
     """Normalize JointInferenceProblem's map vocabulary without resolving groups."""
     if ownership is None:
         return {}
@@ -714,7 +717,7 @@ def _normalized_ownership(ownership: Any, n_experiments: int) -> Any:
     return normalized
 
 
-def _sum_information_field(results: tuple, field: str) -> Any:
+def _sum_information_field(results: tuple, field: str) -> Array | None:
     """Add one optional InformationResult field without an integer seed."""
     values = tuple(
         getattr(result, field) for result in results if getattr(result, field) is not None
@@ -727,7 +730,9 @@ def _sum_information_field(results: tuple, field: str) -> Any:
     return total
 
 
-def _reject_zero_retained(name: str, values: Any, mask: Any) -> None:
+def _reject_zero_retained(
+    name: str, values: ArrayLike | Sequence, mask: ArrayLike | Sequence | None
+) -> None:
     """Refuse zero retained observations under the multiplicative Gaussian likelihood."""
     values = np.asarray(values)
     retained = (
@@ -786,14 +791,14 @@ class ExperimentSet(eqx.Module):
     """
 
     experiments: tuple
-    ownership: Any
+    ownership: dict[str, dict[int, Hashable]] | Callable[..., Hashable]
     independent: bool = eqx.field(static=True)
     experiment_ids: tuple
     joint_likelihood: Any
 
     def __init__(
         self,
-        experiments: Any,
+        experiments: Iterable[object],
         *,
         ownership: Any = None,
         independent: bool,
@@ -876,7 +881,7 @@ class ExperimentSet(eqx.Module):
             joint_likelihood=joint_likelihood,
         )
 
-    def as_joint(self, *, parameters: Any = None, layout: Any = None) -> Any:
+    def as_joint(self, *, parameters: ParameterGroups | None = None, layout: Any = None) -> Any:
         """Lower to the existing ``JointInferenceProblem`` fit engine.
 
         ``parameters.shared`` supplies the globally tied group names; owner
@@ -901,10 +906,10 @@ class ExperimentSet(eqx.Module):
     def information(
         self,
         *,
-        at: Any = None,
+        at: Mapping | ArrayLike | Sequence | None = None,
         kind: str = "expected",
         prior: Any = None,
-        parameters: Any = None,
+        parameters: ParameterGroups | None = None,
     ) -> Any:
         """Add information from independent experiments and one prior.
 
@@ -1007,7 +1012,7 @@ class ExperimentSet(eqx.Module):
         prior: Any,
         parameterization: Any = None,
         gradient: Optional[str] = "forward",
-        parameters: Any = None,
+        parameters: ParameterGroups | None = None,
     ) -> Any:
         """Build the normalized product posterior of independent experiments.
 

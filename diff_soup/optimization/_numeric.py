@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
 import jax.numpy as jnp
-from jaxtyping import ArrayLike, Shaped
+from jaxtyping import ArrayLike, PyTree, Shaped
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization import _derived
-from diff_soup.optimization._binding import Bound, Derived, hold, ignoring_args
+from diff_soup.optimization._binding import Bound, Derived, Held, hold, ignoring_args
 from diff_soup.optimization._penalty import FOLDED, penalized
 from diff_soup.optimization._structure import (
     _ALWAYS,
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from diff_soup.optimization.constraints import Constraints
 
 
-def _is_none(leaf: Any) -> bool:
+def _is_none(leaf: object) -> bool:
     """Whether a pytree node is `None`, which `eqx.tree_at` must see as a leaf to replace."""
     return leaf is None
 
@@ -63,17 +63,17 @@ class OptimizationProblem(eqx.Module):
     x0: Shaped[ArrayLike, " n"]
     structure: frozenset[str] = eqx.field(static=True)
     bounds: tuple[ArrayLike, ArrayLike] | None = None
-    args: Any = None
+    args: PyTree = None
     n_equality: int = eqx.field(static=True, default=0)
     n_inequality: int = eqx.field(static=True, default=0)
     constraint_scales: tuple[ArrayLike, ArrayLike] | None = None
-    objective_scale: Any = None
+    objective_scale: ArrayLike | None = None
     # The fitted model's reconstruction and the regularization can hold arrays; they are
     # held by identity, so the problem's static data stays hashable and array-free.
-    _unflatten: Any = eqx.field(static=True, default=None, converter=hold)
-    _static: Any = eqx.field(static=True, default=None, converter=hold)
-    _regularization: Any = eqx.field(static=True, default=None, converter=hold)
-    lanes: Any = eqx.field(static=True, default=None)
+    _unflatten: Held = eqx.field(static=True, default=None, converter=hold)
+    _static: Held = eqx.field(static=True, default=None, converter=hold)
+    _regularization: Held = eqx.field(static=True, default=None, converter=hold)
+    lanes: object = eqx.field(static=True, default=None)
     ad: str | None = eqx.field(static=True, default=None)
     hessian_composition: str | None = eqx.field(static=True, default=None)
     n_segments: int = eqx.field(static=True, default=1)
@@ -204,7 +204,7 @@ class OptimizationProblem(eqx.Module):
         """The closure `name` bound to this problem's `args`, without the penalty."""
         return Bound(self._unpenalized(name), self.args)
 
-    def with_args(self, args: Any) -> OptimizationProblem:
+    def with_args(self, args: PyTree) -> OptimizationProblem:
         """This problem with `args` replaced, as a lane of a batch holds it."""
         return eqx.tree_at(lambda problem: problem.args, self, args, is_leaf=_is_none)
 
@@ -364,16 +364,16 @@ class OptimizationProblem(eqx.Module):
         return self._unflatten.value
 
     @property
-    def static(self) -> Any:
+    def static(self) -> PyTree:
         """The frozen part of the fitted model, or `None`."""
         return self._static.value
 
     @property
-    def regularization(self) -> Any:
+    def regularization(self) -> object:
         """The regularization whose rows or penalty the solver adds, or `None`."""
         return self._regularization.value
 
-    def fitted(self, x: ArrayLike) -> Any:
+    def fitted(self, x: ArrayLike) -> PyTree:
         """The fitted model at `x`, or `None` without `unflatten` and `static`."""
         if self.unflatten is None or self.static is None:
             return None
@@ -385,11 +385,11 @@ class OptimizationProblem(eqx.Module):
         x0: Any,
         value: Callable,
         *,
-        regularization: Any = None,
+        regularization: object = None,
         bounds: Any = None,
         is_valid: Callable | None = None,
         unflatten: Callable | None = None,
-        static: Any = None,
+        static: PyTree = None,
         hessian: bool = False,
         hessian_composition: str = "forward-over-reverse",
     ) -> OptimizationProblem:

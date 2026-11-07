@@ -13,11 +13,13 @@ process builds the same problem over a zero placeholder of the same shape.
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 __all__ = ["DeferredValues"]
 
@@ -48,7 +50,7 @@ class DeferredValues:
 
     def __init__(
         self,
-        load: Callable[[], Any],
+        load: Callable[[], ArrayLike | list | tuple],
         *,
         name: str,
         n_frames: int,

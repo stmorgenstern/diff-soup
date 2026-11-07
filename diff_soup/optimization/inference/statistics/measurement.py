@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
 
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup.optimization.inference.data.deferred import DeferredValues
-from diff_soup.optimization.inference.fitting.inference_problem import Trajectory
+from diff_soup.optimization.inference.fitting.formulation import Trajectory
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 from diff_soup.optimization.inference.fitting.observables import Observable
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics.experiment import Channel, _CompiledExperiment
 from diff_soup.optimization.inference.statistics.likelihoods import Gaussian, Likelihood
 
@@ -65,7 +68,7 @@ class _NamedObservation:
 
     name: str
     model: Any = dataclasses.field(metadata={"fingerprint": False})
-    static: Any = dataclasses.field(metadata={"fingerprint": False})
+    static: PyTree = dataclasses.field(metadata={"fingerprint": False})
     key: Any = dataclasses.field(metadata={"fingerprint": False})
 
     @classmethod
@@ -167,7 +170,9 @@ class Measurement:
     mask: Any = None
     shape: tuple | None = None
     dtype: Any = None
-    _deferred: Any = dataclasses.field(init=False, repr=False, compare=False, default=None)
+    _deferred: DeferredValues | None = dataclasses.field(
+        init=False, repr=False, compare=False, default=None
+    )
 
     def __post_init__(self):
         """Normalize arrays and validate the ordinary response-data contract."""
@@ -261,7 +266,7 @@ class Measurement:
         """Whether ``values`` is a callable that loads on the owning process."""
         return self._deferred is not None
 
-    def _data(self) -> Any:
+    def _data(self) -> Array | DeferredValues:
         """The value passed to the compiled experiment: an array or its deferred loader."""
         return self.values if self._deferred is None else self._deferred
 
@@ -301,7 +306,7 @@ class Measurement:
         )
 
 
-def _check_scale_input(name: str, value: Any) -> None:
+def _check_scale_input(name: str, value: ArrayLike | Sequence) -> None:
     """Refuse a grid scale (``spec.geometry``) given a size that is not finite and positive."""
     import jax
 
@@ -321,7 +326,7 @@ def _check_schedule(schedule: Any, model: Any, t_span: tuple, trajectory: Any) -
     """Refuse a schedule the model cannot follow over ``t_span`` in one shoot."""
     from diff_soup._errors import ConfigurationError
     from diff_soup._schedule import Schedule, schedule_arrays
-    from diff_soup.optimization.inference.fitting.inference_problem import SingleShoot
+    from diff_soup.optimization.inference.fitting.formulation import SingleShoot
 
     if not isinstance(schedule, Schedule):
         raise TypeError(
@@ -401,18 +406,18 @@ class Experiment:
     model: Any
     solver: Any
     t_span: tuple[float, float]
-    initial_state: Any
+    initial_state: PyTree
     measurements: tuple[Measurement, ...]
-    inputs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
-    id: Any = None
+    inputs: Mapping[str, object] = dataclasses.field(default_factory=dict)
+    id: Hashable | None = None
     trajectory: Trajectory | None = None
     schedule: Any = None
     # A mapping from level name to member, or None; annotated Any so that a
     # wrong value reaches the refusal that explains the field.
     parameters: Any = None
-    _delegate: Any = dataclasses.field(init=False, repr=False, compare=False)
-    _fixed_inputs: Any = dataclasses.field(init=False, repr=False, compare=False)
-    _declarations: Any = dataclasses.field(init=False, repr=False, compare=False)
+    _delegate: _CompiledExperiment = dataclasses.field(init=False, repr=False, compare=False)
+    _fixed_inputs: dict[str, object] = dataclasses.field(init=False, repr=False, compare=False)
+    _declarations: dict[str, Any] = dataclasses.field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         """Validate the declaration and prepare the existing prediction lowering."""
@@ -528,23 +533,23 @@ class Experiment:
         object.__setattr__(self, "_delegate", delegate)
 
     @property
-    def experiment_id(self) -> Any:
+    def experiment_id(self) -> Hashable | None:
         """Stable Study identifier, with a deterministic single-object fallback."""
         return self.id
 
     def as_inference_problem(
         self,
         *,
-        parameters: Any = None,
+        parameters: ParameterGroups | None = None,
         objective: Any = None,
-        trajectory: Any = None,
+        trajectory: Trajectory | None = None,
         regularizer: Any = None,
         bounds: Any = None,
         t0: float | None = None,
         load_data: bool = True,
-        reuse: Any = None,
+        reuse: InferenceProblem | None = None,
         state_prior: Any = None,
-    ) -> Any:
+    ) -> InferenceProblem:
         """Lower this declaration through its private optimization delegate.
 
         Args:
@@ -583,7 +588,7 @@ class Experiment:
             state_prior=state_prior,
         )
 
-    def predictor(self, *, parameters: Any = None) -> Any:
+    def predictor(self, *, parameters: ParameterGroups | None = None) -> Callable:
         """Return the shared, JAX-transformable prediction closure."""
         return self._delegate.predictor(parameters=parameters)
 

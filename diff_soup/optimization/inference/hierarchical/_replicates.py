@@ -28,47 +28,54 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from collections.abc import Callable, Mapping, Sequence
+from numbers import Integral, Real
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, NamedTuple
 
 import jax
 import numpy as np
+from jaxtyping import ArrayLike
+from numpy.typing import DTypeLike
 
+from diff_soup.optimization.inference.fitting.scales import XScale
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._lane_route import _LABEL, _LaneRoute
+from diff_soup.optimization.inference.hierarchical._level_solve import _split
+from diff_soup.optimization.inference.hierarchical._level_system import LevelSystem, _offsets
 from diff_soup.optimization.inference.hierarchical._population import (
     Lockstep,
     PopulationRoute,
     _held_from,
     _NotFinite,
 )
-from diff_soup.optimization.inference.hierarchical.level_solvers import (
-    _LABEL,
+from diff_soup.optimization.inference.hierarchical._trust_step import (
     _bounded_gradient,
     _choose,
-    _failures_text,
     _noise_trial_limit,
     _scale_candidate,
     _stationarity,
-    _stationarity_limit,
     _subproblem,
     _trial_point,
     _trial_valid,
+)
+from diff_soup.optimization.inference.hierarchical._verdicts import (
+    _failures_text,
+    _stationarity_limit,
     _verdict,
 )
 from diff_soup.optimization.solvers._loop import (
     _WINDOW,
     Trials,
     _after_attempt,
-    _judge,
-    _median,
-    _next_radius,
     _saved_window,
     _stop_after,
-    cost_scale,
     loop_tolerances,
     step_small,
 )
+from diff_soup.optimization.solvers._loop_judge import _judge, _median, _next_radius, cost_scale
+from diff_soup.optimization.solvers._termination import GradientTolerance
 
 # ---------------------------------------------------------------------------------------
 # The evaluation at the fit, and what it serves with no further evaluation
@@ -114,7 +121,7 @@ class _ZeroGauge(ValueError):
     """Weights under which every member a gauge averages over weighs zero."""
 
 
-def _finite(gradient: np.ndarray, diagonal: np.ndarray, system: Any = None) -> bool:
+def _finite(gradient: np.ndarray, diagonal: np.ndarray, system: LevelSystem | None = None) -> bool:
     """Whether a level system's gradient, diagonal and (given ``system``) cost are finite."""
     return bool(
         np.all(np.isfinite(gradient))
@@ -123,7 +130,14 @@ def _finite(gradient: np.ndarray, diagonal: np.ndarray, system: Any = None) -> b
     )
 
 
-def one_step(system: Any, point: Any, *, x_scale: Any, bounds: Any, fixed: Any) -> OneStep:
+def one_step(
+    system: LevelSystem,
+    point: ArrayLike,
+    *,
+    x_scale: XScale,
+    bounds: tuple[ArrayLike, ArrayLike] | None,
+    fixed: ArrayLike | Sequence[Integral],
+) -> OneStep:
     """The step a trust-region fit takes from ``point`` when its radius does not cut the full step.
 
     The scale is ``x_scale``'s, from the diagonal of the system's matrix; the
@@ -185,10 +199,10 @@ def one_step(system: Any, point: Any, *, x_scale: Any, bounds: Any, fixed: Any) 
     return OneStep(box.make_strictly_feasible(x + chosen, bounds[0], bounds[1], rstep=0), length)
 
 
-def _kept(system: Any) -> np.ndarray:
+def _kept(system: LevelSystem) -> np.ndarray:
     """``(n,)`` booleans: the coordinates a solve moves, neither fixed nor in a held node."""
     keep = ~np.asarray(system.fixed_mask, dtype=bool)
-    offsets = elimination._offsets(system.counts, system.widths)
+    offsets = _offsets(system.counts, system.widths)
     for level, node in system.held:
         width = int(system.widths[level])
         start = offsets[level] + node * width
@@ -196,7 +210,7 @@ def _kept(system: Any) -> np.ndarray:
     return keep
 
 
-def _against(system: Any, vector: np.ndarray) -> Any:
+def _against(system: LevelSystem, vector: np.ndarray) -> LevelSystem:
     """``system`` with ``vector`` as its gradient and a zero constraint target.
 
     Its solve at zero damping is ``-H^-1 vector`` on the manifold of its
@@ -209,7 +223,7 @@ def _against(system: Any, vector: np.ndarray) -> Any:
     dtype = np.dtype(system.root.dtype)
     placed = system.point
     device = placed.sharding if placed.committed else None
-    parts = elimination._split(system, np.asarray(vector, dtype=dtype))
+    parts = _split(system, np.asarray(vector, dtype=dtype))
     return dataclasses.replace(
         system,
         root_gradient=jax.device_put(np.ascontiguousarray(parts[0]), device),
@@ -311,9 +325,9 @@ class FitProducts:
         fit: Any,
         weights: Any,
         *,
-        x_scale: Any,
+        x_scale: XScale,
         keep: bool = False,
-        numbers: Any = None,
+        numbers: ArrayLike | Sequence[Integral] | None = None,
     ):
         """Evaluate the blocks at the fit's point and compute every product from them.
 
@@ -455,7 +469,7 @@ class FitProducts:
         seconds["total"] = time.perf_counter() - started
         self.seconds = MappingProxyType(seconds)
 
-    def _system_of(self, weights: Any, weight_priors: Any = None) -> Any:
+    def _system_of(self, weights: Any, weight_priors: bool | None = None) -> LevelSystem:
         """The level system at the fit under ``weights``, through the route's weighting.
 
         The system of the fit's objective at unit weights was formed first, so
@@ -471,13 +485,13 @@ class FitProducts:
             raise
         return weighed.system(self.results, self.point, member=0)
 
-    def _one_step(self, system: Any) -> OneStep:
+    def _one_step(self, system: LevelSystem) -> OneStep:
         """The one-step from the fit's point under ``system``."""
         return one_step(
             system, self.point, x_scale=self._x_scale, bounds=self.route.bounds, fixed=self._fixed
         )
 
-    def _inverse_times(self, vector: Any) -> np.ndarray:
+    def _inverse_times(self, vector: ArrayLike) -> np.ndarray:
         """``H^-1 vector`` on the manifold of the equality rows; zero on fixed and held coordinates."""
         right = np.asarray(vector, dtype=np.float64) * self._keep
         if not np.any(right):
@@ -502,11 +516,11 @@ class FitProducts:
         return self._columns[column]
 
     @property
-    def inverse_columns(self) -> Any:
+    def inverse_columns(self) -> Mapping[int, np.ndarray]:
         """The columns of ``H^-1`` solved so far, ``(n,)`` each, by coordinate."""
         return MappingProxyType(dict(self._columns))
 
-    def inverse_block(self, columns: Any) -> np.ndarray:
+    def inverse_block(self, columns: ArrayLike | Sequence[Integral]) -> np.ndarray:
         """``H^-1`` on ``columns`` x ``columns``: ``(k, k)``, a solve per column not solved yet."""
         columns = [int(column) for column in np.ravel(np.asarray(columns, dtype=np.int64))]
         if not columns:
@@ -565,21 +579,21 @@ class _Settings(NamedTuple):
     """What every member's trust region takes from the solver and from the study."""
 
     view: Any
-    bounds: Any
+    bounds: tuple[ArrayLike, ArrayLike] | None
     fixed: np.ndarray
-    x_scale: Any
-    grad_tolerance: Any
+    x_scale: XScale | None
+    grad_tolerance: GradientTolerance | None
     step_tol: float
     cost_tol: float
     cost_atol: float
-    stationarity_tol: Any
+    stationarity_tol: Real | None
     eta: float
     radius_init: float
     radius_max: float
     max_invalid: int
     relaxed: bool
-    noise_limit: Any
-    steps: Any
+    noise_limit: float | None
+    steps: int | None
     max_attempts: int
 
 
@@ -599,7 +613,7 @@ def inherited_noise(fit: Any) -> list:
     return []
 
 
-def _label(status: str, reason: Any) -> str:
+def _label(status: str, reason: str | None) -> str:
     """A status and its reason as one label: ``"stalled: attempts"``, or the status alone."""
     return status if reason is None else f"{status}: {reason}"
 
@@ -615,19 +629,19 @@ class _Member:
     the same helpers, in the same order, as an attempt of a fit.
     """
 
-    def __init__(self, index: int, kind: str, number: int, weights: Any, noise: list):
+    def __init__(self, index: int, kind: str, number: int, weights: ArrayLike, noise: list):
         self.index = int(index)
         self.kind = kind
         self.number = int(number)
         self.weights = np.asarray(weights, dtype=np.float64)
-        self.route: Any = None
-        self.point: Any = None
-        self.system: Any = None
+        self.route: _LaneRoute | None = None
+        self.point: np.ndarray | None = None
+        self.system: LevelSystem | None = None
         self.cost = float("nan")
-        self.lane_costs: Any = None
+        self.lane_costs: np.ndarray | None = None
         # The lanes' costs, rows and failures of the blocks result at the member's point.
-        self.held: Any = None
-        self.scale: Any = None
+        self.held: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self.scale: np.ndarray | None = None
         self.radius = float("nan")
         self.lock = 0
         self.accepted = 0
@@ -638,22 +652,22 @@ class _Member:
         self.solves = 0
         self.invalid_run = 0
         self.noise_run = 0
-        self.accepted_radius: Any = None
-        self.grad_threshold: Any = None
+        self.accepted_radius: float | None = None
+        self.grad_threshold: float | None = None
         self.noise_changes = list(noise)
         self.rejected_changes: list = []
         self.rejected_decreases: list = []
         self.log: list = []
-        self.status: Any = None
-        self.reason: Any = None
-        self.stop: Any = None
-        self.error: Any = None
+        self.status: str | None = None
+        self.reason: str | None = None
+        self.stop: str | None = None
+        self.error: str | None = None
         self.stationarity = float("nan")
         self.seconds = 0.0
-        self.attempt: Any = None
+        self.attempt: SimpleNamespace | None = None
         # The weighted cost of the system at the member's point, kept for a member restored
         # from a checkpoint without its system.
-        self.final_cost: Any = None
+        self.final_cost: float | None = None
         # Whether the member starts at a converged fit: one that needs no step there is kept.
         self.start_converged = False
 
@@ -958,7 +972,7 @@ class _Member:
         stop_gradient = float(np.linalg.norm(_bounded_gradient(gradient, coordinates, s.bounds)))
         return sigma, stop_gradient
 
-    def end(self, s: _Settings, stop: str, *, sigma: Any = None) -> None:
+    def end(self, s: _Settings, stop: str, *, sigma: Real | None = None) -> None:
         """End the member on the event ``stop``, with the status and reason it gives.
 
         The stationarity number at the end point (``sigma``, else computed
@@ -1008,7 +1022,7 @@ class _Member:
                 status, reason = "failed", "no_step"
         self.status, self.reason = status, reason
 
-    def needs_no_step(self, s: _Settings, sigma: float, stop_gradient: Any) -> bool:
+    def needs_no_step(self, s: _Settings, sigma: float, stop_gradient: Real | None) -> bool:
         """Whether a member without an accepted step starts at a converged fit that is its answer.
 
         It is when the fit converged and the member's weights are the original sample's (all
@@ -1021,7 +1035,7 @@ class _Member:
         return self.passes_converged_test(s, sigma, stop_gradient, compute=True)
 
     def passes_converged_test(
-        self, s: _Settings, sigma: float, stop_gradient: Any, *, compute: bool = False
+        self, s: _Settings, sigma: float, stop_gradient: Real | None, *, compute: bool = False
     ) -> bool:
         """The tests the member's next attempt would make first: its gradient test, or its stationarity test.
 
@@ -1038,7 +1052,7 @@ class _Member:
         )
         return bool(gradient_test or (float(sigma) <= limit and self.on_rows()))
 
-    def fail(self, reason: str, error: Any = None) -> None:
+    def fail(self, reason: str, error: Exception | None = None) -> None:
         """End the member failed: its host work raised (``error``), or its gauge or system."""
         if self.attempt is not None:
             self.attempts += 1
@@ -1103,16 +1117,16 @@ class ReplicateStepper(Lockstep):
         self,
         route: PopulationRoute,
         home: PopulationRoute,
-        products: Any,
-        weights: Any,
+        products: FitProducts | None,
+        weights: ArrayLike,
         *,
         solver: Any,
-        steps: Any,
+        steps: Integral | str,
         max_attempts: int,
         noise: list,
-        numbers: Any = None,
-        jackknife: Any = None,
-        state: Any = None,
+        numbers: ArrayLike | Sequence[Integral] | None = None,
+        jackknife: ArrayLike | Sequence[Integral] | None = None,
+        state: Mapping | None = None,
         fit_converged: bool = False,
     ):
         """Start every member from the evaluation at the fit, or from a checkpoint's state.
@@ -1238,7 +1252,7 @@ class ReplicateStepper(Lockstep):
                 member.requests += 1
         self.members = members
 
-    def _units(self, positions: Any = None) -> np.ndarray:
+    def _units(self, positions: ArrayLike | Sequence[Integral] | None = None) -> np.ndarray:
         """``(Q, L)``: the units every request evaluates, the lanes of nonzero weight per member.
 
         A lane whose member of the top level weighs zero in a replicate lies
@@ -1258,7 +1272,7 @@ class ReplicateStepper(Lockstep):
             return "replicate", int(self.numbers[index])
         return "jackknife", int(self.jackknife[index - self.replicates])
 
-    def _restore(self, state: Any, rows: np.ndarray) -> None:
+    def _restore(self, state: Mapping, rows: np.ndarray) -> None:
         """Every member as a checkpoint saved it at the end of an iteration; no system yet."""
         arrays, texts = state["arrays"], state["texts"]
         saved = np.asarray(arrays["weights"], dtype=np.float64)
@@ -1361,10 +1375,10 @@ class ReplicateStepper(Lockstep):
         members = self.members
         lanes, n = len(self.route.ids), int(self.route.n)
 
-        def column(read: Any, dtype: Any = np.float64) -> np.ndarray:
+        def column(read: Callable[..., Real], dtype: DTypeLike = np.float64) -> np.ndarray:
             return np.asarray([read(member) for member in members], dtype=dtype)
 
-        def rows(read: Any, width: int) -> np.ndarray:
+        def rows(read: Callable[..., np.ndarray | None], width: int) -> np.ndarray:
             stacked = [
                 np.full((width,), np.nan) if read(member) is None else read(member)
                 for member in members

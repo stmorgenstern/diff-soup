@@ -14,14 +14,13 @@ it lies outside every sum.
 
 from __future__ import annotations
 
-from typing import Any
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._solution import RESULT
+from diff_soup.timestepping.vsvo.solution import Solution
 
 Array = jax.Array
 
@@ -93,7 +92,7 @@ class LaneStatus(eqx.Module):
         return self.kind == ABSENT
 
 
-def solver_kind(solution: Any) -> Array:
+def solver_kind(solution: Solution) -> Array:
     """The kind code of a solution's terminal status; zero when it succeeded."""
     result = solution.result
     kind = jnp.where(solution.ok, 0, KINDS.index("unknown"))
@@ -104,7 +103,7 @@ def solver_kind(solution: Any) -> Array:
     return jnp.asarray(kind, dtype=jnp.int32)
 
 
-def lane_status(solution: Any, *, sample_missing: Array, not_finite: Array) -> LaneStatus:
+def lane_status(solution: Solution, *, sample_missing: Array, not_finite: Array) -> LaneStatus:
     """The status of a lane from its solution and the checks on its samples.
 
     A solver failure takes precedence, then a requested sample the solve never

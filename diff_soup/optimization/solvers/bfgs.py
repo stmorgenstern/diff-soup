@@ -7,7 +7,7 @@ Uses backtracking Armijo line search with two-loop L-BFGS recursion
 from __future__ import annotations
 
 import time
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -16,6 +16,7 @@ import numpy as np
 
 from diff_soup._distributed import any_process, assert_decision_value, local_value
 from diff_soup.optimization._abc import OptSolver
+from diff_soup.optimization._numeric import OptimizationProblem
 from diff_soup.optimization.inference.fitting.bounds import projected_gradient_norm
 from diff_soup.optimization.inference.fitting.callbacks import StopFit
 from diff_soup.optimization.inference.fitting.regularization import NoReg
@@ -62,7 +63,7 @@ class BFGS(OptSolver):
     ad: str = eqx.field(static=True, default="reverse")
     callbacks: tuple = eqx.field(static=True, default=())
 
-    def solve(self, problem: Any, *, callbacks: tuple = ()) -> OptResult:
+    def solve(self, problem: OptimizationProblem, *, callbacks: tuple = ()) -> OptResult:
         """Run L-BFGS with Armijo line search on ``problem``.
 
         Args:

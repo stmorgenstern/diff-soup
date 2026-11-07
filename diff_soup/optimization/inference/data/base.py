@@ -7,10 +7,10 @@ for comparison with experimental data.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any
 
 import equinox as eqx
 import jax
+from jaxtyping import ArrayLike, PyTree
 
 
 class ObservationOperator(eqx.Module):
@@ -22,7 +22,7 @@ class ObservationOperator(eqx.Module):
     """
 
     @abstractmethod
-    def predict(self, u: jax.Array, t: Any, theta: Any) -> jax.Array:
+    def predict(self, u: jax.Array, t: ArrayLike | None, theta: PyTree) -> jax.Array:
         """Map a nodal FEM field to observed quantities.
 
         Args:
@@ -46,8 +46,8 @@ class ObservationOperator(eqx.Module):
         obs_data: jax.Array,
         weight: float = 1.0,
         *,
-        t: Any = None,
-        theta: Any = None,
+        t: ArrayLike | None = None,
+        theta: PyTree = None,
     ) -> jax.Array:
         """Compute weighted residual ``(predicted - observed) * weight``.
 

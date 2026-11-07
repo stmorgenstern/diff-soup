@@ -33,8 +33,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
-from jaxtyping import Array
+from jaxtyping import Array, PyTree
 
+from diff_soup._adjoints import AbstractAdjoint
 from diff_soup._warnings import warn_user
 from diff_soup.optimization.inference.fitting._forward_seam import parameter_handle_leaf_ids
 from diff_soup.optimization.inference.fitting._path_filter import parameters_at
@@ -43,7 +44,9 @@ from diff_soup.problem._registry import theta_leaf_keys, theta_mask
 __all__ = ["SensitivityRun", "sensitivity_solve"]
 
 
-def _mask_for(base_theta: Any, selectors: tuple, set_name: str, *, problem: Any = None) -> Any:
+def _mask_for(
+    base_theta: PyTree, selectors: tuple, set_name: str, *, problem: Any = None
+) -> PyTree:
     """Build a theta mask from Recipe handles or dotted paths into the parameter pytree."""
     if selectors and not all(isinstance(selector, str) for selector in selectors):
         if any(isinstance(selector, str) for selector in selectors):
@@ -93,7 +96,7 @@ def _mask_for(base_theta: Any, selectors: tuple, set_name: str, *, problem: Any 
         ) from exc
 
 
-def _leaf_labels(tree: Any) -> tuple:
+def _leaf_labels(tree: PyTree) -> tuple:
     """Per-scalar labels for a pytree's leaves, in flattening (ravel) order."""
     labels: list[str] = []
     for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
@@ -144,11 +147,11 @@ class SensitivityRun:
         t_span: tuple,
         y0: Union[Array, Callable],
         *,
-        base_theta: Any,
-        wrt_mask: Any,
-        design_mask: Any,
+        base_theta: PyTree,
+        wrt_mask: PyTree,
+        design_mask: PyTree,
         solver: Any,
-        adjoint: Any,
+        adjoint: AbstractAdjoint,
         saveat: Any,
         include_multipliers: bool,
         solve_kwargs: dict,
@@ -181,13 +184,13 @@ class SensitivityRun:
             self.d0, self._design_unravel = ravel_pytree(design_leaves)
             self.design_names = _leaf_labels(design_leaves)
 
-    def _theta_full(self, x: Array, theta: Any) -> Any:
+    def _theta_full(self, x: Array, theta: PyTree) -> PyTree:
         """Graft the flat analyzed vector ``x`` into the parameter pytree."""
         base = self._base_theta if theta is None else theta
         _, rest = eqx.partition(base, self._wrt_mask)
         return eqx.combine(self._unravel(jnp.asarray(x)), rest)
 
-    def wrt_tangents(self) -> Any:
+    def wrt_tangents(self) -> PyTree:
         """Per-direction tangents of the analyzed subtree.
 
         Returns:
@@ -200,7 +203,7 @@ class SensitivityRun:
         basis = jnp.eye(self.n_directions, dtype=self.x0.dtype)
         return jax.vmap(self.unravel)(basis)
 
-    def __call__(self, x: Array, theta: Any = None) -> Array:
+    def __call__(self, x: Array, theta: PyTree = None) -> Array:
         """Solve with analyzed parameters ``x`` and return the saved frames.
 
         Args:
@@ -222,7 +225,7 @@ class SensitivityRun:
             ys = jnp.concatenate([ys, sol.lambdas], axis=-1)
         return ys
 
-    def solution(self, x: Optional[Array] = None, theta: Any = None) -> Any:
+    def solution(self, x: Optional[Array] = None, theta: PyTree = None) -> Any:
         """Run the solve and return the full solution object.
 
         Args:
@@ -245,7 +248,7 @@ class SensitivityRun:
             **self._solve_kwargs,
         )
 
-    def design_theta(self, d: Array, theta: Any = None) -> Any:
+    def design_theta(self, d: Array, theta: PyTree = None) -> PyTree:
         """Graft flat design values into the parameter pytree.
 
         Args:
@@ -268,7 +271,7 @@ class SensitivityRun:
         _, rest = eqx.partition(base, self._design_mask)
         return eqx.combine(self._design_unravel(jnp.asarray(d)), rest)
 
-    def sensitivities(self, x: Optional[Array] = None, theta: Any = None) -> Array:
+    def sensitivities(self, x: Optional[Array] = None, theta: PyTree = None) -> Array:
         """Return the sensitivity matrix ``S[frame, state, direction]``.
 
         Args:
@@ -292,7 +295,7 @@ def sensitivity_solve(
     saveat: Any,
     solver: Any = None,
     design: tuple = (),
-    theta: Any = None,
+    theta: PyTree = None,
     include_multipliers: bool = False,
     **solve_kwargs: Any,
 ) -> SensitivityRun:

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jaxtyping import PyTree
 
 from .coordinate_nets import _activation, _array_paths, _coordinates
 
@@ -117,8 +118,8 @@ class Transform(eqx.Module):
     preserved with a module. prefix; otherwise every array leaf is fitted.
     """
 
-    module: Any
-    fn: Any = eqx.field(static=True)
+    module: Callable[..., PyTree]
+    fn: str | Callable[..., PyTree] = eqx.field(static=True)
 
     def __init__(self, module, fn):
         """Keep the inner module's fitted leaves and validate the transform."""

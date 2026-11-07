@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import PyTree
 
 
 def _activation(name):
@@ -103,8 +104,8 @@ class FourierFeatureNet(eqx.Module):
     frequencies: tuple = eqx.field(static=True)
     in_size: int = eqx.field(static=True)
     out_size: int = eqx.field(static=True)
-    bounds: Any = eqx.field(static=True)
-    transform: Any = eqx.field(static=True)
+    bounds: tuple[tuple[float, float], ...] | None = eqx.field(static=True)
+    transform: Callable[..., PyTree] | None = eqx.field(static=True)
 
     def __init__(
         self,
@@ -168,8 +169,8 @@ class SIREN(eqx.Module):
     in_size: int = eqx.field(static=True)
     out_size: int = eqx.field(static=True)
     omega_0: float = eqx.field(static=True)
-    bounds: Any = eqx.field(static=True)
-    transform: Any = eqx.field(static=True)
+    bounds: tuple[tuple[float, float], ...] | None = eqx.field(static=True)
+    transform: Callable[..., PyTree] | None = eqx.field(static=True)
 
     def __init__(
         self,
@@ -222,8 +223,8 @@ class WIRE(eqx.Module):
     out_size: int = eqx.field(static=True)
     omega_0: float = eqx.field(static=True)
     s_0: float = eqx.field(static=True)
-    bounds: Any = eqx.field(static=True)
-    transform: Any = eqx.field(static=True)
+    bounds: tuple[tuple[float, float], ...] | None = eqx.field(static=True)
+    transform: Callable[..., PyTree] | None = eqx.field(static=True)
 
     def __init__(
         self,

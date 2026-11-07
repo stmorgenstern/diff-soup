@@ -32,7 +32,7 @@ explicit declaration, never an implicit assumption.
 from __future__ import annotations
 
 import math
-from typing import Any
+from collections.abc import Sequence
 
 import equinox as eqx
 import jax
@@ -40,7 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy import special
 from jax.scipy.linalg import solve_triangular
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike, PyTree
 
 __all__ = [
     "Likelihood",
@@ -156,23 +156,25 @@ class Likelihood(eqx.Module):
     families ignore it.
     """
 
-    def log_prob(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def log_prob(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the normalized total log probability of the observed event(s)."""
         raise NotImplementedError
 
-    def sample(self, key: Array, predicted: Array, *, context: Any = None) -> Array:
+    def sample(self, key: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Generate one observation replicate at the predicted values."""
         raise NotImplementedError
 
-    def score(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def score(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return ``d log_prob / d predicted`` in prediction coordinates."""
         return jax.jacfwd(lambda mean: self.log_prob(observed, mean, context=context))(predicted)
 
-    def expected_information(self, predicted: Array, *, context: Any = None) -> OutputInformation:
+    def expected_information(
+        self, predicted: Array, *, context: PyTree = None
+    ) -> OutputInformation:
         """Return the output-space expected Fisher information as actions."""
         raise NotImplementedError
 
-    def standardize(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def standardize(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return residuals scaled to unit variance under this model."""
         raise NotImplementedError
 
@@ -181,7 +183,7 @@ class Likelihood(eqx.Module):
         keep: Array,
         *,
         full_prediction_shape: tuple,
-        context: Any = None,
+        context: PyTree = None,
     ) -> tuple:
         """Return the likelihood/context view for statically kept frames.
 
@@ -207,7 +209,7 @@ class Likelihood(eqx.Module):
 
 
 def _select_pointwise_field(
-    value: Any,
+    value: ArrayLike | Sequence,
     keep: Array,
     full_prediction_shape: tuple,
     *,
@@ -257,33 +259,33 @@ class Gaussian(Likelihood):
         """Observation standard deviation."""
         return self.scale
 
-    def log_prob(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def log_prob(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the normalized total log probability of the observed event(s)."""
         z = (observed - predicted) / self.scale
         n = observed.size
         log_scales = jnp.sum(jnp.broadcast_to(jnp.log(self.scale), observed.shape))
         return -0.5 * jnp.sum(z**2) - log_scales - 0.5 * n * _LOG_2PI
 
-    def sample(self, key: Array, predicted: Array, *, context: Any = None) -> Array:
+    def sample(self, key: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Generate one observation replicate at the predicted values."""
         return predicted + self.scale * jax.random.normal(key, predicted.shape)
 
-    def score(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def score(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the independent-Gaussian location score."""
         return (observed - predicted) / self.scale**2
 
     def expected_information(
-        self, predicted: Array, *, context: Any = None
+        self, predicted: Array, *, context: PyTree = None
     ) -> DiagonalOutputInformation:
         """Return the output-space expected Fisher information as actions."""
         return DiagonalOutputInformation(scale=jnp.broadcast_to(self.scale, predicted.shape))
 
-    def standardize(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def standardize(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return residuals scaled to unit variance under this model."""
         return (observed - predicted) / self.scale
 
     def for_frames(
-        self, keep: Array, *, full_prediction_shape: tuple, context: Any = None
+        self, keep: Array, *, full_prediction_shape: tuple, context: PyTree = None
     ) -> tuple:
         """Select a frame-aligned scale while preserving shared output scales."""
         scale = _select_pointwise_field(
@@ -295,12 +297,12 @@ class Gaussian(Likelihood):
         return eqx.tree_at(lambda likelihood: likelihood.scale, self, scale), context
 
     def least_squares_rows(
-        self, observed: Array, predicted: Array, *, context: Any = None
+        self, observed: Array, predicted: Array, *, context: PyTree = None
     ) -> Array:
         """Whitened residual rows whose squared 2-norm is the data misfit."""
         return (observed - predicted) / self.scale
 
-    def log_normalizer(self, predicted: Array, *, context: Any = None) -> Array:
+    def log_normalizer(self, predicted: Array, *, context: PyTree = None) -> Array:
         """Log of the density normalization at the predicted values."""
         log_scales = jnp.sum(jnp.broadcast_to(jnp.log(self.scale), predicted.shape))
         return -log_scales - 0.5 * predicted.size * _LOG_2PI
@@ -323,21 +325,21 @@ class CorrelatedGaussian(Likelihood):
         z = jax.vmap(lambda row: solve_triangular(self.cholesky, row, lower=True))(flat)
         return z.reshape(v.shape)
 
-    def log_prob(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def log_prob(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the normalized total log probability of the observed event(s)."""
         z = self._whiten_event(observed - predicted)
         n_events = observed.size // self.cholesky.shape[0]
         log_det = 2.0 * jnp.sum(jnp.log(jnp.diag(self.cholesky)))
         return -0.5 * jnp.sum(z**2) - 0.5 * n_events * (log_det + self.cholesky.shape[0] * _LOG_2PI)
 
-    def sample(self, key: Array, predicted: Array, *, context: Any = None) -> Array:
+    def sample(self, key: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Generate one observation replicate at the predicted values."""
         eps = jax.random.normal(key, predicted.shape)
         flat = eps.reshape((-1, self.cholesky.shape[0]))
         colored = jax.vmap(lambda row: self.cholesky @ row)(flat)
         return predicted + colored.reshape(predicted.shape)
 
-    def score(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def score(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the joint-Gaussian location score."""
         residual = observed - predicted
         flat = residual.reshape((-1, self.cholesky.shape[0]))
@@ -349,17 +351,17 @@ class CorrelatedGaussian(Likelihood):
         return jax.vmap(precision)(flat).reshape(residual.shape)
 
     def expected_information(
-        self, predicted: Array, *, context: Any = None
+        self, predicted: Array, *, context: PyTree = None
     ) -> CholeskyOutputInformation:
         """Return the output-space expected Fisher information as actions."""
         return CholeskyOutputInformation(cholesky=self.cholesky)
 
-    def standardize(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def standardize(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return residuals scaled to unit variance under this model."""
         return self._whiten_event(observed - predicted)
 
     def for_frames(
-        self, keep: Array, *, full_prediction_shape: tuple, context: Any = None
+        self, keep: Array, *, full_prediction_shape: tuple, context: PyTree = None
     ) -> tuple:
         """Select a temporal covariance when scalar-output frames are masked."""
         n_frames = int(full_prediction_shape[0])
@@ -379,19 +381,19 @@ class CorrelatedGaussian(Likelihood):
         )
 
     def least_squares_rows(
-        self, observed: Array, predicted: Array, *, context: Any = None
+        self, observed: Array, predicted: Array, *, context: PyTree = None
     ) -> Array:
         """Whitened residual rows whose squared 2-norm is the data misfit."""
         return self._whiten_event(observed - predicted)
 
-    def log_normalizer(self, predicted: Array, *, context: Any = None) -> Array:
+    def log_normalizer(self, predicted: Array, *, context: PyTree = None) -> Array:
         """Log of the density normalization at the predicted values."""
         n_events = predicted.size // self.cholesky.shape[0]
         log_det = 2.0 * jnp.sum(jnp.log(jnp.diag(self.cholesky)))
         return -0.5 * n_events * (log_det + self.cholesky.shape[0] * _LOG_2PI)
 
 
-def _require_positive(name: str, value: Any) -> None:
+def _require_positive(name: str, value: ArrayLike | Sequence) -> None:
     """Validate a likelihood constructor's positive scalar/array argument."""
     values = np.asarray(value)
     if not np.all(np.isfinite(values)) or np.any(values <= 0):
@@ -419,7 +421,7 @@ class Poisson(Likelihood):
         """Require a positive finite exposure."""
         _require_positive("Poisson exposure", self.exposure)
 
-    def log_prob(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def log_prob(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the normalized independent-Poisson log probability."""
         observed = jnp.asarray(observed)
         predicted = jnp.asarray(predicted)
@@ -428,12 +430,12 @@ class Poisson(Likelihood):
         valid = jnp.all(_valid_counts(observed)) & jnp.all(predicted >= 0)
         return jnp.where(valid, jnp.sum(terms), -jnp.inf)
 
-    def sample(self, key: Array, predicted: Array, *, context: Any = None) -> Array:
+    def sample(self, key: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Generate independent counts at ``exposure * predicted``."""
         predicted = jnp.asarray(predicted)
         return jax.random.poisson(key, lam=self.exposure * predicted, shape=predicted.shape)
 
-    def score(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def score(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the rate score, using the finite zero-count limit."""
         observed = jnp.asarray(observed)
         predicted = jnp.asarray(predicted)
@@ -444,20 +446,20 @@ class Poisson(Likelihood):
         )
 
     def expected_information(
-        self, predicted: Array, *, context: Any = None
+        self, predicted: Array, *, context: PyTree = None
     ) -> DiagonalOutputInformation:
         """Return exact rate-coordinate Fisher information ``exposure / rate``."""
         predicted = jnp.asarray(predicted)
         return DiagonalOutputInformation(scale=jnp.sqrt(predicted / self.exposure))
 
-    def standardize(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def standardize(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return Pearson residuals, with degenerate zero events set to zero."""
         mean = self.exposure * jnp.asarray(predicted)
         residual = jnp.asarray(observed) - mean
         return jnp.where(mean == 0, jnp.zeros_like(residual), residual / jnp.sqrt(mean))
 
     def least_squares_rows(
-        self, observed: Array, predicted: Array, *, context: Any = None
+        self, observed: Array, predicted: Array, *, context: PyTree = None
     ) -> Array:
         """Return signed Poisson deviance residuals.
 
@@ -505,7 +507,7 @@ class Poisson(Likelihood):
         return jnp.asarray(observed) / self.exposure
 
     def for_frames(
-        self, keep: Array, *, full_prediction_shape: tuple, context: Any = None
+        self, keep: Array, *, full_prediction_shape: tuple, context: PyTree = None
     ) -> tuple:
         """Select frame-aligned exposures for kept predictions."""
         exposure = _select_pointwise_field(
@@ -539,7 +541,7 @@ class StudentT(Likelihood):
         _require_positive("StudentT df", self.df)
         _require_positive("StudentT scale", self.scale)
 
-    def log_prob(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def log_prob(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the normalized independent Student-t log probability."""
         residual = jnp.asarray(observed) - jnp.asarray(predicted)
         normalizer = (
@@ -553,18 +555,18 @@ class StudentT(Likelihood):
         )
         return jnp.sum(terms)
 
-    def sample(self, key: Array, predicted: Array, *, context: Any = None) -> Array:
+    def sample(self, key: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Generate independent Student-t observation replicates."""
         predicted = jnp.asarray(predicted)
         return predicted + self.scale * jax.random.t(key, self.df, predicted.shape)
 
-    def score(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def score(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the bounded heavy-tail location score."""
         residual = jnp.asarray(observed) - jnp.asarray(predicted)
         return (self.df + 1.0) * residual / (self.df * self.scale**2 + residual**2)
 
     def expected_information(
-        self, predicted: Array, *, context: Any = None
+        self, predicted: Array, *, context: PyTree = None
     ) -> DiagonalOutputInformation:
         """Return exact Student-t location Fisher information."""
         scale = self.scale * jnp.sqrt((self.df + 3.0) / (self.df + 1.0))
@@ -572,13 +574,13 @@ class StudentT(Likelihood):
             scale=jnp.broadcast_to(scale, jnp.asarray(predicted).shape)
         )
 
-    def standardize(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def standardize(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the score residual standardized to unit model variance."""
         info_scale = self.scale * jnp.sqrt((self.df + 3.0) / (self.df + 1.0))
         return self.score(observed, predicted, context=context) * info_scale
 
     def least_squares_rows(
-        self, observed: Array, predicted: Array, *, context: Any = None
+        self, observed: Array, predicted: Array, *, context: PyTree = None
     ) -> Array:
         """Return exact signed Student-t deviance residuals.
 
@@ -597,7 +599,7 @@ class StudentT(Likelihood):
         return standardized * jnp.sqrt((self.df + 1.0) * ratio)
 
     def for_frames(
-        self, keep: Array, *, full_prediction_shape: tuple, context: Any = None
+        self, keep: Array, *, full_prediction_shape: tuple, context: PyTree = None
     ) -> tuple:
         """Select frame-aligned degrees of freedom and scales."""
         df = _select_pointwise_field(self.df, keep, full_prediction_shape, who="StudentT df")
@@ -632,7 +634,7 @@ class LogNormal(Likelihood):
         safe_predicted = jnp.where(predicted > 0, predicted, 1.0)
         return jnp.log(safe_observed) - jnp.log(safe_predicted) + 0.5 * self.scale**2
 
-    def log_prob(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def log_prob(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the normalized mean-preserving log-normal log probability."""
         observed = jnp.asarray(observed)
         predicted = jnp.asarray(predicted)
@@ -647,25 +649,25 @@ class LogNormal(Likelihood):
         valid = jnp.all(observed > 0) & jnp.all(predicted > 0)
         return jnp.where(valid, jnp.sum(terms), -jnp.inf)
 
-    def sample(self, key: Array, predicted: Array, *, context: Any = None) -> Array:
+    def sample(self, key: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Generate positive observations while preserving ``predicted`` as mean."""
         predicted = jnp.asarray(predicted)
         eps = jax.random.normal(key, predicted.shape)
         return predicted * jnp.exp(-0.5 * self.scale**2 + self.scale * eps)
 
-    def score(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def score(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the mean-coordinate log-normal score."""
         predicted = jnp.asarray(predicted)
         return self._log_residual(jnp.asarray(observed), predicted) / (self.scale**2 * predicted)
 
     def expected_information(
-        self, predicted: Array, *, context: Any = None
+        self, predicted: Array, *, context: PyTree = None
     ) -> DiagonalOutputInformation:
         """Return exact mean-coordinate Fisher information."""
         predicted = jnp.asarray(predicted)
         return DiagonalOutputInformation(scale=self.scale * predicted)
 
-    def standardize(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def standardize(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the unit-normal log-space residual."""
         return self._log_residual(jnp.asarray(observed), jnp.asarray(predicted)) / self.scale
 
@@ -675,7 +677,7 @@ class LogNormal(Likelihood):
         return jnp.where((observed > 0) & (predicted > 0), rows, jnp.inf)
 
     def for_frames(
-        self, keep: Array, *, full_prediction_shape: tuple, context: Any = None
+        self, keep: Array, *, full_prediction_shape: tuple, context: PyTree = None
     ) -> tuple:
         """Select frame-aligned log-space scales."""
         scale = _select_pointwise_field(
@@ -699,7 +701,7 @@ class MultiplicativeGaussian(Likelihood):
         """Require a positive relative standard deviation."""
         _require_positive("MultiplicativeGaussian scale", self.scale)
 
-    def log_prob(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def log_prob(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the normalized parameter-dependent Gaussian log probability."""
         observed = jnp.asarray(observed)
         predicted = jnp.asarray(predicted)
@@ -709,26 +711,26 @@ class MultiplicativeGaussian(Likelihood):
         terms = -0.5 * residual**2 - jnp.log(sd) - 0.5 * _LOG_2PI
         return jnp.where(jnp.all(predicted != 0), jnp.sum(terms), -jnp.inf)
 
-    def sample(self, key: Array, predicted: Array, *, context: Any = None) -> Array:
+    def sample(self, key: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Generate Gaussian observations with relative standard deviation."""
         predicted = jnp.asarray(predicted)
         return predicted + self.scale * jnp.abs(predicted) * jax.random.normal(key, predicted.shape)
 
-    def score(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def score(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the full mean-and-variance score in prediction coordinates."""
         observed = jnp.asarray(observed)
         predicted = jnp.asarray(predicted)
         return observed * (observed - predicted) / (self.scale**2 * predicted**3) - 1.0 / predicted
 
     def expected_information(
-        self, predicted: Array, *, context: Any = None
+        self, predicted: Array, *, context: PyTree = None
     ) -> DiagonalOutputInformation:
         """Return ``(scale**-2 + 2) / predicted**2`` exactly."""
         predicted = jnp.asarray(predicted)
         precision = (self.scale**-2 + 2.0) / predicted**2
         return DiagonalOutputInformation(scale=1.0 / jnp.sqrt(precision))
 
-    def standardize(self, observed: Array, predicted: Array, *, context: Any = None) -> Array:
+    def standardize(self, observed: Array, predicted: Array, *, context: PyTree = None) -> Array:
         """Return the unit-normal relative residual."""
         predicted = jnp.asarray(predicted)
         return (jnp.asarray(observed) - predicted) / (self.scale * jnp.abs(predicted))
@@ -738,7 +740,7 @@ class MultiplicativeGaussian(Likelihood):
         return (jnp.asarray(observed) - predicted) / (self.scale * predicted)
 
     def for_frames(
-        self, keep: Array, *, full_prediction_shape: tuple, context: Any = None
+        self, keep: Array, *, full_prediction_shape: tuple, context: PyTree = None
     ) -> tuple:
         """Select frame-aligned relative-error scales."""
         scale = _select_pointwise_field(

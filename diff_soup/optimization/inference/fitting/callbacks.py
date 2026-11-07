@@ -11,11 +11,13 @@ import json
 import os
 import tempfile
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Optional
 
 import numpy as np
+from jaxtyping import PyTree
 
 from diff_soup.optimization.inference.fitting.result import (
     OptResult,
@@ -143,7 +145,7 @@ _COUNTERS = (
 )
 
 
-def _jsonable(value: Any) -> Any:
+def _jsonable(value: PyTree) -> bool | int | float | str | None:
     """Plain JSON for a step record's value."""
     if value is None or isinstance(value, (bool, int, str)):
         return value
@@ -171,7 +173,7 @@ def _step_fields(info: StepInfo) -> dict:
     }
 
 
-def _attempt_files(directory: Any) -> tuple[Path, ...]:
+def _attempt_files(directory: str | os.PathLike) -> tuple[Path, ...]:
     """The ``attempt-NNNNNN.npz`` files in ``directory``, oldest attempt first."""
     root = Path(directory)
     if not root.is_dir():
@@ -179,7 +181,7 @@ def _attempt_files(directory: Any) -> tuple[Path, ...]:
     return tuple(sorted(root.glob(f"{_ATTEMPT_PREFIX}*.npz")))
 
 
-def checkpoint_files(directory: Any) -> tuple[Path, ...]:
+def checkpoint_files(directory: str | os.PathLike) -> tuple[Path, ...]:
     """The resumable results in ``directory`` written by ``CheckpointCallback``, oldest first.
 
     These are the ``attempt-NNNNNN.npz`` files of a solver that resumes its
@@ -195,7 +197,7 @@ def checkpoint_files(directory: Any) -> tuple[Path, ...]:
     return tuple(sorted(root.glob(f"{_CHECKPOINT_PREFIX}*.npz")))
 
 
-def last_checkpoint_event(directory: Any) -> Optional[dict]:
+def last_checkpoint_event(directory: str | os.PathLike) -> Optional[dict]:
     """The last step record in ``directory``'s event log, or ``None`` without one."""
     path = Path(directory) / _EVENTS_FILE
     if not path.is_file():
@@ -223,7 +225,7 @@ class CheckpointCallback(Callback):
         keep: `"last"` keeps the newest saved attempt, `"best"` also the one of lowest cost, and `"all"` every one.
     """
 
-    def __init__(self, directory: Any, every: int = 1, keep: str = "last"):
+    def __init__(self, directory: str | os.PathLike, every: int = 1, keep: str = "last"):
         """Create ``directory`` and read what a continued run needs from it.
 
         Args:
@@ -331,7 +333,7 @@ class CheckpointCallback(Callback):
             record[name] = None if value is None else self._counter_offsets[name] + int(value)
         return record
 
-    def _attempt_record(self, info: StepInfo, state: Any) -> dict:
+    def _attempt_record(self, info: StepInfo, state: Mapping[str, PyTree]) -> dict:
         """The event of an attempt of a solver that resumes its state, numbered by the solver."""
         record = {
             "event": "step",
@@ -372,7 +374,7 @@ class CheckpointCallback(Callback):
                 os.remove(temporary)
             raise
 
-    def _save_attempt(self, info: StepInfo, state: Any) -> None:
+    def _save_attempt(self, info: StepInfo, state: Mapping[str, PyTree]) -> None:
         """Write ``attempt-NNNNNN.npz`` for the attempt just made, then apply ``keep``."""
         attempt = int(info.step)
         accepted = int(np.asarray(state["accepted"]))

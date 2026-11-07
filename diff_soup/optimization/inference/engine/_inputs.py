@@ -33,12 +33,16 @@ from __future__ import annotations
 
 import dataclasses
 import numbers
+from collections.abc import Hashable, Iterable, Sequence
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
+from numpy.typing import DTypeLike
 
+from diff_soup._schedule import ScheduleArrays
 from diff_soup.optimization.inference.engine._capacity import Frames, lane_frames, smallest_frames
 from diff_soup.optimization.inference.engine._identity import (
     _lane_streams,
@@ -47,7 +51,12 @@ from diff_soup.optimization.inference.engine._identity import (
     lane_identity,
     lane_refusal,
 )
-from diff_soup.optimization.inference.engine._kernel import LaneInputs, LaneProgram, StreamInputs
+from diff_soup.optimization.inference.engine._kernel import (
+    LaneInputs,
+    LaneProgram,
+    LaneResult,
+    StreamInputs,
+)
 from diff_soup.optimization.inference.engine._layout import (
     LaneLayout,
     _window_count,
@@ -55,6 +64,7 @@ from diff_soup.optimization.inference.engine._layout import (
     lane_problems,
 )
 from diff_soup.optimization.inference.engine._reducers import TreeTables, tree_tables
+from diff_soup.optimization.inference.fitting.series import Series
 
 Array = jax.Array
 
@@ -88,7 +98,7 @@ class LaneGroup:
         """The number of lanes."""
         return len(self.lane_ids)
 
-    def points(self, x: Any) -> Array:
+    def points(self, x: ArrayLike | Sequence) -> Array:
         """The narrow point of every lane at the joint parameter vector ``x``."""
         return jnp.asarray(x)[self.gather]
 
@@ -120,7 +130,9 @@ def _check_same_program(children: tuple, lane_ids: tuple) -> None:
             )
 
 
-def _lane_schedules(problems: tuple, lane_ids: tuple, segments: Any) -> Any:
+def _lane_schedules(
+    problems: tuple, lane_ids: tuple, segments: Any
+) -> tuple[ScheduleArrays, ...] | None:
     """Each lane's schedule arrays padded to one capacity, or ``None`` when no lane has one.
 
     Reads every experiment's lowered schedule on the host and refuses what is
@@ -166,7 +178,7 @@ def _lane_schedules(problems: tuple, lane_ids: tuple, segments: Any) -> Any:
     return tuple(items.padded(capacity, degree=degree) for items in arrays)
 
 
-def _configured_first_step(solver: Any, lane: Any, dtype: Any) -> np.ndarray:
+def _configured_first_step(solver: Any, lane: Hashable, dtype: DTypeLike) -> np.ndarray:
     """The first step ``solver`` starts its solves from, ``0`` when it names none.
 
     The solver names one with a ``dt0`` attribute; ``None`` or no attribute
@@ -195,7 +207,9 @@ def _padded_times(times: np.ndarray, capacity: int) -> np.ndarray:
     return np.concatenate([times, extra])
 
 
-def _likelihood_numbers(series: Any, capacity: int, frames: Any = None) -> Any:
+def _likelihood_numbers(
+    series: Series, capacity: int, frames: Sequence[numbers.Integral] | np.ndarray | None = None
+) -> Any:
     """The stream's likelihood object with its leaves as host numbers for ``capacity`` frames.
 
     ``frames`` are the frames of the stream the lane holds, every frame when
@@ -231,7 +245,11 @@ def _likelihood_numbers(series: Any, capacity: int, frames: Any = None) -> Any:
 
 
 def _stream_arrays(
-    series: Any, times: np.ndarray, capacity: int, dtype: Any, frames: Any = None
+    series: Series,
+    times: np.ndarray,
+    capacity: int,
+    dtype: DTypeLike,
+    frames: Sequence[numbers.Integral] | np.ndarray | None = None,
 ) -> tuple:
     """The host arrays of one stream of one lane, padded to ``capacity`` frames.
 
@@ -269,7 +287,7 @@ def _stream_arrays(
     )
 
 
-def _lane_spans(child: Any, dtype: Any) -> tuple:
+def _lane_spans(child: Any, dtype: DTypeLike) -> tuple:
     """Per lane of one experiment, ``(y0, times, streams)``: its start, its times, what it scores.
 
     ``y0`` is the lane's initial state, ``times`` its sample times from the
@@ -282,7 +300,7 @@ def _lane_spans(child: Any, dtype: Any) -> tuple:
     that frame's time, and holds the one frame of the scored stream at its end.
     """
     from diff_soup.optimization.inference.fitting._forward_seam import observed_windows
-    from diff_soup.optimization.inference.fitting.joint import _resolve_child_y0
+    from diff_soup.optimization.inference.fitting._joint_residual import _resolve_child_y0
 
     if not _window_count(child):
         times = np.asarray(child._union_ts, dtype=dtype).reshape(-1)
@@ -296,7 +314,7 @@ def _lane_spans(child: Any, dtype: Any) -> tuple:
     )
 
 
-def _stack(trees: list) -> Any:
+def _stack(trees: list) -> PyTree:
     """Stack the host leaves of equal trees on a leading lane axis, in numpy."""
 
     def stack(*leaves):
@@ -413,7 +431,7 @@ def _lane_group(
     *,
     frames: Any,
     segments: Any,
-    device: Any = None,
+    device: jax.Device | None = None,
 ) -> LaneGroup:
     """``lane_group`` of the lanes ``layout`` places, whose fitted problems are ``every``.
 
@@ -525,7 +543,7 @@ def _lane_group(
     )
 
 
-def tree_of(joint: Any, groups: Any) -> tuple[TreeTables, tuple]:
+def tree_of(joint: Any, groups: Iterable[LaneGroup]) -> tuple[TreeTables, tuple]:
     """The tables of the parameter tree for the lanes of several groups.
 
     The lanes are taken group after group, each group in its own order; lane
@@ -563,7 +581,7 @@ def tree_of(joint: Any, groups: Any) -> tuple[TreeTables, tuple]:
     return tables, tuple(lane for group in groups for lane in group.lane_ids)
 
 
-def concatenate_results(results: Any) -> Any:
+def concatenate_results(results: Iterable[LaneResult]) -> LaneResult:
     """Concatenate the lane results of several groups along the lane axis."""
     results = tuple(results)
 
@@ -575,7 +593,7 @@ def concatenate_results(results: Any) -> Any:
     return jax.tree_util.tree_map(join, *results, is_leaf=lambda leaf: leaf is None)
 
 
-def lanes_at(lanes: LaneInputs, index: Any) -> LaneInputs:
+def lanes_at(lanes: LaneInputs, index: ArrayLike | Sequence) -> LaneInputs:
     """The lanes at the given positions of a stacked batch."""
     index = jnp.asarray(index, dtype=jnp.int32)
     return jax.tree_util.tree_map(lambda leaf: leaf[index], lanes)

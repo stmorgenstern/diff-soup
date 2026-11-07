@@ -18,12 +18,13 @@ and record nothing.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Hashable, Iterable, Mapping
+from os import PathLike
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
+from diff_soup.optimization.inference.engine._result import Results
 from diff_soup.optimization.inference.engine._status import ABSENT
 
 KEEP: int = 8
@@ -32,7 +33,7 @@ KEEP: int = 8
 _PREFIX = "ledger."
 
 
-def attributed_seconds(results: Any) -> np.ndarray:
+def attributed_seconds(results: Results) -> np.ndarray:
     """Per unit of ``results``, ``(P, L)``, its share of its bucket's wall seconds.
 
     A bucket's seconds (``Results.seconds``) are shared among its evaluated
@@ -84,7 +85,7 @@ class Ledger:
             first, ``-1`` where fewer were recorded.
     """
 
-    def __init__(self, lane_ids: Any):
+    def __init__(self, lane_ids: Iterable[Hashable]):
         """Start an empty ledger for the lanes ``lane_ids``."""
         self.lane_ids = tuple(lane_ids)
         self.position = {lane: index for index, lane in enumerate(self.lane_ids)}
@@ -94,7 +95,7 @@ class Ledger:
         self.seconds = np.zeros((count,), dtype=np.float64)
         self.kinds = np.full((count, KEEP), -1, dtype=np.int64)
 
-    def record(self, results: Any) -> None:
+    def record(self, results: Results) -> None:
         """Add the evaluated units of ``results`` to their lanes."""
         kinds = np.asarray(results.status.kind)
         if kinds.ndim != 2:
@@ -167,7 +168,7 @@ class Ledger:
         return True
 
     @classmethod
-    def load(cls, path: Any) -> Ledger:
+    def load(cls, path: str | PathLike[str]) -> Ledger:
         """The ledger a checkpoint saved: an ``attempt-`` or ``population-`` file, or its directory.
 
         A directory gives its newest such file.

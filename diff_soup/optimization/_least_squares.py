@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
+from jaxtyping import PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization import _derived
@@ -70,13 +71,13 @@ class LeastSquaresProblem(OptimizationProblem):
         x0: Any,
         residual: Callable,
         *,
-        args: Any = None,
+        args: PyTree = None,
         jacobian: Callable | None = None,
-        regularization: Any = None,
+        regularization: object = None,
         bounds: Any = None,
         is_valid: Callable | None = None,
         unflatten: Callable | None = None,
-        static: Any = None,
+        static: PyTree = None,
         segment_fns: tuple[Callable, ...] = (),
         hessian: bool = True,
         hessian_composition: str = "forward-over-reverse",

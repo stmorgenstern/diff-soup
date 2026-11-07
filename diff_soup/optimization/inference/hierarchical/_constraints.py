@@ -12,6 +12,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+from numpy.typing import DTypeLike
 
 from diff_soup._distributed import local_value
 from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
@@ -25,7 +26,7 @@ def _constraint_rows(
     constraints: Any,
     gauges: Any,
     owner_weights: Array,
-    dtype: Any,
+    dtype: DTypeLike,
 ) -> tuple[Array, Array]:
     """Lower named linear constraints and gauges to flat joint rows."""
     from diff_soup.optimization.inference.statistics.parameters import Gauge, LinearConstraint

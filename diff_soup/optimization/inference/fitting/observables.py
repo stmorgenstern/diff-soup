@@ -18,15 +18,16 @@ imports as a scalar channel.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, Optional
+from collections.abc import Callable, Sequence
+from typing import Optional
 
 import equinox as eqx
 import jax.numpy as jnp
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup.optimization.inference.data.base import ObservationOperator
 from diff_soup.optimization.inference.data.distribution import CDFBins, Moments, SoftHistogram
+from diff_soup.optimization.inference.fitting.series import Series
 
 __all__ = [
     "Observable",
@@ -50,7 +51,7 @@ class DiagonalNoise(eqx.Module):
 
     sigma: Array
 
-    def __init__(self, sigma: Any):
+    def __init__(self, sigma: ArrayLike | Sequence[float]):
         """Validate and store the standard deviation(s).
 
         Args:
@@ -144,7 +145,7 @@ class Observable(eqx.Module):
         self.noise = noise
         self.wrt_theta = wrt_theta
 
-    def __call__(self, u: Array, *, t: Any = None, theta: Any = None) -> Array:
+    def __call__(self, u: Array, *, t: Optional[ArrayLike] = None, theta: PyTree = None) -> Array:
         """Evaluate the readout on one state frame.
 
         Args:
@@ -176,7 +177,7 @@ class _ObservableOperator(ObservationOperator):
     """
 
     fn: Callable = eqx.field(static=True)
-    theta: Any = None
+    theta: PyTree = None
     wrt_theta: bool = eqx.field(static=True, default=False)
 
     @property
@@ -189,25 +190,25 @@ class _ObservableOperator(ObservationOperator):
         """
         return bool(getattr(self.fn, "is_full_state", False))
 
-    def _theta_for_call(self, theta: Any) -> Any:
+    def _theta_for_call(self, theta: PyTree) -> PyTree:
         """Select the theta the readout sees (bound > trial-if-declared > None)."""
         if self.theta is not None:
             return self.theta
         return theta if self.wrt_theta else None
 
-    def predict(self, u: Array, t: Any, theta: Any) -> Array:
+    def predict(self, u: Array, t: Optional[ArrayLike], theta: PyTree) -> Array:
         """Evaluate the readout at one frame, threading time and parameters."""
         return self.fn(u, t=t, theta=self._theta_for_call(theta))
 
 
 def as_series(
     observable: Observable,
-    ts: Any,
-    values: Any,
+    ts: ArrayLike | Sequence,
+    values: ArrayLike | Sequence,
     *,
-    theta: Any = None,
+    theta: PyTree = None,
     name: Optional[str] = None,
-) -> Any:
+) -> Series:
     """Bind observed data to a channel as a fit-ready data stream.
 
     The one-channel-two-uses bridge: the same [Observable][] that drives

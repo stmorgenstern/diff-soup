@@ -5,7 +5,7 @@
 # splitting it would scatter the residual-stack pieces that must stay co-located.
 """_windows_dv.py — decision-variable multishoot machinery.
 
-A decision-variable [Multishoot][diff_soup.optimization.inference.fitting.inference_problem.Multishoot] optimizes
+A decision-variable [Multishoot][diff_soup.optimization.inference.fitting.formulation.Multishoot] optimizes
 ``x = [θ̃ | s̃₁ … s̃_{W−1}]`` where ``s̃_w`` are the *differential* components
 of the window-start state (window 0 starts at the fixed IC ``y0``).  The
 residual stack is:
@@ -77,20 +77,32 @@ Key design decisions:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.typing import DTypeLike
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup._logging import log as logger
 from diff_soup._warnings import warn_user
-from diff_soup.optimization.inference.fitting._forward_seam import _solution_failed
+from diff_soup.optimization.inference.fitting._forward_seam import ForwardSeam, _solution_failed
 from diff_soup.optimization.inference.fitting._lane_map import lane_map
 from diff_soup.optimization.inference.fitting.dependencies import (
     ResidualDependencyBlock,
     ResidualDependencyBucket,
 )
+from diff_soup.optimization.inference.fitting.series import Series
+from diff_soup.optimization.inference.fitting.windows import (
+    Continuity,
+    RestartStep,
+    StateBasis,
+    WindowInitialization,
+    Windows,
+)
+from diff_soup.timestepping.vsvo.solution import Solution
 
 # Dense-GN decision-variable ceiling: beyond this, the dense normal-equation
 # solve is the cost wall; condensed sparse Gauss-Newton is unavailable. The
@@ -100,7 +112,7 @@ from diff_soup.optimization.inference.fitting.dependencies import (
 _DENSE_GN_CEIL = 2000
 
 
-def _trial_steps(sol: Any) -> jax.Array:
+def _trial_steps(sol: Solution) -> jax.Array:
     """The integrator's trial-step count of one solution, zero when it reports none."""
     steps = getattr(getattr(sol, "stats", None), "trial_steps", None)
     if steps is None:
@@ -182,14 +194,14 @@ class WindowLayout:
         return jnp.where(mask, _embed_diff(s_diff, self.diff_mask, full.dtype), full)
 
 
-def _embed_diff(s_diff: jax.Array, diff_mask: np.ndarray, dtype: Any) -> jax.Array:
+def _embed_diff(s_diff: jax.Array, diff_mask: np.ndarray, dtype: DTypeLike) -> jax.Array:
     """Embed a packed differential vector into full-state positions (zeros elsewhere)."""
     idx = jnp.asarray(np.where(diff_mask)[0])
     full = jnp.zeros((diff_mask.shape[0],), dtype=dtype)
     return full.at[idx].set(jnp.asarray(s_diff, dtype=dtype))
 
 
-def observation_row_scale(series: Any) -> float:
+def observation_row_scale(series: Series) -> float:
     """RMS whitening magnitude of one scored stream's observation rows.
 
     Pointwise-weighted rows carry ``1/sigma`` explicitly, so their scale is
@@ -226,7 +238,7 @@ def observation_row_scale(series: Any) -> float:
 
 
 def resolve_continuity_weight(
-    weight: Any,
+    weight: str | float,
     s_diff: jax.Array,
     atol: float,
     rtol: float,
@@ -266,7 +278,7 @@ def resolve_continuity_weight(
     return jnp.full_like(jnp.asarray(s_diff), scalar)
 
 
-def boundaries_from_windows(windows: Any, ts: np.ndarray, t0: float) -> np.ndarray:
+def boundaries_from_windows(windows: Windows, ts: np.ndarray, t0: float) -> np.ndarray:
     """Resolve a [Windows][diff_soup.optimization.inference.fitting.windows.Windows] spec to the ``(W+1,)`` boundary times.
 
     Args:
@@ -506,7 +518,7 @@ def warn_if_over_ceiling(n_decision: int) -> Optional[str]:
 
 
 class DecisionWindowBuild:
-    """Built closures + host metadata for a decision-variable [Multishoot][diff_soup.optimization.inference.fitting.inference_problem.Multishoot].
+    """Built closures + host metadata for a decision-variable [Multishoot][diff_soup.optimization.inference.fitting.formulation.Multishoot].
 
     Encapsulates the residual stack so ``inference_problem.py`` stays thin: the
     per-window propagation through ``pdesolve`` (theta threaded for AD,
@@ -517,12 +529,12 @@ class DecisionWindowBuild:
     def __init__(
         self,
         *,
-        seam: Any,
+        seam: ForwardSeam,
         solver: Any,
-        series: Any,
+        series: Series,
         layout: WindowLayout,
         y0: jax.Array,
-        continuity: Any,
+        continuity: Continuity,
         state_prior_weight: float,
         theta_only_steps: int,
         project_windows: bool,
@@ -530,9 +542,9 @@ class DecisionWindowBuild:
         atol: float,
         rtol: float,
         failed_sentinel: float,
-        states: Any = None,
-        initialization: Any = None,
-        restart_step: Any = None,
+        states: Optional[StateBasis] = None,
+        initialization: Optional[WindowInitialization] = None,
+        restart_step: Optional[RestartStep] = None,
     ):
         """Build the decision-variable window closures (eager, outside any trace)."""
         from diff_soup import SaveAt
@@ -630,7 +642,7 @@ class DecisionWindowBuild:
 
     # --- propagation --------------------------------------------------------
 
-    def _theta_pytree(self, x: jax.Array) -> Any:
+    def _theta_pytree(self, x: jax.Array) -> PyTree:
         """Reconstruct the full θ pytree from the θ̃ block of x."""
         return self.seam.theta_of(self.layout.theta_of(x))
 
@@ -640,12 +652,12 @@ class DecisionWindowBuild:
 
     def _propagate(
         self,
-        theta_p: Any,
+        theta_p: PyTree,
         y_start: jax.Array,
         t0: float,
         t1: float,
-        segment_index: Any = 0,
-    ) -> Any:
+        segment_index: ArrayLike = 0,
+    ) -> Solution:
         """Solve one window forward from ``y_start``.
 
         Returns the full
@@ -655,13 +667,13 @@ class DecisionWindowBuild:
 
     def _propagate_traced(
         self,
-        theta_p: Any,
+        theta_p: PyTree,
         y_start: jax.Array,
-        t0: Any,
-        t1: Any,
-        segment_index: Any = 0,
-        save_ts: Any = None,
-    ) -> Any:
+        t0: ArrayLike,
+        t1: ArrayLike,
+        segment_index: ArrayLike = 0,
+        save_ts: Optional[ArrayLike] = None,
+    ) -> Solution:
         """Solve one segment forward; ``t0``/``t1`` may be traced (mapped) scalars.
 
         Without ``save_ts`` the solve saves its end state only, through a
@@ -756,7 +768,7 @@ class DecisionWindowBuild:
 
     def residual_kernel(
         self,
-        theta_p: Any,
+        theta_p: PyTree,
         state_block: jax.Array,
         y0: jax.Array,
         anchors: jax.Array,
@@ -765,7 +777,7 @@ class DecisionWindowBuild:
         *,
         parallel_segments: bool = True,
         with_steps: bool = False,
-    ) -> Any:
+    ) -> jax.Array | tuple[jax.Array, jax.Array]:
         """The residual stack as a pure function of one trajectory's dynamic data.
 
         This is the single implementation of the window residual algebra. The leaf
@@ -815,7 +827,7 @@ class DecisionWindowBuild:
 
     def _rows_from(
         self,
-        theta_p: Any,
+        theta_p: PyTree,
         state_block: jax.Array,
         starts: jax.Array,
         anchors: jax.Array,
@@ -835,7 +847,7 @@ class DecisionWindowBuild:
         stack = jnp.concatenate(rows)
         return jnp.where(any_failed, jnp.full_like(stack, self._sentinel), stack)
 
-    def residual_and_jacobian(self, x: jax.Array, *, tile: Any = "full") -> tuple:
+    def residual_and_jacobian(self, x: jax.Array, *, tile: Optional[int | str] = "full") -> tuple:
         """The residual stack at ``x`` and its Jacobian, with one solve tangent per block column.
 
         A window's solve reads the parameters and its own start, nothing else.
@@ -982,7 +994,7 @@ class DecisionWindowBuild:
 
     def window_residual_kernel(
         self,
-        theta_p: Any,
+        theta_p: PyTree,
         state_block: jax.Array,
         y0: jax.Array,
         anchors: jax.Array,
@@ -1441,7 +1453,7 @@ class DecisionWindowBuild:
         return self._start_stack_from(self.layout.state_blocks(x), self.y0, self._anchor_stack)
 
     def _propagate_segments(
-        self, theta_p: Any, starts: jax.Array, *, parallel: bool = True
+        self, theta_p: PyTree, starts: jax.Array, *, parallel: bool = True
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """Solve every planned window once, in one batch, saving its planned times.
 
@@ -1492,7 +1504,7 @@ class DecisionWindowBuild:
         ends, failed, _steps = self._propagate_segments(self._theta_pytree(x), starts)
         return ends, failed
 
-    def _likelihood_view(self, frames: Any) -> tuple:
+    def _likelihood_view(self, frames: ArrayLike | Sequence) -> tuple:
         """Declared likelihood and context restricted to the given data frames.
 
         Returns ``(None, None)`` when the stream is weighted rather than
@@ -1508,7 +1520,7 @@ class DecisionWindowBuild:
 
     def _obs_rows_from(
         self,
-        theta_p: Any,
+        theta_p: PyTree,
         pool: jax.Array,
         targets: jax.Array,
         weight: Optional[jax.Array],

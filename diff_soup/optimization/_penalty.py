@@ -10,56 +10,62 @@ Gauss-Newton statistics and every Hessian. The residual rows stay the data's.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 import jax
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup.optimization._binding import Derived, Held
 from diff_soup.optimization._derived import half_sum_of_squares
 
 
-def _penalty(held: Held, x: Any) -> Any:
+def _penalty(held: Held, x: ArrayLike) -> tuple[Array, Array]:
     """The penalty and its gradient at `x`."""
     return jax.value_and_grad(held.value.penalty)(x)
 
 
-def _penalty_hessian(held: Held, x: Any) -> Any:
+def _penalty_hessian(held: Held, x: ArrayLike) -> Array:
     """The Hessian of the penalty at `x`."""
     return jax.hessian(held.value.penalty)(x)
 
 
-def _penalty_hessian_vector(held: Held, x: Any, v: Any) -> Any:
+def _penalty_hessian_vector(held: Held, x: ArrayLike, v: ArrayLike) -> Array:
     """The Hessian of the penalty at `x` times `v`."""
     return jax.jvp(jax.grad(held.value.penalty), (x,), (v,))[1]
 
 
-def _rows(held: Held, x: Any) -> tuple[Any, Any]:
+def _rows(held: Held, x: ArrayLike) -> tuple[Array, Array]:
     """The regularization's rows and their Jacobian at `x`."""
     residual = held.value.residual
     return residual(x), jax.jacfwd(residual)(x)
 
 
-def _value(value: Callable, held: Held, x: Any, args: Any) -> Any:
+def _value(value: Callable, held: Held, x: ArrayLike, args: PyTree) -> Array:
     return value(x, args) + held.value.penalty(x)
 
 
-def _value_and_gradient(value_and_gradient: Callable, held: Held, x: Any, args: Any) -> Any:
+def _value_and_gradient(
+    value_and_gradient: Callable, held: Held, x: ArrayLike, args: PyTree
+) -> tuple[Array, Array]:
     value, gradient = value_and_gradient(x, args)
     penalty, slope = _penalty(held, x)
     return value + penalty, gradient + slope
 
 
-def _value_gradient_hessian(value_gradient_hessian: Callable, held: Held, x: Any, args: Any):
+def _value_gradient_hessian(
+    value_gradient_hessian: Callable, held: Held, x: ArrayLike, args: PyTree
+):
     value, gradient, hessian = value_gradient_hessian(x, args)
     penalty, slope = _penalty(held, x)
     return value + penalty, gradient + slope, hessian + _penalty_hessian(held, x)
 
 
-def _hessian_vector(hessian_vector: Callable, held: Held, x: Any, v: Any, args: Any) -> Any:
+def _hessian_vector(
+    hessian_vector: Callable, held: Held, x: ArrayLike, v: ArrayLike, args: PyTree
+) -> Array:
     return hessian_vector(x, v, args) + _penalty_hessian_vector(held, x, v)
 
 
-def _gauss_newton(gauss_newton: Callable, held: Held, x: Any, args: Any) -> Any:
+def _gauss_newton(gauss_newton: Callable, held: Held, x: ArrayLike, args: PyTree) -> tuple:
     value, gradient, matrix, failed = gauss_newton(x, args)
     rows, jacobian = _rows(held, x)
     return (
@@ -70,12 +76,12 @@ def _gauss_newton(gauss_newton: Callable, held: Held, x: Any, args: Any) -> Any:
     )
 
 
-def _evaluate(evaluate: Callable, held: Held, x: Any, args: Any) -> Any:
+def _evaluate(evaluate: Callable, held: Held, x: ArrayLike, args: PyTree) -> tuple:
     value, equality, inequality = evaluate(x, args)
     return value + held.value.penalty(x), equality, inequality
 
 
-def _evaluate_with_derivatives(evaluate: Callable, held: Held, x: Any, args: Any) -> Any:
+def _evaluate_with_derivatives(evaluate: Callable, held: Held, x: ArrayLike, args: PyTree) -> tuple:
     value, gradient, *rows = evaluate(x, args)
     penalty, slope = _penalty(held, x)
     return (value + penalty, gradient + slope, *rows)
