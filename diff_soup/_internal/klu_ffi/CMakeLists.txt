@@ -89,6 +89,8 @@ nanobind_add_module(_native_klu NOMINSIZE
 target_include_directories(_native_klu PRIVATE
     ${XLA_DIR}
     ${_KLU_INC}
+    # slot_registry.h, the slot registry the three extensions share.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../native_common
 )
 
 target_link_libraries(_native_klu PRIVATE ${_KLU_LIBS})

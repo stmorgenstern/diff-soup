@@ -1,21 +1,21 @@
 # Optimization solvers
 
 This page provides an overview of the optimizers behind
-`ds.inference.optsolve`: the native Newton and quasi-Newton solvers, the
+`ds.optimization.optsolve`: the native Newton and quasi-Newton solvers, the
 hierarchical trust-region solver, the Optax wrapper, and custom solvers. The examples reuse the recipe, data, and inference problem of
 [fitting parameters](fitting.md#the-least-squares-problem):
 
 ```python
-experiment = ds.inference.Experiment(problem, solver, (0.0, 0.1), y0, (measurement,))
-infproblem = ds.inference.InferenceProblem(experiment, parameters=D)
+experiment = ds.optimization.inference.Experiment(problem, solver, (0.0, 0.1), y0, (measurement,))
+infproblem = ds.optimization.inference.InferenceProblem(experiment, parameters=D)
 ```
 
 ## Recommended default
 
-`ds.inference.NewtonTrustRegion()` at default settings is the recommended
+`ds.optimization.NewtonTrustRegion()` at default settings is the recommended
 optimizer for an optimization problem with fewer than 100 parameters. For
 large optimization problems such as embedded neural networks, we
-recommend `ds.inference.Optax` with `optax.adamw`
+recommend `ds.optimization.Optax` with `optax.adamw`
 ([external solvers](#external-solvers)).
 
 ## The native solvers
@@ -46,13 +46,13 @@ curvature they carry.
 
 Each run ends with one of the status flags listed under
 [analyze the result](fitting.md#analyze-the-result), and box bounds
-declared on the recipe or passed as `ds.inference.Bounds` are kept by
+declared on the recipe or passed as `ds.optimization.inference.Bounds` are kept by
 every native solver ([box bounds](fitting.md#box-bounds)).
 
 #### Newton trust region
 
 ```python
-result = ds.inference.optsolve(infproblem, ds.inference.NewtonTrustRegion())
+result = ds.optimization.optsolve(infproblem, ds.optimization.NewtonTrustRegion())
 result[D]
 result.info["subproblem"]                             # "exact", one parameter
 result.trust_region.radius_history
@@ -90,8 +90,8 @@ The options, with their defaults:
   the objective. Set it at the size of the noise in the objective when
   that noise does not shrink with the objective.
 - `x_scale=` sets the parameter scaling. The default
-  `ds.inference.HessianScale()` scales each parameter by the magnitude
-  of its Hessian diagonal. `ds.inference.JacScale()` is refused with
+  `ds.optimization.inference.HessianScale()` scales each parameter by the magnitude
+  of its Hessian diagonal. `ds.optimization.inference.JacScale()` is refused with
   true curvature, and `HessianScale` is refused in `"cg"` mode.
 - `composition="auto"` picks the second-order composition the
   time-stepping adjoint supports, forward over reverse where it can
@@ -113,7 +113,7 @@ The options, with their defaults:
 - `cg_max_iter=None` is the conjugate-gradient budget, the parameter
   count when unset.
 - `callbacks=()` attaches callbacks to the solver, merged with those
-  passed to `ds.inference.optsolve` ([run the fit](fitting.md#run-the-fit)).
+  passed to `ds.optimization.optsolve` ([run the fit](fitting.md#run-the-fit)).
 
 `result.info` records the `hessian`, `hessian_composition`,
 `subproblem`, `hessian_tile`, and `linear_solver` settings the run used,
@@ -128,7 +128,7 @@ the fit `STALLED`, not converged. `result.info["stall_reason"]` says why:
 #### Levenberg-Marquardt
 
 ```python
-result = ds.inference.optsolve(infproblem, ds.inference.LevenbergMarquardt())
+result = ds.optimization.optsolve(infproblem, ds.optimization.LevenbergMarquardt())
 result[D]        # 0.2993
 result.status    # TerminationStatus.COST_TOL
 ```
@@ -150,8 +150,8 @@ The options, with their defaults:
   that noise does not shrink with the objective.
 - `max_step_norm=5.0` is the longest step allowed. `0` removes the limit.
 - `x_scale=` sets the parameter scaling. The default
-  `ds.inference.JacScale()` scales each parameter by the squared norm
-  of its column of \(J\), and `ds.inference.ConstantScale(scale=s)`
+  `ds.optimization.inference.JacScale()` scales each parameter by the squared norm
+  of its column of \(J\), and `ds.optimization.inference.ConstantScale(scale=s)`
   scales by \(1/s^2\), with `s` the typical magnitude of the
   parameters, one scalar or one entry per parameter.
 - `jacobian_tile="auto"` sets how many directions of \(J\) are formed
@@ -170,16 +170,16 @@ A step or cost test that passes on a step the damping held short ends the
 fit `STALLED`, with the reason in `result.info["stall_reason"]`.
 
 ```python
-lm = ds.inference.LevenbergMarquardt(
-    max_steps=100, lam_init=1e-2, x_scale=ds.inference.ConstantScale(scale=0.1))
-result = ds.inference.optsolve(infproblem, lm)
+lm = ds.optimization.LevenbergMarquardt(
+    max_steps=100, lam_init=1e-2, x_scale=ds.optimization.inference.ConstantScale(scale=0.1))
+result = ds.optimization.optsolve(infproblem, lm)
 result[D]        # 0.2993
 ```
 
 #### BFGS
 
 ```python
-result = ds.inference.optsolve(infproblem, ds.inference.BFGS())
+result = ds.optimization.optsolve(infproblem, ds.optimization.BFGS())
 result[D]        # 0.2993
 result.status    # TerminationStatus.STEP_TOL
 ```
@@ -206,7 +206,7 @@ not finite.
 
 ### Hierarchical solvers
 
-`ds.inference.TrustRegion` fits a study whose parameters vary by cluster
+`ds.optimization.inference.TrustRegion` fits a study whose parameters vary by cluster
 ([hierarchical fits](hierarchical.md)), where some parameters are shared
 across the experiments and others take one value per cluster. It takes
 the study lowered with `ds.lower(study)`, solves each trust-region step
@@ -217,21 +217,21 @@ hierarchical fits page.
 
 ## External solvers
 
-`ds.inference.Optax` runs an Optax optimizer on the loss, with the
+`ds.optimization.Optax` runs an Optax optimizer on the loss, with the
 gradient from the reverse adjoint by default and from the forward-mode
 Jacobian with `ad="forward"`.
 
 ### Optax
 
-`ds.inference.Optax(optimizer=None, max_steps=5000, grad_tol=None)` runs
+`ds.optimization.Optax(optimizer=None, max_steps=5000, grad_tol=None)` runs
 an [Optax](https://optax.readthedocs.io/) optimizer on \(\mathcal{L}\)
 (install the optional dependency with `pip install optax`).
 
 ```python
 import optax
 
-result = ds.inference.optsolve(
-    infproblem, ds.inference.Optax(optimizer=optax.adamw(1e-2), max_steps=200))
+result = ds.optimization.optsolve(
+    infproblem, ds.optimization.Optax(optimizer=optax.adamw(1e-2), max_steps=200))
 result[D]
 ```
 
@@ -249,16 +249,16 @@ Optax ends with `GRAD_TOL` or `MAX_STEPS`.
 
 ## Least-squares problems without a model
 
-`ds.inference.LeastSquaresProblem.from_residual(x0, residual)` poses a
+`ds.optimization.LeastSquaresProblem.from_residual(x0, residual)` poses a
 least-squares problem from any JAX-traceable function, and
-`ds.inference.optsolve` fits it with the native solvers:
+`ds.optimization.optsolve` fits it with the native solvers:
 
 ```python
 t = jnp.linspace(0.0, 2.0, 20)
 y = 3.0 * jnp.exp(-1.3 * t)
-problem = ds.inference.LeastSquaresProblem.from_residual(
+problem = ds.optimization.LeastSquaresProblem.from_residual(
     jnp.array([1.0, 1.0]), lambda x: x[0] * jnp.exp(-x[1] * t) - y)
-result = ds.inference.optsolve(problem, ds.inference.LevenbergMarquardt())
+result = ds.optimization.optsolve(problem, ds.optimization.LevenbergMarquardt())
 result.params   # array([3. , 1.3])
 ```
 
@@ -270,27 +270,27 @@ result.params   # array([3. , 1.3])
 
 ## Custom solvers
 
-A custom solver is a subclass of `ds.inference.OptSolver` implementing
+A custom solver is a subclass of `ds.optimization.solvers.OptSolver` implementing
 `solve`. For example, gradient descent with a backtracking line search,
 taking the gradient from the reverse adjoint and projecting each step
 onto the bounds:
 
 ```python
-class LocalGradientDescent(ds.inference.OptSolver):
+class LocalGradientDescent(ds.optimization.solvers.OptSolver):
     requires = frozenset({"value_gradient"})
     step: float = 1.0
     max_steps: int = 100
     grad_tol: float = 1e-8
 
-    def solve(self, problem, *, callbacks=()) -> ds.inference.OptResult:
+    def solve(self, problem, *, callbacks=()) -> ds.optimization.OptResult:
         loss_and_grad = problem.value_and_gradient
         bounds = problem.bounds
         x = jnp.asarray(problem.x0)
         loss, grad = loss_and_grad(x)
-        status = ds.inference.TerminationStatus.MAX_STEPS
+        status = ds.optimization.TerminationStatus.MAX_STEPS
         for _ in range(self.max_steps):
             if jnp.linalg.norm(grad) < self.grad_tol:
-                status = ds.inference.TerminationStatus.GRAD_TOL
+                status = ds.optimization.TerminationStatus.GRAD_TOL
                 break
             step = self.step
             while True:                                   # halve the step until the loss decreases
@@ -302,21 +302,21 @@ class LocalGradientDescent(ds.inference.OptSolver):
                     break
                 step = step / 2
             x, loss, grad = x_new, loss_new, grad_new
-        return ds.inference.OptResult(
+        return ds.optimization.OptResult(
             params=np.asarray(x), cost=float(loss), status=status)
 
 
-result = ds.inference.optsolve(infproblem, LocalGradientDescent())
+result = ds.optimization.optsolve(infproblem, LocalGradientDescent())
 result[D]
 ```
 
-- `solve(self, problem, *, callbacks=()) -> ds.inference.OptResult` is
-  the one required method. `ds.inference.optsolve` calls it, then
+- `solve(self, problem, *, callbacks=()) -> ds.optimization.OptResult` is
+  the one required method. `ds.optimization.optsolve` calls it, then
   attaches the diagnostics and the failed-solve check to the result it
   returns.
 - `requires` is a class variable naming what the solver needs from the
   problem, such as `"value_gradient"` for the loss and its gradient.
-  `ds.inference.optsolve` refuses a problem that cannot provide it,
+  `ds.optimization.optsolve` refuses a problem that cannot provide it,
   naming the built-in solvers that suit the problem.
 
 The problem passed to `solve` carries:

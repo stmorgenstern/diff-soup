@@ -13,10 +13,11 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
-from diff_soup.inference.approx import PiecewiseLinear
-from diff_soup.inference.fitting.inference_problem import InferenceProblem, ParameterGroups
-from diff_soup.inference.fitting.series import Component, Series
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.approx import PiecewiseLinear
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
+from diff_soup.optimization.inference.fitting.series import Component, Series
 
 _SOLVER = ds.JNDF.stock(linear="dense")
 
@@ -340,3 +341,45 @@ def test_pdesolve_takes_the_problems_own_theta_and_reads_writes_and_differentiat
     grads = jax.grad(lambda t: final(t).sum() + t[rate] ** 2)(theta.replace(rate, 0.5))
     # measured 3.5e-5 off the exact derivative, CPU workstation 2026-10-28
     np.testing.assert_allclose(ds.parameter_gradient(grads, rate), exact, atol=1e-4)
+
+
+def _priced(a_scale, b_scale=1.0):
+    """``u' = -(a + b) u`` with normal priors of standard deviations ``a_scale`` and ``b_scale``."""
+    spec = ds.problem("prior_decay")
+    spec.domain("rod", ds.cartesian_grid_1d(3, 0.0, 1.0, method="fvm"))
+    spec.field("u", mass="differential", scale=1.0)
+    spec.param("a", value=0.2, learnable=True, prior=inf.NormalPrior(mean=0.2, scale=a_scale))
+    spec.param("b", value=0.1, learnable=True, prior=inf.NormalPrior(mean=0.1, scale=b_scale))
+    spec.equation(writes="u", reads=("u",))(lambda q: -(q.p.a + q.p.b) * q.u)
+    return spec
+
+
+def _priced_study(scales, owners):
+    """A study of the priced template whose ``b`` varies by owner, its prior scale per
+    experiment."""
+    priced = ds.recipe(_priced)
+    experiments = [
+        _experiment(priced, inputs={"a_scale": 1.0, "b_scale": scale}, id=index)
+        for index, scale in enumerate(scales)
+    ]
+    parameters = ds.ParameterSet(
+        shared=(priced.handle("a"),), varying={"cell": (priced.handle("b"),)}
+    )
+    return inf.Study(
+        experiments, parameters=parameters, clusters={"cell": owners}, independent=True
+    )
+
+
+def test_a_study_takes_each_owners_prior_from_its_builds():
+    """A parameter varying by owner takes each owner's prior from its experiments' builds of one
+    template: precision 16 for scale 0.25 and 4 for scale 0.5."""
+    fit = inf.InferenceProblem(
+        _priced_study((0.25, 0.5, 0.5), ("x", "y", "y")), objective=inf.MAP()
+    )
+    np.testing.assert_array_equal(np.diag(fit.prior_precision(fit.x0)), [1.0, 16.0, 4.0])
+
+
+def test_an_owner_whose_builds_declare_different_priors_is_refused():
+    """MAP refuses an owner whose experiments' builds declare different priors."""
+    with pytest.raises(ValueError):
+        inf.InferenceProblem(_priced_study((0.25, 0.5), ("x", "x")), objective=inf.MAP())

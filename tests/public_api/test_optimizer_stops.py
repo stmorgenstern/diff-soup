@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
 from diff_soup.domains import cartesian_grid_1d
+from diff_soup.optimization import inference as inf
 from tests.support.inference import (
     NOISE,
     TIMES,
@@ -47,6 +47,9 @@ def test_termination_statuses_name_their_reason_and_whether_they_converged():
         "STEP_TOL": ("step_tolerance", True),
         "COST_TOL": ("cost_tolerance", True),
         "DERIVATIVE_ACCURACY": ("derivative_accuracy", True),
+        "KKT_TOL": ("kkt_tolerance", True),
+        "INFEASIBLE": ("infeasible", False),
+        "RESTORATION_FAILED": ("restoration_failed", False),
         "ACCEPTED_STEPS": ("accepted_steps_reached", False),
         "MAX_STEPS": ("max_steps_reached", False),
         "SOLVER_FAILED": ("pde_solver_failed", False),

@@ -62,11 +62,14 @@ find_package(OpenMP REQUIRED COMPONENTS CXX)
 
 nanobind_add_module(_native_superlu NOMINSIZE
     native/superlu_solver.cpp
+    native/superlu_z_prototypes_check.cpp
 )
 
 target_include_directories(_native_superlu PRIVATE
     ${XLA_DIR}
     ${SUPERLU_MT_INCLUDE_DIR}
+    # slot_registry.h, the slot registry the three extensions share.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../native_common
 )
 # Select the OpenMP build's declarations in the SuperLU_MT headers.
 target_compile_definitions(_native_superlu PRIVATE __OPENMP)

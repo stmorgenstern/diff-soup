@@ -51,7 +51,6 @@ operators at the ``"fp64"`` rung only (``supported_precisions == ("fp64",)``).
 
 from __future__ import annotations
 
-import dataclasses
 import weakref
 from typing import Any, Optional
 
@@ -66,7 +65,6 @@ from diff_soup._layout import Layout
 from diff_soup.linear._api import LinearSolver, SparseTopology, option_field_items
 from diff_soup.linear._factor import (
     Analysis,
-    FactorContractError,
     SolveContext,
     dirichlet_rows,
 )
@@ -75,10 +73,12 @@ from diff_soup.linear._primitive import (
     empty_slot_handle,
     label_empty_slots,
     lower_ffi_call,
-    lower_jnp,
     lower_slot_apply,
     lower_slot_refactor,
+    lower_split_apply,
     lowered_site_key,
+    slot_dtype,
+    slot_targets,
     storage_key,
 )
 
@@ -124,19 +124,9 @@ ORDERINGS: dict[str, int] = {
 
 _OPTION_NAMES = ("ordering", "panel_size", "relax", "pivot_threshold")
 
-#: The FFI targets of each value dtype: ``(factor, refactor, apply)``.
-_TARGETS: dict[np.dtype, tuple[str, str, str]] = {
-    np.dtype(np.float64): (
-        "diffsoup_superlu_factor_f64",
-        "diffsoup_superlu_refactor_f64",
-        "diffsoup_superlu_apply_f64",
-    ),
-    np.dtype(np.complex128): (
-        "diffsoup_superlu_factor_c128",
-        "diffsoup_superlu_refactor_c128",
-        "diffsoup_superlu_apply_c128",
-    ),
-}
+#: The common prefix of the extension's FFI targets
+#: ([slot_targets][diff_soup.linear._primitive.slot_targets]).
+_TARGET_PREFIX = "diffsoup_superlu"
 
 
 def _native():
@@ -208,7 +198,9 @@ def _parse_options(options: tuple) -> dict[str, Any]:
     return parsed
 
 
-def _site_key(ctx: Any, kind: str, analysis: Analysis, *parts: Any) -> np.int64:
+def _site_key(
+    ctx: Any, kind: str, analysis: Analysis, *parts: Any, per_device: bool = False
+) -> np.int64:
     """The native site key of one lowered factor or refactor call on ``analysis``.
 
     A deterministic key of the lowered call
@@ -218,11 +210,14 @@ def _site_key(ctx: Any, kind: str, analysis: Analysis, *parts: Any) -> np.int64:
     site belongs to no context: its slots are keyed by the context id the
     call carries at run time, and each slot is freed with its context.
     ``parts`` are the call's parameters and operand shapes, which tell
-    calls of otherwise equal programs apart.
+    calls of otherwise equal programs apart; ``per_device`` marks a call on
+    shared storage, whose slot the extension keys by device.
     """
     record: _SuperLUAnalysis = analysis.backend_analysis
     shapes = tuple((tuple(aval.shape), str(aval.dtype)) for aval in ctx.avals_in)
-    return lowered_site_key(ctx, f"superlu {kind}", record.native_id, shapes, *parts)
+    return lowered_site_key(
+        ctx, f"superlu {kind}", record.native_id, shapes, *parts, per_device=per_device
+    )
 
 
 def _analysis_id(analysis: Analysis) -> np.int64:
@@ -231,70 +226,22 @@ def _analysis_id(analysis: Analysis) -> np.int64:
     return np.int64(record.native_id)
 
 
-def _native_dtype(dtype: Any, what: str = "values") -> np.dtype:
-    """The dtype the native calls take for operands of ``dtype``: float64 or complex128.
+def _native_dtype(dtype: Any) -> np.dtype:
+    """The dtype the native calls take for values of ``dtype``: float64 or complex128.
 
     Raises:
         FactorContractError: If ``dtype`` is neither a real nor a complex floating dtype.
     """
-    if jnp.issubdtype(dtype, jnp.complexfloating):
-        return np.dtype(np.complex128)
-    if jnp.issubdtype(dtype, jnp.floating):
-        return np.dtype(np.float64)
-    raise FactorContractError(
-        f"SuperLU factors real and complex floating-point matrices; got {what} of dtype "
-        f"{jnp.dtype(dtype)}."
-    )
-
-
-def _lower_split_apply(
-    ctx: Any, values: Any, held_context: Any, slot: Any, order: Any, b: Any, attributes: dict
-) -> list:
-    """Lower a solve of a real factor with a complex right-hand side as one real solve.
-
-    The real and imaginary parts of ``b`` are stacked into one real block of
-    twice the columns (``(2, n)`` for one right-hand side, ``(2 nrhs, n)``
-    for a block), the real call solves the block with the factor once, and
-    the two halves are joined into the complex solution. An empty or failed
-    factor gives ``nan`` in both parts.
-
-    Returns:
-        The MLIR values of ``(x, status, order)``.
-    """
-    values_aval, context_aval, slot_aval, order_aval, b_aval = ctx.avals_in
-    x_aval, status_aval, out_order_aval = ctx.avals_out
-    columns = int(b_aval.shape[0]) if len(b_aval.shape) == 2 else 1
-    block = jax.core.ShapedArray((2 * columns, int(b_aval.shape[-1])), np.float64)
-    (stacked,) = lower_jnp(
-        ctx,
-        lambda v: [jnp.concatenate([jnp.real(v), jnp.imag(v)]).reshape(block.shape)],
-        [b],
-        [b_aval],
-        [block],
-    )
-    real_ctx = dataclasses.replace(
-        ctx,
-        avals_in=[values_aval, context_aval, slot_aval, order_aval, block],
-        avals_out=[block, status_aval, out_order_aval],
-    )
-    x_block, status, order = lower_slot_apply(
-        real_ctx, values, held_context, slot, order, stacked, **attributes
-    )
-    (x,) = lower_jnp(
-        ctx,
-        lambda v: [jax.lax.complex(v[:columns], v[columns:]).reshape(x_aval.shape)],
-        [x_block],
-        [block],
-        [x_aval],
-    )
-    return [x, status, order]
+    return slot_dtype(dtype, "SuperLU")
 
 
 class SuperLU(LinearSolver):
     """SuperLU_MT, a threaded sparse direct solver on the CPU.
 
     It factors float64 and complex128 matrices. `linear="superlu"` selects it with default
-    settings, and `"auto"` never picks it. It needs a source build with SuperLU_MT.
+    settings, and `"auto"` never picks it. It needs a source build with SuperLU_MT, patched by
+    `build_superlu_mt.sh` so that its factors on any number of threads equal one thread's, bit
+    for bit.
 
     Args:
         ordering: The fill-reducing column ordering, `"colamd"` (default), `"mmd_ata"`,
@@ -457,7 +404,7 @@ class SuperLU(LinearSolver):
         values, values_aval = cast_operand(ctx, values, ctx.avals_in[0], dtype)
         results, order = lower_ffi_call(
             ctx,
-            _TARGETS[dtype][0],
+            slot_targets(_TARGET_PREFIX, dtype)[0],
             order,
             [values, token, context_id],
             [values_aval, *ctx.avals_in[1:3]],
@@ -513,7 +460,7 @@ class SuperLU(LinearSolver):
         del n_handle, precision, tol
         dtype = _native_dtype(ctx.avals_in[0].dtype)
         attributes = dict(
-            target=_TARGETS[dtype][2],
+            target=slot_targets(_TARGET_PREFIX, dtype)[2],
             values_dtype=dtype,
             transpose=(orientation == "AT") != bool(transpose),
             analysis_id=_analysis_id(analysis),
@@ -522,7 +469,15 @@ class SuperLU(LinearSolver):
         b_aval = ctx.avals_in[-1]
         if dtype == np.complex128 or not jnp.issubdtype(b_aval.dtype, jnp.complexfloating):
             return lower_slot_apply(ctx, values, held_context, slot, order, b, **attributes)
-        return _lower_split_apply(ctx, values, held_context, slot, order, b, attributes)
+        return lower_split_apply(
+            ctx,
+            b,
+            lambda real_ctx, block: lower_slot_apply(
+                real_ctx, values, held_context, slot, order, block, **attributes
+            ),
+            axis=0,
+            real_dtype=dtype,
+        )
 
     def lower_refactor(
         self,
@@ -568,7 +523,7 @@ class SuperLU(LinearSolver):
         """
         del n_handle, tol
         dtype = _native_dtype(ctx.avals_in[0].dtype)
-        factor_target, refactor_target, _ = _TARGETS[dtype]
+        factor_target, refactor_target, _ = slot_targets(_TARGET_PREFIX, dtype)
         return lower_slot_refactor(
             ctx,
             values,
@@ -579,7 +534,16 @@ class SuperLU(LinearSolver):
             order,
             refactor_target=refactor_target,
             factor_target=factor_target,
-            site=_site_key(ctx, "refactor", analysis, orientation, precision, adopt, storage),
+            site=_site_key(
+                ctx,
+                "refactor",
+                analysis,
+                orientation,
+                precision,
+                adopt,
+                storage,
+                per_device=storage is not None,
+            ),
             analysis_id=_analysis_id(analysis),
             values_dtype=dtype,
             storage=storage_key(storage),

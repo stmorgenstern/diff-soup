@@ -20,8 +20,10 @@ immediately rather than silently falling back.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import threading
+import weakref
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar, Optional
 
@@ -53,8 +55,8 @@ from diff_soup.linear._factor import (
     solve_dtype,
 )
 from diff_soup.linear._operator import apply_assembled
+from diff_soup.linear._phased_impl import _compiled
 from diff_soup.linear._primitive import (
-    _compiled,
     check_empty_handle,
     phased_factor_p,
     phased_invalidate_p,
@@ -774,8 +776,24 @@ def _missing_hook_message(cls: type, hook: str) -> str:
 # --------------------------------------------------------------------------- #
 # The analyze / factor / solve API, with refactor and solve_checked
 # --------------------------------------------------------------------------- #
-_ANALYSES: dict[tuple, Analysis] = {}
+#: Every live analysis by its content, so equal arguments return the one a caller holds.
+_ANALYSES: weakref.WeakValueDictionary[tuple, Analysis] = weakref.WeakValueDictionary()
+#: The most recent analyses, kept alive for callers that analyze again without holding one.
+_RECENT: collections.OrderedDict[tuple, Analysis] = collections.OrderedDict()
+#: The capacity of ``_RECENT`` (ours): it bounds the native analyses and patterns no caller
+#: holds, while a study's systems (its iteration, mass, sensitivity and initialization
+#: patterns per experiment) stay analysed once.
+_RECENT_ANALYSES = 64
 _ANALYSES_LOCK = threading.Lock()
+
+
+def _remember(key: tuple, analysis: Analysis) -> Analysis:
+    """Make ``analysis`` the most recent of the memo; call it holding the lock."""
+    _RECENT[key] = analysis
+    _RECENT.move_to_end(key)
+    while len(_RECENT) > _RECENT_ANALYSES:
+        _RECENT.popitem(last=False)
+    return analysis
 
 
 def _clear_analyses() -> None:
@@ -790,6 +808,7 @@ def _clear_analyses() -> None:
     """
     with _ANALYSES_LOCK:
         _ANALYSES.clear()
+        _RECENT.clear()
     _compiled.cache_clear()
 
 
@@ -818,8 +837,9 @@ def analyze(
 ) -> Analysis:
     """Analyze a sparsity pattern for one backend, before any values are factored.
 
-    Equal arguments return the same `Analysis`, so the work runs once per pattern. A request
-    the backend cannot serve raises here, before anything is traced.
+    Equal arguments return the same `Analysis` while it is held or among the 64 most recent, so
+    the work runs once per pattern. A request the backend cannot serve raises here, before
+    anything is traced.
 
     Args:
         topology: The `SparseTopology` of the matrix.
@@ -829,7 +849,8 @@ def analyze(
         layout: The device placement, or `None` for one device.
         precision: The precision of the factors, `"fp64"` or `"fp32"`.
         symmetric: Declare the matrix symmetric, which is never detected from the values.
-        spd: Declare the matrix symmetric positive definite, which implies `symmetric`.
+        spd: Declare the matrix real symmetric positive definite, which implies `symmetric`.
+            Complex values are refused on such an analysis.
 
     Returns:
         The `Analysis` to pass to `factor`.
@@ -908,8 +929,8 @@ def analyze(
     key = (topology, backend, frozen, layout, precision, symmetric, spd)
     with _ANALYSES_LOCK:
         memoised = _ANALYSES.get(key)
-    if memoised is not None:
-        return memoised
+        if memoised is not None:
+            return _remember(key, memoised)
     _check_dirichlet_diagonal(topology)
     built = Analysis(
         topology,
@@ -922,7 +943,7 @@ def analyze(
         backend_analysis=backend._analyze(topology, frozen, layout, precision),
     )
     with _ANALYSES_LOCK:
-        return _ANALYSES.setdefault(key, built)
+        return _remember(key, _ANALYSES.setdefault(key, built))
 
 
 def _check_dirichlet_diagonal(topology: SparseTopology) -> None:
@@ -979,7 +1000,27 @@ def _check_values(analysis: Analysis, values: Any, caller: str) -> Array:
         raise FactorContractError(
             f"{caller}() needs floating or complex values; got dtype {values.dtype}."
         )
+    _check_spd(analysis, values.dtype, caller)
     return values
+
+
+def _check_spd(analysis: Analysis, dtype: Any, caller: str) -> None:
+    """Refuse complex values on an analysis declared ``spd``.
+
+    ``spd`` declares a real symmetric positive definite matrix. A complex
+    matrix with ``A = A^T`` is symmetric but never positive definite, and a
+    Hermitian one is not symmetric, so its transposed solve is not its plain
+    one.
+
+    Raises:
+        FactorContractError: If ``dtype`` is complex and the analysis declares ``spd``.
+    """
+    if analysis.spd and jnp.issubdtype(dtype, jnp.complexfloating):
+        raise FactorContractError(
+            f"{caller}() received complex values ({jnp.dtype(dtype)}) on an analysis declared "
+            "spd=True, which declares a real symmetric positive definite matrix. Analyze with "
+            "symmetric=True for a complex symmetric matrix (A = A^T), or without either."
+        )
 
 
 def _check_rhs(f: Factor, b: Any, caller: str) -> Array:
@@ -1133,8 +1174,8 @@ def factor(
         The `Factor`.
 
     Raises:
-        FactorContractError: For values of the wrong shape, or no `ctx` where the backend needs
-            one.
+        FactorContractError: For values of the wrong shape, complex values on an `spd`
+            analysis, or no `ctx` where the backend needs one.
     """
     analysis = _check_analysis(analysis, "factor")
     orientation = check_orientation(orientation)
@@ -1187,7 +1228,8 @@ def empty_factor(
         tol: As for `factor`.
         dtype: The dtype of the values, by default float64 or float32 to match the analysis.
         storage: A name of 1 to 64 characters, and the factors of one name in one context share
-            one storage.
+            one storage. Two factors of one name in one program run in no set order unless
+            `after=` orders them.
         after: A factor, or a sequence of factors, whose operations this one must follow.
 
     Returns:
@@ -1214,6 +1256,7 @@ def empty_factor(
             f"empty_factor() needs a floating or complex dtype for the factor's values; got "
             f"{dtype}."
         )
+    _check_spd(analysis, dtype, "empty_factor")
     if storage is not None and (not isinstance(storage, str) or not 0 < len(storage) <= 64):
         raise FactorContractError(
             "empty_factor() takes storage=None or a storage name of 1 to 64 characters; got "

@@ -37,10 +37,11 @@ from diff_soup._precision import Precision
 from diff_soup.linear import SparseTopology
 from diff_soup.problem._cache import BoundedContentCache
 from diff_soup.problem._ir.content_hash import _graph_callable_config_id
+from diff_soup.problem._spec.operating_modes import OPERATING_MODES
 from diff_soup.problem.implicit.consistent_init import (
     ConsistentInitPlan,
     consistent_initial_state,
-    reduced_route_eligible,
+    initialization_route,
     resolve_backend_route,
 )
 from diff_soup.problem.implicit.linearize import build_linearization_plan
@@ -56,7 +57,6 @@ __all__ = [
     "SolverView",
     "StructureSignature",
     "ThetaCodec",
-    "get_or_build_solver_view",
     "solver_view",
 ]
 
@@ -387,16 +387,17 @@ class SolverView:
     def operational_seed_multipliers(self, t0, u0, lam0, theta, control):
         """Bordered-global seed with the operational algebraic-current slot resolved.
 
-        An explicit current seed always wins. Otherwise, when the active mode
-        is ``"power"``, the terminal voltage at the start state is probed
-        through the table's own voltage row; when its magnitude exceeds the
-        table's ``seed_voltage_threshold`` the current slot defaults to
-        ``target / V``. A nonzero power target at near-zero voltage with no
-        explicit seed fails here — before any Newton iteration — with a typed
-        error; under tracing (where no value is concrete) the guarded select
-        keeps the prior slot instead. Resistance defaults to ``V / target``;
-        a zero target without an explicit seed raises eagerly and keeps the
-        prior slot under tracing. Other modes write only an explicit seed.
+        An explicit current seed always wins. Otherwise the active mode's start
+        rule in the operating-mode table gives the slot from the terminal
+        voltage ``V`` at the start state, probed through the table's own
+        voltage row: ``target / V`` for power where ``|V|`` exceeds the
+        table's ``seed_voltage_threshold``, ``V / target`` for resistance
+        where the target is nonzero; current and voltage keep the prior slot,
+        as does a start the rule cannot use. A start the table refuses (power
+        at a nonzero target and a voltage at or below the threshold,
+        resistance at a zero target) raises here, before any Newton
+        iteration, when the values are concrete; under tracing it keeps the
+        prior slot.
         """
         from diff_soup._errors import ConfigurationError
 
@@ -441,54 +442,27 @@ class SolverView:
             isinstance(leaf, jax.core.Tracer)
             for leaf in (v0, target, mode, prior) + (() if seed is None else (seed,))
         )
-        if not traced:
-            has_seed = seed is not None and not bool(jnp.isnan(seed))
-            if has_seed:
-                slot = seed
-            elif modes[int(mode)] == "power":
-                if abs(float(v0)) > thr:
-                    slot = target / v0
-                elif float(target) != 0.0:
-                    raise ConfigurationError(
-                        f"operational control {table.name!r}: power mode with "
-                        f"target {float(target)!r} starts at terminal voltage "
-                        f"{float(v0)!r} (magnitude at or below the seed "
-                        f"threshold {thr!r}), so the current unknown has no "
-                        "usable default start; supply a current seed "
-                        "(ControlState.operating(current_seed=...)) or a "
-                        "physically valid nonzero voltage seed."
-                    )
-                else:
-                    slot = prior
-            elif modes[int(mode)] == "resistance":
-                if float(target) == 0.0:
-                    raise ConfigurationError(
-                        f"operational control {table.name!r}: resistance mode with "
-                        "zero target is a short circuit with no usable default "
-                        "current start; supply a current seed "
-                        "(ControlState.operating(current_seed=...))."
-                    )
-                slot = v0 / target
-            else:
-                slot = prior
-        else:
-            seed_arr = jnp.full((), jnp.nan, dtype=target.dtype) if seed is None else seed
-            has_seed = jnp.logical_not(jnp.isnan(seed_arr))
-            seed_val = jnp.where(has_seed, jnp.nan_to_num(seed_arr), jnp.zeros_like(seed_arr))
-            power_mask = jnp.asarray(np.array([m == "power" for m in modes]))
-            is_power = jnp.take(power_mask, mode)
-            ok_v = jnp.abs(v0) > thr
-            v_safe = jnp.where(ok_v, v0, jnp.ones_like(v0))
-            power_default = jnp.where(ok_v, target / v_safe, prior)
-            resistance_mask = jnp.asarray(np.array([m == "resistance" for m in modes]))
-            is_resistance = jnp.take(resistance_mask, mode)
-            ok_r = target != 0
-            r_safe = jnp.where(ok_r, target, jnp.ones_like(target))
-            resistance_default = jnp.where(ok_r, v0 / r_safe, prior)
-            default = jnp.where(
-                is_power, power_default, jnp.where(is_resistance, resistance_default, prior)
+        starts, usable, refused = [], [], []
+        for name in modes:
+            rule = OPERATING_MODES[name].start
+            value, ok, refuse = (prior, False, False) if rule is None else rule(v0, target, thr)
+            starts.append(jnp.asarray(value, dtype=lam0.dtype))
+            usable.append(jnp.asarray(ok))
+            refused.append(jnp.asarray(refuse))
+        start, start_usable, start_refused = (
+            jnp.take(jnp.stack(values), mode) for values in (starts, usable, refused)
+        )
+        seed_value = jnp.full((), jnp.nan, dtype=lam0.dtype) if seed is None else seed
+        has_seed = jnp.logical_not(jnp.isnan(seed_value))
+        if not traced and not bool(has_seed) and bool(start_refused):
+            raise ConfigurationError(
+                f"operational control {table.name!r}: {OPERATING_MODES[modes[int(mode)]].refusal} "
+                f"(target {float(target)!r}, terminal voltage {float(v0)!r}, seed threshold "
+                f"{thr!r}); supply a current seed (ControlState.operating(current_seed=...))."
             )
-            slot = jnp.where(has_seed, seed_val, default)
+        slot = jnp.where(
+            has_seed, jnp.nan_to_num(seed_value), jnp.where(start_usable, start, prior)
+        )
         return lam0.at[off].set(jnp.asarray(slot, dtype=lam0.dtype))
 
     def default_theta(self):
@@ -678,9 +652,11 @@ class SolverView:
             control: Control values read by the residual, or ``None``.
             ydot0: Optional initial slope guess.
             tol: Absolute residual 2-norm target for Newton iterations.
-            rtol: Relative final gate scaled by the initial residual 2-norm,
-                applied after attempting the absolute target. Positive values
-                also enable the componentwise state/slopes round-off allowance.
+            rtol: Relative part of the final gate: a positive value also accepts a
+                residual 2-norm up to ``tol + (rtol + γ) S``, with
+                ``S = ‖|F_y| |y| + |F_ydot| |ydot|‖₂`` at the final iterate and ``γ``
+                the rounding bound of the longest residual row. Zero keeps the
+                absolute gate only.
             max_iters: Newton iteration budget.
             backend: Linear-backend selection for the initialization system.
             route: ``"auto"``, ``"joint"``, or ``"reduced"`` solve route.
@@ -690,11 +666,7 @@ class SolverView:
                 solve of a reverse sweep.
         """
         theta = self.default_theta() if theta is None else theta
-        if route == "auto":
-            ic_route = "reduced" if reduced_route_eligible(self.problem) else "joint"
-        else:
-            ic_route = route
-        block = int(self.structure.algebraic_indices.size) if ic_route == "reduced" else self.n
+        ic_route, block = initialization_route(self.problem, route)
         route_name, _ = resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
         key = (
             float(tol),
@@ -743,16 +715,12 @@ class SolverView:
         platform's route from the system size; a concrete name or a
         [LinearSolver][diff_soup.linear.LinearSolver] instance is honored unless
         its bound ``layout.n_dofs`` differs from the initialization system size,
-        in which case initialization uses Dense without changing the step backend. The
-        instance is ``None`` on the dense route. Callers that batch
+        in which case it resolves as ``"auto"`` does, without changing the step
+        backend. The instance is ``None`` on the dense route. Callers that batch
         initialization solves (for example projected output sampling) read the
         resolved backend's capabilities from the returned instance.
         """
-        block = (
-            int(self.structure.algebraic_indices.size)
-            if reduced_route_eligible(self.problem)
-            else self.n
-        )
+        _, block = initialization_route(self.problem)
         return resolve_backend_route(backend, plan_mode=self.plan.mode, n_dofs=block)
 
     def startup_slope(
@@ -1088,46 +1056,34 @@ def _build_solver_view(problem, source_key: Hashable) -> SolverView:
 
 
 def solver_view(problem) -> SolverView:
-    """Return the view the solvers take of ``problem``.
+    """Return the view the solvers take of ``problem``, building it once.
 
-    The view is what ``pdesolve`` and the implicit-layer verbs read: the
-    residual ``F(t, y, ydot, theta, control)`` as ``residual``, the state size
-    ``n`` and its local block ``n_u``, the differential rows ``id_mask``, the
-    iteration matrix's sparse pattern ``full_topology`` and the linearization
-    ``plan`` its values follow. It is built once per model and cached, so a
-    rebuilt problem equal in content gets the same view.
+    The view is what ``pdesolve`` and the implicit-layer verbs read. Its public
+    surface is what [SolverView][diff_soup.problem.SolverView] documents: the
+    attributes it lists (the state size ``n`` and its local block ``n_u``, the
+    differential rows ``id_mask``, the linearization ``plan``, and the rest),
+    the residual ``F(t, y, ydot, theta, control)`` as ``residual``, the
+    iteration matrix's sparse pattern ``full_topology`` and the mass
+    operator's dependence ``mass_dependence``. Its other members are internal.
+    It is built once per model and cached: a
+    problem equal in content to one already presented (a rebuilt problem, or
+    a lowered problem with the same structure and values) gets the same view,
+    and the key of a recently presented object is kept with the object, so
+    repeated calls with one object compute its content or value digest once.
 
     Args:
         problem: A lowered problem, a ``MassProblem`` or ``ImplicitProblem``,
-            or a view, which is returned unchanged.
+            a problem with a callable ``solver_problem()`` hook, or a view,
+            which is returned unchanged.
 
     Returns:
         The problem's [SolverView][diff_soup.problem.SolverView].
 
     Raises:
-        TypeError: If ``problem`` supplies no solver problem.
-    """
-    return get_or_build_solver_view(problem)
-
-
-def get_or_build_solver_view(problem) -> SolverView:
-    """Return the cached engine-facing view of ``problem``, building it once.
-
-    [solver_view][diff_soup.problem.solver_view] is the public name.
-
-    Accepts a solver problem ([MassProblem][] / [ImplicitProblem][]),
-    a problem with a callable ``solver_problem()`` hook, or an already-built
-    view (returned unchanged). Other objects are rejected before any JAX
-    callback is traced. A problem equal in content to one already presented
-    (a rebuilt problem, or a lowered problem with the same structure and
-    values) is served the same view. The key of a recently presented object
-    is kept with the object, so repeated calls with one object compute its
-    content or value digest once.
-
-    Raises:
-        TypeError: If the object supplies no solver problem, or if
-            ``solver_problem()`` returns anything other than a
-            ``MassProblem`` or ``ImplicitProblem``.
+        TypeError: If ``problem`` supplies no solver problem, or its
+            ``solver_problem()`` returns anything other than a ``MassProblem``
+            or ``ImplicitProblem``. Other objects are rejected before any JAX
+            callback is traced.
     """
     if isinstance(problem, SolverView):
         return problem

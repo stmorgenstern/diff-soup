@@ -8,7 +8,7 @@ A [Family][diff_soup.problem._ir.family.Family] is a population of ``count``
 structurally-identical members (e.g. an MPM electrode's many particles) sharing
 ONE member domain and per-member variable / equation / BC / coupling templates.
 This module is the declarative front-end that compiles down to that IR node +
-``diff_soup._lowering.family_residual`` lowering — it does NOT re-implement the
+``diff_soup.problem._lowering.family_residual`` lowering — it does NOT re-implement the
 vmapped residual / sparsity / Schur machinery.
 
 The user writes::
@@ -329,7 +329,7 @@ class _MemberResidualFormAdapter(eqx.Module):
         if not isinstance(result, DerivativeExpr):
             record_plain(form_cell)
             return result
-        from .build import _check_cell_scales, _slope_evaluation
+        from .residual_forms import _check_cell_scales, _slope_evaluation
 
         slopes = current_slopes()
         if slopes is not None:
@@ -354,7 +354,7 @@ def _wrap_member_derivative_return(
     rhs: Callable, *, equation_name: str, field_name: str, member_fields: tuple
 ) -> Callable:
     """Wrap a single-output member rhs in the residual-form adapter."""
-    from .build import _FormCell
+    from .residual_forms import _FormCell
 
     return _MemberResidualFormAdapter(
         inner=rhs,
@@ -1117,7 +1117,7 @@ class _FamilyHandle:
         # member-var name against the member Variable so the IR BC's ``.var``
         # is the member Variable.  The flux closure is then folded into the
         # per-member vmap kernel by the residual lowering.
-        from .build import _emit_bc
+        from .build_components import _emit_bc
 
         var_map = {v.name: v for v in member_vars}
         return tuple(_emit_bc(bc, var_map) for bc in self._member_bcs)

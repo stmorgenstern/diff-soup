@@ -36,12 +36,20 @@ import subprocess
 import sys
 import time
 
-__all__ = ["main", "rank_cache_dir"]
+from diff_soup._environment import (
+    CPUS_PER_PROCESS,
+    GPUS_PER_NODE,
+    LAUNCH_COORDINATOR,
+    LAUNCH_RANK,
+    LAUNCH_ROLE,
+    LAUNCH_SIZE,
+    MGMN,
+    MGMN_GPU_MASK,
+    NODES,
+    PROCESSES,
+)
 
-_ROLE = "DIFFSOUP_LAUNCH_ROLE"
-_COORDINATOR = "DIFFSOUP_LAUNCH_COORDINATOR"
-_SIZE = "DIFFSOUP_LAUNCH_SIZE"
-_RANK = "DIFFSOUP_LAUNCH_RANK"
+__all__ = ["main", "rank_cache_dir"]
 
 
 def rank_cache_dir(base: str | None, rank: int) -> str | None:
@@ -49,16 +57,6 @@ def rank_cache_dir(base: str | None, rank: int) -> str | None:
     if not base:
         return None
     return os.path.join(base, f"rank-{rank}")
-
-
-def _settings() -> dict[str, str]:
-    """Read the launch variables with their defaults."""
-    return {
-        "nodes": os.environ.get("DIFFSOUP_NODES", "1"),
-        "gpus_per_node": os.environ.get("DIFFSOUP_GPUS_PER_NODE", "2"),
-        "cpus_per_process": os.environ.get("DIFFSOUP_CPUS_PER_PROCESS", "4"),
-        "mgmn": os.environ.get("DIFFSOUP_MGMN", "0"),
-    }
 
 
 def _restore_allocation_nodelist(nodes: int) -> None:
@@ -91,7 +89,7 @@ def _srun(arguments: list[str], script: list[str]) -> None:
         "diff_soup.distributed.launch",
         *script,
     ]
-    os.environ[_ROLE] = "rank"
+    os.environ[LAUNCH_ROLE.name] = "rank"
     os.execvp(command[0], command)
 
 
@@ -114,7 +112,7 @@ def _fork(script: list[str]) -> int:
     devices = [] if cpu_only else _visible_gpus()
     if len(set(devices)) != len(devices):
         raise ValueError("CUDA_VISIBLE_DEVICES lists a GPU twice; give each process its own GPU.")
-    requested = os.environ.get("DIFFSOUP_PROCESSES")
+    requested = PROCESSES.get()
     if requested is not None:
         count = int(requested)
         if count < 1:
@@ -145,10 +143,10 @@ def _fork(script: list[str]) -> int:
             environment = dict(base)
             environment.update(
                 {
-                    _ROLE: "rank",
-                    _COORDINATOR: coordinator,
-                    _SIZE: str(count),
-                    _RANK: str(rank),
+                    LAUNCH_ROLE.name: "rank",
+                    LAUNCH_COORDINATOR.name: coordinator,
+                    LAUNCH_SIZE.name: str(count),
+                    LAUNCH_RANK.name: str(rank),
                 }
             )
             if devices:
@@ -188,14 +186,14 @@ def _fork(script: list[str]) -> int:
 
 def _run_rank(script: list[str]) -> None:
     """Run the script in this rank: select its GPU and cache directory, then hand over."""
-    mask = os.environ.get("DIFFSOUP_MGMN_GPU_MASK")
+    mask = MGMN_GPU_MASK.get()
     if mask is not None:
         devices = mask.split(",")
         local_rank = int(os.environ["SLURM_LOCALID"])
         if local_rank >= len(devices) or len(set(devices)) != len(devices):
             raise ValueError("The Slurm step needs a distinct allocated GPU for every local rank.")
         os.environ["CUDA_VISIBLE_DEVICES"] = devices[local_rank]
-    rank = int(os.environ.get("SLURM_PROCID", os.environ.get(_RANK, "0")))
+    rank = int(os.environ.get("SLURM_PROCID", LAUNCH_RANK.get() or "0"))
     cache = rank_cache_dir(os.environ.get("JAX_COMPILATION_CACHE_DIR"), rank)
     if cache is not None:
         os.makedirs(cache, exist_ok=True)
@@ -224,21 +222,20 @@ def main(argv: list[str] | None = None) -> int:
     script = list(sys.argv[1:] if argv is None else argv)
     if not script:
         raise SystemExit("usage: python -m diff_soup.distributed.launch script.py [arguments]")
-    if os.environ.get(_ROLE) == "rank":
+    if LAUNCH_ROLE.get() == "rank":
         _run_rank(script)
         return 0
-    settings = _settings()
-    nodes = int(settings["nodes"])
-    gpus_per_node = int(settings["gpus_per_node"])
-    cpus = settings["cpus_per_process"]
+    nodes = int(NODES.get())
+    gpus_per_node = int(GPUS_PER_NODE.get())
+    cpus = CPUS_PER_PROCESS.get()
     in_slurm = bool(os.environ.get("SLURM_JOB_ID"))
     if in_slurm:
         _restore_allocation_nodelist(nodes)
-    if in_slurm and settings["mgmn"] == "1":
+    if in_slurm and MGMN.get() == "1":
         # cuDSS allocates distributed factors outside JAX's memory pool.
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
         if nodes == 1:
-            os.environ["DIFFSOUP_MGMN_GPU_MASK"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            os.environ[MGMN_GPU_MASK.name] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
             _srun(
                 [
                     "--mpi=pmi2",

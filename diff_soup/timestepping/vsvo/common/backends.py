@@ -16,11 +16,8 @@ import equinox as eqx
 import jax.numpy as jnp
 
 from diff_soup._precision import Precision
-from diff_soup.linear import KLU, CuDSS, Dense, LinearSolver, SuperLU
-from diff_soup.linear.superlu_backend import require_superlu
+from diff_soup.linear._resolver import resolve_backend
 from diff_soup.nonlinear._kkt import LinearPlan
-
-_SINGLETONS: dict[str, Any] = {}
 
 # Corrector-tuned refinement settings the engines analyze with under
 # ``solve_mode="fp32_ir"``: a Newton corrector only needs a modest linear
@@ -57,64 +54,6 @@ _FP32_END_TO_END_CORRECTOR_OPTIONS: dict[str, object] = {
 # promises: a native cuDSS refinement step would add a second triangular solve
 # and a matrix product to every corrector solve.
 _FP32_MIXED_CORRECTOR_OPTIONS: dict[str, object] = {"ir_nsteps": 0}
-
-
-def resolve_backend(linear: Any) -> Any:
-    """Resolve a CONCRETE linear-backend name to a process-global instance.
-
-    ``"dense"`` returns the dense backend; ``"klu"``, ``"superlu"`` and
-    ``"cudss"`` return their sparse-direct backends at their default settings.
-    ``"superlu"`` and ``"cudss"`` raise when their native extension is
-    unavailable — neither silently falls back to a dense ``O(n^2)`` solve.
-    ``"auto"`` is NOT resolved here: the size- and platform-aware
-    [BackendResolver][diff_soup.linear._resolver.BackendResolver] must pick a concrete
-    name upstream, so a bare ``"auto"`` (or any unknown name) reaching this
-    function is a bug and raises. The same name always returns the same instance.
-    A configured [LinearSolver][diff_soup.linear.LinearSolver] instance (for
-    example ``KLU(ordering="colamd")`` or ``Krylov(CuDSS())``) is returned as
-    it is.
-
-    Args:
-        linear: A concrete backend name (``"cudss"``, ``"klu"``, ``"superlu"``,
-            ``"dense"``), or a backend instance.
-
-    Returns:
-        The backend singleton for ``linear``, or the instance itself.
-
-    Raises:
-        RuntimeError: When ``"superlu"`` or ``"cudss"`` is requested but its
-            native extension is not available on this host.
-        ValueError: When ``linear`` is ``"auto"`` or an unrecognized name.
-    """
-    if isinstance(linear, LinearSolver):
-        return linear
-    name = str(linear).lower()
-    inst = _SINGLETONS.get(name)
-    if inst is not None:
-        return inst
-    if name == "klu":
-        inst = KLU()
-    elif name == "superlu":
-        require_superlu("linear='superlu'")
-        inst = SuperLU()
-    elif name == "cudss":
-        if CuDSS is None:
-            raise RuntimeError(
-                "the cuDSS backend was requested but its native extension is not "
-                "available on this host; install the cuDSS build, or select 'klu' "
-                "(CPU) or 'dense'."
-            )
-        inst = CuDSS()
-    elif name == "dense":
-        inst = Dense()
-    else:
-        raise ValueError(
-            f"resolve_backend received the non-concrete name {linear!r}; the size- and "
-            "platform-aware BackendResolver must choose a concrete backend ('dense', "
-            "'klu', 'superlu', or 'cudss') before this call, so 'auto' must not reach here."
-        )
-    _SINGLETONS[name] = inst
-    return inst
 
 
 def sensitivity_precision(precision: Any, *, mode: str = "forward") -> Any:

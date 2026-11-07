@@ -37,7 +37,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from diff_soup.timestepping.vsvo.common.weights import wrms_norm
+from diff_soup.utils.weights import wrms_norm
 
 from .state import QMAX, BDFState
 

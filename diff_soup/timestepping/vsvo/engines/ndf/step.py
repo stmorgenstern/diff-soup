@@ -46,16 +46,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
 from diff_soup._precision import Precision
 from diff_soup.nonlinear.border_cache import initial_border_cache
 from diff_soup.nonlinear.generations import certify_exact_root, initial_generations
 from diff_soup.nonlinear.result import LinearizationDirective
-from diff_soup.timestepping.consistent_ic.pin_differential import (
-    _full_dense_topology,
-    _structure,
-)
 from diff_soup.timestepping.vsvo.common.adaptive import (
     CAUSE_ESCALATION,
     CAUSE_FALSE_CONVERGENCE,
@@ -65,19 +60,28 @@ from diff_soup.timestepping.vsvo.common.adaptive import (
     initial_rung_state,
 )
 from diff_soup.timestepping.vsvo.common.backends import (
-    analyze_sensitivity,
     initialization_policy,
     resolve_backend,
 )
 from diff_soup.timestepping.vsvo.common.contract import (
+    ENDPOINT_CLAMP_FUZZ,
+    ENGINE_CACHE_SIZE,
+    ENGINE_CAPABILITIES,
     EngineCapabilities,
+    clamp_initial_step,
     closure_moved,
-    consume_consistent_init,
+    consistent_start,
     ic_gate_tolerance,
+    initialization_policies,
     pack_state,
+    problem_layout,
+    project_start,
+    refuse_unprojected_start,
+    sensitivity_analyses,
+    where_state,
 )
 from diff_soup.timestepping.vsvo.common.decisions import replay_decisions
-from diff_soup.timestepping.vsvo.common.driver import StepReport
+from diff_soup.timestepping.vsvo.common.engine import StepReport
 from diff_soup.timestepping.vsvo.common.flash_controller import (
     FLASH_ERR_SEED,
     flash_step_control,
@@ -88,8 +92,8 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     state_block_size,
 )
 from diff_soup.timestepping.vsvo.common.trace import NDFTraceRecord, StepTraceHeader
-from diff_soup.timestepping.vsvo.common.weights import error_weight, wrms_norm
 from diff_soup.utils.lanes import lane_cond
+from diff_soup.utils.weights import error_weight, wrms_norm
 
 from ..bdf.dense import bdf_initial_step, bdf_slope_fn
 from .controller import accept_step_control, reject_step_control
@@ -124,10 +128,6 @@ _PREV_PREC_FAIL = 3
 # The internal time snaps onto the endpoint within this many rounding errors.
 _TN_SNAP_FUZZ = 100.0
 
-# The endpoint clamp shortens a step to just shy of the endpoint by this
-# many rounding errors.
-_ENDPOINT_CLAMP_FUZZ = 4.0
-
 # The step-size floor is this many spacings of the current time (the hard
 # ``hmin`` bound still applies on top when set).
 _FLOOR_SPACINGS = 10.0
@@ -148,29 +148,6 @@ _ROW_IDX = np.arange(D_ROWS)
 
 # GAMMA padded to the table rows so the history term is one masked matvec.
 _GAMMA_ROWS = np.concatenate([GAMMA, np.zeros(D_ROWS - GAMMA.shape[0])])
-
-
-def _capabilities() -> EngineCapabilities:
-    """The NDF engine's capability flags (every flag stated)."""
-    return EngineCapabilities(
-        # The factored iteration matrix persists across attempts and is
-        # refactored only where a setup replaces it.
-        supports_factor_reuse=True,
-        supports_events=True,
-        # This engine integrates the mass-matrix ODE/DAE form, not a
-        # user-supplied truly-implicit residual F(t, y, ydot).
-        supports_fully_implicit=False,
-        supports_global_constraints=True,
-        # The diagonal mass is re-evaluated at the current iterate inside the
-        # residual; state-dependent mass is handled in weak (chord) form.
-        supports_state_dependent_mass=True,
-        supports_dense_output=True,
-    )
-
-
-def _where_state(cond: jax.Array, a: NDFState, b: NDFState) -> NDFState:
-    """Select between two carried states leaf-by-leaf on a scalar predicate."""
-    return jax.tree_util.tree_map(lambda x, y: jnp.where(cond, x, y), a, b)
 
 
 class NDFEngineCarry(eqx.Module):
@@ -471,49 +448,23 @@ class NDFEngine(eqx.Module):
         t1 = jnp.asarray(t1, dtype=dtype)
         uround = jnp.asarray(jnp.finfo(dtype).eps, dtype=dtype)
 
-        _, _, _diff, _alg_index, needs_projection = _structure(problem)
-        if not bool(cfg.consistent_ic) and needs_projection:
-            raise ConfigurationError(
-                "this problem has algebraic rows; "
-                "consistent_ic=False is not supported for it. Enable "
-                "consistent initialization."
-            )
-        # The projection factors this problem exactly as the corrector does,
-        # so it is analyzed with the lowered problem's placement and the
-        # accepted-root sensitivity precision this solve declared for each
-        # derivative direction — never the backend's defaults.
-        ic_layout, ic_precision = initialization_policy(problem, self.precision, mode="forward")
-        _, ic_reverse_precision = initialization_policy(problem, self.precision, mode="reverse")
-        ic = problem.consistent_initial_state(
+        refuse_unprojected_start(problem, not bool(cfg.consistent_ic), "consistent_ic=False is")
+        policies = initialization_policies(problem, self.precision)
+        _, _, ic_reverse_precision = policies
+        ic = project_start(
+            self,
+            problem,
             t0,
-            pack_state(u0, lam0),
+            u0,
+            lam0,
+            ydot0,
             theta,
             control,
-            ydot0=jnp.concatenate([ydot0, jnp.zeros((n_lam,), dtype=dtype)]),
-            tol=ic_gate_tolerance(self.atol, self.ic_tol),
-            rtol=self.rtol if self.ic_rtol is None else self.ic_rtol,
+            policies,
             max_iters=self.ic_max_newton_iters,
-            backend=self.backend,
-            layout=ic_layout,
-            precision=ic_precision,
-            reverse_precision=ic_reverse_precision,
         )
-        ic_y, ic_ydot = consume_consistent_init(ic)
-        u_c = jnp.asarray(ic_y[:n_u], dtype=dtype)
-        lam_c = jnp.asarray(ic_y[n_u:], dtype=dtype)
-        alg_norm = jnp.asarray(ic.residual_norm, dtype=dtype)
-
-        y_aug0 = pack_state(u_c, lam_c)
-        # The consistent initialization computes derivatives for every
-        # differential row, including differential globals in the bordered
-        # partition; algebraic rows arrive as zeros. Consume it whole.
-        ydot_aug0 = jnp.asarray(ic_ydot, dtype=dtype)
-
-        # A per-row absolute tolerance arrives as a vector on the driver
-        # configuration; it rides the carry so accepted-step weight refreshes
-        # keep consuming it.
-        atol_rows = cfg.atol if getattr(cfg.atol, "ndim", 0) == 1 else None
-        ewt0 = error_weight(y_aug0, self.rtol, self.atol if atol_rows is None else atol_rows)
+        start = consistent_start(self, cfg, ic, n_u, dtype)
+        u_c, lam_c, y_aug0, ydot_aug0, alg_norm, atol_rows, ewt0 = start
 
         hmax = float(cfg.hmax)
         hmax_inv = jnp.asarray(1.0 / hmax if hmax > 0.0 else 0.0, dtype=dtype)
@@ -556,18 +507,7 @@ class NDFEngine(eqx.Module):
             jax.lax.cond(dt0 != 0.0, lambda _: dt0, _auto_initial_step, operand=None)
         )
 
-        rh = jnp.abs(hh) * hmax_inv
-        hh = jnp.where(rh > 1.0, hh / jnp.where(rh > 1.0, rh, 1.0), hh)
-        at_min = jnp.abs(hh) < hmin
-        hh = jnp.where(at_min, hh * (hmin / jnp.where(at_min, jnp.abs(hh), 1.0)), hh)
-        overshoot = (t0 + hh - t1) * hh > 0
-        hh = jnp.where(overshoot, (t1 - t0) * (1.0 - _ENDPOINT_CLAMP_FUZZ * uround), hh)
-
-        if step is not None:
-            # A replayed restart enters with the step its forward sweep recorded.
-            replay, recorded = step
-            recorded = jax.lax.stop_gradient(jnp.asarray(recorded).astype(dtype))
-            hh = jnp.where(replay, recorded, hh)
+        hh = clamp_initial_step(hh, t0, t1, hmax_inv, hmin, uround, step, dtype)
 
         state = init_ndf_state(y_aug0, ydot_aug0, hh, dtype.type)
 
@@ -657,14 +597,7 @@ class NDFEngine(eqx.Module):
         max_order = jnp.asarray(carry.max_order, jnp.int32)
 
         backend = self.backend
-        # The problem's lowering-declared Layout is the single source of
-        # truth for device placement: it places EVERY analysis of this solve
-        # — each corrector rung's factor and the sensitivity pattern alike —
-        # so a multi-GPU factorization request reaches the adjoint's
-        # transpose factor too, never silently staying single-device.
-        layout = getattr(problem, "layout", None)
-        if layout is None:
-            layout = Layout()
+        layout = problem_layout(problem)
         adaptive = self.precision.solve_mode == "adaptive"
         # The corrector's routes: one per precision rung (two under the
         # adaptive ladder, which switches between them on the carried rung).
@@ -726,29 +659,7 @@ class NDFEngine(eqx.Module):
             rung_changed=None if prec is None else prec.entered,
             control=carry.control,
         )
-        # The sensitivity solves of the per-step root derivative factor the
-        # full-system matrix at the accepted root exactly — the tangent solve
-        # the matrix, a reverse sweep its transpose, each under the precision
-        # policy of its direction — through this engine's own backend; a
-        # dense-mode plan hands it the full dense pattern. The symbolic
-        # analysis is problem-static.
-        full_topology = problem.full_topology
-        if full_topology is None:
-            full_topology = _full_dense_topology(int(problem.n))
-        sens_analysis = analyze_sensitivity(
-            backend,
-            full_topology,
-            layout=layout,
-            precision=self.precision,
-            mode="forward",
-        )
-        rev_analysis = analyze_sensitivity(
-            backend,
-            full_topology,
-            layout=layout,
-            precision=self.precision,
-            mode="reverse",
-        )
+        sens_analysis, rev_analysis = sensitivity_analyses(self, problem, backend, layout)
         nls = ndf_corrector_root(
             problem,
             backend,
@@ -848,7 +759,7 @@ class NDFEngine(eqx.Module):
         at_end = jnp.abs(tn_new - t1) <= _TN_SNAP_FUZZ * uround * (jnp.abs(tn_new) + dt_abs)
         overtake = (tn_new + dt_acc - t1) * dt > 0
         clamp = jnp.logical_and(jnp.logical_not(at_end), overtake)
-        dt_acc = jnp.where(clamp, (t1 - tn_new) * (1.0 - _ENDPOINT_CLAMP_FUZZ * uround), dt_acc)
+        dt_acc = jnp.where(clamp, (t1 - tn_new) * (1.0 - ENDPOINT_CLAMP_FUZZ * uround), dt_acc)
         # the constant-step counter survives only an unchanged step size
         nconsteps_acc = jnp.where(dt_acc == dt, acc.nconsteps_next, jnp.zeros((), jnp.int32))
         accept_state = NDFState(
@@ -957,8 +868,8 @@ class NDFEngine(eqx.Module):
         )
 
         # --- select the branch ---
-        fail_state = _where_state(did_converge, reject_state, newton_fail_state)
-        new_state = _where_state(accept, accept_state, fail_state)
+        fail_state = where_state(did_converge, reject_state, newton_fail_state)
+        new_state = where_state(accept, accept_state, fail_state)
 
         new_ewt = error_weight(
             y_new_full, self.rtol, self.atol if carry.atol_rows is None else carry.atol_rows
@@ -1187,7 +1098,7 @@ class NDFEngine(eqx.Module):
         return ndf_interpolant(st.d_basis, st.k_used, carry.tn, st.dt_basis, t)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.lru_cache(maxsize=ENGINE_CACHE_SIZE)
 def ndf_engine(
     profile,
     *,
@@ -1212,8 +1123,8 @@ def ndf_engine(
     binds only for seeds far from the algebraic manifold).
     ``precision`` selects the linear solve mode; a mode the backend does not
     declare is rejected here, eagerly. Identical configurations return one
-    memoised engine object, so repeated solves share the driver's compiled
-    program.
+    memoised engine object (of the last ``ENGINE_CACHE_SIZE``), so repeated
+    solves share the driver's compiled program.
     """
     backend = resolve_backend(linear)
     backend._validate_capabilities(Layout(), precision)
@@ -1223,7 +1134,7 @@ def ndf_engine(
         atol=float(atol),
         loop_form=profile.nonlinear_mode,
         jacobian_policy=profile.jacobian_policy,
-        capabilities=_capabilities(),
+        capabilities=ENGINE_CAPABILITIES["ndf"],
         controller_mode=profile.controller_mode,
         controller_law=profile.controller_law,
         newton_tol_factor=float(newton_tol_factor),

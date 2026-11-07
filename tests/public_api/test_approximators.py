@@ -12,9 +12,9 @@ import optax
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
 from diff_soup.domains import cartesian_grid_1d, rectangle_mesh
-from diff_soup.inference import approx
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference import approx
 from tests.support.inference import small_fit, solver
 
 

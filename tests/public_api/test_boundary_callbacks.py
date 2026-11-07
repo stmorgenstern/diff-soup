@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
-from diff_soup.inference.approx import PiecewiseLinear
+from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.approx import PiecewiseLinear
 
 #: Solver settings (requested tolerances, not asserted bounds).
 _TIGHT = {"rtol": 1e-8, "atol": 1e-10}

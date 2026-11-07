@@ -9,8 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 
 import diff_soup as ds
-from diff_soup import inference as inf
 from diff_soup.domains import cartesian_grid_1d
+from diff_soup.optimization import inference as inf
 
 #: The true rate of every decay data set unless a builder is told otherwise.
 TRUE_RATE = 0.6

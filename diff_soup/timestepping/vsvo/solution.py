@@ -37,7 +37,7 @@ import jax.numpy as jnp
 from jaxtyping import Array
 
 from diff_soup._solution import RESULT, is_successful
-from diff_soup.utils.lanes import _any_lane_p
+from diff_soup.utils.lanes import any_lane
 
 
 class SolverStats(eqx.Module):
@@ -571,7 +571,7 @@ def place_saveat_sample(buffers, pending, slot, rows, write):
         return buffers, (jnp.where(write, slot, pending_slot), pending_rows)
 
     return jax.lax.cond(
-        _any_lane_p.bind(jnp.asarray(write, jnp.bool_)),
+        any_lane(write),
         place,
         lambda operand: operand,
         (tuple(buffers), pending),
@@ -748,7 +748,7 @@ def fill_saveat_window(
         return _fill(operand, start + jnp.arange(window, dtype=jnp.int32))
 
     def _cover(operand):
-        return jax.lax.cond(_any_lane_p.bind(overflow), _full, _windowed, operand)
+        return jax.lax.cond(any_lane(overflow), _full, _windowed, operand)
 
     # An attempt that covers no save time (every rejected attempt, most
     # accepted ones) evaluates nothing; under vmap the fill runs when some
@@ -757,10 +757,10 @@ def fill_saveat_window(
     # The writes already mask each lane by its own [cursor, hi) interval;
     # both fill paths produce the same valid rows on a non-overflow lane.
     # Select only which work the batch needs, not between whole output
-    # buffers. lane_cond's per-leaf where would retain old full trajectories
-    # across both nested conditionals (four extra copies in the arena).
+    # buffers: lane_cond would select each lane's buffers from its two
+    # branches, which holds a second copy of every buffer.
     buffers, pending = jax.lax.cond(
-        _any_lane_p.bind(covers), _cover, lambda operand: operand, (buffers, pending)
+        any_lane(covers), _cover, lambda operand: operand, (buffers, pending)
     )
     evaluations = jnp.where(
         covers,

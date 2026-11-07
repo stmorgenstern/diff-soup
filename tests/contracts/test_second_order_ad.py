@@ -1,6 +1,6 @@
 """Second-order AD through solves: the composable forward rule, Hessians under the checkpoint
-adjoint, the replay guard, run-time failures on an asynchronous device, and a declared
-reverse-sweep dtype under the checkpoint gradient and Hessian."""
+adjoint, reverse over reverse under it alone and through lanes, the replay guard, run-time failures on an asynchronous
+device, and a declared reverse-sweep dtype under the checkpoint gradient and Hessian."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from tests.support.second_order import (
     PROBLEM,
     SPAN,
     THETA,
+    TIGHT,
     Y0,
     composable_reference,
     gradient_and_hessian,
@@ -56,6 +57,37 @@ def test_the_checkpoint_hessian_equals_the_composable_reverse_over_forward_hessi
     hessian = jax.hessian(loss(ds.CheckpointAdjoint(), linear))(THETA)
     np.testing.assert_allclose(reference, reference.T, rtol=_HESSIAN)
     np.testing.assert_allclose(hessian, reference, rtol=_HESSIAN)
+
+
+# measured 8.7e-16 (one solve) and 4.4e-16 (lanes) relative between the two routes, workstation
+# CPU 2026-11-07,
+# pytest tests/contracts/test_second_order_ad.py::test_reverse_over_reverse_equals_forward_over_reverse
+_REVERSE_OVER_REVERSE = 1e-10
+
+
+def _lane_sum(adjoint):
+    """The squared end states of two vmap lanes over start states that share theta, summed."""
+    solver = ds.JNDF.stock(linear="dense", **TIGHT)
+
+    def lane(theta, y0):
+        solution = ds.pdesolve(PROBLEM, solver, SPAN, y0, theta=theta, adjoint=adjoint)
+        return jnp.sum(solution.ys[-1] ** 2)
+
+    return lambda theta: jnp.sum(
+        jax.vmap(lane, in_axes=(None, 0))(theta, jnp.stack([Y0, 1.1 * Y0]))
+    )
+
+
+@pytest.mark.parametrize("objective", [loss, _lane_sum], ids=["one_solve", "lanes"])
+def test_reverse_over_reverse_equals_forward_over_reverse(objective):
+    """Under CheckpointAdjoint(reverse_over_reverse=True) a jitted jax.grad of a jax.grad through
+    the solve, alone or through lanes that share theta, is the Hessian-vector product that
+    forward mode over the gradient gives."""
+    gradient = jax.grad(objective(ds.CheckpointAdjoint(reverse_over_reverse=True)))
+    direction = jnp.asarray([0.3, -0.7])
+    by_reverse = jax.jit(jax.grad(lambda theta: jnp.vdot(gradient(theta), direction)))(THETA)
+    by_forward = jax.jvp(gradient, (THETA,), (direction,))[1]
+    np.testing.assert_allclose(by_reverse, by_forward, rtol=_REVERSE_OVER_REVERSE)
 
 
 def _drifting_engine():

@@ -419,6 +419,8 @@ foreach(LINE ${_resolved_lines})
 
     target_include_directories(${_target} PRIVATE
         ${XLA_DIR}
+        # slot_registry.h, the slot registry the three extensions share.
+        ${CMAKE_CURRENT_SOURCE_DIR}/../native_common
         ${_cudss_include}
         ${CU${LINE}_CUDART_INCLUDE}
         ${CU${LINE}_NVCC_INCLUDE}

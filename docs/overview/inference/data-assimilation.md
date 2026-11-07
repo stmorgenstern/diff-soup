@@ -18,7 +18,7 @@ projected onto the mesh nodes with `interpolate_image_to_nodes`, and
 
 ```python
 from diff_soup.domains.geometry import mask_to_mesh
-from diff_soup.inference.data import PixelAveragingOperator, interpolate_image_to_nodes
+from diff_soup.optimization.inference.data import PixelAveragingOperator, interpolate_image_to_nodes
 
 mask = np.isfinite(frames[0])                                    # True on the oval
 mesh = mask_to_mesh(mask, mesh_size=0.05, pixel_size=pixel_size)     # triangles inside the oval
@@ -54,10 +54,10 @@ images = frames[:, mask]                                           # the observe
 
 ## Estimating the initial condition
 
-`ds.inference.Experiment(..., initial_state=ds.inference.LearnedInitialState(guess), ...)`
+`ds.optimization.inference.Experiment(..., initial_state=ds.optimization.inference.LearnedInitialState(guess), ...)`
 fits the initial condition alongside the parameters, with `guess` the
 starting value of the state at the start of the experiment's span. A
-bare array stays a fixed state, and `ds.inference.FixedInitialState(y0)`
+bare array stays a fixed state, and `ds.optimization.inference.FixedInitialState(y0)`
 is the explicit form. The fitted state reads back from
 `result.window_states[0]`, or `result.experiments[<id>].window_states[0]`,
 a `(1, n_diff)` block under single shooting and the first window block
@@ -73,8 +73,8 @@ we provide `extract_boundary_traces` and `smooth_boundary`:
 ![The boundary nodes read off the image and the trace around the contour](../../assets/data-assimilation-boundary-trace.svg)
 
 ```python
-from diff_soup.inference.approx import PiecewiseLinear
-from diff_soup.inference.data import extract_boundary_traces, smooth_boundary
+from diff_soup.optimization.inference.approx import PiecewiseLinear
+from diff_soup.optimization.inference.data import extract_boundary_traces, smooth_boundary
 
 boundary = mesh.boundary_nodes()
 bc_raw = extract_boundary_traces(frames, mesh.points, boundary,
@@ -100,7 +100,7 @@ trace = PiecewiseLinear(ts, bc)                                    # one column 
 ## Fitting from the frames
 
 The recipe takes the mesh as its domain and the trace as its boundary
-value. The operator's `predict` goes to `ds.inference.Measurement(observe=)`,
+value. The operator's `predict` goes to `ds.optimization.inference.Measurement(observe=)`,
 so the fit compares predicted pixels with the frames:
 
 ```python
@@ -119,9 +119,9 @@ spec.bc.dirichlet("u", node_indices=boundary, value_fn=trace)
 problem = spec.build()
 y0 = spec.assemble_state({"u": u0})
 
-measurement = ds.inference.Measurement("image", ts, images, observe=op.predict,
+measurement = ds.optimization.inference.Measurement("image", ts, images, observe=op.predict,
                                        weight=1e6)
-experiment = ds.inference.Experiment(problem, ds.JIDA(), (float(ts[0]), float(ts[-1])), y0, (measurement,))
-result = ds.inference.optsolve(ds.inference.InferenceProblem(experiment, parameters=D))
+experiment = ds.optimization.inference.Experiment(problem, ds.JIDA(), (float(ts[0]), float(ts[-1])), y0, (measurement,))
+result = ds.optimization.optsolve(ds.optimization.inference.InferenceProblem(experiment, parameters=D))
 result[D]                                                          # the fitted diffusivity
 ```

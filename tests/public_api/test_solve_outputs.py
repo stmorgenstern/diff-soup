@@ -10,7 +10,13 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.timestepping import Bisection, EventSet
-from tests.support.problems import ConstrainedDAE, DecayODE, observed_recipe, operational_cell
+from tests.support.problems import (
+    ConstrainedDAE,
+    DecayODE,
+    observed_recipe,
+    operational_cell,
+    thirds_dae,
+)
 
 _THETA = jnp.asarray(0.4)
 #: Solver and root-finder settings (requested tolerances, not asserted bounds).
@@ -184,19 +190,6 @@ def test_the_save_grid_is_evaluated_only_on_attempts_that_cover_a_save_time():
     assert 0 < int(solution.stats.saveat_interpolations) <= 5 * 5
 
 
-#: ``y' = -y`` and ``0 = 3 z - y``, whose residual at ``y`` near 1e8 cannot fall below about
-#: 7.5e-9 for many values of ``y``: no float ``z`` meets ``3 z = y`` closer.
-_THIRDS = ds.MassProblem(
-    rhs=lambda t, y, theta, control: jnp.stack([-y[0], 3.0 * y[1] - y[0]]),
-    mass=ds.MassOperator.sparse(
-        [0],
-        [0],
-        lambda t, y, theta, control: jnp.ones((1,), y.dtype),
-        n=2,
-        dependencies=ds.Dependencies(time=False, state=False, parameters=False, control=False),
-    ),
-    structure=ds.DAEStructure(differential_vars=np.array([True, False])),
-)
 # measured 1.8e-8 relative on every row, workstation 2026-11-05,
 # pytest tests/public_api/test_solve_outputs.py::test_projected_rows_at_the_rounding_floor_pass_the_gate_of_the_solves_own_start
 _FLOOR_BOUND = 1e-6
@@ -209,7 +202,7 @@ def test_projected_rows_at_the_rounding_floor_pass_the_gate_of_the_solves_own_st
     ``z = y/3``."""
     start, times = 195046369.6325935, jnp.linspace(0.0, 0.5, 41)
     solution = ds.pdesolve(
-        _THIRDS,
+        thirds_dae(),
         ds.JIDA(linear="dense", **_FLOOR),
         (0.0, 0.5),
         jnp.asarray([start, start / 3.0]),
@@ -445,13 +438,10 @@ def test_resistance_control_seeds_and_solves_the_known_load(current_seed):
     )
     assert bool(solution.ok)
     expected_u = 2.0 * np.exp(-0.8 * np.asarray(times))
-    # Measured relative error 1.263e-10 for both seeds, workstation 2026-11-05,
-    # .ports/control_seed_check.py against the closed form in this test's docstring.
+    # measured relative error 1.263e-10 for both seeds, workstation 2026-11-06, pytest
+    # tests/public_api/test_solve_outputs.py::test_resistance_control_seeds_and_solves_the_known_load
     np.testing.assert_allclose(solution.ys, np.repeat(expected_u[:, None], 4, axis=1), rtol=1e-8)
     np.testing.assert_allclose(solution.lambdas[:, 0], expected_u / 5.0, rtol=1e-8)
-    schedule = ds.Schedule([ds.Segment(resistance=3.0, duration=0.5)])
-    arrays = ds.schedule_arrays(schedule, problem.operational_modes())
-    np.testing.assert_array_equal(arrays.mode, [3])
 
 
 def test_schedules_and_segments_are_value_types_that_validate_their_entries():

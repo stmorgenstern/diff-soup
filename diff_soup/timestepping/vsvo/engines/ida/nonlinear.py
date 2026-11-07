@@ -71,9 +71,9 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     linearize,
     refactor_held,
 )
-from diff_soup.timestepping.vsvo.common.weights import wrms_norm
 from diff_soup.utils import safe_div, safe_power
 from diff_soup.utils.lanes import live_lane_cond
+from diff_soup.utils.weights import wrms_norm
 
 from .state import DIRECT_TEST_TOL, NEWTON_CONV_COEFF
 
@@ -125,19 +125,24 @@ _DIRECT_PASS_FACTOR = 1e-4
 _FIRST_PASS_NORM = 1.0
 """Largest first-iteration correction a carried rate memory may accept.
 
-With algebraic rows out of the error test, this is the only bound on them. The
-rate memory describes the last iteration that measured one, often on a fresh
-matrix, where it can be orders of magnitude below the rate of the aged matrix now
-in use, and it is never updated while steps converge on their first iteration. So
-a larger correction takes a second iteration, which measures the rate."""
+The unit of the weighted norm: the local error test accepts a step whose
+weighted RMS error is at most 1 (IDA's error test, Hindmarsh et al., ACM TOMS 31,
+2005, eq. 2.9), so a correction above it is already as large as an error the step
+would be rejected for. With algebraic rows out of the error test, this is the only
+bound on them. The rate memory describes the last iteration that measured one,
+often on a fresh matrix, where it can be orders of magnitude below the rate of the
+aged matrix now in use, and it is never updated while steps converge on their
+first iteration. So a larger correction takes a second iteration, which measures
+the rate."""
 
 _FLOOR_FACTOR = 2.0
 """Largest ratio of a failing correction to the rounding floor that is accepted as converged.
 
 The floor is the weighted norm of the correction the same matrix makes from the
 residual's change when the iterate moves by one rounding unit: the noise every
-correction at the root carries. Two such corrections differ by up to about a factor
-of two, so a correction within twice the floor cannot be told from noise."""
+correction at the root carries. Ours: a correction at the root is itself such a
+noise draw, and a factor of two leaves room for one draw to be twice another; it
+admits no correction a step could still reduce by more than a rounding unit."""
 
 _SCHUR_EPS = 1e-12
 """Tikhonov regularization for the small Schur-complement solve over the global

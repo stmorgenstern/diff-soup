@@ -76,6 +76,41 @@ last command at a CUDA 12 toolkit's compiler with
 a SuperLU_MT installation is found; `diff_soup/_internal/superlu_ffi/build_superlu_mt.sh`
 builds one.
 
+## Environment
+
+`import diff_soup` makes three changes to the process.
+
+- It adds three XLA GPU flags to `XLA_FLAGS`, keeping any flag already set
+  (`ds.distributed.configure`).
+- It turns on JAX's constant hoisting, as above.
+- It wraps JAX's custom-call builder so that every LAPACK, cuSOLVER and cuDSS
+  call reaches XLA as a typed FFI call.
+
+Loading the cuDSS solver adds the NVIDIA wheels' library directories to
+`LD_LIBRARY_PATH` for child processes.
+
+diff-soup reads these variables, with their defaults in brackets.
+
+- `DIFF_SOUP_INHERENT_FFI_CONFIG` (`1`) set to `0` leaves JAX's custom-call
+  builder unwrapped.
+- `DIFFSOUP_CACHE_DIR` is where window initializations are stored. Unset, it
+  is `diff_soup` beside JAX's compilation cache, or `~/.cache/diff_soup`.
+- `DIFFSOUP_COORDINATOR` is process 0's `host:port` for an MPI launch of
+  `ds.distributed.initialize()`.
+- `DIFFSOUP_MGMN` (`0`) set to `1` in every process runs cuDSS across the
+  GPUs of several processes.
+- `DIFFSOUP_MPI_LIBRARY` (`libmpi.so.40`) is the Open MPI library of that mode.
+- `DIFFSOUP_NODES` (`1`), `DIFFSOUP_GPUS_PER_NODE` (`2`) and
+  `DIFFSOUP_CPUS_PER_PROCESS` (`4`) shape a Slurm launch of
+  `python -m diff_soup.distributed.launch`.
+- `DIFFSOUP_PROCESSES` is the number of processes that launcher forks on one
+  host. A CPU-only host needs it.
+- `DIFF_SOUP_DEADLINE_SECONDS` (`600`) and
+  `DIFF_SOUP_PREPARE_DEADLINE_SECONDS` (`21600`) bound how long process 0 of
+  `ds.distributed.run` waits for a reply and for every process to prepare.
+
+An empty variable counts as unset.
+
 ## Troubleshooting
 
 - Install exactly one of `cu12` and `cu13`. With both JAX CUDA plugins

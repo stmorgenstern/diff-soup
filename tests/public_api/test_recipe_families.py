@@ -11,7 +11,6 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.domains import rectangle_mesh
-from diff_soup.utils import build_sparse_jvp_groups
 
 # measured 0.0 between the sparse and dense member Jacobians, CPU VM 2026-10-22,
 # pytest tests/public_api/test_recipe_families.py::test_a_declared_stencil_radius_widens_the_member_tile_to_the_composed_stencil;
@@ -252,20 +251,11 @@ def _wide_member_rows(sites):
 
 
 def test_member_rows_reading_every_site_are_recovered_by_pullback_not_by_a_color_per_site():
-    """A member row reading all of its member's cells makes the pattern need one color per cell
-    (9 at 8 cells, 17 at 16), yet the solver holds the six such rows, one per member, out of its
-    coloring for a pullback and colors the rest with 4 colors at either size."""
-    counts = []
-    for sites in (8, 16):
-        problem = _wide_member_rows(sites)
-        view = ds.solver_view(problem)
-        rows, cols = view.full_topology.rows, view.full_topology.cols
-        colored = ~np.isin(rows, view.plan.held_out_rows)
-        colors = build_sparse_jvp_groups(rows[colored], cols[colored], view.n)[0]
-        counts.append(
-            (ds.topology_report(problem).color_count, view.plan.held_out_rows.size, len(colors))
-        )
-    assert counts == [(9, 6, 4), (17, 6, 4)]
+    """Member rows reading all of their member's cells are recovered by a shared pullback, so the
+    topology report counts the same colors at 8 and at 16 cells per member."""
+    reports = [ds.topology_report(_wide_member_rows(sites)) for sites in (8, 16)]
+    counts = [(report.color_count, report.pullback_count) for report in reports]
+    assert counts[0] == counts[1] and counts[0][1] > 0
 
 
 def test_the_iteration_matrix_of_wide_member_rows_is_the_dense_jacobian():

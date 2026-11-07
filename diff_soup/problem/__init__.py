@@ -27,6 +27,7 @@ Public exports
 """
 
 from diff_soup.domains.boundary_set import BoundarySet, tags
+from diff_soup.problem._ad.tangent_pattern import jacobian_pattern
 from diff_soup.problem._consistency import InconsistentInitializationError
 from diff_soup.problem._ir import (
     BoundaryIntegralConstraint,
@@ -54,7 +55,6 @@ from diff_soup.problem._spec import (
     lower,
     problem,
 )
-from diff_soup.problem.consistent_init import ConsistentInitProblem
 from diff_soup.problem.implicit import (
     DAEStructure,
     Dependencies,
@@ -64,9 +64,9 @@ from diff_soup.problem.implicit import (
     ResidualLinearization,
     ResidualSparsity,
     SolverView,
-    get_or_build_solver_view,
     solver_view,
 )
+from diff_soup.problem.implicit.consistent_init.pinned import ConsistentInitProblem
 from diff_soup.problem.implicit.topology_report import (
     RowOwner,
     TopologyReport,
@@ -74,7 +74,6 @@ from diff_soup.problem.implicit.topology_report import (
     topology_report,
 )
 from diff_soup.problem.parameters import ParameterSet
-from diff_soup.timestepping.vsvo.common.contract import register_problem_coercion
 
 
 def default_theta(problem, values=None):
@@ -101,7 +100,7 @@ def default_theta(problem, values=None):
     if callable(own):
         theta = own()
     else:
-        surface = get_or_build_solver_view(problem).default_theta
+        surface = solver_view(problem).default_theta
         theta = surface() if callable(surface) else surface
     if values is None:
         return theta
@@ -191,6 +190,7 @@ __all__ = [
     # Iteration-matrix structure diagnostics
     "topology_report",
     "jacobian_nnz",
+    "jacobian_pattern",
     "solver_view",
     "SolverView",
     "TopologyReport",
@@ -213,8 +213,3 @@ __all__ = [
     "ResidualSparsity",
     "ResidualLinearization",
 ]
-
-# Wire the scalar solver suite's problem-coercion seam so direct engine calls
-# and the top-level entry resolve the same solver problem. Registering at
-# problem-layer import time keeps the import direction problem -> timestepping.
-register_problem_coercion(get_or_build_solver_view)
