@@ -32,9 +32,11 @@ this report does not perform.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 import numpy as np
+from jaxtyping import ArrayLike
 
 __all__ = [
     "NullDirection",
@@ -154,9 +156,9 @@ _NEGATIVE_CLIP_RTOL = 1e-12
 
 
 def identifiability_report(
-    fim: Any = None,
+    fim: ArrayLike | Sequence | None = None,
     *,
-    whitened_jacobian: Any = None,
+    whitened_jacobian: ArrayLike | Sequence | None = None,
     names: Optional[tuple] = None,
     ridge: float = 1e-10,
     null_tol: float = 1e-10,
@@ -295,9 +297,9 @@ def identifiability_report(
 
 
 def gauss_newton_covariance(
-    jac: Any,
+    jac: ArrayLike | Sequence,
     *,
-    sigma: Any = None,
+    sigma: ArrayLike | Sequence | None = None,
     null_tol: float = 1e-10,
     names: tuple = (),
 ) -> np.ndarray:
@@ -358,7 +360,9 @@ def gauss_newton_covariance(
     return (vt.T / s**2) @ vt
 
 
-def fit_posterior(problem: Any, x: Any, *, sigma: Any = None) -> np.ndarray:
+def fit_posterior(
+    problem: Any, x: ArrayLike | Sequence, *, sigma: ArrayLike | Sequence | None = None
+) -> np.ndarray:
     """Return the Gauss-Newton posterior covariance of a completed fit.
 
     Reuses the inference problem's own residual Jacobian at the converged
@@ -392,7 +396,7 @@ def fit_posterior(problem: Any, x: Any, *, sigma: Any = None) -> np.ndarray:
     return gauss_newton_covariance(jac[:, :n_theta], sigma=sigma)
 
 
-def pointwise_variance(basis: Any, covariance: Any) -> np.ndarray:
+def pointwise_variance(basis: ArrayLike | Sequence, covariance: ArrayLike | Sequence) -> np.ndarray:
     """Return the pointwise standard deviation of a function-valued parameter.
 
     For a function ``f(x) = Σ_i θ_i φ_i(x)`` with coefficient covariance ``C``,
@@ -489,7 +493,7 @@ class FunctionReport:
 
     # -- evaluation helpers -------------------------------------------------
 
-    def _basis_rows(self, cs: Any) -> np.ndarray:
+    def _basis_rows(self, cs: ArrayLike | Sequence) -> np.ndarray:
         if self._basis is None:
             raise ValueError(
                 "this FunctionReport was built without a basis, so it cannot "
@@ -501,7 +505,7 @@ class FunctionReport:
         x = 2.0 * (cs - lo) / (hi - lo) - 1.0
         return np.polynomial.legendre.legvander(x, len(self.names) - 1)
 
-    def _jacobian(self, cs: Any, rows: np.ndarray) -> np.ndarray:
+    def _jacobian(self, cs: ArrayLike | Sequence, rows: np.ndarray) -> np.ndarray:
         """The evaluation Jacobian |d transform / d expansion| at each point."""
         if self.scale != "natural":
             return np.ones(rows.shape[0])
@@ -515,7 +519,7 @@ class FunctionReport:
         jac = [float(jax.grad(lambda p: transform(c, p))(float(p0))) for c, p0 in zip(cs, raw)]
         return np.abs(np.asarray(jac))
 
-    def _weighted_rows(self, cs: Any) -> np.ndarray:
+    def _weighted_rows(self, cs: ArrayLike | Sequence) -> np.ndarray:
         rows = self._basis_rows(cs)
         return rows * self._jacobian(cs, rows)[:, None]
 
@@ -532,11 +536,11 @@ class FunctionReport:
 
     # -- the report surface --------------------------------------------------
 
-    def mode_curves(self, cs: Any) -> np.ndarray:
+    def mode_curves(self, cs: ArrayLike | Sequence) -> np.ndarray:
         """Evaluate every mode's function shape, shape ``(n_modes, n_points)``."""
         return (self._weighted_rows(cs) @ self.modes).T
 
-    def pointwise_sd(self, cs: Any) -> np.ndarray:
+    def pointwise_sd(self, cs: ArrayLike | Sequence) -> np.ndarray:
         """The pointwise function standard deviation at each evaluation point.
 
         ``metric="gram"``: the data-only profiled uncertainty — infinite
@@ -556,7 +560,7 @@ class FunctionReport:
             sd = np.where(null_mass > 1e-12 * np.maximum(total, 1e-300), np.inf, sd)
         return sd
 
-    def pointwise_contraction(self, cs: Any) -> np.ndarray:
+    def pointwise_contraction(self, cs: ArrayLike | Sequence) -> np.ndarray:
         """The posterior/prior pointwise standard-deviation ratio.
 
         ``1`` means the experiment taught nothing about the function value at
@@ -580,7 +584,7 @@ class FunctionReport:
 
     def bands(
         self,
-        cs: Any,
+        cs: ArrayLike | Sequence,
         *,
         kind: str = "pointwise",
         level: float = 0.95,
@@ -641,7 +645,7 @@ class FunctionReport:
         )
 
 
-def _resolve_block_columns(names: tuple, block: Any) -> tuple:
+def _resolve_block_columns(names: tuple, block: str | Iterable[int]) -> tuple:
     """Resolve a block spec to ``(label, column indices)`` over ``names``."""
     if isinstance(block, str):
         cols = [
@@ -663,14 +667,14 @@ def _resolve_block_columns(names: tuple, block: Any) -> tuple:
 
 def function_report(
     information: Any,
-    block: Any,
+    block: str | Iterable[int],
     *,
     metric: str = "gram",
     basis: Any = None,
-    gram: Any = None,
+    gram: ArrayLike | Sequence | None = None,
     nuisance: str = "schur",
     scale: str = "raw",
-    at: Any = None,
+    at: ArrayLike | Sequence | None = None,
     null_tol: float = 1e-10,
 ) -> FunctionReport:
     """Report how well the data determine one function-valued parameter, measured in the function's own norm.

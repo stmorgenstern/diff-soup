@@ -25,9 +25,15 @@ tolerance next to the achieved value.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Hashable
 from typing import Any, Optional
 
 import numpy as np
+
+from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.statistics.diagnostics import ResidualReport
+from diff_soup.optimization.inference.statistics.identifiability import IdentifiabilityReport
+from diff_soup.optimization.inference.statistics.laplace import LaplacePosterior
 
 __all__ = ["PracticalReport", "ToleranceStatus", "practical_report"]
 
@@ -75,23 +81,23 @@ class PracticalReport:
             tell an unexamined question from a settled one.
     """
 
-    local_sensitivity: Any
+    local_sensitivity: IdentifiabilityReport
     likelihood_geometry: tuple
     uncertainty_contraction: Optional[dict]
-    model_adequacy: Optional[Any]
+    model_adequacy: Optional[ResidualReport]
     status: Optional[tuple]
     provenance: dict
 
 
 def practical_report(
     problem: Any,
-    fit: Any,
+    fit: OptResult,
     *,
-    posterior: Any = None,
+    posterior: Optional[LaplacePosterior] = None,
     profiles: tuple = (),
     tolerances: Optional[dict] = None,
-    report: Any = None,
-    experiment_id: Any = None,
+    report: Optional[IdentifiabilityReport] = None,
+    experiment_id: Optional[Hashable] = None,
 ) -> PracticalReport:
     """Collect the evidence on practical identifiability at a fit into one report.
 

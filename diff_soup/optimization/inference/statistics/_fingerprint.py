@@ -18,9 +18,8 @@ import functools
 import hashlib
 import json
 import types
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -34,13 +33,13 @@ class UnstableFingerprintError(TypeError):
     """A declaration contains an object with no stable encoding contract."""
 
 
-def _qualified_type(value: Any) -> str:
+def _qualified_type(value: object) -> str:
     """Fully qualified ``module.QualName`` of ``value`` (or of its type)."""
     cls = value if isinstance(value, type) else type(value)
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
-def _canonical_json(value: Any) -> str:
+def _canonical_json(value: object) -> str:
     """Serialize ``value`` as compact, key-sorted JSON, rejecting NaN."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -49,15 +48,15 @@ class _Recorder:
     """Convert supported objects to deterministic JSON-compatible records."""
 
     def __init__(self) -> None:
-        self._memo: dict[int, Any] = {}
+        self._memo: dict[int, object] = {}
         self._active: dict[int, str] = {}
         # The memo is keyed by object identity, so every memoized value stays
         # referenced for the recorder's lifetime: a freed object's address can be
         # handed to a different object, whose record would otherwise be the
         # stale one stored under that address.
-        self._alive: list[Any] = []
+        self._alive: list[object] = []
 
-    def record(self, value: Any, *, path: str) -> Any:  # noqa: C901, PLR0911
+    def record(self, value: object, *, path: str) -> object:  # noqa: C901, PLR0911
         """Encode one value or raise with the exact unsupported-object path."""
         if value is None:
             return {"kind": "none"}
@@ -255,7 +254,7 @@ class _Recorder:
             "composed only from those values."
         )
 
-    def _guarded(self, value: Any, *, path: str, build: Any) -> Any:
+    def _guarded(self, value: object, *, path: str, build: Callable[[], object]) -> object:
         identity = id(value)
         if identity in self._memo:
             return self._memo[identity]
@@ -273,7 +272,7 @@ class _Recorder:
         self._alive.append(value)
         return record
 
-    def _array_record(self, value: Any, *, path: str) -> dict[str, Any]:
+    def _array_record(self, value: object, *, path: str) -> dict[str, object]:
         try:
             array = np.asarray(value)
         except (TypeError, ValueError) as exc:
@@ -295,7 +294,7 @@ class _Recorder:
             "sha256": hashlib.sha256(contiguous.tobytes()).hexdigest(),
         }
 
-    def _mapping(self, value: Mapping, path: str) -> dict[str, Any]:
+    def _mapping(self, value: Mapping, path: str) -> dict[str, object]:
         items = []
         for index, (key, item) in enumerate(value.items()):
             key_record = self.record(key, path=f"{path}.key[{index}]")
@@ -310,7 +309,7 @@ class _Recorder:
             ],
         }
 
-    def _set(self, value: set | frozenset, path: str) -> dict[str, Any]:
+    def _set(self, value: set | frozenset, path: str) -> dict[str, object]:
         records = [
             self.record(item, path=f"{path}.item[{index}]") for index, item in enumerate(value)
         ]
@@ -321,7 +320,7 @@ class _Recorder:
             "items": records,
         }
 
-    def _code_record(self, code: types.CodeType, *, path: str) -> dict[str, Any]:
+    def _code_record(self, code: types.CodeType, *, path: str) -> dict[str, object]:
         return {
             "kind": "code",
             "bytecode_sha256": hashlib.sha256(code.co_code).hexdigest(),
@@ -336,7 +335,7 @@ class _Recorder:
             "constants": self.record(code.co_consts, path=f"{path}.constants"),
         }
 
-    def _function_record(self, value: Any, *, path: str) -> dict[str, Any]:
+    def _function_record(self, value: object, *, path: str) -> dict[str, object]:
         seen: set[int] = set()
         while hasattr(value, "__wrapped__") and id(value) not in seen:
             seen.add(id(value))
@@ -359,7 +358,7 @@ class _Recorder:
                 record["self"] = self.record(bound_self, path=f"{path}.__self__")
             return record
 
-        def build() -> dict[str, Any]:
+        def build() -> dict[str, object]:
             closure = []
             for index, cell in enumerate(value.__closure__ or ()):
                 try:
@@ -381,7 +380,7 @@ class _Recorder:
         return self._guarded(value, path=path, build=build)
 
 
-def _solver_model_record(recorder: _Recorder, model: Any, *, path: str) -> dict[str, Any]:
+def _solver_model_record(recorder: _Recorder, model: object, *, path: str) -> dict[str, object]:
     """Encode a numerical model through the solver-view contract.
 
     Structural identity comes from the structure signature, while the native
@@ -408,7 +407,7 @@ def study_content_fingerprint(
     *,
     experiments: tuple,
     experiment_ids: tuple,
-    parameters: Any,
+    parameters: object,
     clusters: Mapping[str, tuple],
     independent: bool,
 ) -> str:

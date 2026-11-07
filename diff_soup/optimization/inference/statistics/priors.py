@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections.abc import Iterable, Sequence
 from typing import Any, Optional
 
 import equinox as eqx
@@ -48,7 +49,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
 from jax.scipy.linalg import solve_triangular
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 from diff_soup.optimization.inference.statistics.parameters import COORDINATES, Transform
 
@@ -129,10 +130,10 @@ class GaussianPrior(Prior):
 
     def __init__(
         self,
-        mean: Any,
+        mean: ArrayLike | Sequence,
         *,
-        scale: Any = None,
-        precision: Any = None,
+        scale: ArrayLike | Sequence | None = None,
+        precision: ArrayLike | Sequence | None = None,
         coordinate: str = "x",
     ):
         """Validate the exactly-one-of-scale/precision rule and factorize."""
@@ -255,7 +256,7 @@ class IndependentProduct(Prior):
 
     priors: tuple
 
-    def __init__(self, priors: Any):
+    def __init__(self, priors: Iterable[Prior]):
         """Validate a non-empty collection of same-coordinate priors."""
         priors = tuple(priors)
         if not priors:
@@ -339,8 +340,8 @@ def pullback_log_prob(prior: Prior, transform: Transform, z: Array) -> Array:
 def prior_from_regularizer(
     regularizer: Any,
     *,
-    mean: Any,
-    precision: Any,
+    mean: ArrayLike | Sequence,
+    precision: ArrayLike | Sequence,
     coordinate: str,
 ) -> GaussianPrior:
     """Bridge a quadratic regularizer to the Gaussian prior it implies.
@@ -425,8 +426,8 @@ class NormalPrior:
         scale: The standard deviation, positive, one value or one per entry.
     """
 
-    mean: Any
-    scale: Any
+    mean: ArrayLike | Sequence
+    scale: ArrayLike | Sequence
 
     def __post_init__(self):
         """Reject non-positive standard deviations eagerly."""
@@ -446,8 +447,8 @@ class LogNormalPrior:
             per entry.
     """
 
-    median: Any
-    log_sd: Any
+    median: ArrayLike | Sequence
+    log_sd: ArrayLike | Sequence
 
     def __post_init__(self):
         """Validate the positive median and log-space deviation."""
@@ -485,8 +486,8 @@ class GaussianCoefficientPrior:
 class _NormalBlock:
     """Compiled diagonal normal block with residual and normalized density."""
 
-    mean: Any
-    scale: Any
+    mean: Array
+    scale: Array
 
     @property
     def size(self) -> int:
@@ -506,8 +507,8 @@ class _NormalBlock:
 class _LogNormalBlock:
     """Compiled independent log-normal block."""
 
-    log_median: Any
-    log_sd: Any
+    log_median: Array
+    log_sd: Array
 
     @property
     def size(self) -> int:
@@ -536,8 +537,8 @@ class _LogNormalBlock:
 class _PrecisionNormalBlock:
     """Compiled correlated normal block represented by a precision Cholesky."""
 
-    mean: Any
-    precision_cholesky: Any
+    mean: Array
+    precision_cholesky: Array
 
     @property
     def size(self) -> int:
@@ -554,7 +555,7 @@ class _PrecisionNormalBlock:
         return -0.5 * jnp.sum(rows**2) + 0.5 * log_det_precision - 0.5 * self.size * _LOG_2PI
 
 
-def _broadcast_flat(value: Any, size: int, *, name: str) -> Any:
+def _broadcast_flat(value: ArrayLike | Sequence, size: int, *, name: str) -> Array:
     """Broadcast a declaration to one flat block with a clear shape error."""
     try:
         return jnp.ravel(jnp.broadcast_to(jnp.asarray(value), (size,)))
@@ -562,7 +563,7 @@ def _broadcast_flat(value: Any, size: int, *, name: str) -> Any:
         raise ValueError(f"{name} must be scalar or broadcast to {size} parameter values.") from exc
 
 
-def _initial_function_values(handle: Any, size: int) -> Any:
+def _initial_function_values(handle: Any, size: int) -> Array:
     """Flatten the declared differentiable leaves of a function handle."""
     dynamic, _static = eqx.partition(handle.fn, eqx.is_inexact_array)
     flat, _unravel = ravel_pytree(dynamic)
@@ -574,7 +575,9 @@ def _initial_function_values(handle: Any, size: int) -> Any:
     return flat
 
 
-def compile_prior(declaration: Any, handle: Any, size: int) -> Any:
+def compile_prior(
+    declaration: Any, handle: Any, size: int
+) -> _NormalBlock | _LogNormalBlock | _PrecisionNormalBlock:
     """Compile one public or legacy prior declaration for one handle occurrence."""
     if isinstance(declaration, NormalPrior):
         return _NormalBlock(

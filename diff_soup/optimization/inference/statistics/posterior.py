@@ -10,10 +10,11 @@ explicitly, includes its change-of-variables Jacobian, and returns the mature
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from collections.abc import Mapping
 
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.fitting._layout import resolve_point
 from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
@@ -116,7 +117,9 @@ def _schema_parameterization(
     return Parameterization(tuple(blocks))
 
 
-def _validated_start(problem: EstimationProblem, start: Any) -> np.ndarray:
+def _validated_start(
+    problem: EstimationProblem, start: OptResult | ArrayLike | Mapping | None
+) -> np.ndarray:
     """Resolve an array, mapping or OptResult start; a fit must share the problem's layout."""
     if start is None:
         value = np.asarray(problem.x0, dtype=float)
@@ -177,7 +180,7 @@ def _move_inside_bounds(
 
 def posterior_target(
     problem: EstimationProblem,
-    fit: Any,
+    fit: OptResult | ArrayLike | Mapping,
     *,
     gradient: str | None = "forward",
     interior_fraction: float = 1.0e-8,

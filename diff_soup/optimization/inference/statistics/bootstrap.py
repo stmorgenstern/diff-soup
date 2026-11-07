@@ -49,7 +49,7 @@ _SCHEMES = ("bayesian", "multinomial")
 
 
 def _draw_weights(
-    key: Any, replicates: int, members: int, scheme: str, *, numbers: Any = None
+    key: Any, replicates: int, members: int, scheme: str, *, numbers: np.ndarray | None = None
 ) -> np.ndarray:
     """``(R, M)`` member weights: replicate ``r`` draws from ``jax.random.fold_in(key, r)``.
 

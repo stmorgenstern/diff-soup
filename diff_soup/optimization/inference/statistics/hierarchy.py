@@ -12,7 +12,7 @@ names, never written out.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Any
 
@@ -23,7 +23,7 @@ from diff_soup.problem.parameters import _validate_handles, parameter_decoder
 EXPERIMENT = "experiment"
 
 
-def _quoted(names: Any) -> str:
+def _quoted(names: Iterable[object]) -> str:
     """``names`` as a comma-separated list of their representations."""
     return ", ".join(repr(name) for name in names)
 
@@ -172,7 +172,7 @@ class Hierarchy:
         """Read-only mapping from each level that carries parameters to its handles, in order."""
         return MappingProxyType({key: handles for key, handles in self.per.items() if handles})
 
-    def level_for(self, handle: Any) -> str | None:
+    def level_for(self, handle: object) -> str | None:
         """The level ``handle`` takes one value per member of, or ``None`` if shared.
 
         Raises:
@@ -185,7 +185,7 @@ class Hierarchy:
                 return key
         raise KeyError(f"Hierarchy does not contain handle {getattr(handle, 'name', handle)!r}.")
 
-    def cluster_for(self, handle: Any) -> str | None:
+    def cluster_for(self, handle: object) -> str | None:
         """The same as [level_for][diff_soup.optimization.inference.Hierarchy.level_for]."""
         return self.level_for(handle)
 

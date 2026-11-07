@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
@@ -53,14 +54,14 @@ _OUTCOME_TEXTS = ("kind", "status", "reason", "stop", "error")
 _ONE_STEP_ARRAYS = ("estimates", "jackknife", "laplace", "sandwich", "influence")
 
 
-def _tupled(value: Any) -> Any:
+def _tupled(value: object) -> object:
     """Lists read back from JSON as tuples, at every depth."""
     if isinstance(value, list):
         return tuple(_tupled(item) for item in value)
     return value
 
 
-def _npz(path: Any) -> str:
+def _npz(path: str | os.PathLike) -> str:
     """``path`` with ``.npz`` appended when missing."""
     return str(path) if str(path).endswith(".npz") else f"{path}.npz"
 
@@ -94,24 +95,24 @@ class BootstrapResult:
     over: str
     weight_scheme: str
     weight_priors: bool
-    steps: Any
-    max_attempts: Any
+    steps: int | str
+    max_attempts: int | None
     one_step: BootstrapOneStep
-    outcomes: Any
+    outcomes: BootstrapOutcomes | None
     fit_rmse: float
     fit_params: np.ndarray
     fit_status: str
     fit_converged: bool
-    fit_stationarity: Any
+    fit_stationarity: float | None
     score_balance: float
     work: Mapping
     parameter_schema: Any
     _products: Any = dataclasses.field(repr=False)
-    shard: Any = None
-    replicate_indices: Any = None
-    jackknife_indices: Any = None
-    _counts: Any = dataclasses.field(default=None, repr=False)
-    _declaration: Any = dataclasses.field(default=None, repr=False)
+    shard: tuple[int, int] | None = None
+    replicate_indices: np.ndarray | None = None
+    jackknife_indices: np.ndarray | None = None
+    _counts: Mapping | None = dataclasses.field(default=None, repr=False)
+    _declaration: Mapping | None = dataclasses.field(default=None, repr=False)
 
     def _whole(self, what: str) -> None:
         """Refuse, naming the merge, what a part does not give."""
@@ -119,7 +120,7 @@ class BootstrapResult:
             raise ValueError(_part_refusal(self.shard, what))
 
     @property
-    def counts(self) -> Any:
+    def counts(self) -> Mapping | None:
         """The replicates' outcomes, counted per status or status and reason; ``None`` at ``steps=0``.
 
         Raises:
@@ -204,7 +205,7 @@ class BootstrapResult:
         moved = np.asarray(self.outcomes.accepted[: self.replicates]) > 0
         return int(np.count_nonzero(kept & ~moved))
 
-    def _entry(self, handle: Any) -> Any:
+    def _entry(self, handle: object) -> ParameterEntry:
         """The schema entry of ``handle``; ``KeyError`` if it is not a parameter of the study."""
         try:
             return self.parameter_schema.entry(handle)
@@ -214,7 +215,7 @@ class BootstrapResult:
                 "bootstrapped study; give one of its Recipe parameter handles."
             ) from error
 
-    def values(self, handle: Any, *, members: bool = False) -> Any:
+    def values(self, handle: object, *, members: bool = False) -> np.ndarray | tuple:
         """Return a parameter's values at the kept replicates, one row per replicate.
 
         A row holds one value per member for a parameter of each member, and a function parameter
@@ -266,7 +267,7 @@ class BootstrapResult:
             )
         function = getattr(entry.handle, "kind", None) == "function"
 
-        def decoded(point: np.ndarray, occurrence: Any) -> Any:
+        def decoded(point: np.ndarray, occurrence: ParameterOccurrence) -> Any:
             columns = np.asarray(occurrence.columns, dtype=np.int64)
             return entry.decode(jnp.asarray(point[columns]))
 
@@ -289,11 +290,11 @@ class BootstrapResult:
         hits = drawn.reshape(drawn.shape + (1,) * (stacked.ndim - 2))
         return np.where(hits, stacked, np.nan)
 
-    def __getitem__(self, handle: Any) -> Any:
+    def __getitem__(self, handle: object) -> np.ndarray | tuple:
         """The kept replicates' estimates of a shared handle: ``boot.values(handle)``."""
         return self.values(handle)
 
-    def laplace(self, handle: Any) -> np.ndarray:
+    def laplace(self, handle: object) -> np.ndarray:
         """Return a parameter's Laplace covariance at the fit.
 
         Args:
@@ -449,7 +450,7 @@ class BootstrapResult:
         )
         return dataclasses.replace(result, one_step=one_step)
 
-    def save(self, path: Any) -> None:
+    def save(self, path: str | os.PathLike) -> None:
         """Write the result to one ``.npz`` file, read back by ``BootstrapResult.load``.
 
         The file holds the weights, the one-step products, every population
@@ -544,7 +545,7 @@ class BootstrapResult:
         np.savez(_npz(path), **arrays)
 
     @classmethod
-    def load(cls, path: Any) -> BootstrapResult:
+    def load(cls, path: str | os.PathLike) -> BootstrapResult:
         """Read a result written by [save][diff_soup.optimization.inference.BootstrapResult.save].
 
         The loaded result answers ``values``, ``interval``, ``band`` and the

@@ -43,13 +43,14 @@ only; host numpy appears only in name/metadata handling.
 from __future__ import annotations
 
 import abc
+from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 __all__ = [
     "Transform",
@@ -453,7 +454,7 @@ class ModeLabel(eqx.Module):
     value: Array
     coordinate: str = eqx.field(static=True)
 
-    def __init__(self, value: Any, coordinate: str):
+    def __init__(self, value: ArrayLike | Sequence, coordinate: str):
         """Validate the coordinate label and store the mode.
 
         Raises:
@@ -1276,8 +1277,8 @@ class ConstrainedParameterization(Parameterization):
         self,
         blocks: Any,
         *,
-        x_particular: Any,
-        null_basis: Any,
+        x_particular: ArrayLike | Sequence,
+        null_basis: ArrayLike | Sequence,
         reduced_names: Any,
         constraints: Any = (),
         gauges: Any = (),

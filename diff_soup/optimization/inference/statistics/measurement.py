@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
 
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup.optimization.inference.data.deferred import DeferredValues
 from diff_soup.optimization.inference.fitting.formulation import Trajectory
 from diff_soup.optimization.inference.fitting.observables import Observable
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics.experiment import Channel, _CompiledExperiment
 from diff_soup.optimization.inference.statistics.likelihoods import Gaussian, Likelihood
 
@@ -301,7 +303,7 @@ class Measurement:
         )
 
 
-def _check_scale_input(name: str, value: Any) -> None:
+def _check_scale_input(name: str, value: ArrayLike | Sequence) -> None:
     """Refuse a grid scale (``spec.geometry``) given a size that is not finite and positive."""
     import jax
 
@@ -401,10 +403,10 @@ class Experiment:
     model: Any
     solver: Any
     t_span: tuple[float, float]
-    initial_state: Any
+    initial_state: PyTree
     measurements: tuple[Measurement, ...]
-    inputs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
-    id: Any = None
+    inputs: Mapping[str, object] = dataclasses.field(default_factory=dict)
+    id: Hashable | None = None
     trajectory: Trajectory | None = None
     schedule: Any = None
     # A mapping from level name to member, or None; annotated Any so that a
@@ -528,16 +530,16 @@ class Experiment:
         object.__setattr__(self, "_delegate", delegate)
 
     @property
-    def experiment_id(self) -> Any:
+    def experiment_id(self) -> Hashable | None:
         """Stable Study identifier, with a deterministic single-object fallback."""
         return self.id
 
     def as_inference_problem(
         self,
         *,
-        parameters: Any = None,
+        parameters: ParameterGroups | None = None,
         objective: Any = None,
-        trajectory: Any = None,
+        trajectory: Trajectory | None = None,
         regularizer: Any = None,
         bounds: Any = None,
         t0: float | None = None,
@@ -583,7 +585,7 @@ class Experiment:
             state_prior=state_prior,
         )
 
-    def predictor(self, *, parameters: Any = None) -> Any:
+    def predictor(self, *, parameters: ParameterGroups | None = None) -> Callable:
         """Return the shared, JAX-transformable prediction closure."""
         return self._delegate.predictor(parameters=parameters)
 

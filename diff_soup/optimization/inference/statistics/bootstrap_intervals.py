@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import jax.numpy as jnp
@@ -35,16 +36,16 @@ class BootstrapInterval:
         centre: The statistic at the fit's point.
     """
 
-    lower: Any
-    upper: Any
+    lower: float | np.ndarray
+    upper: float | np.ndarray
     level: float
     kind: str
-    status: Any
+    status: str | np.ndarray
     reason: str
     n_kept: int
     n_failed: int
     members: int
-    centre: Any
+    centre: float | np.ndarray
 
     def __repr__(self) -> str:
         """A one-line summary."""
@@ -66,16 +67,16 @@ class BootstrapBand:
         draws: The statistic on the grid at each kept replicate, one row per replicate.
     """
 
-    lower: Any
-    upper: Any
+    lower: float | np.ndarray
+    upper: float | np.ndarray
     level: float
     kind: str
-    status: Any
+    status: str | np.ndarray
     reason: str
     n_kept: int
     n_failed: int
     members: int
-    centre: Any
+    centre: float | np.ndarray
     at: np.ndarray
     draws: np.ndarray
 
@@ -111,7 +112,7 @@ class _Draws(NamedTuple):
     unresolved: str  # the reason an interval is flagged unresolved, or ""
 
 
-def _name(handle: Any) -> str:
+def _name(handle: object) -> str:
     """A handle's name, for messages."""
     return str(getattr(handle, "name", handle))
 
@@ -135,7 +136,7 @@ class _Entries:
         self.cache: dict = {}
         self.read_members = False
 
-    def __call__(self, handle: Any) -> tuple:
+    def __call__(self, handle: object) -> tuple:
         found = self.cache.get(id(handle))
         if found is None:
             try:
@@ -183,7 +184,9 @@ class _View:
         }
 
 
-def _of_handle(handle: Any, entries: _Entries, grid: Any) -> Any:
+def _of_handle(
+    handle: object, entries: _Entries, grid: np.ndarray | None
+) -> Callable[[_View], object]:
     """The statistic a handle stands for: ``view[handle]``, or ``view[handle](grid)`` for a band."""
     entry, _, _, _ = entries(handle)
     name = _name(entry.handle)
@@ -199,7 +202,7 @@ def _of_handle(handle: Any, entries: _Entries, grid: Any) -> Any:
             "takes a function handle, or a statistic(view, grid)."
         )
 
-    def statistic(view: _View) -> Any:
+    def statistic(view: _View) -> object:
         value = view[handle]
         if isinstance(value, dict):
             parts = list(value.values())
@@ -211,7 +214,9 @@ def _of_handle(handle: Any, entries: _Entries, grid: Any) -> Any:
     return statistic
 
 
-def _statistic_of(statistic: Any, entries: _Entries, grid: Any) -> Any:
+def _statistic_of(
+    statistic: Any, entries: _Entries, grid: np.ndarray | None
+) -> Callable[[_View], object]:
     """``statistic(view)``: a handle's own statistic, or the caller's callable."""
     if hasattr(statistic, "identity") or hasattr(statistic, "name"):
         return _of_handle(statistic, entries, grid)
@@ -227,7 +232,12 @@ def _statistic_of(statistic: Any, entries: _Entries, grid: Any) -> Any:
 
 
 def _value_at(
-    statistic: Any, point: np.ndarray, entries: _Entries, members: bool, where: str, shape: Any
+    statistic: Callable[[_View], object],
+    point: np.ndarray,
+    entries: _Entries,
+    members: bool,
+    where: str,
+    shape: tuple[int, ...] | None,
 ) -> np.ndarray:
     """The statistic at one point, checked: numbers, the fit's shape, finite."""
     value = statistic(_View(point, entries, members))
@@ -345,7 +355,7 @@ def _summarize(
     level: Any,
     kind: Any,
     members: Any,
-    grid: Any = None,
+    grid: np.ndarray | None = None,
 ) -> dict:
     """The fields of an interval (``grid`` None) or of a band of ``statistic`` over ``draws``."""
     level = _check_options(level, kind, members)
@@ -482,7 +492,7 @@ def _grid(at: Any) -> np.ndarray:
     return grid
 
 
-def _part_refusal(shard: Any, what: str) -> str:
+def _part_refusal(shard: tuple[int, int], what: str) -> str:
     """The refusal of something a part of a sharded bootstrap does not give."""
     i, n = (int(item) for item in shard)
     return (
@@ -549,8 +559,8 @@ class BootstrapOneStep:
     influence: np.ndarray
     active_bounds: tuple
     failures: tuple
-    _context: Any = dataclasses.field(default=None, repr=False)
-    _part: Any = dataclasses.field(default=None, repr=False)
+    _context: _Context | None = dataclasses.field(default=None, repr=False)
+    _part: tuple[int, int] | None = dataclasses.field(default=None, repr=False)
 
     def _draws(self) -> _Draws:
         """The one-step estimates that are finite, and the one-steps that could not be computed."""
@@ -632,7 +642,7 @@ class BootstrapOneStep:
         )
 
 
-def _one_of(value: Any, options: tuple) -> bool:
+def _one_of(value: object, options: tuple) -> bool:
     """Whether ``value`` is one of the strings ``options`` (an array is none of them)."""
     return isinstance(value, str) and value in options
 

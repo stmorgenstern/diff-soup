@@ -23,13 +23,14 @@ the violation alongside its uncertainty.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
 from diff_soup.optimization.inference.statistics.information import (
@@ -60,7 +61,7 @@ class AffineSummary(eqx.Module):
     matrix: Array
     offset: Optional[Array]
 
-    def __init__(self, matrix: Any, offset: Any = None):
+    def __init__(self, matrix: ArrayLike | Sequence, offset: ArrayLike | Sequence | None = None):
         """Validate and store ``summary(y) = matrix @ vec(y) + offset``."""
         matrix = jnp.asarray(matrix)
         if matrix.ndim != 2 or matrix.shape[0] < 1:
@@ -132,7 +133,7 @@ class CompressionReport:
         return self.per_direction_retention
 
 
-def _symmetrize(matrix: Any) -> np.ndarray:
+def _symmetrize(matrix: ArrayLike | Sequence) -> np.ndarray:
     """Return the symmetric part ``(A + Aᵀ) / 2`` of ``matrix`` as a float array."""
     matrix = np.asarray(matrix, dtype=float)
     return 0.5 * (matrix + matrix.T)
@@ -150,7 +151,7 @@ def _block_diagonal(blocks: list) -> np.ndarray:
     return result
 
 
-def _psd_pseudoinverse(matrix: Any, *, who: str) -> np.ndarray:
+def _psd_pseudoinverse(matrix: ArrayLike | Sequence, *, who: str) -> np.ndarray:
     """Pseudoinverse of a symmetric positive-semidefinite matrix by eigendecomposition.
 
     Eigenvalues below a scale-relative tolerance are dropped; a negative eigenvalue
@@ -238,7 +239,9 @@ def _moments(samples: np.ndarray, *, who: str) -> tuple:
     return mean, _symmetrize(covariance)
 
 
-def _strict_spd_solve(covariance: Any, rhs: Any, *, who: str) -> np.ndarray:
+def _strict_spd_solve(
+    covariance: ArrayLike | Sequence, rhs: ArrayLike | Sequence, *, who: str
+) -> np.ndarray:
     """Solve ``covariance @ x = rhs`` by Cholesky, refusing a non-SPD matrix without a ridge."""
     covariance = _symmetrize(covariance)
     try:
@@ -294,7 +297,9 @@ def _simulate_event_batch(response: tuple, predictions: dict, draw_keys: Array) 
     return event
 
 
-def _apply_summary_batch(summary: Any, event: dict, *, name: str, event_order: tuple) -> np.ndarray:
+def _apply_summary_batch(
+    summary: AffineSummary | Callable, event: dict, *, name: str, event_order: tuple
+) -> np.ndarray:
     if isinstance(summary, AffineSummary):
         flat = jnp.concatenate(
             [event[channel].reshape((event[channel].shape[0], -1)) for channel in event_order],
@@ -518,8 +523,8 @@ def _posterior_metrics(
 def _finalize_compression_report(
     *,
     names: tuple,
-    at: Any,
-    full_information: Any,
+    at: ArrayLike,
+    full_information: ArrayLike | Sequence,
     summary_information: dict,
     induced_kind: dict,
     estimate_error: dict,
@@ -670,10 +675,10 @@ def compare_compression(
     experiment: Any,
     summaries: dict,
     *,
-    at: Any,
+    at: Mapping | ArrayLike | Sequence | None,
     prior: Any = None,
     induced: str = "analytic",
-    key: Any = None,
+    key: ArrayLike | None = None,
     n_simulations: int = 2048,
     n_batches: int = 8,
     parameters: Any = None,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import operator
 from collections.abc import Iterator
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 
@@ -23,9 +23,9 @@ class BootstrapOutcome(NamedTuple):
     kind: str
     index: int
     status: str
-    reason: Any
-    stop: Any
-    error: Any
+    reason: str | None
+    stop: str | None
+    error: str | None
     attempts: int
     accepted: int
     requests: int
