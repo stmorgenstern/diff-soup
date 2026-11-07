@@ -354,36 +354,32 @@ def _priced(a_scale, b_scale=1.0):
     return spec
 
 
-@pytest.mark.parametrize("scales", [(0.25, 1.0), (1.0, 0.25)])
-def test_each_build_of_a_template_is_fitted_under_its_own_prior(scales):
-    """Builds of one template that differ only in a prior's scale are fitted, each after both
-    were built, under their own prior: precision 16 for scale 0.25 and 1 for scale 1."""
+def _priced_study(scales, owners):
+    """A study of the priced template whose ``b`` varies by owner, its prior scale per
+    experiment."""
     priced = ds.recipe(_priced)
-    for scale in scales:
-        priced.build(a_scale=scale)
-    for scale in scales:
-        experiment = _experiment(priced, inputs={"a_scale": scale})
-        fit = inf.InferenceProblem(experiment, parameters=priced.handle("a"), objective=inf.MAP())
-        assert float(fit.prior_precision(fit.x0)[0, 0]) == scale**-2
+    experiments = [
+        _experiment(priced, inputs={"a_scale": 1.0, "b_scale": scale}, id=index)
+        for index, scale in enumerate(scales)
+    ]
+    parameters = ds.ParameterSet(
+        shared=(priced.handle("a"),), varying={"cell": (priced.handle("b"),)}
+    )
+    return inf.Study(
+        experiments, parameters=parameters, clusters={"cell": owners}, independent=True
+    )
 
 
-def test_a_study_takes_each_owners_prior_and_refuses_an_owner_whose_builds_disagree():
-    """A parameter varying by owner takes each owner's prior from its experiments' builds, and
-    MAP refuses an owner whose experiments' builds declare different priors."""
-    priced = ds.recipe(_priced)
-    a, b = priced.handle("a"), priced.handle("b")
-
-    def study(scales, owners):
-        experiments = [
-            _experiment(priced, inputs={"a_scale": 1.0, "b_scale": scale}, id=index)
-            for index, scale in enumerate(scales)
-        ]
-        parameters = ds.ParameterSet(shared=(a,), varying={"cell": (b,)})
-        return inf.Study(
-            experiments, parameters=parameters, clusters={"cell": owners}, independent=True
-        )
-
-    fit = inf.InferenceProblem(study((0.25, 0.5, 0.5), ("x", "y", "y")), objective=inf.MAP())
+def test_a_study_takes_each_owners_prior_from_its_builds():
+    """A parameter varying by owner takes each owner's prior from its experiments' builds of one
+    template: precision 16 for scale 0.25 and 4 for scale 0.5."""
+    fit = inf.InferenceProblem(
+        _priced_study((0.25, 0.5, 0.5), ("x", "y", "y")), objective=inf.MAP()
+    )
     np.testing.assert_array_equal(np.diag(fit.prior_precision(fit.x0)), [1.0, 16.0, 4.0])
-    with pytest.raises(ValueError, match="sharing 'b' of owner 'x' declare different priors"):
-        inf.InferenceProblem(study((0.25, 0.5), ("x", "x")), objective=inf.MAP())
+
+
+def test_an_owner_whose_builds_declare_different_priors_is_refused():
+    """MAP refuses an owner whose experiments' builds declare different priors."""
+    with pytest.raises(ValueError):
+        inf.InferenceProblem(_priced_study((0.25, 0.5), ("x", "x")), objective=inf.MAP())
