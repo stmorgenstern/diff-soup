@@ -37,6 +37,8 @@ import numpy as np
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._lane_route import _LABEL
+from diff_soup.optimization.inference.hierarchical._level_solve import _split
+from diff_soup.optimization.inference.hierarchical._level_system import _offsets
 from diff_soup.optimization.inference.hierarchical._population import (
     Lockstep,
     PopulationRoute,
@@ -190,7 +192,7 @@ def one_step(system: Any, point: Any, *, x_scale: Any, bounds: Any, fixed: Any) 
 def _kept(system: Any) -> np.ndarray:
     """``(n,)`` booleans: the coordinates a solve moves, neither fixed nor in a held node."""
     keep = ~np.asarray(system.fixed_mask, dtype=bool)
-    offsets = elimination._offsets(system.counts, system.widths)
+    offsets = _offsets(system.counts, system.widths)
     for level, node in system.held:
         width = int(system.widths[level])
         start = offsets[level] + node * width
@@ -211,7 +213,7 @@ def _against(system: Any, vector: np.ndarray) -> Any:
     dtype = np.dtype(system.root.dtype)
     placed = system.point
     device = placed.sharding if placed.committed else None
-    parts = elimination._split(system, np.asarray(vector, dtype=dtype))
+    parts = _split(system, np.asarray(vector, dtype=dtype))
     return dataclasses.replace(
         system,
         root_gradient=jax.device_put(np.ascontiguousarray(parts[0]), device),
