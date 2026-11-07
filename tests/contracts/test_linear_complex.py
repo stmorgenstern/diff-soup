@@ -353,9 +353,10 @@ def _direction(arg, seed):
 @pytest.mark.parametrize("case", ["complex", "real", "parameter"])
 @pytest.mark.parametrize("make", BACKENDS)
 def test_jvp_and_vjp_of_a_factor_then_solve_match_central_differences(make, case):
-    """``jax.jvp`` and ``jax.vjp`` through ``factor`` then ``solve`` match central differences:
-    complex values and right-hand side, real ones, and a complex factor along real parameters,
-    for which the cotangent is the real part of ``ct^T J``."""
+    """``jax.jvp`` under ``jit`` and ``jax.vjp``'s pullback under ``jit(vmap)`` through ``factor``
+    then ``solve`` match central differences: complex values and right-hand side, real ones, and
+    a complex factor along real parameters, for which the cotangent is the real part of
+    ``ct^T J``."""
     topology, values, _ = _random_system()
     run = _solver(make, topology, _context(make))
     inputs, primals = _case(case, values, _rhs(N))
@@ -365,11 +366,13 @@ def test_jvp_and_vjp_of_a_factor_then_solve_match_central_differences(make, case
 
     directions = tuple(_direction(p, seed) for seed, p in enumerate(primals))
     expected = _central(fun, primals, directions)
-    _, tangent = jax.jvp(fun, primals, directions)
+    tangent = jax.jit(lambda *p: jax.jvp(fun, p, directions)[1])(*primals)
     assert _relative(tangent, expected) <= _FD
     out, pullback = jax.vjp(fun, *primals)
     cotangent = _rhs(N, seed=9) if jnp.iscomplexobj(out) else jnp.real(_rhs(N, seed=9))
-    paired = sum(jnp.sum(p * d) for p, d in zip(pullback(cotangent), directions))
+    lanes = jax.jit(jax.vmap(pullback))(jnp.stack([cotangent, 2.0 * cotangent]))
     want = jnp.sum(cotangent * expected)
     want = jnp.real(want) if case == "parameter" else want
-    assert abs(complex(paired) - complex(want)) <= _FD * abs(complex(want))
+    for lane in (0, 1):
+        paired = sum(jnp.sum(p[lane] * d) for p, d in zip(lanes, directions))
+        assert abs(complex(paired) - (lane + 1) * complex(want)) <= _FD * abs(complex(want))

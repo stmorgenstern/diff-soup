@@ -62,19 +62,24 @@ def test_levenberg_marquardt_recovers_the_rate_of_a_single_experiment(single, lm
     np.testing.assert_allclose(tiled.params, whole.params, rtol=0.0, atol=1e-12)
 
 
-def test_an_interior_point_fit_under_a_rate_ceiling_ends_on_the_ceiling(single):
-    """A constraint on an `InferenceProblem`'s values, its limit in `args`, binds at the
-    interior point's solution when the data's rate lies above it."""
-    decay, _ = single
+def _under_a_ceiling(decay):
+    """The single experiment's rate fit under a ceiling whose value it reads from `args`."""
     ceiling = ds.optimization.Constraints(
         inequality=lambda values, args: values[decay.rate] - args["rate_max"], n_inequality=1
     )
-    problem = inf.InferenceProblem(
+    return inf.InferenceProblem(
         decay_experiment(decay),
         parameters=decay.rate,
         constraints=ceiling,
         args={"rate_max": jnp.asarray(0.3)},
     )
+
+
+def test_an_interior_point_fit_under_a_rate_ceiling_ends_on_the_ceiling(single):
+    """A constraint on an `InferenceProblem`'s values, its limit in `args`, binds at the
+    interior point's solution when the data's rate lies above it."""
+    decay, _ = single
+    problem = _under_a_ceiling(decay)
     # the solver's tolerance; measured 1e-12 off the ceiling below
     fit = ds.optimization.optsolve(
         problem, ds.optimization.InteriorPoint(tol=1e-12), diagnostics=False
@@ -82,6 +87,20 @@ def test_an_interior_point_fit_under_a_rate_ceiling_ends_on_the_ceiling(single):
     # measured 1e-12 off the ceiling 0.3 (rate at 0.3 to 12 digits), workstation CPU 2026-11-06,
     # pytest tests/public_api/test_fits.py
     np.testing.assert_allclose(fit.params, [0.3], rtol=0, atol=1e-10)
+
+
+def test_the_rate_fitted_under_a_ceiling_follows_the_ceiling_in_args(single):
+    """jax.jacfwd of the interior point's solution of the constrained problem in the ceiling,
+    passed in `args`, is 1: the ceiling binds."""
+    decay, _ = single
+    # the solver's tolerance, as the fit above; measured: the slope below
+    solver = ds.optimization.InteriorPoint(tol=1e-12)
+    numeric = _under_a_ceiling(decay).numeric_problem(solver)
+    slope = jax.jit(jax.jacfwd(lambda cap: solver.run(numeric, numeric.x0, {"rate_max": cap})[0]))(
+        jnp.asarray(0.3)
+    )
+    # measured 0.0 off 1, workstation CPU 2026-11-07, pytest tests/public_api/test_fits.py
+    np.testing.assert_allclose(slope, [1.0], rtol=0, atol=1e-10)
 
 
 def test_the_result_reports_point_status_steps_handle_values_and_final_rows(single, lm_fit):

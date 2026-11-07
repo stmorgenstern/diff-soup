@@ -14,14 +14,14 @@
     },
     "contracts": {
       "files": 22,
-      "functions": 221,
-      "collected": 427,
+      "functions": 220,
+      "collected": 426,
       "lines": 6937
     },
     "performance_contracts": {
       "files": 2,
-      "functions": 14,
-      "collected": 31,
+      "functions": 15,
+      "collected": 32,
       "lines": 510
     },
     "multi_device": {
@@ -223,7 +223,7 @@
     },
     {
       "file": "tests/public_api/test_solve_outputs_ad.py",
-      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap on a save grid whose lanes cover a cluster at different steps, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
+      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap on a save grid whose lanes cover a cluster at different steps, lanes of a schedule whose segments end at different times, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
     },
     {
       "file": "tests/public_api/test_adjoints.py",
@@ -235,7 +235,7 @@
     },
     {
       "file": "tests/public_api/test_fits.py",
-      "feature": "Fits: single, joint and lowered-study fits through optsolve with every public optimizer, bounds, the result contract"
+      "feature": "Fits: single, joint and lowered-study fits through optsolve with every public optimizer, bounds, a constrained fit and its derivative in args, the result contract"
     },
     {
       "file": "tests/public_api/test_optimizer_stops.py",
@@ -307,7 +307,7 @@
     },
     {
       "file": "tests/contracts/test_linear_complex.py",
-      "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a stiff impedance operator, the plain transpose, real factors with complex right-hand sides in lanes, value lanes, statuses, empty factors refactored in a loop, jvp and vjp against central differences, and the bytes a KLU factor holds and releases"
+      "feature": "Linear contract, complex values: each exact backend against the dense reference on a random sparse system and a stiff impedance operator, the plain transpose, real factors with complex right-hand sides in lanes, value lanes, statuses, empty factors refactored in a loop, jvp under jit and vjp under jit and vmap against central differences, and the bytes a KLU factor holds and releases"
     },
     {
       "file": "tests/contracts/test_lane_select.py",
@@ -347,7 +347,7 @@
     },
     {
       "file": "tests/performance_contracts/test_compile_cache.py",
-      "feature": "Compile cache: no retrace for a value change, program text flat in the mesh, identical text for inexact arguments, batched solves keep corrector branches, bounded checkpoint carries, saved output holding a bounded number of copies of the trajectory, root matrices assembled inside the reverse sweep's transposed solves, a control problem or a receding horizon of one configuration compiling once"
+      "feature": "Compile cache: no retrace for a value change, program text flat in the mesh, identical text for inexact arguments, batched solves keep corrector branches, bounded checkpoint carries, saved output holding a bounded number of copies of the trajectory, root matrices assembled inside the reverse sweep's transposed solves, a schedule solve given new durations and targets tracing once, a control problem or a receding horizon of one configuration compiling once"
     },
     {
       "file": "tests/performance_contracts/test_batch_lowering.py",
@@ -387,11 +387,11 @@
     },
     {
       "file": "tests/public_api/test_control.py",
-      "feature": "Control: control problems over a schedule solve and their numeric problems, the receding horizon under scan and from the host, the estimators"
+      "feature": "Control: control problems over a schedule solve, their numeric problems and their derivative in the initial state and limits, the receding horizon under scan and from the host, the estimators"
     },
     {
       "file": "tests/contracts/test_jacobian_pattern.py",
-      "feature": "Jacobian patterns from a tangent map: each rule against jax.jacfwd, branches and loops of unknown outcome, the fallback warning, the within bound"
+      "feature": "Jacobian patterns from a tangent map: each rule against jax.jacfwd, through nested jit and custom_jvp, branches and loops of unknown outcome, the fallback warning, the within bound"
     },
     {
       "file": "tests/contracts/test_coloring.py",

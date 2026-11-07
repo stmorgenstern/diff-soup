@@ -3,11 +3,12 @@ arguments leave an exact solve's program unchanged, batched solves keep their co
 branches, a checkpoint stores the iteration matrix once, a reverse sweep assembles a root's
 matrix inside the solve that factors it, an undifferentiated checkpoint solve keeps its
 compiled temporaries at their measured size, saved output holds a bounded number of copies
-of the trajectory, and a control problem or a receding horizon of one configuration compiles
-once."""
+of the trajectory, a schedule solve given new durations and targets traces once, and a control
+problem or a receding horizon of one configuration compiles once."""
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 
 import equinox as eqx
@@ -307,6 +308,33 @@ def test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory():
     # holds a third), workstation 2026-11-07,
     # pytest tests/performance_contracts/test_compile_cache.py::test_saved_output_holds_a_bounded_number_of_copies_of_the_trajectory
     assert rows <= 2.5
+
+
+def test_new_segment_durations_and_targets_reuse_one_compiled_schedule_solve():
+    """A jitted schedule solve given new segment durations and new targets traces once."""
+    problem, traces = operational_cell().build(), []
+    holds = ds.schedule_arrays(
+        ds.Schedule([ds.Segment(current=0.5, duration=0.3), ds.Segment(current=1.5, duration=0.4)]),
+        problem.operational_modes(),
+    )
+
+    @jax.jit
+    def run(durations, targets):
+        traces.append(None)
+        solution, _ = ds.solve_schedule(
+            problem,
+            ds.JIDA(linear="dense"),
+            dataclasses.replace(holds, duration=durations, target=targets),
+            jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))]),
+            t0=0.0,
+            t_end=0.7,
+            times=jnp.asarray([0.5, 0.7]),
+        )
+        return solution.ys
+
+    run(jnp.asarray([0.3, 0.4]), jnp.asarray([0.5, 1.5]))
+    run(jnp.asarray([0.2, 0.5]), jnp.asarray([1.0, -0.5]))
+    assert len(traces) == 1
 
 
 @pytest.fixture(scope="module")

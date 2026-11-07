@@ -1,5 +1,6 @@
-"""Control: a control problem over a schedule solve and its numeric problem, the receding
-horizon under scan and from the host, the estimators."""
+"""Control: a control problem over a schedule solve, its numeric problem and its derivative in
+the initial state and limits, the receding horizon under scan and from the host, the
+estimators."""
 
 from __future__ import annotations
 
@@ -129,6 +130,18 @@ def test_the_interior_point_reaches_the_charging_problems_closed_form(toy):
     # measured 1.2e-9 off the closed form, workstation CPU 2026-11-06,
     # pytest tests/public_api/test_control.py
     np.testing.assert_allclose(result.params, _closed_form(STARTS_AT, CHARGE), rtol=0, atol=1e-8)
+
+
+def test_the_currents_differentiate_in_the_initial_state_and_the_limit(toy):
+    """jax.jacfwd of the interior point's currents in the starting level and the charge limit,
+    through the implicit rule over the schedule solve, is the closed form's."""
+    point = jnp.asarray([STARTS_AT, CHARGE])
+    jacobian = jax.jacfwd(lambda p: _solve(charging(toy, level=p[0], charge=p[1])))(point)
+    base = _closed_form(0.0, 0.0)
+    expected = np.stack([_closed_form(1.0, 0.0) - base, _closed_form(0.0, 1.0) - base], axis=1)
+    # measured 6.6e-10 off the closed form's derivatives, workstation CPU 2026-11-07,
+    # pytest tests/public_api/test_control.py
+    np.testing.assert_allclose(jacobian, expected, rtol=0, atol=1e-8)
 
 
 def test_a_batch_of_control_problems_is_one_vmap(toy):
