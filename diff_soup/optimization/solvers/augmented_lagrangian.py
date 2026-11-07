@@ -115,7 +115,7 @@ class AugmentedLagrangian(ConstrainedSolver):
         inner_max_steps: The step budget of each inner minimization, `200` by default.
         hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`, as for `InteriorPoint`.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
-        adjoint: How the solution is differentiated in `args`. [ForwardAdjoint][diff_soup.ForwardAdjoint] (default) is one forward rule: `jax.jvp` and `jax.jacfwd` cost one KKT solve per tangent, and `jax.grad` transposes it. [ImplicitAdjoint][diff_soup.nonlinear.ImplicitAdjoint] is one reverse rule: `jax.grad` and `jax.vjp` cost one transposed KKT solve whatever the size of `args`, and forward mode raises. Choose it for a large `args`, or for closures that run a solve under `CheckpointAdjoint(reverse_over_reverse=True)`, with `hessian="exact"` there, since Gauss-Newton takes the residual's Jacobian in forward mode.
+        adjoint: How the solution is differentiated in `args`. [ForwardAdjoint][diff_soup.ForwardAdjoint] (default) is one forward rule: `jax.jvp` and `jax.jacfwd` cost one KKT solve per tangent, and `jax.grad` transposes it. [ImplicitAdjoint][diff_soup.nonlinear.ImplicitAdjoint] is one reverse rule: `jax.grad` and `jax.vjp` cost one transposed KKT solve whatever the size of `args`, and forward mode raises. Choose it for a large `args`, or for closures that run a solve under `CheckpointAdjoint(reverse_over_reverse=True)`, with `hessian="exact"` or `"bfgs"` there, since Gauss-Newton takes the residual's Jacobian in forward mode.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
