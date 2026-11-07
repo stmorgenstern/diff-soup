@@ -20,7 +20,7 @@ FVM/FDM (``Grid1D`` / ``GridND``) domains.  Traction and Symmetry are FEM-only:
 both are stated on boundary facets and need the facet normals and measures a
 tagged mesh carries.
 
-This module lives under ``diff_soup/_lowering`` and may import both
+This module lives under ``diff_soup/problem/_lowering`` and may import both
 ``diff_soup.domains`` (L1) and ``diff_soup.problem._ir`` (L2 IR nodes).
 """
 

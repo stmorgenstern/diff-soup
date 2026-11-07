@@ -5,7 +5,7 @@ topology from per-equation node-field rules + coupling cross-blocks.  Used by
 the provider's ``analyze`` to construct the [SparseTopology][diff_soup.problem._lowering.sparsity.SparseTopology] that
 ``physics_jacobian_blocks`` evaluates against.
 
-This module lives under ``diff_soup/_lowering`` and may import
+This module lives under ``diff_soup/problem/_lowering`` and may import
 ``diff_soup.problem._ir`` IR nodes.  The family self-block stamps ONE member
 stencil ``count`` times (no dense fallback), and the family<->component
 cross-blocks are resolved once per coupling.

@@ -27,7 +27,7 @@ XLA is shape-identical to ``count>1``.
 The member kernel uses only the tagging ops (weak-form provenance) and
 ``finalize_residual``; no plain ``Operators`` handle is allocated.
 
-This module lives under ``diff_soup/_lowering`` and imports both
+This module lives under ``diff_soup/problem/_lowering`` and imports both
 ``diff_soup.domains.operators`` and ``diff_soup.problem._ir`` IR nodes.
 """
 
@@ -418,7 +418,7 @@ class _FamilyResidualBlock:
                     "directly (node_indices=[...] or on=from_nodes(...))."
                 )
             # Delegate index resolution + face-factor to the shared helpers
-            # in diff_soup/_lowering/bcs.py so geometry behaviour stays
+            # in diff_soup/problem/_lowering/bcs.py so geometry behaviour stays
             # identical to the component FluxBC path.
             local = _resolve_grid_local_indices(domain, bc.where)
             factor = _grid_face_factor(domain, local)
