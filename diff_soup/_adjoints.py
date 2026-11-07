@@ -176,7 +176,7 @@ class CheckpointAdjoint(AbstractAdjoint):
 
     Pass `adjoint=CheckpointAdjoint()` to use `jax.grad` or `jax.vjp` on a solve. It cannot be combined with `SaveAt(steps=...)`.
 
-    The gradient composes with forward mode over it, as in `jax.hessian`. Reverse mode over the gradient, as in `jax.grad` of `jax.grad`, needs `reverse_over_reverse=True`. The solve then also takes `jax.jvp`, and forward mode over the gradient costs about twice as much, so leave it off unless you need it.
+    The gradient composes with forward mode over it, as in `jax.hessian`. Reverse mode over the gradient, as in `jax.grad` of `jax.grad`, needs `reverse_over_reverse=True`: a fit whose closures run this solve and that is differentiated by the reverse implicit derivative ([ImplicitAdjoint][diff_soup.nonlinear.ImplicitAdjoint] on a compiled solver) needs it too. The solve then also takes `jax.jvp`, and forward mode over the gradient costs about twice as much, so leave it off unless you need it.
 
     Args:
         checkpoints: Number of states the forward pass stores for the backward replay, chosen from `max_steps` when `None`.

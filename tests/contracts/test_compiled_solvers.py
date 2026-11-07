@@ -1,7 +1,8 @@
 """Compiled constrained solvers: solutions in jit and vmap lanes, each Hessian mode and the unscaled
-interior point, the implicit derivative in args, a forward-only residual under forward-over-forward,
-the record's dtypes, and how a run ends: degenerate, infeasible, out of steps, diverged, a failed
-subproblem, restoration, failed evaluations."""
+interior point, the implicit derivative in args, its reverse form and the adjoint that selects it,
+a forward-only residual under forward-over-forward, the record's dtypes, and how a run ends:
+degenerate, infeasible, out of steps, diverged, a failed subproblem, restoration, failed
+evaluations."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+import diff_soup as ds
 from diff_soup.optimization import (
     SQP,
     AugmentedLagrangian,
@@ -52,6 +54,9 @@ _TANGENT = 1e-9
 _LANE_GRADIENT = 1e-12
 # measured 0 (point and jacobian), workstation CPU 2026-11-06, pytest tests/contracts/test_compiled_solvers.py
 _COMPOSITION = 1e-10
+# measured 4.1e-16 (worst over solvers and lanes), workstation CPU 2026-11-06,
+# pytest tests/contracts/test_compiled_solvers.py::test_the_reverse_form_gradient_equals_the_forward_form_jacobian
+_REVERSE_FORM = 1e-10
 
 
 def _flat(x, record):
@@ -137,6 +142,34 @@ def test_grad_of_a_lane_sum_equals_the_lane_gradients(solver):
     batched = jax.jit(jax.grad(lambda b: jnp.sum(jax.vmap(lane)(b))))(toy.args_batch)
     single = jnp.stack([jax.jit(jax.grad(lane))(a) for a in toy.args_batch])
     assert float(jnp.max(jnp.abs(batched - single)) / jnp.max(jnp.abs(single))) <= _LANE_GRADIENT
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_the_reverse_form_gradient_equals_the_forward_form_jacobian(solver):
+    """`jax.grad` through `adjoint=ImplicitAdjoint()`, in jitted vmap lanes, equals `jax.jacfwd`
+    through the default forward rule, lane by lane."""
+    toy = TOYS["inequality"]
+
+    def lane(adjoint, a):
+        x, record = dataclasses.replace(SOLVERS[solver], adjoint=adjoint).run(
+            toy.problem, toy.problem.x0, a
+        )
+        return jnp.sum(jnp.sin(x)) + jnp.sum(record.multipliers_inequality) + record.value
+
+    reverse = jax.jit(jax.vmap(jax.grad(lambda a: lane(ds.nonlinear.ImplicitAdjoint(), a))))
+    forward = jax.jit(jax.vmap(jax.jacfwd(lambda a: lane(ds.ForwardAdjoint(), a))))
+    by_reverse, by_forward = reverse(toy.args_batch), forward(toy.args_batch)
+    assert float(jnp.max(jnp.abs(by_reverse - by_forward)) / jnp.max(jnp.abs(by_forward))) <= (
+        _REVERSE_FORM
+    )
+
+
+def test_a_solver_refuses_an_adjoint_without_an_implicit_rule():
+    """A compiled solver's adjoint selects the forward or the reverse implicit rule; another raises."""
+    toy = TOYS["inequality"]
+    solver = dataclasses.replace(SOLVERS["interior_point"], adjoint=ds.CheckpointAdjoint())
+    with pytest.raises(ds.ConfigurationError, match="ImplicitAdjoint"):
+        solver.run(toy.problem, toy.problem.x0, toy.args_batch[0])
 
 
 def _residual(x, a):
