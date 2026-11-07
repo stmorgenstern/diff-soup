@@ -23,6 +23,7 @@ from diff_soup.optimization.inference.engine._status import LaneStatus
 from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._constraints import _constraint_rows
+from diff_soup.optimization.inference.hierarchical._level_system import regularizer_block_members
 
 _LABEL = "TrustRegion"
 
@@ -338,7 +339,7 @@ class _LaneRoute:
                 # level it belongs to (its deepest node or that node's ancestor); a block
                 # above that level weighs one.
                 if number not in self.attributions:
-                    self.attributions[number] = elimination.regularizer_block_members(
+                    self.attributions[number] = regularizer_block_members(
                         self.view.regularization, self.problem.x0, tables, number, self.device
                     )
                 attributed = self.attributions[number]

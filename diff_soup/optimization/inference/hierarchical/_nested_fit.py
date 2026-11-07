@@ -23,6 +23,8 @@ from diff_soup.optimization.inference.hierarchical._lane_route import (
     _LaneRoute,
     _listed,
 )
+from diff_soup.optimization.inference.hierarchical._level_inner import model_split
+from diff_soup.optimization.inference.hierarchical._level_system import nonfinite_members
 from diff_soup.optimization.inference.hierarchical._trust_step import (
     _bounded_gradient,
     _full_step,
@@ -359,7 +361,7 @@ class _NestedFit(_JointFit):
         if solved is None:
             return entries
         delta = np.asarray(solved.point, dtype=np.float64) - np.asarray(point, dtype=np.float64)
-        members, rest = elimination.model_split(system, delta, self.cut)
+        members, rest = model_split(system, delta, self.cut)
         entries["owner_predicted"] = np.asarray(members, dtype=np.float64)
         entries["owner_shared_predicted"] = np.asarray(rest, dtype=np.float64)
         if not solved.failures and solved.lane_costs is not None:
@@ -699,7 +701,7 @@ class _NestedFit(_JointFit):
         Each of the member's lanes is a failure of kind ``NONFINITE_BLOCKS``: its solve reached
         the end at a finite cost and its sensitivities are not finite there.
         """
-        broken = elimination.nonfinite_members(system, self.cut)
+        broken = nonfinite_members(system, self.cut)
         if not broken.any():
             return ()
         route = self.route
