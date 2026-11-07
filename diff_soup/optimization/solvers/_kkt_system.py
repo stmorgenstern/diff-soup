@@ -24,7 +24,8 @@ from diff_soup.optimization.solvers._protocol import SolveRecord
 #: Ours: a multiplier and its slack both below `DEGENERATE * sqrt(mu)` make the active set degenerate.
 DEGENERATE = 1e2
 #: Ours: the cap on the degenerate system's barrier diagonals, so the branch that is not
-#: selected stays finite and its zero cotangent never meets an infinity.
+#: selected stays finite and its zero cotangent never meets an infinity; a dtype whose
+#: largest finite value is smaller (float32) is capped there instead.
 _CAP = 1e200
 
 
@@ -169,15 +170,16 @@ def system_at(
     below, above = distances(x, bounds)
     z_lower, z_upper = record.bound_multipliers
     tiny = jnp.finfo(dtype).tiny
+    cap = min(_CAP, float(jnp.finfo(dtype).max))
     sigma_lower = jnp.where(
-        bounds.has_lower, jnp.minimum(z_lower / jnp.maximum(below, tiny), _CAP), 0.0
+        bounds.has_lower, jnp.minimum(z_lower / jnp.maximum(below, tiny), cap), 0.0
     )
     sigma_upper = jnp.where(
-        bounds.has_upper, jnp.minimum(z_upper / jnp.maximum(above, tiny), _CAP), 0.0
+        bounds.has_upper, jnp.minimum(z_upper / jnp.maximum(above, tiny), cap), 0.0
     )
     # At `mu = 0` (SQP, the augmented Lagrangian) an active slack can be exactly 0, and two
     # identical active rows would then give an exact zero pivot; the floor keeps it finite.
-    slack_ratio = jnp.clip(record.slacks / jnp.maximum(lam_i, tiny), jnp.finfo(dtype).eps, _CAP)
+    slack_ratio = jnp.clip(record.slacks / jnp.maximum(lam_i, tiny), jnp.finfo(dtype).eps, cap)
     fixed = (active.lower | active.upper) & ~degenerate
     keep = (~fixed).astype(dtype)
     primal = jnp.where(

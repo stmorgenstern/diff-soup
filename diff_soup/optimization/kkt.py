@@ -203,9 +203,12 @@ class KKTSolve(eqx.Module):
             factor = jnp.where(delta_w_last == 0.0, _FIRST_GROWTH, self.delta_w_factor)
             return jnp.where(delta_w == 0.0, first, factor * delta_w)
 
+        # A `delta_w_max` past the dtype's largest finite value (1e40 in float32) is capped there.
+        delta_w_max = min(self.delta_w_max, float(jnp.finfo(primal_block.dtype).max))
+
         def cond(carry):
             factor, delta_w, _ = carry
-            return ~factor.ok & (delta_w <= self.delta_w_max)
+            return ~factor.ok & (delta_w <= delta_w_max)
 
         def body(carry):
             factor, delta_w, route = carry
