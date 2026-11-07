@@ -34,9 +34,12 @@ import os
 import pickle
 import sys
 import time
+from collections.abc import Iterable
+from numbers import Integral
 from typing import Any, NamedTuple
 
 import numpy as np
+from numpy.typing import DTypeLike
 
 from diff_soup import _environment
 from diff_soup._errors import ConfigurationError
@@ -333,7 +336,7 @@ class Transport:
         """The next header process 0 broadcasts."""
         return self.comm.bcast(None, root=0)
 
-    def array(self, shape: Any, dtype: Any) -> np.ndarray:
+    def array(self, shape: Iterable[Integral], dtype: DTypeLike) -> np.ndarray:
         """The next array process 0 broadcasts, into a fresh buffer."""
         buffer = np.empty(tuple(shape), dtype=np.dtype(dtype))
         self.comm.Bcast(buffer, root=0)

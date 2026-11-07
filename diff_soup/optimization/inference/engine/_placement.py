@@ -48,10 +48,13 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from typing import Any
 
 import numpy as np
+
+from diff_soup.optimization.inference.engine._batched import BatchedLanes
+from diff_soup.optimization.inference.engine._plan import Plan
 
 BUCKET_SLACK: float = 0.1
 """How much more the most loaded process may carry so that a bucket's lanes stay on one process.
@@ -136,7 +139,7 @@ def _world_size(world_size: Any) -> int:
 _WINDOW = re.compile(r"^(?:(?P<experiment>.*) )?window \d+$")
 
 
-def experiment_of(lane: Any) -> Any:
+def experiment_of(lane: Hashable) -> Hashable:
     """The experiment a lane belongs to, read from its id.
 
     An experiment solved in one shoot has one lane of its own id; one fitted in
@@ -150,7 +153,7 @@ def experiment_of(lane: Any) -> Any:
     return match.group("experiment") or ""
 
 
-def plan_costs(plan: Any) -> dict:
+def plan_costs(plan: Plan) -> dict:
     """Lane id to the cost the plan alone models: the frame slots of the lane's bucket.
 
     The plan knows the frames of every bucket's class and not the size of a
@@ -165,7 +168,7 @@ def plan_costs(plan: Any) -> dict:
     return costs
 
 
-def _cost_table(plan: Any, lanes: tuple, costs: Any, measured: Any) -> tuple:
+def _cost_table(plan: Plan, lanes: tuple, costs: Any, measured: Any) -> tuple:
     """Per lane, the cost to balance, and the source of those costs."""
     if costs is None:
         costs = plan_costs(plan)
@@ -277,7 +280,7 @@ def _joined(blocks: list, block_of: Mapping, buckets: tuple, order: Mapping) -> 
 
 
 def place(
-    plan: Any,
+    plan: Plan,
     world_size: int,
     costs: Mapping | None = None,
     measured: Any = None,
@@ -380,7 +383,7 @@ def place(
     )
 
 
-def modelled_costs(lanes: Any) -> dict:
+def modelled_costs(lanes: BatchedLanes) -> dict:
     """Lane id to its modelled cost: the size of its state times the frames it records.
 
     Args:

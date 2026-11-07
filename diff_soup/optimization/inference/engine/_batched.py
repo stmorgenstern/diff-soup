@@ -50,19 +50,24 @@ import dataclasses
 import time
 import types
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
+from numbers import Integral, Real
 from typing import Any, NamedTuple
 
 import jax
 import numpy as np
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.stages import Compiled
+from jax.tree_util import PyTreeDef
 
 from diff_soup._errors import BackendError
 from diff_soup.optimization.inference.engine._balance import device_order
 from diff_soup.optimization.inference.engine._capacity import lane_frames
+from diff_soup.optimization.inference.engine._identity import LaneIdentity
 from diff_soup.optimization.inference.engine._inputs import _lane_group
-from diff_soup.optimization.inference.engine._kernel import MODES, LaneProgram
+from diff_soup.optimization.inference.engine._kernel import MODES, LaneProgram, LaneResult
 from diff_soup.optimization.inference.engine._layout import lane_layout, lane_problems
+from diff_soup.optimization.inference.engine._levels import LevelTables
 from diff_soup.optimization.inference.engine._order import (
     StepMemory,
     canonical_lanes,
@@ -81,6 +86,7 @@ from diff_soup.optimization.inference.engine._result import (
     unit_values,
 )
 from diff_soup.optimization.inference.engine._status import KINDS
+from diff_soup.optimization.inference.statistics.hierarchy import Hierarchy
 
 
 class ProgramKey(NamedTuple):
@@ -96,10 +102,10 @@ class ProgramKey(NamedTuple):
             program that runs every call on one device.
     """
 
-    identity: Any
+    identity: LaneIdentity
     mode: str
     chunk: int
-    mesh: Any = None
+    mesh: Mesh | None = None
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -123,9 +129,9 @@ class CompiledProgram:
 
     key: ProgramKey
     program: LaneProgram
-    kernel: Any
-    compiled: Any
-    lanes_tree: Any
+    kernel: Callable[..., LaneResult]
+    compiled: Compiled
+    lanes_tree: PyTreeDef
     lane_leaves: tuple
     record: Any
 
@@ -181,12 +187,12 @@ class BucketLanes:
     bucket: Bucket
     program: LaneProgram
     leaves: tuple
-    tree: Any
+    tree: PyTreeDef | None
     gather: np.ndarray
     owners: np.ndarray
     local: np.ndarray
     frames: tuple
-    dtype: Any
+    dtype: np.dtype
     dt0_leaf: int
     state_sizes: tuple = ()
 
@@ -428,7 +434,7 @@ def lane_metadata(plan: Plan, joint: Any) -> BatchedLanes:
     )
 
 
-def restricted_plan(plan: Plan, lanes: Any) -> tuple:
+def restricted_plan(plan: Plan, lanes: Iterable[Hashable]) -> tuple:
     """The plan of a subset of a study's lanes, each bucket's programs as wide as in ``plan``.
 
     A bucket keeps the lanes of ``lanes`` in its own order; a bucket left
@@ -506,7 +512,7 @@ def _check_modes(lanes: BatchedLanes, modes: Any) -> tuple:
     return tuple(dict.fromkeys(modes))
 
 
-def placement(plan: Plan) -> Any:
+def placement(plan: Plan) -> jax.Device | NamedSharding | None:
     """Where the arrays of one call go: the plan's device, or the lane axis split over its mesh.
 
     Every array of a call (the points and every leaf of the lane inputs) leads
@@ -534,7 +540,11 @@ def _lane_leaves(entry: BucketLanes) -> tuple:
 
 
 def prepare(
-    lanes: BatchedLanes, *, modes: Any, compile_program: Callable, buckets: Any = None
+    lanes: BatchedLanes,
+    *,
+    modes: Any,
+    compile_program: Callable,
+    buckets: Iterable[Integral] | None = None,
 ) -> tuple:
     """Compile the program of every bucket (or of the buckets ``buckets``) in every mode of ``modes``.
 
@@ -614,7 +624,9 @@ def _one_width(lanes: BatchedLanes, ids: tuple) -> tuple:
     return places
 
 
-def _refuse_nodes_without_lanes(lanes: BatchedLanes, hierarchy: Any, experiments: Any) -> None:
+def _refuse_nodes_without_lanes(
+    lanes: BatchedLanes, hierarchy: Hierarchy, experiments: Iterable
+) -> None:
     """Refuse a hierarchy study with a node every experiment below which the plan refused.
 
     The level tables hold every node of the hierarchy; a node with no planned
@@ -643,7 +655,9 @@ def _refuse_nodes_without_lanes(lanes: BatchedLanes, hierarchy: Any, experiments
             )
 
 
-def level_tables_of(lanes: BatchedLanes, lane_ids: Any, hierarchy: Any, experiments: Any) -> Any:
+def level_tables_of(
+    lanes: BatchedLanes, lane_ids: Any, hierarchy: Hierarchy, experiments: Iterable
+) -> LevelTables:
     """The level tables of a hierarchy study for lane results in the order of ``lane_ids``.
 
     Args:
@@ -745,7 +759,7 @@ def _run_bucket(
     starts: np.ndarray,
     *,
     keep_inputs: bool = True,
-    keep: Any = None,
+    keep: np.ndarray | None = None,
 ) -> tuple:
     """Evaluate the units of one bucket; its call outputs, its wall seconds and its batch.
 
@@ -892,8 +906,8 @@ def evaluate(
     lanes: BatchedLanes,
     request: Request,
     *,
-    retry_kinds: Any = (),
-    retry_first_step_factors: Any = (),
+    retry_kinds: Iterable[str] = (),
+    retry_first_step_factors: Iterable[Real] = (),
 ) -> Results:
     """Evaluate a request through the compiled programs of a study.
 

@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
+from jaxtyping import ArrayLike
 
 UNKNOWN_STEPS: int = -1
 """The step count recorded for a unit that has not been evaluated."""
@@ -154,7 +155,7 @@ class StepMemory:
         return found
 
     def record(
-        self, bucket: int, lanes: int, members: np.ndarray, positions: np.ndarray, steps: Any
+        self, bucket: int, lanes: int, members: np.ndarray, positions: np.ndarray, steps: ArrayLike
     ) -> None:
         """Keep the step counts of units of ``bucket``, a bucket of ``lanes`` lanes."""
         members = np.asarray(members, dtype=np.int64)
