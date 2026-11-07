@@ -16,7 +16,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.linear import MemberBlock, MemberBlockLayout
-from tests.support.problems import SparseChainDAE, reaction_diffusion_recipe
+from tests.support.problems import SparseChainDAE, reaction_diffusion_recipe, thirds_dae
 
 _CONSTANT = ds.Dependencies(time=False, state=False, parameters=False, control=False)
 _OPTIONS = ds.AlgebraicProjectionOptions(
@@ -185,14 +185,6 @@ def test_a_family_solve_on_a_member_block_backend_initializes_consistently():
     np.testing.assert_allclose(np.concatenate(got), np.concatenate(expected), rtol=_MEMBER_BOUND)
 
 
-#: ``y' = -y`` and ``0 = 3 z - y``.
-_THIRDS = ds.MassProblem(
-    rhs=lambda t, y, theta, control: jnp.stack([-y[0], 3.0 * y[1] - y[0]]),
-    mass=ds.MassOperator.sparse(
-        [0], [0], lambda t, y, theta, control: jnp.ones((1,), y.dtype), n=2, dependencies=_CONSTANT
-    ),
-    structure=ds.DAEStructure(differential_vars=np.array([True, False])),
-)
 #: A start ``y`` near 2e8 whose nearest floats ``z`` to ``y/3`` all leave ``3 z - y`` at 7.5e-9,
 #: the residual initialization ends with (measured, workstation 2026-11-05).
 _FLOOR_Y = 195046369.6325935
@@ -208,7 +200,7 @@ def test_a_start_at_the_rounding_floor_of_large_values_passes_the_relative_gate(
 
     def solve(ic_rtol):
         return ds.pdesolve(
-            _THIRDS,
+            thirds_dae(),
             ds.JIDA(linear="dense", **_FLOOR_TOLERANCES),
             (0.0, 0.01),
             jnp.asarray([_FLOOR_Y, _FLOOR_Y / 3.0]),
@@ -240,14 +232,14 @@ def _cubic():
     )
 
 
-#: Requested tolerances (not asserted bounds), the JIDA review's run C.
+#: Requested tolerances (not asserted bounds).
 _CUT_TOLERANCES = {"tol": 1e-10, "rtol": 1e-3}
 
 
 def test_a_start_the_newton_budget_cuts_off_far_from_the_root_is_refused():
-    """From ``z = x + 100`` seven Newton steps leave the cubic's residual in the hundreds: the
-    relative gate, scaled by the residual's own terms at that iterate rather than by the
-    starting residual, refuses the start, and a budget with room to converge accepts it."""
+    """From ``z = x + 100`` seven Newton steps leave the cubic's residual in the hundreds, and
+    initialization reports that start as not converged; a budget with room to converge accepts
+    it."""
     view = ds.solver_view(_cubic())
     cut, full = (
         view.consistent_initial_state(
