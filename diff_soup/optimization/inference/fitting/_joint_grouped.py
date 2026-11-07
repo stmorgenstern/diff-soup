@@ -9,6 +9,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._layout import Layout
 from diff_soup.optimization._derived import half_sum_of_squares
@@ -35,7 +36,7 @@ class _FrozenTailRegularizer:
     """View a full-joint regularizer over a frozen state tail."""
 
     inner: Any
-    full_start: Any
+    full_start: ArrayLike
     n_active: int
 
     def _full(self, x):

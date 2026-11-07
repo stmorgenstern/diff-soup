@@ -45,7 +45,7 @@ def build_stacked_residual_fns(segment_fns: tuple) -> tuple:
     return _r_fn, _rj_fn
 
 
-def _stacked_residual_fn(segment_fns: tuple, batched_r: Any = None) -> Callable:
+def _stacked_residual_fn(segment_fns: tuple, batched_r: Optional[Callable] = None) -> Callable:
     """Build a jitted data-residual closure without differentiating it."""
     if batched_r is not None:
         return batched_r
@@ -159,11 +159,11 @@ def lower_residual_problem(
     *,
     evaluator: Any = None,
     lanes: Any = None,
-    gauss_newton: Any = None,
-    value: Any = None,
+    gauss_newton: Optional[Callable] = None,
+    value: Optional[Callable] = None,
     regularization: Any = None,
-    joint_view: Any = None,
-) -> Any:
+    joint_view: Optional[Callable] = None,
+) -> LeastSquaresProblem:
     """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] of a residual problem.
 
     ``problem`` is an inference problem of residual rows: an

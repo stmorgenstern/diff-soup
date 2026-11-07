@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any, Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup._warnings import warn_user
 from diff_soup.optimization.inference.fitting._forward_seam import (
+    ForwardSeam,
     GroupedThetaSelection,
     parameter_handle_leaf_ids,
     selected_leaf_ids,
@@ -22,6 +24,7 @@ from diff_soup.optimization.inference.fitting.learnables import (
     has_declared_learnables,
     learnables,
 )
+from diff_soup.problem.parameters import ParameterSchema
 
 # ---------------------------------------------------------------------------
 # Parameter groups
@@ -59,7 +62,7 @@ class ParameterGroups:
             )
 
 
-def _group_value_names(value: Any) -> tuple:
+def _group_value_names(value: str | Iterable[str]) -> tuple:
     """Learnable names for a plain (non-selector) parameter-group value."""
     if isinstance(value, str):
         return (value,)
@@ -230,7 +233,7 @@ def _resolve_parameters(parameters: Optional[ParameterGroups], problem: Any) -> 
         if group_kind == kind
     )
     if has_identity_selection:
-        theta_selection: Any = GroupedThetaSelection(
+        theta_selection: Optional[GroupedThetaSelection] = GroupedThetaSelection(
             name_sources=tuple(name_sources),
             mask_sources=tuple(mask_sources),
             leaf_id_sources=tuple(leaf_id_sources),
@@ -250,12 +253,12 @@ class ParameterValues(Mapping):
     reads, and a parameter that varies by experiment gives a mapping by experiment.
     """
 
-    def __init__(self, schema: Any, x: Any):
+    def __init__(self, schema: ParameterSchema, x: ArrayLike):
         """Read `x` through `schema`, a fit's parameter schema."""
         self._schema = schema
         self._x = x
 
-    def __getitem__(self, parameter: Any) -> Any:
+    def __getitem__(self, parameter: Any) -> PyTree:
         """Return the value of `parameter`."""
         return self._schema.value(parameter, self._x)
 
@@ -272,7 +275,7 @@ class ParameterValues(Mapping):
         return f"ParameterValues({[handle.name for handle in self._schema.handles]})"
 
 
-def parameter_values(schema: Any, x: Any) -> ParameterValues:
+def parameter_values(schema: Optional[ParameterSchema], x: ArrayLike) -> ParameterValues:
     """Return the read-only view of `x` through `schema`, refusing a problem with none."""
     if schema is None:
         raise ValueError(
@@ -288,7 +291,7 @@ def parameter_values(schema: Any, x: Any) -> ParameterValues:
 _STRUCTURAL_SCHEMA_PREFIX = "structural:"
 
 
-def _is_structural_schema(schema: Any) -> bool:
+def _is_structural_schema(schema: Optional[ParameterSchema]) -> bool:
     """Whether ``schema`` labels one inference problem's own coordinates rather than a Study's.
 
     A structural schema is stamped on the result of fitting an inference problem directly.
@@ -307,7 +310,7 @@ def _is_structural_schema(schema: Any) -> bool:
     return isinstance(fingerprint, str) and fingerprint.startswith(_STRUCTURAL_SCHEMA_PREFIX)
 
 
-def _recipe_parameter_schema(problem: Any, parameters: ParameterGroups, seam: Any):
+def _recipe_parameter_schema(problem: Any, parameters: ParameterGroups, seam: ForwardSeam):
     """Build handle lookup metadata for one structural Recipe inference problem.
 
     A handle earns an entry when the fit selected exactly the coordinates its
@@ -382,7 +385,7 @@ def _recipe_parameter_schema(problem: Any, parameters: ParameterGroups, seam: An
     return ParameterSchema(entries, fingerprint=fingerprint)
 
 
-def _group_columns(seam: Any, groups: tuple) -> tuple:
+def _group_columns(seam: ForwardSeam, groups: tuple) -> tuple:
     """Map each parameter group to its flat-vector column indices.
 
     A group owns a column when that column's source θ-leaf slot key is one the group

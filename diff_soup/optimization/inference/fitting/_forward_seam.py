@@ -34,7 +34,7 @@ equinox static field, so both swaps use ``dataclasses.replace`` rather than
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from typing import Any, NamedTuple, Optional
 
 import equinox as eqx
@@ -42,10 +42,15 @@ import jax
 import jax.flatten_util
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import PyTree
 
 from diff_soup._logging import log as logger
+from diff_soup._schedule.records import ScheduleArrays
 from diff_soup.optimization.inference.fitting._lane_map import lane_map
+from diff_soup.optimization.inference.fitting.series import Series
 from diff_soup.problem._registry import theta_leaf_keys, theta_mask, theta_table
+from diff_soup.problem.implicit.solver_problem import SolverView
+from diff_soup.timestepping.vsvo.solution import Solution
 
 # Residual value stamped on any failed or non-finite PDE solve. Large enough
 # that the optimizer steps away from the failing region without a NaN poisoning
@@ -54,7 +59,7 @@ from diff_soup.problem._registry import theta_leaf_keys, theta_mask, theta_table
 _FAILED_SENTINEL = 1e15
 
 
-def _solution_failed(solution: Any) -> jax.Array:
+def _solution_failed(solution: Solution) -> jax.Array:
     """JIT-safe guard for every unsuccessful or non-finite trajectory.
 
     ``Solution.ok`` recognizes all successful terminal codes (including a
@@ -75,7 +80,7 @@ def _solution_failed(solution: Any) -> jax.Array:
 # ---------------------------------------------------------------------------
 
 
-def coerce_forward_problem(problem: Any) -> Any:
+def coerce_forward_problem(problem: Any) -> SolverView:
     """Return the identity-stable solver view for ``problem``.
 
     Args:
@@ -98,7 +103,7 @@ def coerce_forward_problem(problem: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _is_name_spec(theta: Any) -> bool:
+def _is_name_spec(theta: PyTree) -> bool:
     """Whether ``theta`` is a name spec (a non-string iterable of strings)."""
     if isinstance(theta, str):
         return True
@@ -109,7 +114,7 @@ def _is_name_spec(theta: Any) -> bool:
     return bool(items) and all(isinstance(i, str) for i in items)
 
 
-def _path_key_tokens(path: Any) -> tuple:
+def _path_key_tokens(path: tuple) -> tuple:
     """Extract the human-readable key tokens from a JAX tree key path.
 
     A leaf's key path is a tuple of ``GetAttrKey`` / ``DictKey`` / ``SequenceKey``
@@ -128,7 +133,7 @@ def _path_key_tokens(path: Any) -> tuple:
     return tuple(tokens)
 
 
-def names_to_theta_mask(theta0: Any, names: Any) -> tuple[Any, tuple]:
+def names_to_theta_mask(theta0: PyTree, names: str | Iterable[str]) -> tuple[PyTree, tuple]:
     """Build a True/False mask over ``theta0`` selecting the named θ leaves.
 
     The mask is keyed by the leaf's *key path* through the partitioned ``theta0``
@@ -157,12 +162,12 @@ def names_to_theta_mask(theta0: Any, names: Any) -> tuple[Any, tuple]:
 
     leaves_with_path = jax.tree_util.tree_leaves_with_path(theta0)
 
-    def _leaf_label(path: Any) -> str:
+    def _leaf_label(path: tuple) -> str:
         tokens = _path_key_tokens(path)
         return tokens[-1] if tokens else ""
 
     # Build the mask leaf-by-leaf so it has the exact structure of theta0.
-    def _mask_leaf(path: Any, leaf: Any) -> bool:
+    def _mask_leaf(path: tuple, leaf: PyTree) -> bool:
         if not eqx.is_inexact_array(leaf):
             return False
         leaf_names.append(_leaf_label(path))
@@ -339,15 +344,15 @@ class ForwardSeam:
         theta_leaf_ids: Per-scalar slot keys (paths in the problem's path table), in ravel order.
     """
 
-    problem: Any
+    problem: SolverView
     unflatten: Callable
-    theta_frozen: Any
+    theta_frozen: PyTree
     x0: np.ndarray
     theta_names: tuple = ()
     theta_token_sets: tuple = ()
     theta_leaf_ids: tuple = ()
 
-    def theta_of(self, x_flat: jax.Array) -> Any:
+    def theta_of(self, x_flat: jax.Array) -> PyTree:
         """Reconstruct the full theta pytree from a flat learnable vector."""
         return eqx.combine(self.unflatten(x_flat), self.theta_frozen)
 
@@ -381,7 +386,7 @@ class GroupedThetaSelection:
     order: tuple = ()
 
 
-def selected_leaf_ids(pytree: Any, mask: Any) -> frozenset:
+def selected_leaf_ids(pytree: PyTree, mask: PyTree) -> frozenset:
     """Return the slot keys of the ``pytree`` leaves selected ``True`` by ``mask``.
 
     ``mask`` is a boolean pytree of ``pytree``'s structure (e.g. from
@@ -493,7 +498,7 @@ def build_forward_seam(problem: Any, theta: Any) -> ForwardSeam:
     )
 
 
-def _own_default_theta(problem: Any, solver_problem: Any) -> tuple:
+def _own_default_theta(problem: Any, solver_problem: SolverView) -> tuple:
     """Return ``(source, theta0)``: the problem whose values ``theta0`` holds, and ``theta0``.
 
     A problem equal in content to one presented earlier is served that one's
@@ -508,7 +513,7 @@ def _own_default_theta(problem: Any, solver_problem: Any) -> tuple:
     return (source if source is not None else problem), solver_problem.default_theta()
 
 
-def _declared_leaf_filter(source: Any, theta0: Any) -> Any:
+def _declared_leaf_filter(source: Any, theta0: PyTree) -> PyTree:
     """Return the θ mask selecting the declared learnables of ``source``, the owner of ``theta0``'s leaves.
 
     Membership follows the declaration, not the leaf's type: a parameter is
@@ -531,7 +536,7 @@ def _declared_leaf_filter(source: Any, theta0: Any) -> Any:
     return theta_mask(theta0, keys)
 
 
-def _deduplicated_selection(learn: Any) -> tuple:
+def _deduplicated_selection(learn: PyTree) -> tuple:
     """Return one ``(label, path_tokens, leaf, key)`` entry per selected slot.
 
     ``learn`` holds the selected θ leaves.  One declared array can sit at
@@ -542,7 +547,7 @@ def _deduplicated_selection(learn: Any) -> tuple:
     occurrence still selects it, and takes its label from the first
     occurrence's own path.
     """
-    order: dict[Any, int] = {}
+    order: dict[Hashable, int] = {}
     labels: list[str] = []
     tokens: list[set] = []
     leaves: list = []
@@ -575,7 +580,7 @@ def _in_declaration_order(selected: tuple, order: tuple) -> tuple:
     return tuple(sorted(selected, key=rank))
 
 
-def _ravel_deduplicated(learn: Any, selected: tuple) -> tuple:
+def _ravel_deduplicated(learn: PyTree, selected: tuple) -> tuple:
     """Ravel the deduplicated selection and return ``(flat, unflatten)``.
 
     ``unflatten`` writes each flat block back to EVERY place of the slot it came
@@ -595,7 +600,7 @@ def _ravel_deduplicated(learn: Any, selected: tuple) -> tuple:
     return flat, unflatten
 
 
-def _grouped_leaf_filter(problem: Any, theta0: Any, selection: GroupedThetaSelection) -> Any:
+def _grouped_leaf_filter(problem: Any, theta0: PyTree, selection: GroupedThetaSelection) -> PyTree:
     """Union a [GroupedThetaSelection][diff_soup.optimization.inference.fitting._forward_seam.GroupedThetaSelection]'s sources into one θ-leaf bool mask.
 
     Name sources resolve via [names_to_theta_mask][] (path-token match); mask
@@ -696,9 +701,9 @@ def union_prediction_factory(
     y0: jax.Array,
     solver: Any,
     t0: Optional[float] = None,
-    decision_to_theta: Optional[Callable[[jax.Array], Any]] = None,
+    decision_to_theta: Optional[Callable[[jax.Array], PyTree]] = None,
     decision_to_y0: Optional[Callable[[jax.Array], jax.Array]] = None,
-    schedule: Any = None,
+    schedule: Optional[ScheduleArrays] = None,
 ) -> tuple[Callable[[jax.Array], tuple], tuple, np.ndarray, dict]:
     """Build the single-solve per-stream prediction over the union time grid.
 
@@ -843,9 +848,9 @@ def union_residual_factory(
     y0: jax.Array,
     solver: Any,
     t0: Optional[float] = None,
-    decision_to_theta: Optional[Callable[[jax.Array], Any]] = None,
+    decision_to_theta: Optional[Callable[[jax.Array], PyTree]] = None,
     decision_to_y0: Optional[Callable[[jax.Array], jax.Array]] = None,
-    schedule: Any = None,
+    schedule: Optional[ScheduleArrays] = None,
 ) -> tuple[Callable[[jax.Array], jax.Array], tuple, np.ndarray, dict]:
     """Build a single-solve residual over the union of all streams' times.
 
@@ -941,10 +946,10 @@ def stack_frame_likelihoods(
     target_frames: Sequence[int],
     *,
     full_prediction_shape: tuple,
-    context: Any,
+    context: PyTree,
     values: np.ndarray,
     who: str,
-) -> tuple[Any, Any]:
+) -> tuple[PyTree, PyTree]:
     """Stack per-frame likelihood views on a leading window axis.
 
     Windowing splits one trajectory into independent per-window observation
@@ -1088,7 +1093,7 @@ class ObservedWindows(NamedTuple):
     starts: np.ndarray
 
 
-def observed_windows(series: Any, *, scored: Any = None) -> ObservedWindows:
+def observed_windows(series: Series, *, scored: Optional[Series] = None) -> ObservedWindows:
     """The kept windows of an observed-start trajectory, read on the host.
 
     Window ``i -> i+1`` starts from the measured full state at frame ``i`` of
@@ -1131,9 +1136,9 @@ def observed_windows(series: Any, *, scored: Any = None) -> ObservedWindows:
 def batched_transition_residual_factory(
     seam: ForwardSeam,
     *,
-    series: Any,
+    series: Series,
     solver: Any,
-    scored: Any = None,
+    scored: Optional[Series] = None,
 ) -> tuple[Callable, Callable, int, list]:
     """Build one vmapped residual over observed-start window transitions.
 

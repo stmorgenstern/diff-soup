@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from collections.abc import Callable
+from typing import Optional
 
 import equinox as eqx
 import jax
 import numpy as np
+from jax.sharding import Mesh
+from jaxtyping import PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
@@ -17,7 +20,7 @@ from diff_soup.optimization.inference.fitting.formulation import LearnedInitialS
 from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 
 
-def _host_tree_equal(a: Any, b: Any) -> bool:
+def _host_tree_equal(a: PyTree, b: PyTree) -> bool:
     """Host boolean equality for pytrees containing arrays and static leaves."""
     try:
         return bool(np.asarray(eqx.tree_equal(a, b)))
@@ -28,7 +31,7 @@ def _host_tree_equal(a: Any, b: Any) -> bool:
             return False
 
 
-def _same_leaf_shapes(a: Any, b: Any) -> bool:
+def _same_leaf_shapes(a: PyTree, b: PyTree) -> bool:
     """Whether two pytrees have equal structure and array leaf shape/dtype."""
     if jax.tree_util.tree_structure(a) != jax.tree_util.tree_structure(b):
         return False
@@ -246,7 +249,7 @@ def _structural_groups(children: tuple) -> tuple:
     return tuple(tuple(g) for g in groups)
 
 
-def _group_submeshes(groups: tuple, children: tuple, mesh: Any) -> tuple[tuple, tuple]:
+def _group_submeshes(groups: tuple, children: tuple, mesh: Mesh) -> tuple[tuple, tuple]:
     """Assign each structural group a submesh of experiment lanes.
 
     With at most as many groups as lanes, every group gets a contiguous block of
@@ -336,7 +339,10 @@ def plan_child_data_owners(
 
 
 def child_lanes(
-    children: tuple, shared: tuple, ownership: Any, placement: Optional[Layout]
+    children: tuple,
+    shared: tuple,
+    ownership: Optional[dict | Callable],
+    placement: Optional[Layout],
 ) -> tuple[tuple[int, int], ...]:
     """Per child, the experiment lane that evaluates it and the process owning that lane.
 
@@ -388,7 +394,7 @@ def _sharding_requested(layout: Optional[Layout]) -> bool:
     return layout is not None and layout.experiment_axis is not None and layout.mesh is not None
 
 
-def _validate_sharding_mesh(mesh: Any) -> None:
+def _validate_sharding_mesh(mesh: Mesh) -> None:
     """Reject device meshes that child-batch sharding cannot place (eager, pre-lowering).
 
     Raises:

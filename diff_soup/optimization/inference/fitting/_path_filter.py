@@ -22,12 +22,12 @@ you would a callable filter::
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any
 
 import jax
+from jaxtyping import PyTree
 
 
-def _walk_path(root: Any, path: str) -> Any:
+def _walk_path(root: PyTree, path: str) -> PyTree:
     """Walk a dotted path through ``root`` using getattr / __getitem__.
 
     Numeric path components (e.g. ``"0"``) trigger ``__getitem__``; all
@@ -51,7 +51,7 @@ def _walk_path(root: Any, path: str) -> Any:
     return obj
 
 
-def parameters_at(pytree: Any, paths: Iterable[str]) -> Any:
+def parameters_at(pytree: PyTree, paths: Iterable[str]) -> PyTree:
     r"""Build a learnable-filter mask selecting leaves at given dotted paths.
 
     Each entry in ``paths`` is a dotted attribute path; integer-looking

@@ -6,9 +6,10 @@ from typing import Any
 
 import jax
 import numpy as np
+from jaxtyping import ArrayLike
 
 
-def trial_is_valid(problem: Any, point: Any) -> bool:
+def trial_is_valid(problem: Any, point: ArrayLike) -> bool:
     """Evaluate an optional scalar ``trial_is_valid`` contract on device."""
     checker = getattr(problem, "trial_is_valid", None)
     if checker is None:

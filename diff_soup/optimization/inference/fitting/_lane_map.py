@@ -42,11 +42,13 @@ kernel is never pushed forward directly.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any, Optional
+from collections.abc import Set as AbstractSet
+from typing import Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup._jax_compat import Primitive, ad, batching, mlir
 from diff_soup._jax_compat import partial_eval as pe
@@ -55,9 +57,9 @@ from diff_soup._jax_compat import partial_eval as pe
 def lane_map(
     kernel: Callable,
     in_axes: Sequence[Optional[int]],
-    *args: Any,
+    *args: PyTree,
     fold: bool = True,
-) -> Any:
+) -> PyTree:
     """Map ``kernel`` over a lane axis, folding enclosing ``vmap`` batches into it.
 
     Args:
@@ -131,7 +133,9 @@ class _Kernel:
     def __call__(self, *args):
         return self.fn(*args)
 
-    def abstract(self, avals: Sequence[Any], axes: tuple) -> tuple[list, Any]:
+    def abstract(
+        self, avals: Sequence[jax.core.ShapedArray], axes: tuple
+    ) -> tuple[list, AbstractSet]:
         """The output shapes and effects of the plain map on ``avals``, traced once per shape."""
         key = (tuple((a.shape, a.dtype) for a in avals), axes)
         if key not in self._abstract:
@@ -181,7 +185,7 @@ def _through_linearization(kernel: _Kernel) -> _Kernel:
 # ---------------------------------------------------------------------------
 
 
-def _is_differentiable(value: Any) -> bool:
+def _is_differentiable(value: ArrayLike | jax.core.ShapedArray) -> bool:
     """Whether ``value`` has an inexact dtype, and so carries a tangent."""
     return jnp.issubdtype(jnp.result_type(value), jnp.inexact)
 
@@ -229,7 +233,7 @@ def _map_abstract(*avals, kernel, axes, reverse=False):
     return kernel.abstract(avals, axes)
 
 
-def _n_primal_outputs(res: Sequence[Any]) -> int:
+def _n_primal_outputs(res: Sequence[ArrayLike | jax.core.ShapedArray]) -> int:
     """Number of primal outputs in a directional-derivative result.
 
     The result holds ``n`` primal outputs followed by one tangent per inexact
@@ -243,7 +247,7 @@ def _n_primal_outputs(res: Sequence[Any]) -> int:
     raise ValueError("lane_map derivative returned an inconsistent output count.")
 
 
-def _zero_tangent(value: Any) -> Any:
+def _zero_tangent(value: ArrayLike | jax.core.ShapedArray) -> ad.Zero:
     """A symbolic zero tangent for ``value``."""
     return ad.Zero(jax.typeof(value).to_tangent_aval())
 

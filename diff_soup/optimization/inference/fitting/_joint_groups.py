@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from typing import Any, Optional
 
 import numpy as np
@@ -170,7 +171,7 @@ def _require_group_on_every_child(children: tuple, group: str) -> None:
             )
 
 
-def _tied_values(children: tuple, groups: tuple, members: tuple, label: Any, noun: str):
+def _tied_values(children: tuple, groups: tuple, members: tuple, label: Hashable, noun: str):
     """The initial values of one tied block, which every child of it must agree on.
 
     ``members`` are the indices of the children that read the block; the value

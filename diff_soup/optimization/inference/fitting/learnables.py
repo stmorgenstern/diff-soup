@@ -21,12 +21,14 @@ from typing import Any, Optional
 
 import equinox as eqx
 import jax
+from jaxtyping import PyTree
 
 from diff_soup.optimization.inference.fitting._path_filter import parameters_at
 from diff_soup.problem._ir.content_hash import declared_callable_layers, iter_declared_closures
+from diff_soup.problem._registry import ThetaTable
 
 
-def _dotted_key_path(path: tuple[Any, ...]) -> str:
+def _dotted_key_path(path: tuple) -> str:
     """Convert a JAX pytree key path to the dotted selector grammar."""
     parts: list[str] = []
     for key in path:
@@ -42,7 +44,7 @@ def _dotted_key_path(path: tuple[Any, ...]) -> str:
     return ".".join(parts)
 
 
-def _module_leaf_field_names(obj: Any) -> tuple[str, ...]:
+def _module_leaf_field_names(obj: PyTree) -> tuple[str, ...]:
     """Return every nested inexact-array path on an ``eqx.Module``."""
     if not isinstance(obj, eqx.Module) or not dataclasses.is_dataclass(obj):
         return ()
@@ -54,7 +56,7 @@ def _module_leaf_field_names(obj: Any) -> tuple[str, ...]:
     )
 
 
-def _function_leaf_paths(fn: Any) -> tuple[str, ...]:
+def _function_leaf_paths(fn: PyTree) -> tuple[str, ...]:
     """Return the leaf paths a declared callable contributes, relative to itself.
 
     A callable that declares ``learnable_paths()`` is read at its word — an
@@ -69,7 +71,7 @@ def _function_leaf_paths(fn: Any) -> tuple[str, ...]:
     return _module_leaf_field_names(fn)
 
 
-def _traced_adapter_layer(problem: Any) -> Optional[tuple[str, Any]]:
+def _traced_adapter_layer(problem: Any) -> Optional[tuple[str, PyTree]]:
     """Return ``(dotted_path, adapter)`` for one lowered closure adapter.
 
     Every lowered closure of one Recipe shares a single params namespace and a
@@ -163,7 +165,7 @@ def learnable_paths(problem: Any, names: Iterable[str] | None = None) -> list[st
     return paths
 
 
-def _model_declared_keys(problem: Any, table: Any) -> frozenset:
+def _model_declared_keys(problem: Any, table: ThetaTable) -> frozenset:
     """The slot keys of the leaves at or under each path a model declares for itself."""
     paths = _model_declared_paths(problem)
     if not paths:
@@ -243,7 +245,7 @@ class LearnableSelector:
     """
 
     names: Optional[tuple]
-    mask: Any
+    mask: PyTree
 
     def __iter__(self):
         """Yield the requested names (empty when ``names`` is ``None``)."""

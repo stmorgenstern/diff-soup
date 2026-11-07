@@ -11,14 +11,19 @@ import os
 import time
 import types
 import weakref
-from typing import Any, NamedTuple
+from collections.abc import Callable
+from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup._errors import ConfigurationError
+from diff_soup._layout import Layout
 from diff_soup._warnings import warn_user
+from diff_soup.optimization._abc import LeastSquaresProblem, OptSolver
+from diff_soup.optimization.constraints import Constraints
 from diff_soup.optimization.inference.engine import _batched, _transport
 from diff_soup.optimization.inference.engine._ledger import Ledger
 from diff_soup.optimization.inference.engine._levels import (
@@ -42,7 +47,10 @@ from diff_soup.optimization.inference.engine._reducers import TreeTables
 from diff_soup.optimization.inference.engine._request import Request
 from diff_soup.optimization.inference.engine._result import Results
 from diff_soup.optimization.inference.engine._status import KINDS
-from diff_soup.optimization.inference.fitting.result import ExperimentFit
+from diff_soup.optimization.inference.fitting.formulation import Trajectory
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterValues
+from diff_soup.optimization.inference.fitting.regularization import Regularizer
+from diff_soup.optimization.inference.fitting.result import ExperimentFit, OptResult
 from diff_soup.optimization.inference.statistics.estimation import (
     MAP,
     MLE,
@@ -81,12 +89,12 @@ class InferenceProblem(EstimationProblem):
         parameters: Any = None,
         objective: MLE | MAP = MLE(),
         clusters: Any = None,
-        layout: Any = None,
-        trajectory: Any = None,
-        regularization: Any = None,
-        trial_predicate: Any = None,
-        constraints: Any = None,
-        args: Any = None,
+        layout: Optional[Layout] = None,
+        trajectory: Optional[Trajectory] = None,
+        regularization: Optional[Regularizer] = None,
+        trial_predicate: Optional[Callable] = None,
+        constraints: Optional[Constraints] = None,
+        args: PyTree = None,
     ):
         """Compile experiments, handle ownership, and the chosen objective.
 
@@ -162,7 +170,7 @@ class InferenceProblem(EstimationProblem):
             for identifier, (lane, process) in zip(self.study.experiment_ids, lanes)
         }
 
-    def values(self, x: Any) -> Any:
+    def values(self, x: ArrayLike) -> ParameterValues:
         """Return the parameter values a flat vector in this problem's fit order holds.
 
         ```python
@@ -243,7 +251,9 @@ class InferenceProblem(EstimationProblem):
         record["owners"] = owners
         return record
 
-    def with_start(self, start: Any) -> InferenceProblem:
+    def with_start(
+        self, start: ArrayLike | collections.abc.Mapping | OptResult
+    ) -> InferenceProblem:
         """This problem, compiled once, started at another point.
 
         Args:
@@ -376,7 +386,7 @@ def _retry_settings(kinds: Any, factors: Any, tolerance: Any) -> tuple:
     return kinds, tuple(checked), tolerance
 
 
-def _on_the_host(function: Any, point: Any, shapes: Any) -> Any:
+def _on_the_host(function: Callable, point: ArrayLike, shapes: PyTree) -> PyTree:
     """``function`` of a point's numbers: called at once, or through ``jax.pure_callback`` when traced.
 
     ``function`` takes points ``(..., n)`` and returns numbers per point, so
@@ -457,19 +467,19 @@ class LoweredStudy(InferenceProblem):
         study: Study,
         *,
         objective: MLE | MAP = MLE(),
-        layout: Any = None,
-        regularization: Any = None,
-        trial_predicate: Any = None,
-        trajectory: Any = None,
+        layout: Optional[Layout] = None,
+        regularization: Optional[Regularizer] = None,
+        trial_predicate: Optional[Callable] = None,
+        trajectory: Optional[Trajectory] = None,
         chunk: int | None = None,
-        device: Any = None,
+        device: Optional[jax.Device] = None,
         evaluation_noise: float | None = None,
         retry_kinds: Any = RETRY_KINDS,
         retry_first_step_factors: Any = RETRY_FIRST_STEP_FACTORS,
         retry_tolerance_factors: Any = (),
         measured: Any = None,
-        constraints: Any = None,
-        args: Any = None,
+        constraints: Optional[Constraints] = None,
+        args: PyTree = None,
     ):
         """Lower a study: its experiments, the plan of its lanes, and their numbers.
 
@@ -588,8 +598,8 @@ class LoweredStudy(InferenceProblem):
         self,
         world: Any,
         joint: Any,
-        chunk: Any,
-        device: Any,
+        chunk: int | str | None,
+        device: Optional[jax.Device],
         start: float,
         lowered_at: float,
         measured: Any = None,
@@ -730,7 +740,7 @@ class LoweredStudy(InferenceProblem):
         """The plan that groups the experiments' solves into batches."""
         return self._lanes.plan
 
-    def for_population(self, members: int, *, chunk: Any = "auto") -> LoweredStudy:
+    def for_population(self, members: int, *, chunk: int | str | None = "auto") -> LoweredStudy:
         """A copy of the study re-planned to evaluate `members` parameter points per request.
 
         Nothing is lowered again, and the copy reuses this study's compiled solves.
@@ -774,7 +784,9 @@ class LoweredStudy(InferenceProblem):
         object.__setattr__(population, "_keeper", kept)
         return population
 
-    def prepare(self, *, modes: Any = None, **options: Any) -> PrepareReport:
+    def prepare(
+        self, *, modes: Optional[str | collections.abc.Sequence[str]] = None, **options: Any
+    ) -> PrepareReport:
         """Compile the study's solves before the first evaluation.
 
         Args:
@@ -881,7 +893,7 @@ class LoweredStudy(InferenceProblem):
         object.__setattr__(fit, "_value_route", None)
         return fit
 
-    def numeric_problem(self, optimizer: Any) -> Any:
+    def numeric_problem(self, optimizer: OptSolver) -> LeastSquaresProblem:
         """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] ``optimizer`` solves.
 
         As ``InferenceProblem.numeric_problem``, evaluated through a copy of
@@ -896,7 +908,9 @@ class LoweredStudy(InferenceProblem):
         lanes = fit if self.__dict__.get("_lanes") is not None else None
         return lower_estimation(self, fit, optimizer, lanes=lanes)
 
-    def value_and_gradient(self, points: Any, *, weights: Any = None) -> ValueAndGradient:
+    def value_and_gradient(
+        self, points: ArrayLike, *, weights: Optional[ArrayLike] = None
+    ) -> ValueAndGradient:
         """Evaluate the objective and its gradient at many points in one batched request.
 
         Args:
@@ -909,7 +923,7 @@ class LoweredStudy(InferenceProblem):
         return self._value_and_gradient(points, weights, regularizer=True)
 
     def _value_and_gradient(
-        self, points: Any, weights: Any, *, regularizer: bool
+        self, points: ArrayLike, weights: Optional[ArrayLike], *, regularizer: bool
     ) -> ValueAndGradient:
         """``value_and_gradient``; with ``regularizer=False``, the lanes' part alone.
 
@@ -1041,7 +1055,7 @@ class LoweredStudy(InferenceProblem):
             with jax.core.eval_context():
                 self.prepare(modes=(mode,))
 
-    def _lanes_at(self, mode: str, x: Any) -> tuple:
+    def _lanes_at(self, mode: str, x: ArrayLike) -> tuple:
         """The data's objective and its derivatives at one point, from one request of ``mode``.
 
         Every planned lane is evaluated at ``x``; each lane's cost, gradient and
@@ -1110,7 +1124,7 @@ class LoweredStudy(InferenceProblem):
         rows = int(np.sum(np.asarray(results.rows)[0]))
         return cost, gradient, matrix, rows, failed, results
 
-    def _prior_rows(self, point: Any) -> Any:
+    def _prior_rows(self, point: ArrayLike) -> Optional[tuple[np.ndarray, np.ndarray]]:
         """The rows of the ``MAP`` priors at ``point`` and their Jacobian; ``None`` without priors."""
         if not self._prior_blocks:
             return None
@@ -1124,7 +1138,7 @@ class LoweredStudy(InferenceProblem):
         residual, jacobian = value_and_jacfwd(rows, jnp.asarray(point))
         return np.asarray(residual), np.asarray(jacobian)
 
-    def log_likelihood(self, x: Any) -> Any:
+    def log_likelihood(self, x: ArrayLike) -> jax.Array:
         """The log-likelihood of the measurements at `x`, differentiable with JAX.
 
         Args:
@@ -1166,7 +1180,7 @@ class LoweredStudy(InferenceProblem):
 
         return self._log_normalizer - cost(point)
 
-    def _lane_costs(self, points: Any) -> np.ndarray:
+    def _lane_costs(self, points: ArrayLike) -> np.ndarray:
         """The lanes' costs summed at every point of ``points`` ``(P, n)``, from one ``value`` request.
 
         NaN at a point where a lane failed.
@@ -1191,7 +1205,7 @@ class LoweredStudy(InferenceProblem):
             return super().loss_fn
         return self._lane_loss
 
-    def _lane_loss(self, x: Any) -> float:
+    def _lane_loss(self, x: ArrayLike) -> float:
         cost = self._lanes_at("value", x)[0]
         return cost + float(self._prior_objective(jnp.asarray(x)))
 
@@ -1219,7 +1233,7 @@ class LoweredStudy(InferenceProblem):
             )
         return self._lane_loss_and_gradient
 
-    def _lane_loss_and_gradient(self, x: Any) -> tuple:
+    def _lane_loss_and_gradient(self, x: ArrayLike) -> tuple:
         cost, gradient, _matrix, _rows, _failed, _results = self._lanes_at("gradient", x)
         prior, prior_gradient = jax.value_and_grad(self._prior_objective)(jnp.asarray(x))
         return cost + float(prior), jnp.asarray(gradient + np.asarray(prior_gradient))
@@ -1241,7 +1255,7 @@ class LoweredStudy(InferenceProblem):
             return super().loss_grad_hessian_fn(composition)
         return self._lane_loss_gradient_hessian
 
-    def _lane_loss_gradient_hessian(self, x: Any) -> tuple:
+    def _lane_loss_gradient_hessian(self, x: ArrayLike) -> tuple:
         cost, gradient, hessian, _rows, _failed, _results = self._lanes_at("hessian", x)
         point = jnp.asarray(x)
         prior, prior_gradient = jax.value_and_grad(self._prior_objective)(point)
@@ -1268,7 +1282,7 @@ class LoweredStudy(InferenceProblem):
         """
         return self._lane_gauss_newton if self._offers("blocks") else None
 
-    def _lane_gauss_newton(self, x: Any) -> tuple:
+    def _lane_gauss_newton(self, x: ArrayLike) -> tuple:
         cost, gradient, matrix, _rows, failed, _results = self._lanes_at("blocks", x)
         prior = self._prior_rows(x)
         if prior is not None:
@@ -1278,7 +1292,7 @@ class LoweredStudy(InferenceProblem):
             matrix = matrix + jacobian.T @ jacobian
         return cost, jnp.asarray(gradient), jnp.asarray(matrix), failed
 
-    def observed_information(self, x: Any) -> Any:
+    def observed_information(self, x: ArrayLike) -> jax.Array | np.ndarray:
         """The observed information at `x`, the Hessian of the negative log-likelihood.
 
         Args:
@@ -1290,7 +1304,7 @@ class LoweredStudy(InferenceProblem):
             return super().observed_information(x)
         return jnp.asarray(self._lanes_at("hessian", x)[2])
 
-    def expected_information(self, x: Any) -> Any:
+    def expected_information(self, x: ArrayLike) -> Optional[jax.Array]:
         """The expected information at `x`, the Gauss-Newton matrix, or `None` when the study does not provide it.
 
         Args:
@@ -1300,7 +1314,7 @@ class LoweredStudy(InferenceProblem):
             return None
         return jnp.asarray(self._lanes_at("blocks", x)[2])
 
-    def _experiment_scores(self, x: Any) -> Any:
+    def _experiment_scores(self, x: ArrayLike) -> Optional[tuple]:
         """The data's ``J^T J`` and every experiment's ``J_e^T r_e`` at ``x``, from the lanes.
 
         One request of the ``blocks`` mode. Returns ``(bread, scores, rows)``:
@@ -1342,7 +1356,7 @@ class LoweredStudy(InferenceProblem):
             scores[...] = np.nan
         return bread, scores, rows
 
-    def tables(self, lane_ids: Any) -> TreeTables | LevelTables:
+    def tables(self, lane_ids: collections.abc.Iterable) -> TreeTables | LevelTables:
         """The tables that map the given solves to their columns of the joint vector.
 
         Args:
@@ -1358,7 +1372,9 @@ class LoweredStudy(InferenceProblem):
         return _batched.tables(self._lanes, lane_ids)
 
 
-def prepare_windows(experiment: Experiment, trajectory: Any = None, **problem_kwargs: Any) -> Any:
+def prepare_windows(
+    experiment: Experiment, trajectory: Optional[Trajectory] = None, **problem_kwargs: Any
+) -> Optional[str]:
     """Compute and store the window starts of a multiple-shooting experiment before a fit.
 
     A later fit of the same experiment loads them instead of solving again. Set
