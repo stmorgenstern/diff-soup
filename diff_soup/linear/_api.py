@@ -55,8 +55,8 @@ from diff_soup.linear._factor import (
     solve_dtype,
 )
 from diff_soup.linear._operator import apply_assembled
+from diff_soup.linear._phased_impl import _compiled
 from diff_soup.linear._primitive import (
-    _compiled,
     check_empty_handle,
     phased_factor_p,
     phased_invalidate_p,

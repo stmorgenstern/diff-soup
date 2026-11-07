@@ -52,8 +52,8 @@ from diff_soup.linear._factor import (
 from diff_soup.linear._krylov._gmres import gmres_core
 from diff_soup.linear._krylov._transposed import transposed_topology, transposed_values
 from diff_soup.linear._operator import apply_assembled
+from diff_soup.linear._phased_abstract import _split_solve_operands
 from diff_soup.linear._primitive import (
-    _split_solve_operands,
     pattern_matvec,
     phased_factor_p,
     phased_invalidate_p,
