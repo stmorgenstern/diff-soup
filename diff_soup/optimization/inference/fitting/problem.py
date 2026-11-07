@@ -1008,10 +1008,8 @@ class LoweredStudy(InferenceProblem):
         kept = self.__dict__.get("_value_route")
         route = kept[1] if kept is not None and kept[0]() is self else None
         if route is None:
-            from diff_soup.optimization.inference.hierarchical.level_solvers import (
-                TrustRegion,
-                _LaneRoute,
-            )
+            from diff_soup.optimization.inference.hierarchical._lane_route import _LaneRoute
+            from diff_soup.optimization.inference.hierarchical.level_solvers import TrustRegion
 
             route = _LaneRoute(TrustRegion(), self)
             # The kept route refers to this study weakly: keeping it makes no reference cycle,

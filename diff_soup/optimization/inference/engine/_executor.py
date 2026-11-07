@@ -284,7 +284,7 @@ class Cluster:
         key = tuple(lane_ids)
         tables = self._tables.get(key)
         if tables is None:
-            from diff_soup.optimization.inference.hierarchical.level_solvers import _route_tables
+            from diff_soup.optimization.inference.hierarchical._lane_route import _route_tables
 
             if self._view is None:
                 self._view = self.study.joint_view()
