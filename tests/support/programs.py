@@ -23,10 +23,23 @@ def _lane_kernel(equation) -> Any:
     return jax.make_jaxpr(kernel)(*lane)
 
 
+def _replay_body(equation) -> Any:
+    """The jaxpr of a checkpointed replay rule's primitive, traced from its implementation, or ``None``.
+
+    The replay rule's primitives (``replay_*``) carry their bodies as Python functions; the
+    forward pass with tangents or the backward loop they run counts as nested.
+    """
+    if not equation.primitive.name.startswith("replay_"):
+        return None
+    operands = [jax.ShapeDtypeStruct(v.aval.shape, v.aval.dtype) for v in equation.invars]
+    return jax.make_jaxpr(lambda *xs: equation.primitive.impl(*xs, **equation.params))(*operands)
+
+
 def equations(closed_jaxpr) -> list[Any]:
     """Flatten the equations of a closed jaxpr and of every jaxpr nested in it.
 
-    A lane map's kernel is a callable, not a jaxpr; its per-lane jaxpr counts as nested.
+    A lane map's kernel is a callable, not a jaxpr; its per-lane jaxpr counts as nested, as does
+    the body of a checkpointed replay rule's primitive.
     """
     found: list[Any] = []
 
@@ -38,9 +51,9 @@ def equations(closed_jaxpr) -> list[Any]:
         if hasattr(value, "eqns"):
             for equation in value.eqns:
                 found.append(equation)
-                kernel = _lane_kernel(equation)
-                if kernel is not None:
-                    visit(kernel)
+                for kernel in (_lane_kernel(equation), _replay_body(equation)):
+                    if kernel is not None:
+                        visit(kernel)
                 for param in equation.params.values():
                     if hasattr(param, "jaxpr") or hasattr(param, "eqns"):
                         visit(param)

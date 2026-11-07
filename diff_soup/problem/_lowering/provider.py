@@ -61,7 +61,7 @@ from .layout import _BlockLayout, _build_global_layout_entries, _layout
 from .mass import _mass_diagonal as _mass_diagonal_full
 from .operator_resolve import resolve_operator
 from .sparsity import _sparsity as _sparsity_full
-from .stencil_infer import _infer_stencil_offsets
+from .stencil_infer import _infer_stencil_offsets, _walked_stencil_offsets
 
 
 def _check_multi_equation_return(eq: MultiEquation, r) -> None:
@@ -2445,16 +2445,15 @@ def _analyze_family_layer(
             probe_controls,
         )[0]
 
-    stencil_offsets = {}
-    if probe_stencils:
-        stencil_offsets = _infer_stencil_offsets(
-            eqset,
-            layout.offset_of,
-            total,
-            int(sum(int(c.dim) for c in eqset.constraints)),
-            _probe_f,
-            compute_dtype,
-        )
+    measure = _infer_stencil_offsets if probe_stencils else _walked_stencil_offsets
+    stencil_offsets = measure(
+        eqset,
+        layout.offset_of,
+        total,
+        int(sum(int(c.dim) for c in eqset.constraints)),
+        _probe_f,
+        compute_dtype,
+    )
     _capture_component_forms(
         eqset,
         _probe_f,
@@ -2576,7 +2575,8 @@ def analyze(
             analyse.
         precision: Dtype policy; its ``compute_dtype`` drives the boundary-cast
             at closure entry (default fp64).
-        probe_stencils: Whether to measure each block's stencil at probe states.
+        probe_stencils: Whether to measure each block's stencil at probe states, or else
+            read it from the residual's tangent map.
 
     Returns:
         The
@@ -2611,16 +2611,15 @@ def analyze(
     def _probe_f(u, lam, t):
         return residual_fn(slim_equations, (), (), (), (), (), (), u, lam, t, ())[0]
 
-    stencil_offsets = {}
-    if probe_stencils:
-        stencil_offsets = _infer_stencil_offsets(
-            eqset,
-            lambda key: offset_of[key],
-            total,
-            0,
-            _probe_f,
-            compute_dtype,
-        )
+    measure = _infer_stencil_offsets if probe_stencils else _walked_stencil_offsets
+    stencil_offsets = measure(
+        eqset,
+        lambda key: offset_of[key],
+        total,
+        0,
+        _probe_f,
+        compute_dtype,
+    )
     _capture_component_forms(eqset, _probe_f, total, 0, compute_dtype)
     rows, cols = _sparsity_full(eqset, _layout(eqset), stencil_offsets=stencil_offsets)
     topo = SparseTopology(rows=rows, cols=cols, n_dofs=total, bc_indices=None)

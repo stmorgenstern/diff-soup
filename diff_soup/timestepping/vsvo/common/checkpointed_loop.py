@@ -44,6 +44,8 @@ from equinox.internal._loop.checkpointed import (
 from equinox.internal._loop.common import common_rewrite
 from jax.sharding import AxisType
 
+from .replay_rule import replayed_while_loop
+
 __all__ = ["checkpointed_while_loop"]
 
 
@@ -142,6 +144,7 @@ def checkpointed_while_loop(
     max_steps: int | None = None,
     buffers: Callable[[Any], Any | Sequence[Any]] | None = None,
     checkpoints: int | None = None,
+    reverse_over_reverse: bool = False,
 ) -> Any:
     """Run equinox's checkpointed while loop on a carry that may be typed on a mesh.
 
@@ -166,6 +169,9 @@ def checkpointed_while_loop(
             ``checkpoints`` is given.
         buffers: Optional selector of write-only buffer leaves of the carry.
         checkpoints: Number of loop states saved for the reverse replay.
+        reverse_over_reverse: Whether the replay is itself differentiable (the rule of
+            `replay_rule`), rather than equinox's rule, which composes only with forward mode
+            over it.
 
     Returns:
         The final carry.
@@ -189,8 +195,7 @@ def checkpointed_while_loop(
     )
     cond_fun_ = jtu.tree_map(_stop_gradient, _convert(cond_fun_, init_val_))
     body_fun_ = _convert(body_fun_, init_val_)
-    final_val_ = _checkpointed_while_loop(
-        (init_val_, body_fun_), cond_fun_, checkpoints, buffers_, max_steps
-    )
+    loop = replayed_while_loop if reverse_over_reverse else _checkpointed_while_loop
+    final_val_ = loop((init_val_, body_fun_), cond_fun_, checkpoints, buffers_, max_steps)
     _, _, _, final_val = _stop_gradient_on_unperturbed(init_val_, final_val_, body_fun_)
     return final_val

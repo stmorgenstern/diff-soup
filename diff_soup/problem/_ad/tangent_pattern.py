@@ -15,7 +15,8 @@ Each tangent operation is linear, which is why so few rules are needed (see
 [pattern_rules][diff_soup.problem._ad.pattern_rules] and
 [pattern_structured][diff_soup.problem._ad.pattern_structured]); another module adds
 one with [register_pattern_rule][diff_soup.problem._ad.pattern_walk.register_pattern_rule].
-A primitive with no rule, an index not known at build time and a loop whose reach does
+A gather at an index not known at build time reads its window at every start. A
+primitive with no rule, a slice or a write at such an index and a loop whose reach does
 not settle take the sound answer, every output on every input, with a warning at the
 first such operation.
 """
@@ -82,9 +83,10 @@ def jacobian_pattern(fn, y, *args, within=None):
     The pattern is read from the tangent map of `fn` (`jax.jvp`), with no evaluation of
     `fn`: a state or a parameter stands for any value, so both sides of a branch on the
     state count, and only a value that holds whatever the inputs are, such as a literal, a
-    closed-over array or an index computed from them, rules an entry out. An operation no
-    rule covers, an index the inputs set, and a loop whose reach does not settle make
-    each output they reach read every input that reaches them, and warn.
+    closed-over array or an index computed from them, rules an entry out. A gather at an
+    index the inputs set reads its window at every start. An operation no rule covers, a
+    slice or a write at such an index, and a loop whose reach does not settle make each
+    output they reach read every input that reaches them, and warn.
 
     ```python
     rows, cols = ds.jacobian_pattern(residual, y, theta)
