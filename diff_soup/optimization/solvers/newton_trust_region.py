@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Literal
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._distributed import any_process, assert_decision_value, local_value
 from diff_soup._errors import ConfigurationError
@@ -101,7 +102,7 @@ class NewtonTrustRegion(OptSolver):
     cg_max_iter: int | None = eqx.field(static=True, default=None)
     callbacks: tuple = eqx.field(static=True, default=())
 
-    def _resolved_hessian_tile(self, n_params: int, lanes: bool) -> Any:
+    def _resolved_hessian_tile(self, n_params: int, lanes: bool) -> str | int:
         """The tangent tile the solve starts with: an int, or ``"full"``."""
         if self.hessian_tile != "auto":
             return self.hessian_tile
@@ -130,7 +131,7 @@ class NewtonTrustRegion(OptSolver):
 
         return dataclasses.replace(self, hessian="gauss-newton" if gauss_newton else "true")
 
-    def _resolve_options(self, problem: Any) -> tuple[str, str | None, str]:
+    def _resolve_options(self, problem: OptimizationProblem) -> tuple[str, str | None, str]:
         """Return the concrete subproblem, composition, and linear solver."""
         if self.hessian not in ("true", "gauss-newton"):
             raise ConfigurationError(
@@ -236,7 +237,9 @@ class NewtonTrustRegion(OptSolver):
             normalize_tangent_tile(self.hessian_tile, max(n_params, 1))
         return resolved_subproblem, composition, resolved_linear_solver
 
-    def _checked_hessian(self, problem: Any, x: jax.Array, tile: Any, lanes: bool) -> Callable:
+    def _checked_hessian(
+        self, problem: OptimizationProblem, x: jax.Array, tile: str | int, lanes: bool
+    ) -> Callable:
         """The exact-Hessian evaluation, memory-checked against the device before any step.
 
         ``"full"`` uses the problem's own Hessian. A tile pushes the gradient
@@ -273,7 +276,7 @@ class NewtonTrustRegion(OptSolver):
             return checked
         raise error
 
-    def _checked_jacobian(self, problem: Any, x: jax.Array) -> Callable:
+    def _checked_jacobian(self, problem: OptimizationProblem, x: jax.Array) -> Callable:
         """``x -> (residual, jacobian)`` of the Gauss-Newton path, memory-checked at ``x``.
 
         The problem's structured Jacobian is used when it has one, such as fitted
@@ -287,7 +290,13 @@ class NewtonTrustRegion(OptSolver):
         return checked_residual_jacobian(problem, x, self.hessian_tile, knob="hessian_tile")
 
     def _radius_held_the_step(
-        self, attempt: tuple, threshold: float, bounds: Any, lb: Any, ub: Any, cg_iters: int
+        self,
+        attempt: tuple,
+        threshold: float,
+        bounds: tuple[ArrayLike, ArrayLike] | None,
+        lb: jax.Array | None,
+        ub: jax.Array | None,
+        cg_iters: int,
     ) -> bool:
         """Whether the radius held the stopping step short of the model's own step.
 

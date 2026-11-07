@@ -29,11 +29,15 @@ than the floor could take back along it.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, NamedTuple
+from collections.abc import Mapping
+from numbers import Real
+from typing import NamedTuple
 
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._distributed import local_value
+from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.solvers._loop_judge import (
     _floor_sample,
     _median,
@@ -63,7 +67,7 @@ class LoopTolerances(NamedTuple):
     step_tol: float
     cost_tol: float
     cost_atol: float
-    stationarity_tol: Any
+    stationarity_tol: Real | None
 
 
 def loop_tolerances(
@@ -88,7 +92,7 @@ def loop_tolerances(
     )
 
 
-def _saved_window(state: Any, key: str) -> list:
+def _saved_window(state: Mapping | None, key: str) -> list:
     """A window of rejected trials kept in a saved state; empty when the state has none."""
     if state is None:
         return []
@@ -99,7 +103,7 @@ def _saved_window(state: Any, key: str) -> list:
     return [float(value) for value in np.ravel(np.asarray(values, dtype=np.float64))]
 
 
-def _saved_value(state: Any, key: str) -> Any:
+def _saved_value(state: Mapping | None, key: str) -> int | float | str | None:
     """One entry of a saved state as a Python scalar, or ``None`` when it is absent."""
     try:
         value = state[key]
@@ -108,13 +112,13 @@ def _saved_value(state: Any, key: str) -> Any:
     return np.asarray(value).item()
 
 
-def _saved_count(state: Any, key: str) -> int:
+def _saved_count(state: Mapping | None, key: str) -> int:
     """A count kept in a saved state; 0 when the state has none."""
     value = _saved_value(state, key)
     return 0 if value is None else int(value)
 
 
-def _saved_radius(state: Any, key: str) -> Any:
+def _saved_radius(state: Mapping | None, key: str) -> float | None:
     """A radius kept in a saved state; ``None`` when the state has none or holds ``nan``."""
     value = _saved_value(state, key)
     return None if value is None or not np.isfinite(value) else float(value)
@@ -139,10 +143,10 @@ class LoopState:
 
     attempt: int = 0
     accepted: int = 0
-    point: Any
-    scale: Any
+    point: ArrayLike
+    scale: ArrayLike | None
     cost: float
-    grad_threshold: Any = None
+    grad_threshold: float | None = None
     radius: float
     growth_lock: int = 0
     cost_history: list = dataclasses.field(default_factory=list)
@@ -151,14 +155,14 @@ class LoopState:
     rejected_cost_change: list = dataclasses.field(default_factory=list)
     rejected_predicted_decrease: list = dataclasses.field(default_factory=list)
     noise_dominated_cost_change: list = dataclasses.field(default_factory=list)
-    accepted_step_radius: Any = None
+    accepted_step_radius: Real | None = None
     consecutive_invalid_trials: int = 0
     consecutive_noise_dominated_trials: int = 0
     gradient_floor_samples: list = dataclasses.field(default_factory=list)
     record: dict
 
     @classmethod
-    def start(cls, *, radius: float, **values: Any) -> LoopState:
+    def start(cls, *, radius: float, **values: object) -> LoopState:
         """A fresh loop from ``point``, ``cost``, ``scale``, ``radius`` and ``record``.
 
         No attempt is made; the radius history holds ``radius``, and the other
@@ -167,7 +171,9 @@ class LoopState:
         return cls(radius=radius, radius_history=[radius], **values)
 
     @classmethod
-    def restore(cls, state: Any, *, point: Any, cost: float, scale: Any) -> LoopState:
+    def restore(
+        cls, state: Mapping, *, point: ArrayLike, cost: float, scale: ArrayLike | None
+    ) -> LoopState:
         """The loop that the saved ``state`` continues, at ``point`` with ``cost`` and ``scale``.
 
         A state saved without the windows (the floor samples' included) resumes
@@ -256,7 +262,7 @@ def cost_small(
     )
 
 
-def step_small(step_norm: float, point: Any, step_tol: float, *, tested: bool = True) -> bool:
+def step_small(step_norm: float, point: ArrayLike, step_tol: float, *, tested: bool = True) -> bool:
     """The step test of a trial: ``tested`` and ``step_norm <= step_tol * (1 + ||point||)``.
 
     ``point`` is the point the loop holds after the trial; ``tested`` says
@@ -267,7 +273,7 @@ def step_small(step_norm: float, point: Any, step_tol: float, *, tested: bool = 
     return bool(tested and step_norm <= step_tol * (1.0 + float(np.linalg.norm(point))))
 
 
-def trial_valid(problem: Any, point: Any) -> bool:
+def trial_valid(problem: OptimizationProblem, point: ArrayLike) -> bool:
     """Whether ``problem.is_valid(point)`` holds, read on the host.
 
     Raises:
@@ -293,7 +299,7 @@ class Trials(NamedTuple):
     rejected_cost_change: list
     rejected_predicted_decrease: list
     noise_dominated_cost_change: list
-    accepted_step_radius: Any
+    accepted_step_radius: Real | None
     consecutive_invalid_trials: int
     consecutive_noise_dominated_trials: int
     gradient_floor_samples: list = []
@@ -322,9 +328,9 @@ def _after_attempt(
     step_radius: float,
     cost_tol: float,
     cost_atol: float,
-    noise_limit: Any,
+    noise_limit: Real | None,
     scaled_norm: float = 0.0,
-    floor_bound: Any = None,
+    floor_bound: Real | None = None,
 ) -> AfterAttempt:
     """The growth lock, the windows and the runs after an attempt made at objective ``cost``.
 
@@ -408,13 +414,13 @@ def _stop_after(
     after: AfterAttempt,
     *,
     max_invalid: int,
-    step_small: Any,
+    step_small: bool,
     accepted_count: int,
-    target_steps: Any,
+    target_steps: Real | None,
     target_stop: str = "accepted_steps",
     requested: bool = False,
     evaluations: int = 0,
-    max_evaluations: Any = None,
+    max_evaluations: Real | None = None,
 ) -> str | None:
     """The event that ends a trust-region loop after an attempt, or ``None`` to go on.
 

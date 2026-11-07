@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 _END_ROUNDING = np.finfo(np.float64).eps
 
 
-def _lengths(duration: Any) -> float | tuple:
+def _lengths(duration: ArrayLike | Sequence[float]) -> float | tuple:
     """A duration as Python floats, a scalar or a tuple, so it is static and hashable."""
     if np.ndim(duration) == 0:
         return float(duration)
@@ -207,7 +207,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
                 self.save_times = (*times[:-1], end)
 
     @property
-    def model(self) -> Any:
+    def model(self) -> object:
         """The built diff-soup problem, held by identity."""
         return self.problem.value
 

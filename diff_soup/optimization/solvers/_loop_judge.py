@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from numbers import Real
 
 import numpy as np
+from jaxtyping import ArrayLike
 
 _TINY = float(np.finfo(float).tiny)
 
 
-def cost_scale(cost: Any, cost_tol: float, cost_atol: float) -> Any:
+def cost_scale(cost: ArrayLike, cost_tol: float, cost_atol: float) -> float | np.ndarray:
     """The yardstick of a loop's relative numbers: ``max(|cost|, cost_atol / cost_tol)``.
 
     A cost-unit quantity (a cost change, a predicted decrease, a noise level)
@@ -31,7 +32,7 @@ def _next_radius(
     scaled_norm: float,
     *,
     lock: int,
-    radius_max: Any,
+    radius_max: Real,
     computed: bool,
     floor: float = 0.0,
 ) -> float:
@@ -67,8 +68,8 @@ _RELAXATION = 4.0
 
 
 def _gain_ratio(
-    actual: Any, predicted: Any, *, noise: float, relative_to: Any, relaxed: bool
-) -> Any:
+    actual: ArrayLike, predicted: ArrayLike, *, noise: float, relative_to: ArrayLike, relaxed: bool
+) -> ArrayLike:
     """The gain ratio of a trial: its cost decrease ``actual`` over the model's ``predicted``.
 
     With ``relaxed`` and a measured evaluation noise ``noise`` above 0 (relative
@@ -90,12 +91,12 @@ def _noise_dominated(
     evaluated: bool,
     accepted: bool,
     step_radius: float,
-    accepted_radius: Any,
+    accepted_radius: Real | None,
     cost: float,
     trial_cost: float,
     predicted: float,
     relative_to: float,
-    limit: Any = None,
+    limit: Real | None = None,
 ) -> bool:
     """Whether a trial's cost change measures the cost's evaluation jitter.
 
@@ -124,7 +125,7 @@ def _median(window: list) -> float:
     return float(np.median(np.asarray(window, dtype=np.float64))) if window else 0.0
 
 
-def _jump_level(changes: list, decreases: list, ceiling: Any) -> Any:
+def _jump_level(changes: list, decreases: list, ceiling: Real | None) -> float | None:
     """The median cost jump of the rejected trials, or ``None`` when one of them was no jump.
 
     ``changes`` and ``decreases`` are the window of rejected trials: the size
@@ -152,14 +153,14 @@ def _floor_sample(
     evaluated: bool,
     accepted: bool,
     step_radius: float,
-    accepted_radius: Any,
+    accepted_radius: Real | None,
     cost: float,
     trial_cost: float,
     predicted: float,
     scaled_norm: float,
     noise: float,
     relative_to: float,
-    bound: Any,
+    bound: Real | None,
 ) -> float | None:
     """A rejected trial's measure of the gradient's error, or ``None`` when it gives none.
 
@@ -200,7 +201,7 @@ def _floor_sample(
     return float(max(mismatch - noise_abs, 0.0) / scaled_norm)
 
 
-def _floor_level(samples: list, bound: Any) -> Any:
+def _floor_level(samples: list, bound: Real | None) -> float | None:
     """The gradient's accuracy floor: the median of the floor ``samples``, at most ``bound``.
 
     In cost per unit of scaled step length. ``None`` when there is no sample or
@@ -211,7 +212,7 @@ def _floor_level(samples: list, bound: Any) -> Any:
     return min(_median(samples), float(bound))
 
 
-def _floor_sigma(level: Any, full_step_norm: float, relative_to: float) -> float:
+def _floor_sigma(level: Real | None, full_step_norm: float, relative_to: float) -> float:
     """The floor's cost equivalent along the model's full step, relative to the cost scale.
 
     ``level * full_step_norm`` is what a gradient in error by ``level`` along
@@ -226,7 +227,7 @@ def _floor_sigma(level: Any, full_step_norm: float, relative_to: float) -> float
     return level * full_step_norm / relative_to
 
 
-def _floor_radius(level: Any, full_step_norm: float, gradient_norm: float) -> float:
+def _floor_radius(level: Real | None, full_step_norm: float, gradient_norm: float) -> float:
     """The radius at which a step along the gradient predicts the floor's cost equivalent.
 
     ``level * full_step_norm / gradient_norm``, with ``gradient_norm`` the
@@ -241,8 +242,8 @@ def _floor_radius(level: Any, full_step_norm: float, gradient_norm: float) -> fl
 
 
 def _floor_parameter_radius(
-    level: Any, full_step_norm: float, full_step_length: float, predicted: float
-) -> Any:
+    level: Real | None, full_step_norm: float, full_step_length: float, predicted: float
+) -> float | None:
     """How far, in parameter units, the gradient's error moves the minimizer along the full step.
 
     Along the model's full step, of scaled norm ``full_step_norm``, length
@@ -273,7 +274,7 @@ def _judge(
     lock: int,
     noise_window: list,
     eta: float,
-    radius_max: Any,
+    radius_max: Real,
     relaxed: bool,
     relative_to: float,
     hold: bool = False,
