@@ -462,7 +462,7 @@ def _walked_stencil_offsets(
 ) -> dict:
     """Each node-field block's stencil offsets, read from the residual's tangent map.
 
-    The same result as [_infer_stencil_offsets][diff_soup._lowering.stencil_infer._infer_stencil_offsets]
+    The same result as [_infer_stencil_offsets][diff_soup.problem._lowering.stencil_infer._infer_stencil_offsets]
     with no probe state: an entry is reached when a tangent can carry it (see
     [tangent_flow][diff_soup.problem._ad.tangent_pattern.tangent_flow]), so a limiter's
     upstream read counts whatever the state. A block a fallback of the walk reaches is

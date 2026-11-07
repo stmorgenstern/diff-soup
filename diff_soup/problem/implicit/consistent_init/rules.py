@@ -33,6 +33,7 @@ from diff_soup.problem.implicit.consistent_init.newton import (
     _routes,
 )
 from diff_soup.problem.implicit.consistent_init.plan import ConsistentInitPlan
+from diff_soup.problem.implicit.tangent_gates import poison, zero_where_not
 
 
 def _root_tangent(icp: ConsistentInitPlan, values, n: int, rhs):
@@ -61,23 +62,6 @@ def _root_solvable(icp: ConsistentInitPlan, values, n: int):
     return RouteFactor(route, jnp.asarray(values)).solves()
 
 
-def _zero_where_not(keep, tree):
-    """Replace every inexact leaf of ``tree`` with exact zeros where ``keep`` is false.
-
-    A selection, not a product: an infinite or NaN leaf that is not kept
-    becomes zero instead of NaN, and so does its cotangent under
-    transposition. Integer (``float0``) leaves and ``None`` pass unchanged.
-    """
-    keep = jnp.asarray(keep)
-
-    def gate(leaf):
-        if getattr(leaf, "dtype", None) == jax.dtypes.float0:
-            return leaf
-        return jnp.where(keep, leaf, jnp.zeros_like(leaf))
-
-    return jax.tree_util.tree_map(gate, tree)
-
-
 def _gated_root_tangent(icp: ConsistentInitPlan, values, n: int, rhs_dot, valid):
     """The tangent solve ``M dz = -rhs_dot`` with its right-hand side and result gated on ``valid``.
 
@@ -85,9 +69,9 @@ def _gated_root_tangent(icp: ConsistentInitPlan, values, n: int, rhs_dot, valid)
     receives nor returns a cotangent there: a singular matrix cannot turn a
     discarded cotangent into NaN.
     """
-    rhs = _zero_where_not(valid, -rhs_dot)
+    rhs = zero_where_not(valid, -rhs_dot)
     dz = _root_tangent(icp, values, n, rhs)
-    return _zero_where_not(valid, dz)
+    return zero_where_not(valid, dz)
 
 
 def _pinned_residual_fn(icp: ConsistentInitPlan, t0, y_star, ydot_star):
@@ -120,11 +104,6 @@ def _zero_cotangent(x):
     return jax.tree_util.tree_map(lambda leaf: zero_from_primal(leaf, symbolic_zeros=False), x)
 
 
-def _poison(x, valid):
-    """Replace ``x`` with NaN when the root or its sensitivity solve is invalid."""
-    return jnp.where(valid, x, jnp.full_like(x, jnp.nan))
-
-
 @functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
 def consistent_ic_root(icp, t0, y0, ydot_guess, theta, control):
     """Joint consistent-initialization root with its implicit-function derivative.
@@ -153,14 +132,14 @@ def _consistent_ic_root_jvp(icp, primals, tangents):
     values = _k_root_values(icp, t0, y_star, ydot_star, theta, control)
     valid = jnp.logical_and(converged, _root_solvable(icp, values, icp.n))
     pinned_residual = _pinned_residual_fn(icp, t0, y_star, ydot_star)
-    dy0_pinned = _zero_where_not(valid, jnp.where(diff_mask, dy0, 0.0))
-    dtheta, dcontrol = _zero_where_not(valid, (dtheta, dcontrol))
+    dy0_pinned = zero_where_not(valid, jnp.where(diff_mask, dy0, 0.0))
+    dtheta, dcontrol = zero_where_not(valid, (dtheta, dcontrol))
     _, rhs_dot = jax.jvp(pinned_residual, (y0, theta, control), (dy0_pinned, dtheta, dcontrol))
     if not fixed_time:
         _, time_dot = jax.jvp(
             lambda t: icp.plan._residual(t, y_star, ydot_star, theta, control),
             (t0,),
-            (_zero_where_not(valid, dt0),),
+            (zero_where_not(valid, dt0),),
         )
         rhs_dot = rhs_dot + time_dot
     dz = _gated_root_tangent(icp, values, icp.n, rhs_dot, valid)
@@ -168,8 +147,8 @@ def _consistent_ic_root_jvp(icp, primals, tangents):
     dy = jnp.where(diff_mask, dy0, dz)
     dydot = jnp.where(diff_mask, dz, jnp.zeros_like(dz))
     return out, (
-        _poison(dy, valid),
-        _poison(dydot, valid),
+        poison(dy, valid),
+        poison(dydot, valid),
         _zero_cotangent(norm),
         _zero_cotangent(iterations),
         _zero_cotangent(converged),
@@ -218,14 +197,14 @@ def _reduced_ic_root_jvp(icp, primals, tangents):
     values = _g_root_values(icp, t0, y_star, theta, control)
     valid = jnp.logical_and(converged, _root_solvable(icp, values, icp.n_a))
     pinned_residual = _pinned_alg_residual_fn(icp, t0, y_star)
-    dy0_pinned = _zero_where_not(valid, jnp.where(diff_mask, dy0, 0.0))
-    dtheta, dcontrol = _zero_where_not(valid, (dtheta, dcontrol))
+    dy0_pinned = zero_where_not(valid, jnp.where(diff_mask, dy0, 0.0))
+    dtheta, dcontrol = zero_where_not(valid, (dtheta, dcontrol))
     _, rhs_dot = jax.jvp(pinned_residual, (y0, theta, control), (dy0_pinned, dtheta, dcontrol))
     if not fixed_time:
         _, time_dot = jax.jvp(
             lambda t: icp.plan._residual(t, y_star, jnp.zeros_like(y_star), theta, control)[a_idx],
             (t0,),
-            (_zero_where_not(valid, dt0),),
+            (zero_where_not(valid, dt0),),
         )
         rhs_dot = rhs_dot + time_dot
     dz = _gated_root_tangent(icp, values, icp.n_a, rhs_dot, valid)
@@ -233,7 +212,7 @@ def _reduced_ic_root_jvp(icp, primals, tangents):
     dz_full = jnp.zeros_like(y_star).at[a_idx].set(dz, unique_indices=True, indices_are_sorted=True)
     dy = jnp.where(diff_mask, dy0, dz_full)
     return out, (
-        _poison(dy, valid),
+        poison(dy, valid),
         _zero_cotangent(iterations),
         _zero_cotangent(converged),
     )
@@ -256,7 +235,7 @@ def _reconstruct_slopes(icp: ConsistentInitPlan, t0, y, theta, control):
     diag_ok = jnp.all(jnp.where(diff_mask, on_diff, True))
     safe_diag = jnp.where(diff_mask & on_diff, diag, jnp.ones_like(diag))
     ydot = jnp.where(diff_mask, f / safe_diag, 0.0)
-    return _poison(ydot, diag_ok), diag_ok
+    return poison(ydot, diag_ok), diag_ok
 
 
 def _reduced_root_and_slopes(icp: ConsistentInitPlan, root, t0, y0, ydot_guess, theta, control):

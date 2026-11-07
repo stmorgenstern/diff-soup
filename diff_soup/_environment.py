@@ -19,7 +19,9 @@ Importing diff_soup makes three changes, in this order:
    ``DIFF_SOUP_INHERENT_FFI_CONFIG=0``.
 
 Loading the cuDSS backend prepends the NVIDIA wheels' library directories to
-``LD_LIBRARY_PATH`` for child processes (``diff_soup.linear._cudss._ffi_loader``).
+``LD_LIBRARY_PATH`` for child processes
+([prepend_library_path][diff_soup._environment.prepend_library_path], called by
+``diff_soup.linear._cudss._ffi_loader``).
 
 The cuDSS extension reads five variables of its own when a handle starts, each leaving
 cuDSS's default in place when unset (``_internal/cudss_ffi/native/single_solve.cpp``):
@@ -134,6 +136,15 @@ def add_xla_flags() -> None:
     present = {flag.split("=", 1)[0] for flag in flags}
     flags.extend(f"{key}={value}" for key, value in XLA_GPU_FLAGS.items() if key not in present)
     os.environ["XLA_FLAGS"] = " ".join(flags)
+
+
+def prepend_library_path(directories: list[str]) -> None:
+    """Put ``directories`` first on ``LD_LIBRARY_PATH``, keeping every other entry once.
+
+    It affects child processes only: this process resolved its search path at start-up.
+    """
+    existing = os.environ.get("LD_LIBRARY_PATH", "").split(":")
+    os.environ["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys(p for p in directories + existing if p))
 
 
 def _configure_process() -> None:

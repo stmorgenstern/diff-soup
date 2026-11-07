@@ -397,13 +397,13 @@ class LoweredProblem(eqx.Module):
             name: The family name (``Family.name``).
 
         Returns:
-            A [FamilyView][diff_soup._lowering.family_view.FamilyView] for
+            A [FamilyView][diff_soup.problem._lowering.family_view.FamilyView] for
             ``name``.
 
         Raises:
             KeyError: when no family named ``name`` exists on this problem.
         """
-        from diff_soup._lowering.family_view import _build_family_view
+        from diff_soup.problem._lowering.family_view import _build_family_view
 
         for fam in self._families:
             if fam.name == name:
@@ -679,7 +679,7 @@ class LoweredProblem(eqx.Module):
         # their ``(coords, m)`` closures are evaluable here
         # because a Family carries its own member ``domain`` + ``member_params``.
         if self._families:
-            from diff_soup._lowering.family_assemble import assemble_family_pieces
+            from diff_soup.problem._lowering.family_assemble import assemble_family_pieces
 
             pieces.extend(assemble_family_pieces(self._families, values, default))
         return jnp.concatenate(pieces) if pieces else jnp.zeros(0)

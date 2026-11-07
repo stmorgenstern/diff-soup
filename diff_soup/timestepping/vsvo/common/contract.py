@@ -22,7 +22,6 @@ and concatenated views. Tolerances live on this (problem) side; the error-weight
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Optional
 
@@ -39,6 +38,11 @@ from diff_soup.utils.weights import error_weight
 #: The endpoint clamp shortens a step to just shy of the endpoint by this many rounding
 #: errors (ours: a margin of a few ulps so ``t + h`` never lands past ``t1``).
 ENDPOINT_CLAMP_FUZZ = 4.0
+
+#: The engines of each kind kept by configuration (ours): a process alternates among a few
+#: solver configurations, and an engine evicted by a sweep over more is rebuilt, after which
+#: its solves compile again.
+ENGINE_CACHE_SIZE = 64
 
 
 # ---------------------------------------------------------------------------
@@ -276,48 +280,6 @@ def validate_requirements(problem, caps: EngineCapabilities) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Problem-coercion injection seam
-# ---------------------------------------------------------------------------
-# The driver accepts either a problem that already satisfies the solver contract
-# (it exposes the parameter accessor ``default_theta``) or a higher-level
-# problem object that has to be wrapped in a solver adapter first. That wrapping
-# belongs to the problem layer, which this layer must not import. The problem
-# layer registers its coercion here at its own import time; until it does,
-# ``coerce_problem`` is the identity -- which is already correct for any problem
-# that satisfies the contract.
-_PROBLEM_COERCION: Optional[Callable[[Any], Any]] = None
-
-
-def register_problem_coercion(coercion: Optional[Callable[[Any], Any]]) -> None:
-    """Register the coercion the driver applies to a problem before solving.
-
-    The problem layer calls this at import time so a direct ``solve`` accepts
-    the same problem objects the top-level solve entry point does. Pass ``None``
-    to clear the registered coercion (the test / session-reset hook).
-
-    Args:
-        coercion: ``coerce(problem) -> problem`` mapping any accepted problem to
-            one that satisfies the solver contract, or ``None`` to clear it.
-    """
-    global _PROBLEM_COERCION
-    _PROBLEM_COERCION = coercion
-
-
-def coerce_problem(problem: Any) -> Any:
-    """Return a problem that satisfies the solver contract.
-
-    Applies the registered coercion, if any. With none registered this is the
-    identity, which is correct for a problem that already satisfies the contract
-    -- the wrap is only needed for a higher-level problem object, and having
-    imported the layer that defines those objects is what registers the
-    coercion in the first place.
-    """
-    if _PROBLEM_COERCION is None:
-        return problem
-    return _PROBLEM_COERCION(problem)
-
-
 class ConsistentStart(NamedTuple):
     """The consistent state an engine starts from, with the weights of its first step.
 
@@ -505,14 +467,12 @@ __all__ = [
     "ConsistentStart",
     "clamp_initial_step",
     "EngineCapabilities",
-    "coerce_problem",
     "consistent_start",
     "initialization_policies",
     "pack_state",
     "problem_layout",
     "project_start",
     "refuse_unprojected_start",
-    "register_problem_coercion",
     "sensitivity_analyses",
     "unpack_state",
     "validate_requirements",

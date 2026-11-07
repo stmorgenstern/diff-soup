@@ -37,6 +37,7 @@ from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision, resolve_precision
 from diff_soup.linear import LinearSolver
 from diff_soup.linear._resolver import BackendResolver, array_platform, is_batched
+from diff_soup.problem.implicit.solver_problem import solver_view
 from diff_soup.timestepping.tolerances import (
     ResolvedTolerances,
     ToleranceSpec,
@@ -45,7 +46,7 @@ from diff_soup.timestepping.tolerances import (
 from diff_soup.timestepping.vsvo.engines import bdf_engine, ida_engine, ndf_engine
 from diff_soup.utils.precision import warn_if_float32_default, warn_if_float32_on_cpu
 
-from .common.contract import coerce_problem, pack_state
+from .common.contract import pack_state
 from .common.driver import DriverConfig, run_engine
 from .solution import Solution
 
@@ -82,7 +83,7 @@ def _resolve_linear_name(
     if isinstance(requested, LinearSolver):
         return requested
 
-    solver_problem = coerce_problem(problem)
+    solver_problem = solver_view(problem)
     y0_arr = jnp.asarray(y0)
     return BackendResolver(backend=linear if linear is not None else configured).choose(
         block_size=int(solver_problem.n_u),
@@ -188,7 +189,7 @@ def _tolerance_wiring(tolerances: Any, problem: Any, solver: Any) -> tuple:
     if tolerances is None:
         return None, solver.rtol, solver.atol, None, None, None, solver.newton_tol_factor
 
-    coerced = coerce_problem(problem)
+    coerced = solver_view(problem)
     if isinstance(tolerances, ToleranceSpec):
         record = resolve_for_problem(tolerances, coerced)
         explicit_ic_tol = tolerances.ic_atol is not None
@@ -402,7 +403,7 @@ class _VSVOSolver(eqx.Module):
         """
         warn_if_float32_default()
         precision = resolve_precision(
-            coerce_problem(problem), self.precision, self.jacobian_values_dtype
+            solver_view(problem), self.precision, self.jacobian_values_dtype
         )
         warn_if_float32_on_cpu(precision, y0, theta, t_span)
 

@@ -36,7 +36,4 @@ __all__ = ["ProblemSpec", "problem", "lower"]
 # ---------------------------------------------------------------------------
 # lower() — the EquationSet → LoweredProblem transform. Re-exported here so
 # ``problem.__init__`` / ``diff_soup.__init__`` keep the same ``lower`` binding.
-# The residual / Jacobian / sparsity kernel construction is injected via
-# ``_ir.lower.set_lowering_ops`` (the dependency-injection seam for the
-# discretization provider).
 # ---------------------------------------------------------------------------

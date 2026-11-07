@@ -74,7 +74,6 @@ from diff_soup.problem.implicit.topology_report import (
     topology_report,
 )
 from diff_soup.problem.parameters import ParameterSet
-from diff_soup.timestepping.vsvo.common.contract import register_problem_coercion
 
 
 def default_theta(problem, values=None):
@@ -214,8 +213,3 @@ __all__ = [
     "ResidualSparsity",
     "ResidualLinearization",
 ]
-
-# Wire the scalar solver suite's problem-coercion seam so direct engine calls
-# and the top-level entry resolve the same solver problem. Registering at
-# problem-layer import time keeps the import direction problem -> timestepping.
-register_problem_coercion(solver_view)

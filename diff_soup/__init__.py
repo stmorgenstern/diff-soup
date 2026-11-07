@@ -34,13 +34,8 @@ import types as _types
 import diff_soup._environment  # noqa: F401
 
 # ---------------------------------------------------------------------------
-# Root-private modules: the lowering provider, errors, layout, schedules
+# Root-private modules: errors, layout, schedules
 # ---------------------------------------------------------------------------
-# Register the lowering-analysis provider. Importing ``diff_soup._lowering``
-# calls ``set_lowering_ops`` so ``lower()`` can build residual, Jacobian,
-# sparsity and mass kernels from the Layer 1 operator bank. This file is the
-# wiring layer, so it may import every layer.
-import diff_soup._lowering  # noqa: F401 — side-effect: registers the provider.
 from diff_soup import distributed
 
 # ``compile`` compiles one ``pdesolve`` call ahead of time without running it.

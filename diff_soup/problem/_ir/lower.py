@@ -22,18 +22,16 @@ Three responsibilities:
    fp64 this is a no-op; for a mixed-precision config it prevents forward-pass
    precision loss from corrupting the factor dtype.
 
-The L1-dependent host analysis (operator-bank residual / Jacobian kernels,
-boundary geometry, FEM sparsity stencils) is injected via a ``LoweringOps``
-provider — see [_OPS_PROVIDER][] and [set_lowering_ops][].  The
-``problem`` layer may not import ``domains`` directly (the import-direction law,
-AST-enforced).
+The host analysis that needs the ``domains`` operator bank (residual and
+Jacobian kernels, boundary geometry, FEM sparsity stencils) is
+``diff_soup.problem._lowering.provider.analyze``, imported where it is called,
+since the provider imports this module.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
-from collections.abc import Callable
 from typing import Any, Optional
 
 import equinox as eqx
@@ -50,25 +48,6 @@ from diff_soup.problem._cache import compose_content_key
 from .content_hash import content_hash
 from .equation_set import EquationSet
 from .lowered_problem import LoweredProblem
-
-# ---------------------------------------------------------------------------
-# Operator-provider injection seam.
-# ---------------------------------------------------------------------------
-#
-# The residual / Jacobian / sparsity / mass-diagonal kernels for an EquationSet
-# are built from the ``domains.operators`` bank. The ``problem`` layer cannot
-# import ``domains`` directly (the import-direction law); a layer that may import
-# ``domains`` (the public surface or a domains-side registration) supplies a
-# provider here.  The provider protocol is the single function:
-#
-#     analyze(eqset, *, precision) -> _LoweringAnalysis
-#
-# which performs the host analysis pass (layout, bcs, sparsity, mass_diagonal,
-# residual_fn, jac_blocks_fn, observe_fn, controls_fn), applying the
-# boundary-cast law at closure entry.  ``set_lowering_ops`` registers it.  The
-# only mutable module state is the registered provider, set once at import of
-# the wiring layer.
-_OPS_PROVIDER: Optional[Callable[..., "_LoweringAnalysis"]] = None
 
 
 class _LoweringAnalysis:
@@ -106,33 +85,10 @@ class _LoweringAnalysis:
             setattr(self, name, kw.get(name))
 
 
-def set_lowering_ops(provider: Optional[Callable[..., _LoweringAnalysis]]) -> None:
-    """Register the ``domains``-aware analysis provider for ``lower()`` (the injection seam).
-
-    Called once by the wiring layer — the layer that may import
-    ``domains.operators``.  The provider performs the host analysis pass and
-    returns a
-    [_LoweringAnalysis][diff_soup.problem._ir.lower._LoweringAnalysis].  Pass
-    ``None`` to clear the seam (the
-    test / session-reset hook).
-
-    Args:
-        provider: ``analyze(eqset, *, precision) -> _LoweringAnalysis``, or
-            ``None`` to clear the registered provider.
-    """
-    global _OPS_PROVIDER
-    _OPS_PROVIDER = provider
-
-
 def _build_analysis(
     eqset: EquationSet, *, precision: Precision, probe_stencils: bool = True
 ) -> _LoweringAnalysis:
-    """Run the host analysis pass via the injected provider.
-
-    The residual / Jacobian / sparsity / mass-diagonal construction requires
-    ``domains.operators``, which the ``problem`` layer cannot import directly.
-    When no provider is registered, raises a [LoweringError][]
-    directing the caller to register one via [set_lowering_ops][].
+    """Run the host analysis pass, ``diff_soup.problem._lowering.provider.analyze``.
 
     Args:
         eqset: The EquationSet to analyse.
@@ -143,21 +99,10 @@ def _build_analysis(
 
     Returns:
         The [_LoweringAnalysis][].
-
-    Raises:
-        LoweringError: When no analysis provider is registered.
     """
-    if _OPS_PROVIDER is None:
-        raise LoweringError(
-            "lower(): no operator-bank analysis provider is registered. "
-            "The residual / Jacobian / sparsity / mass-diagonal kernels are "
-            "built from diff_soup.domains.operators, which the problem layer "
-            "may not import directly (import-direction law, AST-enforced). "
-            "A layer that may import domains.operators must register a provider "
-            "via diff_soup.problem._ir.lower.set_lowering_ops(provider) before "
-            "calling lower()."
-        )
-    return _OPS_PROVIDER(eqset, precision=precision, probe_stencils=probe_stencils)
+    from diff_soup.problem._lowering.provider import analyze
+
+    return analyze(eqset, precision=precision, probe_stencils=probe_stencils)
 
 
 def _assemble_lowered_problem(

@@ -4,7 +4,7 @@
   every coupling's source/target component pairs.
 - ``_resolve_family_couplings``: owner-aware resolution of the family-
   touching couplings (scatter / gather) into
-  [FamilyCoupling][diff_soup._lowering.couplings.FamilyCoupling]
+  [FamilyCoupling][diff_soup.problem._lowering.couplings.FamilyCoupling]
   records, used by the residual-assembly family branch.
 - ``_compose_cross_block_sparsity``: composes the equation-local
   dependency rows with the transfer-op's source columns to produce the
