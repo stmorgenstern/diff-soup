@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
+from numbers import Real
 from types import MappingProxyType
 from typing import Any
 
 import numpy as np
+from numpy.typing import DTypeLike
 
 from diff_soup.optimization.inference.hierarchical._lane_route import _Failure, _LaneRoute
 from diff_soup.optimization.solvers._loop import (
@@ -13,18 +16,20 @@ from diff_soup.optimization.solvers._loop import (
 )
 
 
-def _strings(values: Any) -> np.ndarray:
+def _strings(values: Iterable) -> np.ndarray:
     """Labels as a host array of strings (no object array)."""
     return np.asarray([str(value) for value in values], dtype=str)
 
 
-def _string_rows(rows: Any, width: int) -> np.ndarray:
+def _string_rows(rows: Iterable[Iterable], width: int) -> np.ndarray:
     """Rows of labels as a ``(len(rows), width)`` host array of strings."""
     rows = [[str(value) for value in row] for row in rows]
     return np.asarray(rows, dtype=str).reshape(len(rows), width)
 
 
-def _padded_rows(rows: Any, fill: Any, dtype: Any) -> np.ndarray:
+def _padded_rows(
+    rows: Iterable[Iterable[Real | str]], fill: Real | str, dtype: DTypeLike
+) -> np.ndarray:
     """Rows of different lengths as one host array, each row padded with ``fill``."""
     rows = [list(row) for row in rows]
     width = max((len(row) for row in rows), default=0)
@@ -32,7 +37,7 @@ def _padded_rows(rows: Any, fill: Any, dtype: Any) -> np.ndarray:
     return np.asarray(padded, dtype=dtype).reshape(len(rows), width)
 
 
-def _unpadded(row: Any) -> tuple:
+def _unpadded(row: np.ndarray) -> tuple:
     """A row of rungs written by ``_padded_rows`` with the fill -1, without its padding."""
     return tuple(int(value) for value in np.ravel(row) if int(value) >= 0)
 
@@ -118,13 +123,13 @@ class _Work:
         self.attempt_switches: list = []
         # The nested mode's counts per member of the cut level, and the number of attempts
         # made with the polish switched off; None in the joint mode.
-        self.inner_members: Any = None
-        self.inner_iterations: Any = None
-        self.inner_rejections: Any = None
-        self.inner_unconverged: Any = None
-        self.inner_start_iterations: Any = None
-        self.inner_retreats: Any = None
-        self.polish_skipped: Any = None
+        self.inner_members: tuple | None = None
+        self.inner_iterations: np.ndarray | None = None
+        self.inner_rejections: np.ndarray | None = None
+        self.inner_unconverged: np.ndarray | None = None
+        self.inner_start_iterations: np.ndarray | None = None
+        self.inner_retreats: np.ndarray | None = None
+        self.polish_skipped: int | None = None
 
     def nest(self, members: tuple) -> None:
         """Count the inner iterations of every member of the cut level from here on."""
@@ -133,7 +138,7 @@ class _Work:
             setattr(self, name, np.zeros((len(members),), dtype=np.int64))
         self.polish_skipped = 0
 
-    def restore(self, state: Any) -> None:
+    def restore(self, state: Mapping) -> None:
         """Continue the counts and the failure log of the saved state of the same fit."""
         for name in self.COUNTS:
             setattr(self, name, int(np.asarray(state[f"work.{name}"])))
@@ -225,7 +230,7 @@ class _Work:
             self.rejected += 1
         self.attempts += 1
 
-    def request(self, lanes: Any) -> dict:
+    def request(self, lanes: Iterable[str] | None) -> dict:
         """The keywords of a request for ``lanes`` (``None``: every lane) at the rungs held.
 
         A request whose lanes all hold rung 0 names no rung.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from numbers import Real
 from typing import Any, ClassVar
 
@@ -28,7 +29,7 @@ from diff_soup.optimization.solvers._loop import (
 from diff_soup.optimization.solvers._termination import step_budget
 
 
-def _refuse_state(state: Any, *, solver: str, mode: str, nested_at: Any, n: int) -> None:
+def _refuse_state(state: Mapping, *, solver: str, mode: str, nested_at: Any, n: int) -> None:
     """Refuse a saved state this solver cannot continue, naming both settings."""
     saved_nested = _saved_value(state, "nested_at")
     raise ValueError(
@@ -39,7 +40,7 @@ def _refuse_state(state: Any, *, solver: str, mode: str, nested_at: Any, n: int)
     )
 
 
-def _check_state(state: Any, solver: TrustRegion, route: _LaneRoute) -> None:
+def _check_state(state: Mapping, solver: TrustRegion, route: _LaneRoute) -> None:
     """Refuse a saved state of another solver, mode, cut level, size or problem."""
     mode = "joint" if solver.nested_at is None else "nested"
     expected = {

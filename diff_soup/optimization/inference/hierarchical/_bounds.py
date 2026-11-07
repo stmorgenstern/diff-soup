@@ -25,13 +25,21 @@ the Cauchy step along ``-g_h``. Iterates are kept strictly inside the box by
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from math import copysign
-from typing import Any, NamedTuple
+from numbers import Real
+from typing import NamedTuple
 
 import numpy as np
+from jaxtyping import ArrayLike
 
 
-def CL_scaling_vector(x: Any, g: Any, lb: Any, ub: Any) -> tuple:
+def CL_scaling_vector(
+    x: ArrayLike | Sequence[Real],
+    g: ArrayLike | Sequence[Real],
+    lb: ArrayLike | Sequence[Real],
+    ub: ArrayLike | Sequence[Real],
+) -> tuple:
     """The Coleman-Li scaling vector ``v`` and its derivative ``dv`` at ``x``.
 
     ``v[i]`` is ``ub[i] - x[i]`` where ``g[i] < 0`` and ``ub[i]`` is finite,
@@ -59,7 +67,12 @@ def CL_scaling_vector(x: Any, g: Any, lb: Any, ub: Any) -> tuple:
     return v, dv
 
 
-def find_active_constraints(x: Any, lb: Any, ub: Any, rtol: Any = 1e-10) -> np.ndarray:
+def find_active_constraints(
+    x: ArrayLike | Sequence[Real],
+    lb: ArrayLike | Sequence[Real],
+    ub: ArrayLike | Sequence[Real],
+    rtol: Real = 1e-10,
+) -> np.ndarray:
     """Which side of the box is active at ``x``, per coordinate.
 
     A side is active when ``x`` is within ``rtol * max(1, |side|)`` of it and
@@ -94,7 +107,12 @@ def find_active_constraints(x: Any, lb: Any, ub: Any, rtol: Any = 1e-10) -> np.n
     return active
 
 
-def make_strictly_feasible(x: Any, lb: Any, ub: Any, rstep: Any = 0) -> np.ndarray:
+def make_strictly_feasible(
+    x: ArrayLike | Sequence[Real],
+    lb: ArrayLike | Sequence[Real],
+    ub: ArrayLike | Sequence[Real],
+    rstep: Real = 0,
+) -> np.ndarray:
     """``x`` moved strictly inside the box.
 
     With ``rstep = 0`` a coordinate on a side or beyond it is moved to the next
@@ -128,12 +146,19 @@ def make_strictly_feasible(x: Any, lb: Any, ub: Any, rstep: Any = 0) -> np.ndarr
     return x_new
 
 
-def in_bounds(x: Any, lb: Any, ub: Any) -> bool:
+def in_bounds(
+    x: ArrayLike | Sequence[Real], lb: ArrayLike | Sequence[Real], ub: ArrayLike | Sequence[Real]
+) -> bool:
     """Whether ``lb <= x <= ub`` holds in every coordinate."""
     return bool(np.all((np.asarray(x) >= lb) & (np.asarray(x) <= ub)))
 
 
-def step_size_to_bound(x: Any, s: Any, lb: Any, ub: Any) -> tuple:
+def step_size_to_bound(
+    x: ArrayLike | Sequence[Real],
+    s: ArrayLike | Sequence[Real],
+    lb: ArrayLike | Sequence[Real],
+    ub: ArrayLike | Sequence[Real],
+) -> tuple:
     """The smallest ``t >= 0`` at which ``x + t * s`` reaches a side of the box.
 
     Args:
@@ -160,7 +185,9 @@ def step_size_to_bound(x: Any, s: Any, lb: Any, ub: Any) -> tuple:
     return min_step, np.equal(steps, min_step) * np.sign(s).astype(int)
 
 
-def intersect_trust_region(x: Any, s: Any, Delta: Any) -> tuple:
+def intersect_trust_region(
+    x: ArrayLike | Sequence[Real], s: ArrayLike | Sequence[Real], Delta: Real
+) -> tuple:
     """The two roots ``t`` of ``||x + t * s|| = Delta``, the negative one first.
 
     Raises:
@@ -183,7 +210,12 @@ def intersect_trust_region(x: Any, s: Any, Delta: Any) -> tuple:
     return t2, t1
 
 
-def build_quadratic_1d(quadratic_form: Any, g: Any, s: Any, s0: Any = None) -> tuple:
+def build_quadratic_1d(
+    quadratic_form: Callable[..., Real],
+    g: ArrayLike | Sequence[Real],
+    s: ArrayLike | Sequence[Real],
+    s0: ArrayLike | Sequence[Real] | None = None,
+) -> tuple:
     """The model ``0.5 u^T H u + g^T u`` along the line ``u = s0 + t * s``.
 
     Args:
@@ -209,7 +241,7 @@ def build_quadratic_1d(quadratic_form: Any, g: Any, s: Any, s0: Any = None) -> t
     return a, b, c
 
 
-def minimize_quadratic_1d(a: Any, b: Any, lb: Any, ub: Any, c: Any = 0) -> tuple:
+def minimize_quadratic_1d(a: Real, b: Real, lb: Real, ub: Real, c: Real = 0) -> tuple:
     """The minimum of ``a t^2 + b t + c`` on ``lb <= t <= ub`` (finite ends).
 
     Returns:
@@ -226,23 +258,27 @@ def minimize_quadratic_1d(a: Any, b: Any, lb: Any, ub: Any, c: Any = 0) -> tuple
     return t[min_index], y[min_index]
 
 
-def evaluate_quadratic(quadratic_form: Any, g: Any, s: Any) -> Any:
+def evaluate_quadratic(
+    quadratic_form: Callable[..., Real],
+    g: ArrayLike | Sequence[Real],
+    s: ArrayLike | Sequence[Real],
+) -> float:
     """The model ``0.5 s^T H s + g^T s`` at the step ``s``."""
     s = np.asarray(s)
     return 0.5 * float(quadratic_form(s)) + float(np.dot(s, g))
 
 
 def select_step(
-    x: Any,
-    quadratic_form: Any,
-    g_h: Any,
-    p: Any,
-    p_h: Any,
-    d: Any,
-    Delta: Any,
-    lb: Any,
-    ub: Any,
-    theta: Any,
+    x: ArrayLike | Sequence[Real],
+    quadratic_form: Callable[..., Real],
+    g_h: ArrayLike | Sequence[Real],
+    p: ArrayLike | Sequence[Real],
+    p_h: ArrayLike | Sequence[Real],
+    d: ArrayLike | Sequence[Real],
+    Delta: Real,
+    lb: ArrayLike | Sequence[Real],
+    ub: ArrayLike | Sequence[Real],
+    theta: Real,
 ) -> tuple:
     """The trial step of the trust-region subproblem's solution under the box.
 
@@ -350,14 +386,14 @@ def _candidates(x, quadratic_form, g_h, p, p_h, d, Delta, lb, ub, theta) -> tupl
 
 
 def shortened_step(
-    x: Any,
-    quadratic_form: Any,
-    g_h: Any,
-    p: Any,
-    p_h: Any,
-    lb: Any,
-    ub: Any,
-    theta: Any,
+    x: ArrayLike | Sequence[Real],
+    quadratic_form: Callable[..., Real],
+    g_h: ArrayLike | Sequence[Real],
+    p: ArrayLike | Sequence[Real],
+    p_h: ArrayLike | Sequence[Real],
+    lb: ArrayLike | Sequence[Real],
+    ub: ArrayLike | Sequence[Real],
+    theta: Real,
 ) -> tuple:
     """``select_step``'s first candidate alone: ``p``, or ``p`` shortened to stay inside.
 
@@ -379,7 +415,7 @@ def shortened_step(
         return p, p_h, -evaluate_quadratic(quadratic_form, g_h, p_h)
 
 
-def step_back_ratio(g: Any, v: Any) -> Any:
+def step_back_ratio(g: ArrayLike | Sequence[Real], v: ArrayLike | Sequence[Real]) -> float:
     """``theta = max(0.995, 1 - ||g * v||_inf)``: how close to a side a step may go."""
     product = np.asarray(g) * np.asarray(v)
     largest = float(np.max(np.abs(product))) if product.size else 0.0
@@ -399,14 +435,20 @@ class Scaling(NamedTuple):
         theta: ``max(0.995, 1 - ||g * v||_inf)``.
     """
 
-    v: Any
-    dv: Any
-    scale: Any
-    addition: Any
-    theta: Any
+    v: np.ndarray
+    dv: np.ndarray
+    scale: np.ndarray
+    addition: np.ndarray | None
+    theta: float
 
 
-def coleman_li_scaling(x: Any, g: Any, lb: Any, ub: Any, scale: Any) -> Scaling:
+def coleman_li_scaling(
+    x: ArrayLike | Sequence[Real],
+    g: ArrayLike | Sequence[Real],
+    lb: ArrayLike | Sequence[Real],
+    ub: ArrayLike | Sequence[Real],
+    scale: ArrayLike | Sequence[Real],
+) -> Scaling:
     """The scaled coordinates of the trust-region subproblem at ``x``.
 
     ``scale`` is the solver's scale ``S`` of the variables (the step's scaled
@@ -439,7 +481,11 @@ def coleman_li_scaling(x: Any, g: Any, lb: Any, ub: Any, scale: Any) -> Scaling:
     return Scaling(v=v, dv=dv, scale=coordinates, addition=addition, theta=theta)
 
 
-def active_bounds(x: Any, bounds: Any, rtol: Any = 1e-10) -> tuple:
+def active_bounds(
+    x: ArrayLike | Sequence[Real],
+    bounds: tuple[ArrayLike | Sequence[Real], ArrayLike | Sequence[Real]] | None,
+    rtol: Real = 1e-10,
+) -> tuple:
     """The active sides at ``x`` as ``((index, -1 | 1), ...)``; empty without bounds."""
     if bounds is None:
         return ()

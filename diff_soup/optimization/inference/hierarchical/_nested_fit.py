@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from collections.abc import Callable, Mapping
+from numbers import Real
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import jax
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._distributed import assert_decision
 from diff_soup.optimization.inference.fitting._trial import trial_is_valid
@@ -111,21 +114,21 @@ class _InnerResult(NamedTuple):
     """
 
     point: np.ndarray
-    system: Any
-    scale: Any
+    system: elimination.LevelSystem | None
+    scale: np.ndarray | None
     radii: np.ndarray
     locks: np.ndarray
     thresholds: np.ndarray
     iterations: np.ndarray
     failures: tuple
-    stationarity: Any = None
-    lane_costs: Any = None
-    decreases: Any = None
-    codes: Any = None
-    first_cost: Any = None
-    retreats: Any = None
-    full_steps: Any = None
-    floor_terms: Any = None
+    stationarity: np.ndarray | None = None
+    lane_costs: np.ndarray | None = None
+    decreases: np.ndarray | None = None
+    codes: np.ndarray | None = None
+    first_cost: float | None = None
+    retreats: np.ndarray | None = None
+    full_steps: np.ndarray | None = None
+    floor_terms: tuple[np.ndarray, np.ndarray] | None = None
 
 
 def _member_numbers(decreases: np.ndarray, scales: np.ndarray) -> np.ndarray:
@@ -134,7 +137,7 @@ def _member_numbers(decreases: np.ndarray, scales: np.ndarray) -> np.ndarray:
         return np.asarray(decreases, dtype=np.float64) / np.asarray(scales, dtype=np.float64)
 
 
-def _finite_blocks(system: Any) -> bool:
+def _finite_blocks(system: elimination.LevelSystem) -> bool:
     """Whether every block of a system's matrix and its gradient are finite."""
     arrays = [system.root] + list(system.diagonal[1:])
     arrays += [entry for row in system.cross[1:] for entry in row]
@@ -175,7 +178,7 @@ class _NestedFit(_JointFit):
         self.members = tuple(route.members[self.cut - 1])
         self.lane_member = np.asarray(route.nodes[:, self.cut - 1], dtype=np.int64)
         # The member of the cut level of every joint column; set by the fit's first ``blocks``.
-        self.owners: Any = None
+        self.owners: np.ndarray | None = None
         regularizer = route.view.regularization
         rows = regularizer.residual(jax.device_put(route.problem.x0, route.device))
         self.regularized = int(np.shape(rows)[0]) > 0
@@ -199,8 +202,12 @@ class _NestedFit(_JointFit):
         }
 
     def member_above(
-        self, members: Any, noise: float, tolerance: Any = None, floors: Any = None
-    ) -> Any:
+        self,
+        members: ArrayLike | None,
+        noise: float,
+        tolerance: Real | None = None,
+        floors: ArrayLike | None = None,
+    ) -> tuple | None:
         """The member whose model predicts the most beyond the members' limit, or ``None``.
 
         The limit is ``tolerance``, or for ``None`` the members' yardstick
@@ -223,7 +230,9 @@ class _NestedFit(_JointFit):
             limit = float(limits[worst])
         return (self.solver.nested_at, self.members[int(worst)], float(numbers[worst]), limit)
 
-    def members_stationary(self, members: Any, noise: float, floors: Any = None) -> bool:
+    def members_stationary(
+        self, members: ArrayLike | None, noise: float, floors: ArrayLike | None = None
+    ) -> bool:
         """Whether every member's stationarity number is within the inner stationarity limit.
 
         The limit is the inner ``stationarity_tol``, or for ``None`` the
@@ -334,7 +343,11 @@ class _NestedFit(_JointFit):
         return total
 
     def owner_split(
-        self, system: Any, point: np.ndarray, lane_costs: np.ndarray, solved: Any
+        self,
+        system: elimination.LevelSystem,
+        point: np.ndarray,
+        lane_costs: np.ndarray,
+        solved: _InnerResult | None,
     ) -> dict:
         """The attempt's cost split by member of the cut level, read off without changing the fit.
 
@@ -374,7 +387,11 @@ class _NestedFit(_JointFit):
         return entries
 
     def member_decrease(
-        self, system: Any, scale: Any, zero: tuple, addition: Any = None
+        self,
+        system: elimination.LevelSystem,
+        scale: ArrayLike,
+        zero: tuple,
+        addition: ArrayLike | None = None,
     ) -> np.ndarray:
         """The decrease every member's model predicts for its full step at zero damping.
 
@@ -401,14 +418,19 @@ class _NestedFit(_JointFit):
         return predicted
 
     def member_stationarity(
-        self, system: Any, scale: Any, zero: tuple, costs: np.ndarray, addition: Any = None
+        self,
+        system: elimination.LevelSystem,
+        scale: ArrayLike,
+        zero: tuple,
+        costs: np.ndarray,
+        addition: ArrayLike | None = None,
     ) -> np.ndarray:
         """Every member's stationarity number: ``member_decrease`` over its cost scale."""
         return _member_numbers(
             self.member_decrease(system, scale, zero, addition), self.member_scales(costs)
         )
 
-    def member_scales(self, costs: Any) -> Any:
+    def member_scales(self, costs: ArrayLike) -> float | np.ndarray:
         """Every member's cost scale ``max(|cost_n|, cost_atol / cost_tol)``, inner tolerances."""
         tolerances = self.inner_tolerances
         return cost_scale(costs, tolerances.cost_tol, tolerances.cost_atol)
@@ -431,7 +453,13 @@ class _NestedFit(_JointFit):
             )
         return norms / self.member_scales(costs)
 
-    def members_at(self, system: Any, scale: Any, point: np.ndarray, lane_costs: Any) -> tuple:
+    def members_at(
+        self,
+        system: elimination.LevelSystem,
+        scale: ArrayLike,
+        point: np.ndarray,
+        lane_costs: np.ndarray,
+    ) -> tuple:
         """Every member's predicted decrease, stationarity number and full step at ``point``.
 
         From one solve at zero damping of every subtree, in the subproblem's
@@ -451,15 +479,15 @@ class _NestedFit(_JointFit):
 
     def full_stationarity(
         self,
-        system: Any,
-        reduced: Any,
+        system: elimination.LevelSystem,
+        reduced: elimination.LevelSystem,
         point: np.ndarray,
         scale: np.ndarray,
         relative_to: float,
         decreases: np.ndarray,
         *,
-        outer: Any = None,
-        zero: Any = None,
+        outer: box.Scaling | None = None,
+        zero: tuple | None = None,
     ) -> tuple:
         """The stationarity number of the full system at ``point``, the solves, the outer step.
 
@@ -514,7 +542,9 @@ class _NestedFit(_JointFit):
         total = step.decrease + float(np.sum(np.asarray(decreases, dtype=np.float64)))
         return total / relative_to, solves, step
 
-    def member_quadratic(self, system: Any, coordinates: Any, member: int) -> Any:
+    def member_quadratic(
+        self, system: elimination.LevelSystem, coordinates: box.Scaling, member: int
+    ) -> Callable[..., float]:
         """``quadratic_form`` of one member's scaled subtree model, its diagonal addition in it.
 
         It takes a vector over the member's columns in the coordinates
@@ -536,10 +566,10 @@ class _NestedFit(_JointFit):
 
     def choose_members(
         self,
-        system: Any,
+        system: elimination.LevelSystem,
         x: np.ndarray,
         gradient: np.ndarray,
-        coordinates: Any,
+        coordinates: box.Scaling,
         step: np.ndarray,
         radii: np.ndarray,
         active: np.ndarray,
@@ -583,11 +613,11 @@ class _NestedFit(_JointFit):
 
     def respond(
         self,
-        system: Any,
+        system: elimination.LevelSystem,
         x: np.ndarray,
         scale: np.ndarray,
         multiplier: float,
-        outer_step: Any,
+        outer_step: np.ndarray,
         radii: np.ndarray,
     ) -> tuple:
         """The trial of an outer step: the inner coordinates moved by their response to it.
@@ -649,7 +679,7 @@ class _NestedFit(_JointFit):
             trial[columns] = x[columns] + member_step
         return box.make_strictly_feasible(trial, lower, upper, rstep=0), norms, capped, solves
 
-    def reduce(self, system: Any) -> Any:
+    def reduce(self, system: elimination.LevelSystem) -> elimination.LevelSystem:
         """The outer system: the inner blocks eliminated; a singular inner problem is refused.
 
         Under bounds the inner blocks carry the diagonal ``|g_i| / v_i`` of the
@@ -695,7 +725,7 @@ class _NestedFit(_JointFit):
             self.owners = elimination.node_of_columns(system, self.cut)
         return system, lane_costs
 
-    def nonfinite_block_failures(self, results: Any, system: Any) -> tuple:
+    def nonfinite_block_failures(self, results: Any, system: elimination.LevelSystem) -> tuple:
         """The lanes of every member whose Gauss-Newton blocks or gradient are not finite at a finite cost.
 
         Each of the member's lanes is a failure of kind ``NONFINITE_BLOCKS``: its solve reached
@@ -821,17 +851,17 @@ class _NestedFit(_JointFit):
         self,
         point: np.ndarray,
         *,
-        origin: Any = None,
-        scale: Any,
+        origin: np.ndarray | None = None,
+        scale: ArrayLike | None,
         radii: np.ndarray,
         locks: np.ndarray,
         thresholds: np.ndarray,
         attempt: int,
         start: bool,
         limit: int,
-        outer_predicted: Any = None,
+        outer_predicted: Real | None = None,
         noise: float = 0.0,
-        level: Any = None,
+        level: Real | None = None,
     ) -> _InnerResult:
         """Every member of the cut level iterates on its subtree at the outer point of ``point``.
 
@@ -1182,7 +1212,7 @@ class _NestedFit(_JointFit):
             self.floor.latest,
         )
 
-    def run(self, state: Any = None) -> OptResult:
+    def run(self, state: Mapping | None = None) -> OptResult:
         """Fit from the start point, or continue the fit whose ``state`` is given."""
         solver, inner, route, work = self.solver, self.inner, self.route, self.work
         dtype = np.asarray(route.problem.x0).dtype
