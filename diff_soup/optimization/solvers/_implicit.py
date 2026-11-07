@@ -47,6 +47,7 @@ from diff_soup.optimization.solvers._barrier import Bounds
 from diff_soup.optimization.solvers._closures import Closures
 from diff_soup.optimization.solvers._kkt_system import active_set, residual_of, system_at
 from diff_soup.optimization.solvers._protocol import SolveRecord
+from diff_soup.problem.implicit.tangent_gates import poison, zero_where_not
 
 __all__ = ["active_set", "implicit_run", "kkt_cotangent", "kkt_tangent"]
 
@@ -189,28 +190,6 @@ def _zero(leaf: Array) -> ArrayLike:
     return zero_from_primal(leaf, symbolic_zeros=False)
 
 
-def _poison(tree: PyTree, valid: Bool[Array, ""]) -> PyTree:
-    """NaN in every inexact leaf of `tree` where `valid` is false."""
-
-    def gate(leaf):
-        if getattr(leaf, "dtype", None) == jax.dtypes.float0:
-            return leaf
-        return jnp.where(valid, leaf, jnp.full_like(leaf, jnp.nan))
-
-    return jax.tree.map(gate, tree)
-
-
-def _zero_where_not(keep: Bool[Array, ""], tree: PyTree) -> PyTree:
-    """Exact zeros in every inexact leaf of `tree` where `keep` is false."""
-
-    def gate(leaf):
-        if getattr(leaf, "dtype", None) == jax.dtypes.float0:
-            return leaf
-        return jnp.where(keep, leaf, jnp.zeros_like(leaf))
-
-    return jax.tree.map(gate, tree)
-
-
 @functools.partial(jax.custom_jvp, nondiff_argnums=(0, 1, 2, 3))
 def _entry(primal, prepare, kkt, static, dynamic, x0, args, warm):
     """`primal(problem, x0, args, warm) -> (x, record)` with the implicit derivative in `args`."""
@@ -227,9 +206,9 @@ def _entry_jvp(primal, prepare, kkt, static, primals, tangents):
     x, record = out
     closures, bounds = prepare(eqx.combine(dynamic, static), x)
     valid = record.status == TerminationStatus.KKT_TOL
-    dargs = _zero_where_not(valid, dargs)
+    dargs = zero_where_not(valid, dargs)
     dx, drecord, solved = kkt_tangent(closures, bounds, kkt, x, record, args, dargs)
-    return out, _poison((dx, drecord), valid & solved)
+    return out, poison((dx, drecord), valid & solved)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0, 1, 2, 3))
