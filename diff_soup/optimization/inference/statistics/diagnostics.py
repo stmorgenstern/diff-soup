@@ -25,10 +25,12 @@ from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 from scipy.special import ndtri
 from scipy.stats import rankdata
 
 from diff_soup.optimization.inference.data.deferred import DeferredValues
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
 
 __all__ = [
@@ -122,7 +124,9 @@ def residual_report(problem, fit, *, experiment_id=None) -> ResidualReport:
     return _residual_report(experiment, _point(problem, fit)[columns], parameters=parameters)
 
 
-def _residual_report(experiment, x_flat: Any, *, parameters: Any = None) -> ResidualReport:
+def _residual_report(
+    experiment, x_flat: ArrayLike, *, parameters: ParameterGroups | None = None
+) -> ResidualReport:
     """Check each scored channel's residuals against its declared likelihood.
 
     Runs the experiment's shared prediction closure once at ``x_flat`` and

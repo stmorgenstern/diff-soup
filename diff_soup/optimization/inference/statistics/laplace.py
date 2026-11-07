@@ -29,6 +29,7 @@ against the stored Cholesky factor — no matrix inverse is ever formed.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from statistics import NormalDist
 from typing import Any, Optional, Union
@@ -38,7 +39,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import solve_triangular
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
+from numpy.typing import DTypeLike
 
 from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.optimization.inference.statistics.estimation import EstimationProblem
@@ -57,6 +59,7 @@ from diff_soup.optimization.inference.statistics.report import (
     IdentifiedSubspace,
     ImproperPosteriorError,
 )
+from diff_soup.problem.parameters import ParameterSchema
 
 __all__ = [
     "LaplacePosterior",
@@ -95,8 +98,8 @@ _STATIONARITY_BOUNDS = (0.1, 0.5)
 class Marginal:
     """Mean, standard deviation, and Gaussian interval for a fitted handle."""
 
-    mean: Any
-    sd: Any
+    mean: Array
+    sd: Array
 
     def interval(self, level=0.95):
         """Return the central pointwise interval at the requested level."""
@@ -175,9 +178,9 @@ class LaplacePosterior(eqx.Module):
     provenance: Any = None
     warnings: tuple = eqx.field(static=True, default=())
 
-    parameter_schema: Any = None
+    parameter_schema: ParameterSchema | None = None
     _data_curvature: Optional[Array] = None
-    _evidence_prior: Any = None
+    _evidence_prior: _DeclaredPrior | str | None = None
 
     def __getitem__(self, handle):
         """Return the marginal for a shared handle, or marginals keyed by owner."""
@@ -205,7 +208,7 @@ class LaplacePosterior(eqx.Module):
         """Number of parameters the posterior covers."""
         return int(self.mode.shape[0])
 
-    def covariance_action(self, v: Any) -> Array:
+    def covariance_action(self, v: ArrayLike | Sequence) -> Array:
         """Return ``P⁻¹ v`` via two triangular solves (no formed inverse).
 
         Args:
@@ -232,7 +235,7 @@ class LaplacePosterior(eqx.Module):
         cov = self.covariance_action(jnp.eye(self.dim, dtype=self.mode.dtype))
         return 0.5 * (cov + cov.T)
 
-    def marginal_sd(self, names: Any = None) -> Array:
+    def marginal_sd(self, names: str | int | Iterable[str | int] | None = None) -> Array:
         """Return posterior marginal standard deviations.
 
         The covariance diagonal is read off the inverse Cholesky factor
@@ -372,14 +375,14 @@ def _require_finite(
 
 
 def _as_symmetric(
-    matrix: Any,
+    matrix: ArrayLike | Sequence,
     n: int,
     *,
     what: str,
     label: str,
     remedy: str,
     names: tuple = (),
-    dtype: Any = float,
+    dtype: DTypeLike = float,
 ) -> np.ndarray:
     """Validate an ``(n, n)`` symmetric matrix and return its symmetrized copy.
 
@@ -411,16 +414,16 @@ def _descending_eigh(matrix: np.ndarray) -> tuple:
 
 
 def laplace_posterior(
-    mode: Any,
+    mode: ArrayLike | Sequence,
     *,
-    data_curvature: Any = None,
-    whitened_jacobian: Any = None,
-    prior_precision: Any = None,
+    data_curvature: ArrayLike | Sequence | None = None,
+    whitened_jacobian: ArrayLike | Sequence | None = None,
+    prior_precision: ArrayLike | Sequence | None = None,
     coordinate: str = "x",
     curvature_kind: str,
     names: tuple = (),
     on_singular: str = "raise",
-    log_likelihood_at_mode: Any = None,
+    log_likelihood_at_mode: ArrayLike | Sequence | None = None,
     likelihood_normalized: Optional[bool] = None,
     curvature_regularization: Optional[float] = None,
     mode_gradient_norm: Optional[float] = None,
@@ -637,7 +640,7 @@ class _DeclaredPrior:
         self._problem = problem
         self.size = int(problem.n_params)
 
-    def log_prob(self, value: Any) -> Array:
+    def log_prob(self, value: ArrayLike) -> Array:
         """The normalized log density of the declared priors at ``value``."""
         return self._problem.log_prior(value)
 
@@ -661,7 +664,7 @@ def _evidence_refusal(problem: EstimationProblem) -> str | None:
     return None
 
 
-def _solver_rtol(source: Any) -> tuple[Optional[float], bool]:
+def _solver_rtol(source: object) -> tuple[Optional[float], bool]:
     """The largest solver ``rtol`` behind ``source``, and whether any of its solves is float32.
 
     ``source`` is an inference problem, whose study's experiments are read, or one
@@ -683,7 +686,7 @@ def _solver_rtol(source: Any) -> tuple[Optional[float], bool]:
     return (max(tolerances) if tolerances else None), single
 
 
-def _credited_rtol(source: Any) -> Optional[float]:
+def _credited_rtol(source: object) -> Optional[float]:
     """The solver ``rtol`` behind ``source``, at least ``_FLOAT32_SOLVE_RTOL`` for a float32 solve."""
     rtol, single = _solver_rtol(source)
     if rtol is None or not single:
@@ -702,7 +705,9 @@ def _stationarity_tolerance(problem: EstimationProblem) -> tuple[float, Optional
     return float(min(high, max(low, _STATIONARITY_PER_SOLVER_RTOL * rtol))), basis
 
 
-def _negative_log_joint_gradient(problem: EstimationProblem, point: Any, terms: tuple) -> Any:
+def _negative_log_joint_gradient(
+    problem: EstimationProblem, point: ArrayLike, terms: tuple
+) -> np.ndarray:
     """The gradient of the negative log likelihood plus the negative log prior at ``point``.
 
     ``terms`` is the whitened data ``(residual, jacobian)`` at ``point`` when both are
@@ -723,7 +728,7 @@ def _laplace_facade(
     problem: EstimationProblem,
     fit: OptResult | None = None,
     *,
-    at: Any = None,
+    at: object = None,
     curvature: str = "observed",
     on_singular: str = "raise",
 ) -> LaplacePosterior | IdentifiedSubspace:
@@ -832,7 +837,13 @@ def _laplace_facade(
     return posterior
 
 
-def laplace(problem: Any, fit: Any, *, curvature: str = "observed", on_singular: str = "raise"):
+def laplace(
+    problem: Any,
+    fit: OptResult | Mapping | ArrayLike | Sequence,
+    *,
+    curvature: str = "observed",
+    on_singular: str = "raise",
+):
     """Build the Laplace approximation, the Gaussian centered on a fit with the inverse curvature as covariance.
 
     For a `MAP` problem the curvature includes the prior's, and `log_evidence` is the Laplace

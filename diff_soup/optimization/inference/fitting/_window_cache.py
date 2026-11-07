@@ -20,13 +20,19 @@ import hashlib
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup._environment import CACHE_DIR
-from diff_soup.optimization.inference.fitting.windows import WindowInitialization
+from diff_soup.optimization.inference.fitting._forward_seam import ForwardSeam
+from diff_soup.optimization.inference.fitting.windows import (
+    RestartStep,
+    StateBasis,
+    WindowInitialization,
+)
 from diff_soup.problem.implicit.solver_problem import solver_view
 
 _SUBDIRECTORY = "window-initialization"
@@ -58,12 +64,12 @@ def cache_directory() -> Path:
 
 def window_initialization_key(
     *,
-    seam: Any,
-    y0: Any,
-    times: Any,
-    boundaries: Any,
-    states: Any,
-    restart_step: Any,
+    seam: ForwardSeam,
+    y0: ArrayLike,
+    times: ArrayLike,
+    boundaries: ArrayLike,
+    states: StateBasis,
+    restart_step: Optional[RestartStep],
     solver: Any,
     project_windows: bool,
 ) -> str:
@@ -117,12 +123,12 @@ def window_initialization_key(
     return digest.hexdigest()
 
 
-def _is_content_key(source_key: Any) -> bool:
+def _is_content_key(source_key: PyTree) -> bool:
     """Whether a structure signature's model key is a ``("content", digest)`` key."""
     return isinstance(source_key, tuple) and bool(source_key) and source_key[0] == "content"
 
 
-def _feed(digest: Any, value: Any) -> None:
+def _feed(digest: Any, value: PyTree) -> None:
     """Feed one value into ``digest`` in a form that depends on its content alone."""
     if value is None:
         digest.update(b"N")

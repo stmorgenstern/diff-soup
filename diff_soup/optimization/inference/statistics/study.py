@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from types import MappingProxyType
 from typing import Any
 
@@ -11,13 +11,14 @@ import jax
 import numpy as np
 
 from diff_soup._layout import Layout
-from diff_soup.optimization.inference.fitting.bounds import Bounds
-from diff_soup.optimization.inference.fitting.inference_problem import ParameterGroups
-from diff_soup.optimization.inference.fitting.joint import (
-    JointInferenceProblem,
+from diff_soup.optimization.inference.fitting._joint_structure import (
     _sharding_requested,
     plan_child_data_owners,
 )
+from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
+from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics._fingerprint import study_content_fingerprint
 from diff_soup.optimization.inference.statistics.hierarchy import EXPERIMENT, Hierarchy, _tree
 from diff_soup.optimization.inference.statistics.measurement import Experiment
@@ -31,7 +32,7 @@ from diff_soup.problem.parameters import (
 )
 
 
-def _unique_in_order(values: Any) -> tuple:
+def _unique_in_order(values: Iterable[object]) -> tuple:
     """Return unique hashable values without sorting away semantic order."""
     result = []
     for value in values:
@@ -45,7 +46,7 @@ def _is_unique_partition(labels: tuple) -> bool:
     return len(_unique_in_order(labels)) == len(labels)
 
 
-def _validate_handle_model(handle: Any, model: Any, *, experiment_id: Any, declarations=None):
+def _validate_handle_model(handle: Any, model: Any, *, experiment_id: Hashable, declarations=None):
     """Resolve one compatible declared name on the experiment's own model."""
     if declarations is None:
         declarations = {
@@ -78,7 +79,9 @@ def _experiment_rows(experiment: Experiment) -> int:
     )
 
 
-def balance_owners(experiments: Any, lanes: int, *, weight: Callable | None = None) -> Any:
+def balance_owners(
+    experiments: Any, lanes: int, *, weight: Callable | None = None
+) -> Study | tuple[Experiment, ...]:
     """Reorder a study's experiments so that equal consecutive blocks of owners carry balanced loads.
 
     The owners are the members of the study's outermost level or cluster, or else the
@@ -168,7 +171,7 @@ class Study:
         experiments: Experiment | Any,
         *,
         parameters: ParameterSet | Hierarchy,
-        clusters: Mapping[str, Any] | None = None,
+        clusters: Mapping[str, Iterable[object]] | None = None,
         independent: bool | None = None,
     ):
         """Validate statistical independence and cluster alignment once.
@@ -403,7 +406,7 @@ class Study:
 
     def compile_inference_problem(
         self, *, layout: Layout | None = None, state_prior: Any = None
-    ) -> Any:
+    ) -> InferenceProblem | JointInferenceProblem:
         """Lower this Study to one existing leaf or owner-aware joint problem.
 
         Args:
@@ -469,7 +472,7 @@ class Study:
             data_holders=holders,
         )
 
-    def _compile_hierarchy(self, layout: Layout | None, state_prior: Any) -> Any:
+    def _compile_hierarchy(self, layout: Layout | None, state_prior: Any) -> JointInferenceProblem:
         """The joint problem of a hierarchy study: one block per member, level by level."""
         hierarchy = self.parameters
         tied = self._tied_clusters()
@@ -685,7 +688,7 @@ class Study:
                 child.persist_window_initialization()
         return children, holders
 
-    def _declarations_of(self, handle: Any, indices: Any) -> tuple:
+    def _declarations_of(self, handle: Any, indices: Iterable[int]) -> tuple:
         """The declarations of ``handle`` in the builds of the experiments at ``indices``."""
         return tuple(self.experiments[index]._declarations[handle.name] for index in indices)
 

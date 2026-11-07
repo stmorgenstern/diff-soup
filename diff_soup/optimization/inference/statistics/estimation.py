@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import dataclasses
 import types
+from collections.abc import Callable
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup._precision import cast_floating_leaves
 from diff_soup.optimization._binding import Derived, Held
 from diff_soup.optimization._derived import half_sum_of_squares
+from diff_soup.optimization._least_squares import LeastSquaresProblem
 from diff_soup.optimization.inference.fitting._layout import resolve_point
-from diff_soup.optimization.inference.fitting.inference_problem import (
-    _MemoryCheckedHessian,
-    lower_residual_problem,
+from diff_soup.optimization.inference.fitting._residual_lowering import lower_residual_problem
+from diff_soup.optimization.inference.fitting._residual_memory import _MemoryCheckedHessian
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
+from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
+from diff_soup.optimization.inference.fitting.parameter_groups import (
+    ParameterValues,
     parameter_values,
 )
 from diff_soup.optimization.inference.fitting.regularization import NoReg
@@ -38,6 +44,7 @@ from diff_soup.optimization.inference.statistics.study import Study
 from diff_soup.optimization.problem import AbstractOptimizationProblem
 from diff_soup.optimization.solvers.tangent import value_and_jacfwd
 from diff_soup.problem._ir.lower import prior_digest
+from diff_soup.problem.parameters import ParameterSchema
 from diff_soup.utils.ad_guards import reverse_linearization_observed
 
 
@@ -151,7 +158,7 @@ def _measurement_log_normalizer(study: Study, holders: tuple | None = None) -> f
     return total
 
 
-def _compile_prior_blocks(schema: Any, objective: Any) -> tuple:
+def _compile_prior_blocks(schema: ParameterSchema, objective: MLE | MAP) -> tuple:
     """Compile each handle occurrence exactly once for a physical MAP.
 
     An occurrence takes its prior from the declarations of the experiments
@@ -197,7 +204,7 @@ def _compile_prior_blocks(schema: Any, objective: Any) -> tuple:
     return tuple(blocks)
 
 
-def _resolve_handle_regularization(regularization: Any, schema: Any) -> Any:
+def _resolve_handle_regularization(regularization: Any, schema: ParameterSchema) -> Any:
     """Resolve a ``Tikhonov(on=handle)`` to the handle's column blocks; pass others through."""
     handle = getattr(regularization, "on", None)
     if handle is None:
@@ -221,7 +228,7 @@ class _StructuredPriorRegularizer:
     blocks: tuple
     extra: Any = dataclasses.field(default_factory=NoReg)
 
-    def residual(self, x: Any) -> Any:
+    def residual(self, x: ArrayLike) -> Array:
         """Concatenate the same physical-prior rows used by dense LM."""
         x = jnp.asarray(x)
         parts = (self.extra.residual(x),) + tuple(
@@ -229,13 +236,13 @@ class _StructuredPriorRegularizer:
         )
         return jnp.concatenate(parts)
 
-    def penalty(self, x: Any) -> Any:
+    def penalty(self, x: ArrayLike) -> Array:
         """Return half the squared norm of all prior residual rows."""
         return self.extra.penalty(x) + sum(
             half_sum_of_squares(prior.residual(x[columns])) for columns, prior in self.blocks
         )
 
-    def block_rows(self, x: Any) -> tuple:
+    def block_rows(self, x: ArrayLike) -> tuple:
         """Return column-local ``(columns, residual, jacobian)`` triples of every prior row."""
         x = jnp.asarray(x)
         result = []
@@ -266,22 +273,22 @@ class EstimationProblem(AbstractOptimizationProblem):
 
     study: Study
     objective: MLE | MAP
-    parameter_schema: Any
-    _inference_problem: Any
+    parameter_schema: ParameterSchema
+    _inference_problem: InferenceProblem | JointInferenceProblem
     _x0: np.ndarray
-    _data_r: Any
-    _data_residual_jacobian: Any
-    _observed_information: Any
-    _prior_precision: Any
-    _residual: Any
-    _residual_jacobian: Any
+    _data_r: Callable
+    _data_residual_jacobian: Callable
+    _observed_information: Callable
+    _prior_precision: Callable
+    _residual: Callable
+    _residual_jacobian: Callable
     _prior_blocks: tuple
     _log_normalizer: float | None
-    _loss_fn: Any
+    _loss_fn: Callable | None
     _loss_grad_fns: dict
     _loss_grad_hessian_fns: dict
     regularization: NoReg
-    trial_predicate: Any
+    trial_predicate: Callable[..., ArrayLike] | None
 
     #: What the constraint functions take as ``args``.
     _args = None
@@ -398,7 +405,7 @@ class EstimationProblem(AbstractOptimizationProblem):
         )
         object.__setattr__(self, "trial_predicate", trial_predicate)
 
-    def trial_is_valid(self, x: Any):
+    def trial_is_valid(self, x: ArrayLike) -> Array:
         """Whether ``x`` passes the declared trial predicate and the data problem's own checks."""
         point = jnp.asarray(x)
         valid = jnp.asarray(True)
@@ -409,7 +416,7 @@ class EstimationProblem(AbstractOptimizationProblem):
             valid = valid & jnp.asarray(inner(point), dtype=bool)
         return valid
 
-    def _prior_objective(self, x: Any) -> Any:
+    def _prior_objective(self, x: ArrayLike) -> Array:
         """Return the MAP prior penalty represented by the compiled prior rows."""
         x = jnp.asarray(x)
         total = jnp.zeros((), dtype=x.dtype)
@@ -560,11 +567,11 @@ class EstimationProblem(AbstractOptimizationProblem):
         return bool(getattr(self._inference_problem, "is_sharded", False))
 
     @property
-    def diagnostic_problem(self) -> Any:
+    def diagnostic_problem(self) -> InferenceProblem | JointInferenceProblem:
         """Data-only problem for practical-identifiability diagnostics."""
         return self._inference_problem
 
-    def joint_view(self) -> Any:
+    def joint_view(self) -> EstimationProblem | JointInferenceProblem:
         """The joint problem with its level structure, warm-started at this problem's start.
 
         For a study of several experiments this is the underlying
@@ -597,7 +604,7 @@ class EstimationProblem(AbstractOptimizationProblem):
             problem = problem.with_trial_predicate(self.trial_predicate)
         return problem
 
-    def numeric_problem(self, optimizer: Any) -> Any:
+    def numeric_problem(self, optimizer: Any) -> LeastSquaresProblem:
         """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] ``optimizer`` solves.
 
         Its residual is the whitened data rows followed by the MAP prior
@@ -629,14 +636,14 @@ class EstimationProblem(AbstractOptimizationProblem):
             lowered = held[1][key] = lower_estimation(self, self, optimizer)
         return lowered
 
-    def args(self) -> Any:
+    def args(self) -> PyTree:
         """What the constraint functions take as ``args``, the numeric problem's ``args`` leaf.
 
         The data residual closes over its measurements and reads no ``args``.
         """
         return self._args
 
-    def count_failed(self, x_flat: Any) -> tuple[int, tuple[int, ...]]:
+    def count_failed(self, x_flat: ArrayLike) -> tuple[int, tuple[int, ...]]:
         """Delegate sentinel failure detection to the underlying PDE problem."""
         count = getattr(self._inference_problem, "count_failed", None)
         return (0, ()) if not callable(count) else count(x_flat)
@@ -657,7 +664,7 @@ class EstimationProblem(AbstractOptimizationProblem):
             raise AttributeError("shared_values")
         return value
 
-    def log_likelihood(self, x: Any) -> Any:
+    def log_likelihood(self, x: ArrayLike) -> Array:
         """Normalized response log likelihood at physical parameters.
 
         Differentiable in both modes. Evaluation and forward-mode derivatives
@@ -680,19 +687,19 @@ class EstimationProblem(AbstractOptimizationProblem):
         residual = self._data_r(x)
         return -0.5 * jnp.sum(residual**2) + self._log_normalizer
 
-    def data_residual_jacobian(self, x: Any) -> tuple[Any, Any]:
+    def data_residual_jacobian(self, x: ArrayLike) -> tuple[Array, Array]:
         """Return whitened data residuals and their cached forward Jacobian."""
         return self._data_residual_jacobian(jnp.asarray(x))
 
-    def observed_information(self, x: Any) -> Any:
+    def observed_information(self, x: ArrayLike) -> Array:
         """Return the observed NLL Hessian from the inference-problem seam."""
         return self._observed_information(jnp.asarray(x))
 
-    def prior_precision(self, x: Any) -> Any:
+    def prior_precision(self, x: ArrayLike) -> Array:
         """Return local physical-coordinate prior curvature (zero for MLE)."""
         return self._prior_precision(jnp.asarray(x))
 
-    def log_prior(self, x: Any) -> Any:
+    def log_prior(self, x: ArrayLike) -> Array:
         """Normalized physical-coordinate prior log density for a MAP problem."""
         x = jnp.asarray(x, dtype=self._x0.dtype)
         total = jnp.zeros((), dtype=x.dtype)
@@ -729,7 +736,7 @@ class EstimationProblem(AbstractOptimizationProblem):
         )
 
 
-def _reduced_cost(problem: EstimationProblem) -> Any:
+def _reduced_cost(problem: EstimationProblem) -> Callable:
     """``x -> `` the reduced cost plus the MAP prior rows, NaN where a child failed."""
     evaluate_cost = problem._inference_problem.evaluate_cost_fn
 
@@ -741,7 +748,7 @@ def _reduced_cost(problem: EstimationProblem) -> Any:
     return value
 
 
-def _reduced_gauss_newton(problem: EstimationProblem) -> Any:
+def _reduced_gauss_newton(problem: EstimationProblem) -> Callable:
     """``x -> (cost, J^T r, J^T J, failed)`` reduced across the mesh, with the MAP prior rows."""
     evaluate = problem._inference_problem.evaluate_lsq_fn
     blocks = problem._prior_blocks
@@ -765,7 +772,9 @@ def _reduced_gauss_newton(problem: EstimationProblem) -> Any:
     return gauss_newton
 
 
-def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any = None) -> Any:
+def lower_estimation(
+    problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any = None
+) -> LeastSquaresProblem:
     """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] of an estimation problem.
 
     Args:
@@ -813,7 +822,7 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
     return constrained.with_args(problem.args())
 
 
-def _values_of(schema: Held, x: Any) -> Any:
+def _values_of(schema: Held, x: ArrayLike) -> ParameterValues:
     """The fitted values by parameter at the flat vector `x`."""
     return parameter_values(schema.value, x)
 

@@ -11,8 +11,10 @@ of one problem are equal and `filter_jit` reuses one compile, with no cache.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from typing import Any
+
+from jaxtyping import PyTree
 
 #: The closures a lowering (a `Constraints`, a control horizon) builds, by the names
 #: [OptimizationProblem.closure][diff_soup.optimization.OptimizationProblem.closure] takes,
@@ -30,12 +32,12 @@ class Bound:
 
     __slots__ = ("fn", "args", "__weakref__")
 
-    def __init__(self, fn: Callable, args: Any):
+    def __init__(self, fn: Callable, args: PyTree):
         """Bind `args` as the last argument of `fn`."""
         self.fn = fn
         self.args = args
 
-    def __call__(self, *operands: Any) -> Any:
+    def __call__(self, *operands: PyTree) -> PyTree:
         """`fn(*operands, args)`."""
         return self.fn(*operands, self.args)
 
@@ -63,7 +65,7 @@ class IgnoringArgs:
         """Wrap `fn`, a function of the operands without `args`."""
         self.fn = fn
 
-    def __call__(self, *operands_and_args: Any) -> Any:
+    def __call__(self, *operands_and_args: PyTree) -> PyTree:
         """`fn` of every argument but the last."""
         return self.fn(*operands_and_args[:-1])
 
@@ -102,12 +104,12 @@ class Derived:
 
     __slots__ = ("rule", "inputs", "__weakref__")
 
-    def __init__(self, rule: Callable, *inputs: Any):
+    def __init__(self, rule: Callable, *inputs: Hashable):
         """Derive a closure by `rule` from `inputs`."""
         self.rule = rule
         self.inputs = inputs
 
-    def __call__(self, *operands: Any) -> Any:
+    def __call__(self, *operands: PyTree) -> PyTree:
         """`rule(*inputs, *operands)`."""
         return self.rule(*self.inputs, *operands)
 
@@ -135,7 +137,7 @@ class Held:
 
     __slots__ = ("value",)
 
-    def __init__(self, value: Any):
+    def __init__(self, value: object):
         """Hold `value` by identity, outside the pytree."""
         self.value = value
 
@@ -151,7 +153,7 @@ class Held:
         return id(self.value)
 
 
-def hold(value: Any) -> Held:
+def hold(value: object) -> Held:
     """`value` in a `Held`, unless it is one already."""
     return value if isinstance(value, Held) else Held(value)
 

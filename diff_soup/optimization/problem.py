@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from jaxtyping import PyTree
 
@@ -30,7 +30,7 @@ class AbstractOptimizationProblem(abc.ABC):
     """
 
     constraints: Constraints | None = None
-    bounds: Any = None
+    bounds: PyTree = None
 
     @abc.abstractmethod
     def numeric_problem(self, optimizer: OptSolver) -> OptimizationProblem:

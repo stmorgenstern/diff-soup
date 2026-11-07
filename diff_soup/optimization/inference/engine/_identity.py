@@ -45,12 +45,16 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+from collections.abc import Sequence
+from numbers import Integral
 from typing import Any
 
 import jax
 import numpy as np
+from jaxtyping import PyTree
 
 from diff_soup.optimization.inference.engine._layout import _window_count
+from diff_soup.optimization.inference.fitting.series import Series
 from diff_soup.optimization.inference.statistics._fingerprint import (
     UnstableFingerprintError,
     _canonical_json,
@@ -129,7 +133,7 @@ class _IdentityRecorder(_Recorder):
         self.by_object: list[str] = []
         self.held: list[Any] = []
 
-    def record(self, value: Any, *, path: str) -> Any:
+    def record(self, value: Any, *, path: str) -> dict:
         """Encode ``value``; an object without a stable encoding is encoded by its address."""
         try:
             return super().record(value, path=path)
@@ -144,11 +148,11 @@ class _IdentityRecorder(_Recorder):
         return {"kind": "object", "type": _qualified_type(value), "address": id(value)}
 
 
-def _frame_shape(series: Any) -> tuple:
+def _frame_shape(series: Series) -> tuple:
     return tuple(int(size) for size in np.shape(series.values)[1:])
 
 
-def _leaf_shapes(tree: Any) -> tuple:
+def _leaf_shapes(tree: PyTree) -> tuple:
     """Leaf paths, shapes and dtypes of ``tree``, read without touching a device."""
     leaves = []
     for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
@@ -164,7 +168,7 @@ def _leaf_shapes(tree: Any) -> tuple:
     return tuple(leaves)
 
 
-def _likelihood_leaves(series: Any) -> tuple:
+def _likelihood_leaves(series: Series) -> tuple:
     """Each leaf of a stream's likelihood object as ``(path, leaf, span)``, read on the host.
 
     ``span`` is ``"none"`` for a leaf that holds the same numbers for every
@@ -197,7 +201,7 @@ def _likelihood_leaves(series: Any) -> tuple:
     return tuple(leaves)
 
 
-def _family(series: Any) -> tuple:
+def _family(series: Series) -> tuple:
     """A stream's likelihood family as plain values: its type, static fields and leaves.
 
     Each leaf is recorded by its path, dtype, span and shape for one frame, so
@@ -244,7 +248,7 @@ def _lane_streams(child: Any) -> tuple:
 
 def _components(child: Any, recorder: _IdentityRecorder) -> tuple:
     """The record of every component of ``child``, in the order of ``LANE_COMPONENTS``."""
-    from diff_soup.optimization.inference.fitting.joint import _child_mode
+    from diff_soup.optimization.inference.fitting._joint_structure import _child_mode
 
     seam = child._seam
     view = seam.problem
@@ -322,7 +326,13 @@ def lane_identity(child: Any) -> LaneIdentity:
     )
 
 
-def bucket_identity(lane: LaneIdentity, *, frames: Any, width: int, segments: Any) -> LaneIdentity:
+def bucket_identity(
+    lane: LaneIdentity,
+    *,
+    frames: tuple[Integral, Sequence[Integral]],
+    width: int,
+    segments: Integral | None,
+) -> LaneIdentity:
     """The identity of a bucket: the identity of its lanes and the sizes of its program.
 
     Args:
@@ -380,7 +390,7 @@ def lane_refusal(child: Any) -> str | None:
         The reason, a sentence that names what the lanes cannot take, or
         ``None``.
     """
-    from diff_soup.optimization.inference.fitting.joint import _child_mode
+    from diff_soup.optimization.inference.fitting._joint_structure import _child_mode
 
     mode = _child_mode(child)
     if mode not in ("single", "observed_ic"):

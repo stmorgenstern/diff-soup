@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import itertools
-from typing import Any
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import PyTree
 
 
 class SparseLegendre(eqx.Module):
@@ -26,7 +27,7 @@ class SparseLegendre(eqx.Module):
     indices: tuple = eqx.field(static=True)
     degree: int = eqx.field(static=True)
     truncation: str = eqx.field(static=True)
-    transform: Any = eqx.field(static=True)
+    transform: Callable[..., PyTree] | None = eqx.field(static=True)
 
     def __init__(
         self,

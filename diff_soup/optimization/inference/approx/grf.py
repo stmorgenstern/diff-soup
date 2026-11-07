@@ -22,7 +22,7 @@ The mode set is {(m,n) : m + n ≤ M}, giving (M+1)(M+2)/2 modes.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 import equinox as eqx
 import jax
@@ -30,6 +30,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.interpolate
 import scipy.linalg
+from numpy.typing import DTypeLike
 from scipy.spatial.distance import cdist
 
 
@@ -488,7 +489,7 @@ class KLBasis(eqx.Module):
         maxiter: Optional[int] = None,
         ncv: Optional[int] = None,
         sigma_psi0: float = 1.0,
-        dtype: Any = jnp.float64,
+        dtype: DTypeLike = jnp.float64,
     ) -> "KLBasis":
         """Construct a mass-aware KL basis without a dense mass matrix.
 

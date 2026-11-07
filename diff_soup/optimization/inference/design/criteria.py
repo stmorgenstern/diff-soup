@@ -38,7 +38,7 @@ from typing import Any
 
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 __all__ = [
     "d_optimal",
@@ -218,7 +218,7 @@ def integrated_variance(fim: Array, target: Any, *, gram: Array, ridge: float = 
     return jnp.trace(sigma_block @ (0.5 * (g + g.T)))
 
 
-def fisher_with_prior(fim: Array, prior_precision: Any) -> Array:
+def fisher_with_prior(fim: Array, prior_precision: ArrayLike | list | tuple) -> Array:
     """Return the Bayesian information ``fim + Λ₀``.
 
     Adds Gaussian prior precision to the Fisher information: a scalar adds

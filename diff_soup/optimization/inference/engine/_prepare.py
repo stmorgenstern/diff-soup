@@ -38,7 +38,9 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import PartitionSpec
+from jax.sharding import Mesh, PartitionSpec
+from jax.stages import Compiled
+from jaxtyping import PyTree
 
 from diff_soup.optimization.inference.engine._batched import (
     BatchedLanes,
@@ -49,7 +51,13 @@ from diff_soup.optimization.inference.engine._batched import (
     _lane_leaves,
 )
 from diff_soup.optimization.inference.engine._batched import prepare as _prepare_programs
-from diff_soup.optimization.inference.engine._kernel import batched_kernel
+from diff_soup.optimization.inference.engine._kernel import (
+    LaneInputs,
+    LaneProgram,
+    LaneResult,
+    batched_kernel,
+)
+from diff_soup.optimization.inference.engine._placement import Placement
 
 BUDGET_SHARE: float = 0.8
 """The share of the device allocator's memory limit one program may need."""
@@ -169,7 +177,7 @@ class PrepareReport:
     records: tuple
     stages: Mapping
     seconds: float
-    placement: Any = None
+    placement: Placement | None = None
 
     @property
     def programs(self) -> int:
@@ -277,7 +285,7 @@ def _record_row(record: ProgramRecord) -> tuple:
     )
 
 
-def memory_budget(device: Any, share: float | None = None) -> int | None:
+def memory_budget(device: jax.Device, share: float | None = None) -> int | None:
     """The device memory, in bytes, one program may need on ``device``.
 
     Args:
@@ -342,7 +350,7 @@ def _peak_bytes() -> int | None:
     return peak if sys.platform == "darwin" else peak * 1024
 
 
-def _device_bytes(compiled: Any) -> int | None:
+def _device_bytes(compiled: Compiled) -> int | None:
     """Arguments + outputs + temporaries + code - aliases of a compiled program."""
     analysis = compiled.memory_analysis()
     names = (
@@ -410,7 +418,7 @@ class ProgramOverBudget(ValueError):
         fits: The largest power-of-two chunk width that fits; 0 when none.
     """
 
-    def __init__(self, message: str, **numbers: Any):
+    def __init__(self, message: str, **numbers: int | str):
         """Carry the message and the numbers that make it."""
         super().__init__(message)
         for name, value in numbers.items():
@@ -418,7 +426,7 @@ class ProgramOverBudget(ValueError):
 
 
 def _over_budget(
-    entry: BucketLanes, key: ProgramKey, needs: int, budget: int, device: Any
+    entry: BucketLanes, key: ProgramKey, needs: int, budget: int, device: jax.Device
 ) -> ValueError:
     bucket = entry.bucket
     fits = _largest_fitting_width(key.chunk, needs, budget)
@@ -450,7 +458,7 @@ def _over_budget(
     )
 
 
-def _summed_rows(program: Any) -> tuple:
+def _summed_rows(program: LaneProgram) -> tuple:
     """The bordered rows whose derivative the program's Jacobian sums from a field's rows."""
     view = program.problem
     source = getattr(view, "source", None)
@@ -461,7 +469,7 @@ def _summed_rows(program: Any) -> tuple:
     return tuple(str(name) for name in plan.shortcut_constraints)
 
 
-def split_empty_leaves(inputs: Any) -> tuple[list, Callable[[list, int], Any]]:
+def split_empty_leaves(inputs: PyTree) -> tuple[list, Callable[[list, int], PyTree]]:
     """Keep the zero-size leaves of lane-axis inputs out of a ``shard_map``.
 
     XLA's Shardy partitioner (jaxlib 0.11) crashes the process with a
@@ -485,7 +493,7 @@ def split_empty_leaves(inputs: Any) -> tuple[list, Callable[[list, int], Any]]:
     shapes = [(tuple(jnp.shape(leaf)[1:]), jnp.result_type(leaf)) for leaf in leaves]
     kept = [leaf for leaf, is_empty in zip(leaves, empty) if not is_empty]
 
-    def restore(kept_local: list, n_local: int) -> Any:
+    def restore(kept_local: list, n_local: int) -> PyTree:
         local = iter(kept_local)
         rebuilt = [
             jnp.zeros((n_local, *shape), dtype) if is_empty else next(local)
@@ -496,7 +504,9 @@ def split_empty_leaves(inputs: Any) -> tuple[list, Callable[[list, int], Any]]:
     return kept, restore
 
 
-def placed_kernel(program: Any, mode: str, mesh: Any = None) -> Any:
+def placed_kernel(
+    program: LaneProgram, mode: str, mesh: Mesh | None = None
+) -> Callable[..., LaneResult]:
     """The kernel of one call of a bucket's program, placed as the plan places the lanes.
 
     Args:
@@ -519,10 +529,10 @@ def placed_kernel(program: Any, mode: str, mesh: Any = None) -> Any:
         return kernel
     split = PartitionSpec("data")
 
-    def placed(points: Any, lanes: Any) -> Any:
+    def placed(points: jax.Array, lanes: LaneInputs) -> LaneResult:
         kept, restore = split_empty_leaves((points, lanes))
 
-        def body(*local: Any) -> Any:
+        def body(*local: jax.Array) -> LaneResult:
             return kernel(*restore(list(local), local[0].shape[0]))
 
         return jax.shard_map(body, mesh=mesh, in_specs=split, out_specs=split, check_vma=False)(

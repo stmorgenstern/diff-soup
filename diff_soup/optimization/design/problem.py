@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 from jaxtyping import PyTree
@@ -27,7 +27,7 @@ class DesignProblem(AbstractOptimizationProblem, eqx.Module):
     """
 
     constraints: Constraints | None = None
-    bounds: Any = None
+    bounds: PyTree = None
     design: PyTree = None
     criterion: Callable | None = eqx.field(static=True, default=None)
 

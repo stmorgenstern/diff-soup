@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import Array, ArrayLike, PyTree
 
 
 @dataclasses.dataclass(frozen=True)
@@ -31,12 +31,12 @@ class ResidualDependencyBlock:
     name: str
     columns: tuple[int, ...]
     row_count: int
-    residual_fn: Callable[[Any], Any] = dataclasses.field(
+    residual_fn: Callable[[Array], Array] = dataclasses.field(
         repr=False,
         compare=False,
     )
     elimination_groups: tuple[tuple[int, ...], ...] = ()
-    metadata: tuple[tuple[str, Any], ...] = ()
+    metadata: tuple[tuple[str, PyTree], ...] = ()
 
     def __post_init__(self) -> None:
         """Normalize and validate the immutable structural declaration."""
@@ -84,11 +84,11 @@ class ResidualDependencyBucket:
     name: str
     columns: tuple[tuple[int, ...], ...]
     row_count: int
-    residual_fn: Callable[[Any, Any], Any] = dataclasses.field(
+    residual_fn: Callable[..., PyTree] = dataclasses.field(
         repr=False,
         compare=False,
     )
-    metadata: tuple[tuple[str, Any], ...] = ()
+    metadata: tuple[tuple[str, PyTree], ...] = ()
 
     def __post_init__(self) -> None:
         """Normalize and validate lane widths and the indexed callable."""
@@ -121,10 +121,10 @@ class ResidualDependencyBucket:
 
 def audit_residual_dependencies(
     blocks: tuple[ResidualDependencyBlock, ...],
-    point: Any,
+    point: ArrayLike,
     *,
     atol: float = 0.0,
-) -> tuple[dict[str, Any], ...]:
+) -> tuple[dict[str, PyTree], ...]:
     """Differentiate excluded columns and fail if a declaration is incomplete.
 
     This is intentionally a debug/validation utility: it forms each block's

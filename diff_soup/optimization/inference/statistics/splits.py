@@ -105,7 +105,7 @@ class CrossValidationSplit:
     cohort: str
     split_id: str
     level: str
-    entity: Any
+    entity: object
     train_indices: tuple[int, ...]
     held_out_indices: tuple[int, ...]
     train: Any
@@ -173,7 +173,7 @@ def _cohort_id(experiment_set: Any, experiment_ids: tuple[str, ...]) -> str:
     return f"experiment-set:{digest.hexdigest()[:16]}"
 
 
-def _mapping_values(mapping: Any, n_experiments: int, *, group: str) -> tuple[Any, ...]:
+def _mapping_values(mapping: Any, n_experiments: int, *, group: str) -> tuple[object, ...]:
     """Normalize one ownership declaration to an aligned label tuple."""
     if isinstance(mapping, Mapping):
         expected = set(range(n_experiments))
@@ -201,7 +201,7 @@ def _mapping_values(mapping: Any, n_experiments: int, *, group: str) -> tuple[An
     return labels
 
 
-def _owner_labels(experiment_set: Any, *, by: str = "owner") -> tuple[Any, ...]:
+def _owner_labels(experiment_set: Any, *, by: str = "owner") -> tuple[object, ...]:
     """Resolve the requested ownership partition to one label per experiment."""
     n_experiments = len(_experiment_ids(experiment_set))
     ownership = getattr(experiment_set, "ownership", None)
@@ -248,16 +248,16 @@ def _owner_labels(experiment_set: Any, *, by: str = "owner") -> tuple[Any, ...]:
     return reference
 
 
-def _unique_in_order(values: tuple[Any, ...]) -> tuple[Any, ...]:
+def _unique_in_order(values: tuple[object, ...]) -> tuple[object, ...]:
     """Return equality-unique labels in first-occurrence order."""
-    unique: list[Any] = []
+    unique: list[object] = []
     for value in values:
         if not any(value == previous for previous in unique):
             unique.append(value)
     return tuple(unique)
 
 
-def _indices_for_label(labels: tuple[Any, ...], entity: Any) -> tuple[int, ...]:
+def _indices_for_label(labels: tuple[object, ...], entity: object) -> tuple[int, ...]:
     """Return original indices belonging to ``entity``."""
     return tuple(i for i, label in enumerate(labels) if label == entity)
 
@@ -339,7 +339,7 @@ def _conditioning_records(
     experiment_set: Any, indices: tuple[int, ...]
 ) -> tuple[ConditioningRecord, ...]:
     """Build deterministic held-out conditioning provenance."""
-    from diff_soup.optimization.inference.fitting.inference_problem import _initial_state_array
+    from diff_soup.optimization.inference.fitting.formulation import _initial_state_array
 
     experiment_ids = _experiment_ids(experiment_set)
     experiments = tuple(experiment_set.experiments)
@@ -427,7 +427,7 @@ def _make_split(
     held_out_indices: tuple[int, ...],
     split_id: str,
     level: str,
-    entity: Any,
+    entity: object,
 ) -> CrossValidationSplit:
     """Construct one split and assert its row-level leakage invariant."""
     experiment_ids = _experiment_ids(experiment_set)
@@ -551,7 +551,7 @@ def leave_one_entity_out(experiment_set: Any, *, by: str = "owner") -> tuple:
     return tuple(splits)
 
 
-def within_entity_holdout(experiment_set: Any, entity: Any, *, by: str = "owner") -> tuple:
+def within_entity_holdout(experiment_set: Any, entity: object, *, by: str = "owner") -> tuple:
     """Hold out each child of a multi-child owner in turn.
 
     The held-out child remains intact in ``split.held_out`` so its conditioning
@@ -590,7 +590,7 @@ def within_entity_holdout(experiment_set: Any, entity: Any, *, by: str = "owner"
     return tuple(splits)
 
 
-def _curve_value(curve: Any, name: str, *, aliases: tuple[str, ...] = ()) -> Any:
+def _curve_value(curve: Any, name: str, *, aliases: tuple[str, ...] = ()) -> object:
     """Read one CV-curve field from a mapping or record-like object."""
     names = (name,) + aliases
     if isinstance(curve, Mapping):
@@ -605,7 +605,7 @@ def _curve_value(curve: Any, name: str, *, aliases: tuple[str, ...] = ()) -> Any
     raise ValueError(f"cross-validation curve is missing required field {choices}.")
 
 
-def one_standard_error(cv_curve: Any) -> Any:
+def one_standard_error(cv_curve: Any) -> object:
     """Choose the simplest candidate within one SE of the empirical best.
 
     The threshold uses the standard error *at the best candidate*.  For a

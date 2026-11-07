@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from typing import Any
 
 import jax.numpy as jnp
@@ -21,15 +21,16 @@ from diff_soup.optimization.inference.statistics.robust import (
     _cluster_sandwich_covariance,
     sandwich_covariance,
 )
+from diff_soup.problem.parameters import ParameterSchema
 
 
 @dataclasses.dataclass(frozen=True)
 class ClusterResidualBlock:
     """One contiguous measurement block in the data residual's exact row order."""
 
-    experiment_id: Any
+    experiment_id: Hashable
     measurement: str
-    cluster_id: Any
+    cluster_id: Hashable
     row_slice: tuple[int, int]
     n_kept_frames: int
     rows_per_frame: int
@@ -47,7 +48,7 @@ class ClusterCovarianceResult:
 
     covariance: np.ndarray
     coordinates: tuple[IdentifiabilityCoordinate, ...]
-    parameter_schema: Any
+    parameter_schema: ParameterSchema
     schema_fingerprint: str
     study_fingerprint: str
     objective_kind: str
@@ -74,7 +75,7 @@ class ClusterCovarianceResult:
 def _validate_problem_fit(
     problem: Any,
     fit: Any,
-) -> tuple[Any, np.ndarray, tuple[IdentifiabilityCoordinate, ...], str, str]:
+) -> tuple[ParameterSchema, np.ndarray, tuple[IdentifiabilityCoordinate, ...], str, str]:
     """Validate that a fitted vector still belongs to this exact Study schema."""
     where = "cluster_covariance"
     if not isinstance(problem, EstimationProblem):
@@ -134,7 +135,7 @@ def _cluster_residual_rows(
         )
 
     owner_ids = problem.study.clusters[cluster]
-    row_ids: list[Any] = []
+    row_ids: list[Hashable] = []
     blocks: list[ClusterResidualBlock] = []
     row_start = 0
     for experiment_id, experiment, owner_id in zip(
@@ -168,8 +169,8 @@ def _cluster_residual_rows(
 
 def _integer_cluster_codes(row_ids: tuple) -> tuple[np.ndarray, tuple, tuple[int, ...]]:
     """Encode arbitrary hashable owner IDs without requiring them to be sortable."""
-    ids: list[Any] = []
-    lookup: dict[Any, int] = {}
+    ids: list[Hashable] = []
+    lookup: dict[Hashable, int] = {}
     codes = np.empty(len(row_ids), dtype=int)
     for row, owner_id in enumerate(row_ids):
         if owner_id not in lookup:

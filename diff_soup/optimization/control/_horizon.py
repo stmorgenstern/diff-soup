@@ -10,11 +10,12 @@ compiled solver reuses its compile, with no cache of closures.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._schedule import solve_schedule
@@ -91,7 +92,7 @@ class Horizon:
         return self._built
 
 
-def _call(horizon: Horizon, name: str, *operands: Any) -> Any:
+def _call(horizon: Horizon, name: str, *operands: PyTree) -> PyTree:
     """Call the closure `name` of `horizon`."""
     return horizon.built()[name](*operands)
 
@@ -247,7 +248,9 @@ def _build(configuration: Configuration) -> Lowered:
     }
 
 
-def _sized(function: Callable | None, solution: Any, u: Any, args: Any, count: int, name: str):
+def _sized(
+    function: Callable | None, solution: PyTree, u: ArrayLike, args: PyTree, count: int, name: str
+):
     """The rows `function` returns, flattened and checked against `count`; empty without one."""
     if function is None:
         return jnp.zeros((0,))

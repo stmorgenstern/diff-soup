@@ -8,12 +8,12 @@
 An [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem] owns exactly one problem/geometry and one latent
 trajectory.  It composes four interchangeable nouns:
 
-* an **objective** — [LeastSquares][diff_soup.optimization.inference.fitting.inference_problem.LeastSquares] (weighted output-error fitting);
-* a **trajectory** strategy — [SingleShoot][diff_soup.optimization.inference.fitting.inference_problem.SingleShoot] (one forward solve over the
-  horizon) or [Multishoot][diff_soup.optimization.inference.fitting.inference_problem.Multishoot] (window partitioning);
-* an **initial-state** policy — [FixedInitialState][diff_soup.optimization.inference.fitting.inference_problem.FixedInitialState] (the first
-  differential state is fixed) or [LearnedInitialState][diff_soup.optimization.inference.fitting.inference_problem.LearnedInitialState] (it is optimized);
-* **parameter groups** — [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups] naming the local and shared
+* an **objective** — [LeastSquares][diff_soup.optimization.inference.fitting.formulation.LeastSquares] (weighted output-error fitting);
+* a **trajectory** strategy — [SingleShoot][diff_soup.optimization.inference.fitting.formulation.SingleShoot] (one forward solve over the
+  horizon) or [Multishoot][diff_soup.optimization.inference.fitting.formulation.Multishoot] (window partitioning);
+* an **initial-state** policy — [FixedInitialState][diff_soup.optimization.inference.fitting.formulation.FixedInitialState] (the first
+  differential state is fixed) or [LearnedInitialState][diff_soup.optimization.inference.fitting.formulation.LearnedInitialState] (it is optimized);
+* **parameter groups** — [ParameterGroups][diff_soup.optimization.inference.fitting.parameter_groups.ParameterGroups] naming the local and shared
   learnable selections.
 
 An inference problem may carry several named [Series][diff_soup.optimization.inference.fitting.series.Series]
@@ -33,34 +33,35 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-import os
-import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 from typing import Any, Optional, Union
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
-from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision, cast_to_compute_dtype, compute_dtype_of
-from diff_soup._warnings import warn_user
-from diff_soup.optimization._abc import LeastSquaresProblem
-from diff_soup.optimization._binding import ignoring_args
-from diff_soup.optimization._derived import half_sum_of_squares
+from diff_soup._schedule.records import Schedule, ScheduleArrays
 from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
+    ForwardSeam,
     GroupedThetaSelection,
     batched_transition_residual_factory,
     build_forward_seam,
     count_failed_frames,
-    parameter_handle_leaf_ids,
     resolve_forward_adjoint,
     resolve_reverse_adjoint,
-    selected_leaf_ids,
     union_residual_factory,
 )
+from diff_soup.optimization.inference.fitting._residual_lowering import (
+    _loss_and_grad_from_residual,
+    _loss_fn_from_residual,
+    _loss_grad_hessian_from_gradient,
+    _stacked_residual_fn,
+)
+from diff_soup.optimization.inference.fitting._residual_memory import _TiledJacobian
 from diff_soup.optimization.inference.fitting._window_cache import (
     load_window_initialization,
     store_window_initialization,
@@ -72,101 +73,36 @@ from diff_soup.optimization.inference.fitting._windows_dv import (
     boundaries_from_windows,
     warn_if_over_ceiling,
 )
-from diff_soup.optimization.inference.fitting.bounds import Bounds, resolve_decision_bounds
-from diff_soup.optimization.inference.fitting.learnables import (
-    LearnableSelector,
-    has_declared_learnables,
-    learnables,
+from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.formulation import (
+    FixedInitialState,
+    InitialState,
+    LearnedInitialState,
+    LeastSquares,
+    Multishoot,
+    Objective,
+    SingleShoot,
+    Trajectory,
+    _check_initial_state_time,
+    _FrozenStateMultishoot,
+)
+from diff_soup.optimization.inference.fitting.parameter_groups import (
+    ParameterGroups,
+    ParameterValues,
+    _group_columns,
+    _recipe_parameter_schema,
+    _resolve_parameters,
+    _resolve_spec_declared_bounds,
+    parameter_values,
 )
 from diff_soup.optimization.inference.fitting.regularization import NoReg
 from diff_soup.optimization.inference.fitting.series import FullState, Series, observes_full_state
 from diff_soup.optimization.inference.fitting.windows import (
-    Continuity,
     RestartStep,
     StateBasis,
-    Windows,
+    WindowInitialization,
 )
-
-# ---------------------------------------------------------------------------
-# Objective objects
-# ---------------------------------------------------------------------------
-
-
-class Objective(eqx.Module):
-    """Base class of the objective an [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem] takes through ``objective=``.
-
-    An objective says how the misfit of the observations becomes the rows of
-    the problem's residual.
-    """
-
-
-class LeastSquares(Objective):
-    """The least-squares objective, half the squared norm of the residual."""
-
-
-# ---------------------------------------------------------------------------
-# Trajectory strategy objects
-# ---------------------------------------------------------------------------
-
-
-class Trajectory(eqx.Module):
-    """Base class for trajectory strategies (how the latent trajectory is solved)."""
-
-
-class SingleShoot(Trajectory):
-    """Single shooting, one solve over the experiment's whole time span, the default trajectory."""
-
-
-class Multishoot(Trajectory):
-    """Multiple shooting, one solve per window of the time span, each from its own start state.
-
-    Pass it as `trajectory=` of an `Experiment`, or of an `InferenceProblem` to apply it to
-    every experiment.
-
-    Args:
-        windows: The [Windows][diff_soup.optimization.inference.Windows] that split the time span.
-        continuity: The weight of the continuity term between fitted windows, `Continuity()` when `None`.
-        states: The [StateBasis][diff_soup.optimization.inference.StateBasis] of the fitted window starts, or `None` to fit every differential entry.
-        warm_start_steps: The number of optimizer steps on the parameters alone, with the window starts held, before the full fit.
-        first_step: A `FirstStep` policy for the first time step of each window's solve, or `None` to leave it to the solver.
-    """
-
-    windows: Windows
-    continuity: Continuity = eqx.field(default_factory=Continuity)
-    states: StateBasis = eqx.field(default_factory=StateBasis.full)
-    warm_start_steps: int = eqx.field(static=True, default=0)
-    first_step: Optional[RestartStep] = None
-
-    def __init__(
-        self,
-        windows: Windows,
-        continuity: Optional[Continuity] = None,
-        *,
-        states: Optional[StateBasis] = None,
-        warm_start_steps: int = 0,
-        first_step: Optional[RestartStep] = None,
-    ):
-        """Store the window spec, continuity config, window-state coordinate, and step policies."""
-        self.windows = windows
-        self.continuity = continuity if continuity is not None else Continuity()
-        if states is not None and not isinstance(states, StateBasis):
-            raise TypeError(
-                f"Multishoot 'states' must be a StateBasis; got {type(states).__name__}."
-            )
-        self.states = states if states is not None else StateBasis.full()
-        if isinstance(warm_start_steps, bool) or int(warm_start_steps) < 0:
-            raise ValueError(
-                "Multishoot 'warm_start_steps' must be a nonnegative integer; "
-                f"got {warm_start_steps!r}."
-            )
-        self.warm_start_steps = int(warm_start_steps)
-        if first_step is not None and not isinstance(first_step, RestartStep):
-            raise TypeError(
-                "Multishoot 'first_step' must be a FirstStep policy (FirstStep.auto(), "
-                f".fixed(dt), .fraction(f), .hinted(...)) or None; got {type(first_step).__name__}."
-            )
-        self.first_step = first_step
-
+from diff_soup.problem.parameters import ParameterSchema
 
 # ---------------------------------------------------------------------------
 # Initial-state policy objects
@@ -187,7 +123,7 @@ def _declared_precision(problem: Any) -> Precision:
     return getattr(view, "precision", None) or Precision()
 
 
-def _lowered_schedule(schedule: Any, problem: Any) -> Any:
+def _lowered_schedule(schedule: Optional[Schedule], problem: Any) -> Optional[ScheduleArrays]:
     """The segment arrays of ``schedule`` against ``problem``'s mode names, or ``None``.
 
     The arrays carry the targets and durations at the compute dtype of the
@@ -204,1144 +140,6 @@ def _lowered_schedule(schedule: Any, problem: Any) -> Any:
     )
 
 
-class InitialState(eqx.Module):
-    """Base class for the trajectory initial-state policy."""
-
-
-class FixedInitialState(InitialState):
-    """A known initial state, the form a bare array passed as `initial_state=` takes.
-
-    Attributes:
-        y0: The state at the start of the experiment's time span.
-        time: The start time, which the experiment sets to the start of its span.
-    """
-
-    y0: Any = None
-    time: float = 0.0
-
-
-class LearnedInitialState(InitialState):
-    """An initial state fitted together with the parameters, starting from `guess`.
-
-    Pass it as `initial_state=` of an `Experiment`. The fitted state follows the parameters
-    in `result.params`, and `Windows.from_data` refuses it.
-
-    Attributes:
-        guess: The starting value of the full state, a 1-D array.
-        time: The start time, which the experiment sets to the start of its span.
-    """
-
-    guess: Any
-    time: float = 0.0
-
-
-def _initial_state_array(initial_state: Any) -> Any:
-    """Return the state array a declaration carries.
-
-    A policy carries it as ``y0`` (fixed) or ``guess`` (learned); a bare array
-    is the state itself. The array is what a prediction or a provenance digest
-    reads, whichever policy holds it.
-    """
-    if isinstance(initial_state, LearnedInitialState):
-        return initial_state.guess
-    if isinstance(initial_state, FixedInitialState):
-        return initial_state.y0
-    return initial_state
-
-
-def _initial_state_policy(initial_state: Any, *, time: float) -> InitialState:
-    """Return the trajectory initial-state policy of a declaration, timed at ``time``.
-
-    A bare array becomes ``FixedInitialState``; a policy keeps its kind and is
-    re-timed, because the state a declaration carries is the state at the start
-    of that declaration's own span.
-    """
-    if isinstance(initial_state, InitialState):
-        return dataclasses.replace(initial_state, time=float(time))
-    return FixedInitialState(initial_state, time=float(time))
-
-
-# ---------------------------------------------------------------------------
-# Parameter groups
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass(frozen=True)
-class ParameterGroups:
-    """Named local and shared learnable-parameter selections. Frozen.
-
-    Each value is a
-    [LearnableSelector][diff_soup.optimization.inference.fitting.learnables.LearnableSelector]
-    (from ``learnables(problem, names)``), a learnable name, or a sequence of
-    names.  ``local`` groups are geometry-specific (e.g. a particle's ``k(x)``);
-    ``shared`` groups name constitutive functions intended to be tied across
-    geometries by a [JointInferenceProblem][diff_soup.optimization.inference.fitting.joint.JointInferenceProblem]
-    (e.g. ``j0(c; theta)``).  When a
-    leaf is fit alone, shared groups are ordinary learnable groups.
-
-    Attributes:
-        local: Mapping from local group name to its learnable selector.
-        shared: Mapping from shared group name to its learnable selector.
-    """
-
-    local: dict = dataclasses.field(default_factory=dict)
-    shared: dict = dataclasses.field(default_factory=dict)
-
-    def __post_init__(self):
-        """Reject a name used as both a local and a shared group."""
-        overlap = set(self.local) & set(self.shared)
-        if overlap:
-            raise ValueError(
-                f"ParameterGroups: group name(s) {sorted(overlap)} appear in both "
-                "local and shared; local and shared group names must be disjoint."
-            )
-
-
-def _group_value_names(value: Any) -> tuple:
-    """Learnable names for a plain (non-selector) parameter-group value."""
-    if isinstance(value, str):
-        return (value,)
-    return tuple(str(n) for n in value)
-
-
-def _group_value_handles(value: Any) -> tuple:
-    """Return Recipe handles from one group value, or ``()`` for name values."""
-    if hasattr(value, "identity") and hasattr(value, "kind"):
-        return (value,)
-    if isinstance(value, (str, LearnableSelector)):
-        return ()
-    try:
-        values = tuple(value)
-    except TypeError:
-        return ()
-    if values and all(hasattr(item, "identity") and hasattr(item, "kind") for item in values):
-        return values
-    return ()
-
-
-def _declared_learnable_names(problem: Any) -> frozenset:
-    """Public names ``problem`` declares learnable, or an empty set.
-
-    These are the names a declaration states — a Recipe parameter or function by the
-    name it was declared under, a model-level declaration by the last segment of the
-    path it states — not the leaf field names underneath them. A learnable function
-    module named ``"reaction"`` is declared once under that name however many array
-    fields it holds.
-    """
-    from diff_soup.optimization.inference.fitting.learnables import (
-        _model_declared_paths,
-        _traced_adapter_layer,
-    )
-
-    names = {path.rsplit(".", 1)[-1] for path in _model_declared_paths(problem)}
-    located = _traced_adapter_layer(problem)
-    if located is not None:
-        _base, adapter = located
-        names.update(getattr(adapter, "learnable_params", ()))
-        names.update(getattr(adapter, "learnable_functions", ()))
-    return frozenset(names)
-
-
-def _theta_path_tokens(problem: Any) -> tuple:
-    """Path tokens a plain group name can match on ``problem``'s theta pytree.
-
-    Returns ``(tokens, labels)`` — every token on an inexact-array leaf's path (what a
-    name is matched against) and the subset that names a leaf itself (what an error
-    message advertises).
-    """
-    from diff_soup.optimization.inference.fitting._forward_seam import (
-        _path_key_tokens,
-        coerce_forward_problem,
-    )
-
-    theta0 = coerce_forward_problem(problem).default_theta()
-    tokens: set = set()
-    labels: set = set()
-    for path, leaf in jax.tree_util.tree_leaves_with_path(theta0):
-        if not eqx.is_inexact_array(leaf):
-            continue
-        path_tokens = _path_key_tokens(path)
-        tokens.update(path_tokens)
-        if path_tokens:
-            labels.add(path_tokens[-1])
-    return frozenset(tokens), frozenset(labels)
-
-
-def _resolve_parameters(parameters: Optional[ParameterGroups], problem: Any) -> tuple:
-    """Resolve [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups].
-
-    Produces a θ-selection spec and group records. Returns ``(theta_selection, groups)``:
-
-    * ``theta_selection`` is what the forward seam selects as learnable — ``None``
-      (the problem's declared learnables) when no groups are declared, and otherwise a
-      [GroupedThetaSelection]
-      [diff_soup.optimization.inference.fitting._forward_seam.GroupedThetaSelection]. Its
-      ``order`` puts the flat decision vector in declaration order: shared
-      groups first, then local groups, each in the order declared -- the same
-      order a joint problem gives its shared and per-experiment blocks. Declared
-      names and explicit
-      [LearnableSelector][diff_soup.optimization.inference.fitting.learnables.LearnableSelector]
-      values are resolved to slot keys of the problem's path table, while legacy model names retain their
-      path-token matching behavior. Thus, a declared learnable whose public name is
-      not a θ-leaf path token still resolves.
-    * ``groups`` is a tuple of ``(group_name, kind, leaf_ids, tokens)`` records in
-      declaration order (locals first, then shared). ``leaf_ids`` are the slot
-      keys a selector, a Recipe handle, or a declared-learnable name resolved
-      to; ``tokens`` are the plain names left to path-token matching. A group can
-      carry both when it mixes declared learnables with path tokens.
-    """
-    if parameters is None:
-        return None, ()
-    groups: list = []
-    combined: list = []
-    seen: set = set()
-    name_sources: list = []
-    mask_sources: list = []
-    leaf_id_sources: list = []
-    has_identity_selection = False
-    uses_declared_learnables = has_declared_learnables(problem)
-    declared_names: Optional[frozenset] = None
-    for kind, mapping in (("local", parameters.local), ("shared", parameters.shared)):
-        for gname, value in mapping.items():
-            if isinstance(value, LearnableSelector):
-                if value.names is None:
-                    raise ValueError(
-                        "ParameterGroups: a group selector must name specific learnables; "
-                        "learnables(problem) with no names selects everything and cannot "
-                        "label a group."
-                    )
-                has_identity_selection = True
-                groups.append((gname, kind, selected_leaf_ids(problem, value.mask), frozenset()))
-                mask_sources.append(value.mask)
-            elif handles := _group_value_handles(value):
-                has_identity_selection = True
-                ids = frozenset().union(
-                    *(parameter_handle_leaf_ids(handle, problem=problem) for handle in handles)
-                )
-                if not ids:
-                    raise ValueError(
-                        f"ParameterGroups: group {gname!r} selects no inexact theta leaves."
-                    )
-                groups.append((gname, kind, ids, frozenset()))
-                leaf_id_sources.append(ids)
-            else:
-                names = _group_value_names(value)
-                if uses_declared_learnables:
-                    if declared_names is None:
-                        declared_names = _declared_learnable_names(problem)
-                    declared = tuple(n for n in names if n in declared_names)
-                    tokens = tuple(n for n in names if n not in declared_names)
-                    if tokens:
-                        available, labels = _theta_path_tokens(problem)
-                        unknown = sorted(n for n in tokens if n not in available)
-                        if unknown:
-                            raise ValueError(
-                                f"ParameterGroups: group {gname!r} names {unknown}, which "
-                                "match neither a declared learnable of this problem "
-                                f"({sorted(declared_names)}) nor a theta leaf "
-                                f"({sorted(labels)}). Name a declared learnable, or a "
-                                "learnable leaf of the problem's theta pytree."
-                            )
-                else:
-                    declared, tokens = (), tuple(names)
-                group_ids: frozenset = frozenset()
-                if declared:
-                    selector = learnables(problem, declared)
-                    if selector is None:  # pragma: no cover - learnables raises for missing names
-                        raise ValueError(
-                            f"ParameterGroups: group {gname!r} selects no learnable leaves."
-                        )
-                    has_identity_selection = True
-                    group_ids = selected_leaf_ids(problem, selector.mask)
-                    mask_sources.append(selector.mask)
-                if tokens:
-                    name_sources.append(tokens)
-                groups.append((gname, kind, group_ids, frozenset(tokens)))
-                for n in names:
-                    if n not in seen:
-                        seen.add(n)
-                        combined.append(n)
-    order = tuple(
-        (leaf_ids, tokens)
-        for kind in ("shared", "local")
-        for _gname, group_kind, leaf_ids, tokens in groups
-        if group_kind == kind
-    )
-    if has_identity_selection:
-        theta_selection: Any = GroupedThetaSelection(
-            name_sources=tuple(name_sources),
-            mask_sources=tuple(mask_sources),
-            leaf_id_sources=tuple(leaf_id_sources),
-            order=order,
-        )
-    elif combined:
-        theta_selection = GroupedThetaSelection(name_sources=(tuple(combined),), order=order)
-    else:
-        theta_selection = None
-    return theta_selection, tuple(groups)
-
-
-class ParameterValues(Mapping):
-    """The parameter values a flat vector in a fit's order holds, read by parameter.
-
-    Returned by `InferenceProblem.values(x)`. `values[rate]` is the value `fit[rate]`
-    reads, and a parameter that varies by experiment gives a mapping by experiment.
-    """
-
-    def __init__(self, schema: Any, x: Any):
-        """Read `x` through `schema`, a fit's parameter schema."""
-        self._schema = schema
-        self._x = x
-
-    def __getitem__(self, parameter: Any) -> Any:
-        """Return the value of `parameter`."""
-        return self._schema.value(parameter, self._x)
-
-    def __iter__(self):
-        """Iterate over the fitted parameters in the fit's order."""
-        return iter(self._schema.handles)
-
-    def __len__(self) -> int:
-        """Return the number of fitted parameters."""
-        return len(self._schema.entries)
-
-    def __repr__(self) -> str:
-        """Name the fitted parameters."""
-        return f"ParameterValues({[handle.name for handle in self._schema.handles]})"
-
-
-def parameter_values(schema: Any, x: Any) -> ParameterValues:
-    """Return the read-only view of `x` through `schema`, refusing a problem with none."""
-    if schema is None:
-        raise ValueError(
-            "values: this inference problem fits no declared parameters, so a flat "
-            "vector has no parameter values to read."
-        )
-    return ParameterValues(schema, x)
-
-
-# Marks a ParameterSchema whose fingerprint labels one inference problem's own fitted
-# coordinates. It carries no declaration content, so it is never comparable with a
-# Study's content fingerprint.
-_STRUCTURAL_SCHEMA_PREFIX = "structural:"
-
-
-def _is_structural_schema(schema: Any) -> bool:
-    """Whether ``schema`` labels one inference problem's own coordinates rather than a Study's.
-
-    A structural schema is stamped on the result of fitting an inference problem directly.
-    Its fingerprint records that inference problem's handle-to-column layout, so it states
-    nothing about the declaration a Study fingerprint summarizes and the two are never
-    equal by construction.
-
-    Args:
-        schema: A [ParameterSchema][diff_soup.problem.parameters.ParameterSchema], or
-            ``None``.
-
-    Returns:
-        ``True`` when ``schema`` carries a structural fingerprint.
-    """
-    fingerprint = getattr(schema, "fingerprint", None)
-    return isinstance(fingerprint, str) and fingerprint.startswith(_STRUCTURAL_SCHEMA_PREFIX)
-
-
-def _recipe_parameter_schema(problem: Any, parameters: ParameterGroups, seam: Any):
-    """Build handle lookup metadata for one structural Recipe inference problem.
-
-    A handle earns an entry when the fit selected exactly the coordinates its
-    declared value holds. A handle the selection covers only in part is left out,
-    so the result stays indexable by every handle it can answer for. A handle the
-    caller named in the declaration is an error when it resolves incompletely.
-    """
-    from diff_soup.problem._registry import parameter_handles
-    from diff_soup.problem.parameters import (
-        ParameterEntry,
-        ParameterOccurrence,
-        ParameterSchema,
-        parameter_decoder,
-    )
-
-    explicit: list = []
-    for mapping in (parameters.local, parameters.shared):
-        for value in mapping.values():
-            explicit.extend(_group_value_handles(value))
-
-    named = bool(explicit)
-    if named:
-        handles = tuple(dict.fromkeys(explicit))
-    else:
-        namespaces = parameter_handles(problem)
-        # Structurally identical Recipe builders share one lowered problem.
-        # Retain every registered handle identity as an alias for the same
-        # current structural coordinate, so a result remains indexable by the
-        # handle held by whichever builder supplied it.
-        handles = tuple(
-            dict.fromkeys(handle for declarations in namespaces.values() for handle in declarations)
-        )
-
-    entries = []
-    for handle in handles:
-        if not bool(getattr(handle, "learnable", False)):
-            continue
-        leaf_ids = parameter_handle_leaf_ids(handle, problem=problem)
-        columns = tuple(i for i, leaf_id in enumerate(seam.theta_leaf_ids) if leaf_id in leaf_ids)
-        if not columns:
-            continue
-        size, decode = parameter_decoder(handle)
-        if len(columns) != size:
-            if not named:
-                # A selection that covers a declared value only in part leaves this
-                # handle without a complete coordinate block, so it gets no schema
-                # entry rather than a partial one.
-                continue
-            raise ValueError(
-                f"Recipe handle {handle.name!r} resolves to {len(columns)} fitted "
-                f"coordinates, but its declared value has size {size}. Select every "
-                "coordinate of the handle, or name a handle whose value the "
-                "selection covers completely."
-            )
-        entries.append(
-            ParameterEntry(
-                handle=handle,
-                occurrences=(
-                    ParameterOccurrence(owner=None, columns=columns, declarations=(handle,)),
-                ),
-                size=size,
-                decode=decode,
-            )
-        )
-    if not entries:
-        return None
-    entries.sort(key=lambda entry: entry.occurrences[0].columns[0])
-    fingerprint = _STRUCTURAL_SCHEMA_PREFIX + "|".join(
-        f"{entry.handle.kind}:{entry.handle.name}:{entry.occurrences[0].columns}"
-        for entry in entries
-    )
-    return ParameterSchema(entries, fingerprint=fingerprint)
-
-
-def _group_columns(seam: Any, groups: tuple) -> tuple:
-    """Map each parameter group to its flat-vector column indices.
-
-    A group owns a column when that column's source θ-leaf slot key is one the group
-    resolved (a selector, a Recipe handle, or a declared-learnable name — which
-    resolves declared learnables whose public name is not a θ-leaf token), or when one
-    of the group's remaining plain names appears in that column's path-token set (the
-    same rule the name→leaf resolver uses).
-
-    Returns ``(group_names, group_cols)`` in declaration order.
-    """
-    token_sets = seam.theta_token_sets
-    leaf_ids = seam.theta_leaf_ids
-    names: list = []
-    cols: list = []
-    owners: dict[int, str] = {}
-    for gname, _kind, group_ids, group_tokens in groups:
-        matched = tuple(
-            i
-            for i, (lid, ts) in enumerate(zip(leaf_ids, token_sets))
-            if lid in group_ids or (group_tokens and ts & group_tokens)
-        )
-        for col in matched:
-            previous = owners.get(col)
-            if previous is not None:
-                raise ValueError(
-                    f"ParameterGroups: groups {previous!r} and {gname!r} overlap on "
-                    f"learnable parameter column {col}. Each learnable scalar must belong "
-                    "to exactly one parameter group."
-                )
-            owners[col] = gname
-        names.append(gname)
-        cols.append(matched)
-    return tuple(names), tuple(cols)
-
-
-def _parameter_groups_select_name(parameters: ParameterGroups, name: str) -> bool:
-    """Whether an explicit nonempty parameter declaration selects ``name``.
-
-    An empty [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
-    states no selection at all, and the fit falls back to the problem's declared
-    learnables, so callers should only use this helper after establishing that at
-    least one group was declared.
-    """
-    for mapping in (parameters.local, parameters.shared):
-        for value in mapping.values():
-            if isinstance(value, LearnableSelector):
-                if value.names is not None and name in value.names:
-                    return True
-            elif handles := _group_value_handles(value):
-                if any(handle.name == name for handle in handles):
-                    return True
-            elif name in _group_value_names(value):
-                return True
-    return False
-
-
-def build_stacked_residual_fns(segment_fns: tuple) -> tuple:
-    """Build the jitted ``(r_fn, rj_fn)`` pair over a tuple of segment closures.
-
-    ``r_fn(p)`` concatenates the per-segment residuals; ``rj_fn(p)`` returns
-    ``(r, J)`` via forward-mode. Built ONCE per inference problem and cached, so a
-    repeated ``solve()`` — every outer iteration of a penalty loop — reuses the
-    compiled kernels instead of retracing the PDE residual. Regularizer rows are
-    deliberately NOT part of these callables: they evaluate eagerly in the
-    solvers, so penalty weights can change between solves without recompiling.
-    """
-    # Local import avoids a fitting-to-solver module cycle at import time.
-    from diff_soup.optimization.solvers.tangent import value_and_jacfwd
-
-    @jax.jit
-    def _r_fn(p):
-        return jnp.concatenate([fn(p) for fn in segment_fns])
-
-    @jax.jit
-    def _rj_fn(p):
-        return value_and_jacfwd(lambda p_: _r_fn(p_), p)
-
-    return _r_fn, _rj_fn
-
-
-def _stacked_residual_fn(segment_fns: tuple, batched_r: Any = None) -> Callable:
-    """Build a jitted data-residual closure without differentiating it."""
-    if batched_r is not None:
-        return batched_r
-
-    @jax.jit
-    def residual(x):
-        return jnp.concatenate([fn(x) for fn in segment_fns])
-
-    return residual
-
-
-def _loss_fn_from_residual(residual_fn: Callable) -> Callable:
-    """Build the scalar data-misfit loss from a residual closure."""
-
-    @jax.jit
-    def loss(x):
-        residual = residual_fn(x)
-        return half_sum_of_squares(residual)
-
-    return loss
-
-
-def _loss_and_grad_from_residual(residual_fn: Callable, ad: str) -> Callable:
-    """Build one scalar-loss value-and-gradient seam."""
-    if ad == "forward":
-        from diff_soup.optimization.solvers.tangent import value_and_jacfwd
-
-        @jax.jit
-        def forward_loss_and_grad(x):
-            residual, jacobian = value_and_jacfwd(residual_fn, x)
-            loss = half_sum_of_squares(residual)
-            grad = jacobian.T @ residual
-            failed = jnp.any(jnp.abs(residual) >= _FAILED_SENTINEL)
-            return loss, jnp.where(failed, jnp.zeros_like(grad), grad)
-
-        return forward_loss_and_grad
-
-    @jax.jit
-    def reverse_loss_and_grad(x):
-        def objective(point):
-            residual = residual_fn(point)
-            loss = half_sum_of_squares(residual)
-            failed = jnp.any(jnp.abs(residual) >= _FAILED_SENTINEL)
-            return loss, failed
-
-        (loss, failed), grad = jax.value_and_grad(objective, has_aux=True)(x)
-        # A zero cotangent entering a failed time loop can still encounter NaN
-        # during replay. Select after the backward pass so it cannot escape.
-        return loss, jnp.where(failed, jnp.zeros_like(grad), grad)
-
-    return reverse_loss_and_grad
-
-
-def _loss_grad_hessian_from_gradient(loss_and_grad_fn: Callable) -> Callable:
-    """Build a forward derivative of a value-and-gradient seam."""
-
-    @jax.jit
-    def loss_grad_hessian(x):
-        def gradient_with_aux(point):
-            loss, grad = loss_and_grad_fn(point)
-            return grad, (loss, grad)
-
-        hessian, (loss, grad) = jax.jacfwd(gradient_with_aux, has_aux=True)(x)
-        return loss, grad, hessian
-
-    return _MemoryCheckedHessian(loss_grad_hessian, tile="full")
-
-
-# The memory of an exact Hessian grows with the square of the parameter count:
-# every tangent direction of the forward-over-reverse product carries the whole
-# reverse tape. Measured on a decision-variable multishoot fit (CPU,
-# 2026-10-28): 4.2 / 16.1 / 63.2 GB of compiled temporaries at 83 / 163 / 323
-# parameters. Below this width the Hessian is used without measuring it first.
-_HESSIAN_GUARD_MIN_WIDTH = 64
-#: The share of the free device memory one Hessian evaluation may take.
-_HESSIAN_MEMORY_SHARE = 0.9
-
-
-class _HessianMemoryError(ConfigurationError):
-    """The exact Hessian needs more memory than the device has free."""
-
-
-def _cgroup_memory_headroom() -> Optional[int]:
-    """The bytes this process may still allocate under its cgroup v2 limits, or ``None``."""
-    try:
-        with open("/proc/self/cgroup") as handle:
-            lines = handle.read().splitlines()
-    except OSError:
-        return None
-    relative = next((line[3:] for line in lines if line.startswith("0::")), None)
-    if relative is None:
-        return None
-    headroom = None
-    path = os.path.normpath("/sys/fs/cgroup/" + relative.lstrip("/"))
-    while path.startswith("/sys/fs/cgroup"):
-        try:
-            with open(os.path.join(path, "memory.max")) as handle:
-                limit = handle.read().strip()
-            with open(os.path.join(path, "memory.current")) as handle:
-                current = int(handle.read().strip())
-        except (OSError, ValueError):
-            limit = "max"
-            current = 0
-        if limit != "max":
-            room = max(int(limit) - current, 0)
-            headroom = room if headroom is None else min(headroom, room)
-        if path == "/sys/fs/cgroup":
-            break
-        path = os.path.dirname(path)
-    return headroom
-
-
-def _host_available_memory() -> Optional[int]:
-    """The host memory available to this process in bytes, or ``None`` when unknown."""
-    available = None
-    try:
-        with open("/proc/meminfo") as handle:
-            for line in handle:
-                if line.startswith("MemAvailable:"):
-                    available = int(line.split()[1]) * 1024
-                    break
-    except (OSError, ValueError, IndexError):
-        available = None
-    if available is None:
-        try:
-            import psutil
-
-            available = int(psutil.virtual_memory().available)
-        except Exception:  # psutil is optional; without it the host is unmeasured
-            available = None
-    headroom = _cgroup_memory_headroom()
-    if headroom is not None:
-        available = headroom if available is None else min(available, headroom)
-    return available
-
-
-def _free_device_memory(device: Any) -> Optional[int]:
-    """The bytes ``device`` can still allocate, or ``None`` when it cannot say."""
-    if device.platform == "cpu":
-        return _host_available_memory()
-    try:
-        stats = device.memory_stats() or {}
-    except Exception:  # a backend without allocator statistics is unmeasured
-        return None
-    limit = stats.get("bytes_limit")
-    if limit is None:
-        return None
-    return int(limit) - int(stats.get("bytes_in_use", 0))
-
-
-def _memory_need_and_free(compiled: Any) -> Optional[tuple]:
-    """``(need, free, platform)`` of a compiled evaluation, or ``None`` when unmeasured."""
-    try:
-        analysis = compiled.memory_analysis()
-    except Exception:  # not every backend implements the analysis
-        return None
-    if analysis is None:
-        return None
-    need = int(getattr(analysis, "temp_size_in_bytes", 0) or 0) + int(
-        getattr(analysis, "output_size_in_bytes", 0) or 0
-    )
-    device = jax.local_devices()[0]
-    free = _free_device_memory(device)
-    if free is None:
-        return None
-    return need, free, device.platform
-
-
-def _check_hessian_memory(compiled: Any, width: int, tile: Any) -> None:
-    """Raise `_HessianMemoryError` when a compiled Hessian needs more than the free memory.
-
-    ``compiled`` is the ahead-of-time compiled evaluation of ``width``
-    parameters in tiles of ``tile`` directions. A backend that reports no
-    memory figures passes.
-    """
-    measured = _memory_need_and_free(compiled)
-    if measured is None or measured[0] <= _HESSIAN_MEMORY_SHARE * measured[1]:
-        return
-    need, free, platform = measured
-    gib = 2.0**30
-    how = "whole" if tile in (None, "full") else f"in tiles of {tile} directions"
-    smaller = (
-        "a smaller hessian_tile= (8 or 16), " if tile in (None, "full") or int(tile) > 8 else ""
-    )
-    raise _HessianMemoryError(
-        f"The exact Hessian over {width} parameters, formed {how}, needs "
-        f"{need / gib:.1f} GiB and the {platform} device has {free / gib:.1f} GiB "
-        f"free. With NewtonTrustRegion pass {smaller}"
-        'hessian="gauss-newton", or subproblem="cg" with '
-        "x_scale=ds.optimization.inference.ConstantScale(...). For laplace and information, "
-        'use the expected curvature (curvature="expected", kind="expected").'
-    )
-
-
-class _JacobianMemoryError(ConfigurationError):
-    """The Gauss-Newton residual Jacobian needs more memory than the device has free."""
-
-
-def _jacobian_memory_reporter(knob: str) -> Callable:
-    """The memory check of a residual Jacobian whose tile the option ``knob`` sets."""
-
-    def check(compiled: Any, width: int, tile: Any) -> None:
-        measured = _memory_need_and_free(compiled)
-        if measured is None or measured[0] <= _HESSIAN_MEMORY_SHARE * measured[1]:
-            return
-        need, free, platform = measured
-        gib = 2.0**30
-        how = "whole" if tile in (None, "full") else f"in tiles of {tile} directions"
-        smaller = (
-            f"Pass a smaller {knob}= (8 or 16), or d"
-            if tile in (None, "full") or int(tile) > 8
-            else "D"
-        )
-        raise _JacobianMemoryError(
-            f"The Gauss-Newton residual Jacobian over {width} parameters, formed {how}, "
-            f"needs {need / gib:.1f} GiB and the {platform} device has {free / gib:.1f} GiB "
-            f"free. {smaller}eclare a ds.optimization.inference.StateBasis or fewer windows to shrink "
-            "the decision vector."
-        )
-
-    return check
-
-
-#: Set while a concrete check compiles: an enclosing check measures every
-#: nested Hessian, so the nested ones skip their own compilation.
-_ENCLOSING_CHECK = threading.local()
-
-
-class _MemoryCheckedHessian:
-    """A jitted Hessian evaluation whose memory is checked before its first run.
-
-    Above `_HESSIAN_GUARD_MIN_WIDTH` parameters the evaluation is compiled
-    ahead of time once per input shape and its memory compared with the free
-    memory of the device. A concrete input is compiled exactly as the call
-    compiles it, so the call reuses that compilation. A traced input (the
-    Hessian inside another jitted function) is measured on its shape, which
-    costs a second compilation, unless an enclosing check is compiling it.
-    ``report(compiled, width, tile)`` raises when the evaluation does not fit;
-    the exact Hessian's check by default, a residual Jacobian's through
-    `_jacobian_memory_reporter`.
-    """
-
-    def __init__(self, fn: Callable, *, tile: Any = "full", report: Callable = None):
-        self._fn = fn if hasattr(fn, "lower") else jax.jit(fn)
-        self.tile = tile
-        self._report = _check_hessian_memory if report is None else report
-        self._checked: set = set()
-
-    def lower(self, *args, **kwargs):
-        """Lower the wrapped jitted function, as `jax.jit(...).lower` does."""
-        return self._fn.lower(*args, **kwargs)
-
-    def check(self, x: Any) -> None:
-        """Compile for ``x`` and raise the memory error of the evaluation when it does not fit."""
-        shape = tuple(np.shape(x))
-        if len(shape) != 1 or shape[0] <= _HESSIAN_GUARD_MIN_WIDTH:
-            return
-        key = (shape, str(jnp.result_type(x)))
-        traced = isinstance(x, jax.core.Tracer)
-        if key in self._checked or (traced and getattr(_ENCLOSING_CHECK, "active", False)):
-            return
-        point = jax.ShapeDtypeStruct(shape, jnp.result_type(x)) if traced else x
-        enclosing = getattr(_ENCLOSING_CHECK, "active", False)
-        _ENCLOSING_CHECK.active = True
-        try:
-            compiled = self._fn.lower(point).compile()
-        finally:
-            _ENCLOSING_CHECK.active = enclosing
-        self._report(compiled, shape[0], self.tile)
-        self._checked.add(key)
-
-    def __call__(self, x: Any):
-        self.check(x)
-        return self._fn(x)
-
-
-#: The tiles ``"auto"`` tries for a residual Jacobian that does not fit whole, widest first.
-_AUTO_JACOBIAN_TILES = (32, 16, 8)
-
-
-class _TiledJacobian:
-    """A jitted ``x -> (residual, jacobian)`` that can also be formed in tiles.
-
-    ``build(tile)`` returns the evaluation pushing ``tile`` tangents at a time;
-    calling the object evaluates it with every tangent at once. The solvers
-    read [at_tile][diff_soup.optimization.inference.fitting.inference_problem._TiledJacobian.at_tile]
-    to tile a structured Jacobian instead of tiling the residual's directions.
-    """
-
-    def __init__(self, build: Callable):
-        self._build = build
-        self._jitted: dict = {}
-
-    def at_tile(self, tile: Any) -> Callable:
-        """The jitted evaluation in tiles of ``tile`` tangents, built once per tile."""
-        key = "full" if tile is None else tile
-        if key not in self._jitted:
-            self._jitted[key] = jax.jit(self._build(key))
-        return self._jitted[key]
-
-    def lower(self, x: Any):
-        """Lower the whole evaluation, as `jax.jit(...).lower` does."""
-        return self.at_tile("full").lower(x)
-
-    def __call__(self, x: Any):
-        return self.at_tile("full")(x)
-
-
-def checked_residual_jacobian(problem: Any, x: Any, tile: Any, *, knob: str) -> Any:
-    """``x -> (residual, jacobian)`` of a least-squares problem, memory-checked at ``x``.
-
-    The problem's structured Jacobian (a `_TiledJacobian`, such as fitted
-    window starts give) is used when it has one, else the residual's forward
-    Jacobian. ``tile`` is an int, ``"full"``, or ``"auto"``: whole when the
-    compiled evaluation fits in the free device memory, else the widest of
-    `_AUTO_JACOBIAN_TILES` that fits. The result's ``tile`` names the tile
-    used. ``knob`` is the solver option the memory error names.
-
-    Raises:
-        ConfigurationError: If no candidate tile fits.
-    """
-    from diff_soup.optimization.solvers.tangent import value_and_jacfwd_tiled
-
-    at_tile = getattr(problem.residual_and_jacobian, "at_tile", None)
-    residual = problem.residual
-
-    def evaluation(chosen):
-        if at_tile is not None:
-            return at_tile(chosen)
-        return jax.jit(lambda point: value_and_jacfwd_tiled(residual, point, tile=chosen))
-
-    width = int(np.shape(x)[0])
-    if tile == "auto":
-        candidates = ["full"] + [t for t in _AUTO_JACOBIAN_TILES if t < width]
-    else:
-        candidates = ["full" if tile is None else tile]
-    report = _jacobian_memory_reporter(knob)
-    error = None
-    for candidate in candidates:
-        checked = _MemoryCheckedHessian(evaluation(candidate), tile=candidate, report=report)
-        try:
-            checked.check(x)
-        except _JacobianMemoryError as exc:
-            error = exc
-            continue
-        return checked
-    raise error
-
-
-def _estimation_window_jacobian(problem: Any) -> Optional[_TiledJacobian]:
-    """The structured Jacobian of an estimation problem over fitted window starts, or ``None``.
-
-    Its residual is the data rows of its data problem followed by the MAP prior
-    rows; the data rows take the data problem's window-block Jacobian.
-    """
-    data = getattr(problem, "diagnostic_problem", None)
-    blocks = getattr(problem, "_prior_blocks", None)
-    if data is None or data is problem or blocks is None:
-        return None
-    if not getattr(data, "fits_window_states", False) or data.batched_r_fn is not None:
-        return None
-    data_jacobian = data.stacked_rj_fn
-    if not isinstance(data_jacobian, _TiledJacobian):
-        return None
-
-    def prior_rows(x):
-        return jnp.concatenate(
-            [jnp.zeros((0,), dtype=x.dtype)] + [prior.residual(x[c]) for c, prior in blocks]
-        )
-
-    def build(tile):
-        data_rows = data_jacobian._build(tile)
-
-        def residual_and_jacobian(x):
-            residual, jacobian = data_rows(x)
-            if not blocks:
-                return residual, jacobian
-            rows = prior_rows(x)
-            return (
-                jnp.concatenate((residual, rows)),
-                jnp.concatenate((jacobian, jax.jacfwd(prior_rows)(x)), axis=0),
-            )
-
-        return residual_and_jacobian
-
-    return _TiledJacobian(build)
-
-
-def lower_residual_problem(
-    problem: Any,
-    optimizer: Any,
-    *,
-    evaluator: Any = None,
-    lanes: Any = None,
-    gauss_newton: Any = None,
-    value: Any = None,
-    regularization: Any = None,
-    joint_view: Any = None,
-) -> Any:
-    """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] of a residual problem.
-
-    ``problem`` is an inference problem of residual rows: an
-    [InferenceProblem][diff_soup.optimization.inference.fitting.inference_problem.InferenceProblem],
-    a joint problem, or a view of one. The result's residual is its
-    ``batched_r_fn`` (else ``stacked_r_fn``, else the concatenation of its
-    ``segment_fns``) with the matching Jacobian; its value, gradient and exact
-    Hessian are ``evaluator.loss_fn``, ``evaluator.loss_and_grad_fn(ad)`` and
-    ``evaluator.loss_grad_hessian_fn(composition)`` when the evaluator has
-    them, evaluated on first use, and are derived from the residual
-    otherwise. ``ad`` and ``composition`` come from ``optimizer`` (its ``ad``
-    and ``composition``; a solver that requires ``"hessian"`` and names no
-    ``ad`` differentiates its gradient in the mode the composition's inner
-    derivative uses). The bounds are resolved once.
-
-    Args:
-        problem: The residual problem; its ``x0``, ``regularization``,
-            ``bounds``, ``unflatten_fn``, ``prob_static``, ``segment_fns``,
-            ``n_segments``, ``n_residuals`` and ``trial_is_valid`` are read.
-        optimizer: The solver the problem is lowered for.
-        evaluator: The object whose seams evaluate the objective; ``None``
-            is ``problem``.
-        lanes: The lowered study that evaluates the objective on its lanes,
-            or ``None``; with one the structure holds ``"batched_lanes"``.
-        gauss_newton: ``x -> (cost, J^T r, J^T J, failed)`` evaluated without
-            forming the Jacobian, or ``None``: the lanes' ``gauss_newton_fn``
-            when given, the reduced statistics of a sharded problem, else
-            ``J^T J`` of the residual's Jacobian.
-        value: ``x -> `` the objective, NaN where an evaluation failed, to use
-            in place of ``evaluator.loss_fn``: the cost reduced across the
-            mesh for a sharded problem; ``None`` reads ``evaluator.loss_fn``,
-            or a sharded problem's ``evaluate_cost_fn``.
-        regularization: The regularization the solver adds; ``None`` is
-            ``problem.regularization``.
-        joint_view: ``() -> `` the joint problem with its level structure,
-            for ``"batched_lanes"``.
-    """
-    evaluator = problem if evaluator is None else evaluator
-    requires = frozenset(getattr(optimizer, "requires", ()))
-    asked = getattr(optimizer, "composition", "auto")
-    resolve = getattr(evaluator, "resolved_hessian_composition", None)
-    composition = None
-    if "hessian" in requires and callable(resolve):
-        composition = resolve(asked)
-    ad = getattr(optimizer, "ad", None)
-    if ad is None:
-        ad = "forward" if composition not in (None, "forward-over-reverse") else "reverse"
-
-    residual = getattr(problem, "batched_r_fn", None)
-    residual_and_jacobian = getattr(problem, "batched_rj_fn", None)
-    if residual is None or residual_and_jacobian is None:
-        residual = getattr(problem, "stacked_r_fn", None)
-        residual_and_jacobian = getattr(problem, "stacked_rj_fn", None)
-    if residual is None or residual_and_jacobian is None:
-        residual, residual_and_jacobian = build_stacked_residual_fns(tuple(problem.segment_fns))
-    # Fitted window starts: the data rows take the window-block Jacobian.
-    window_jacobian = _estimation_window_jacobian(problem)
-    if window_jacobian is not None:
-        residual_and_jacobian = window_jacobian
-    if getattr(evaluator, "loss_fn", None) is None:
-        evaluator = _ResidualSeams(residual)
-
-    if value is None and lanes is None and getattr(problem, "is_sharded", False):
-        evaluate_cost = getattr(problem, "evaluate_cost_fn", None)
-        if evaluate_cost is not None:
-            value = _reduced_cost(evaluate_cost)
-    if value is None:
-
-        def value(x):
-            return evaluator.loss_fn(x)
-
-    def value_and_gradient(x):
-        return evaluator.loss_and_grad_fn(ad)(x)
-
-    def value_gradient_hessian(x):
-        return evaluator.loss_grad_hessian_fn(asked if composition is None else composition)(x)
-
-    hessian_vector = None
-    if lanes is None:
-
-        def hessian_vector(x, v):
-            gradient = evaluator.loss_and_grad_fn(ad)
-            return jax.jvp(lambda y: gradient(y)[1], (x,), (v,))[1]
-
-    predicate = getattr(problem, "trial_is_valid", None)
-    is_valid = None
-    if callable(predicate):
-
-        def is_valid(x):
-            return problem.trial_is_valid(x)
-
-    structure = {"value_gradient", "residual_jacobian", "gauss_newton"}
-    if getattr(evaluator, "supported_compositions", frozenset()):
-        structure.add("hessian")
-    if lanes is not None:
-        structure.add("batched_lanes")
-    reduced = gauss_newton is not None
-    if gauss_newton is None and lanes is None and getattr(problem, "is_sharded", False):
-        evaluate = getattr(problem, "evaluate_lsq_fn", None)
-        if evaluate is not None:
-            gauss_newton, reduced = _reduced_statistics(evaluate), True
-    regularization = (
-        getattr(problem, "regularization", None) if regularization is None else regularization
-    )
-    n_residuals = getattr(problem, "n_residuals", None)
-    segment_fns = tuple(getattr(problem, "segment_fns", ()) or ())
-    return LeastSquaresProblem(
-        x0=problem.x0,
-        structure=frozenset(structure),
-        _unflatten=getattr(problem, "unflatten_fn", None),
-        _static=getattr(problem, "prob_static", None),
-        bounds=resolve_decision_bounds(problem),
-        _regularization=regularization,
-        lanes=lanes,
-        ad=ad,
-        hessian_composition=composition,
-        n_segments=int(getattr(problem, "n_segments", 1) or 1),
-        reduced_gauss_newton=reduced,
-        # The closures read no args: an inference problem's lanes differ in their data,
-        # which the lowering closes over.
-        _value=ignoring_args(value),
-        _value_and_gradient=ignoring_args(value_and_gradient),
-        _value_gradient_hessian=ignoring_args(value_gradient_hessian),
-        _hessian_vector=ignoring_args(hessian_vector),
-        _gauss_newton=ignoring_args(gauss_newton),
-        _is_valid=ignoring_args(is_valid),
-        _joint_view=joint_view,
-        _residual=ignoring_args(residual),
-        _residual_and_jacobian=ignoring_args(residual_and_jacobian),
-        _segment_fns=tuple(map(ignoring_args, segment_fns)),
-        n_residuals=None if n_residuals is None else int(n_residuals),
-    )
-
-
-def _reduced_cost(evaluate_cost: Callable) -> Callable:
-    """``x -> `` the cost from a reduced ``evaluate_cost_fn``, NaN where a child failed."""
-
-    def value(x):
-        cost, _rows, failed = evaluate_cost(jnp.asarray(x))
-        return jnp.where(failed == 0, cost, jnp.nan)
-
-    return value
-
-
-def _reduced_statistics(evaluate: Callable) -> Callable:
-    """``x -> (cost, J^T r, J^T J, failed)`` from a reduced ``evaluate_lsq_fn``."""
-
-    def gauss_newton(x):
-        cost, gradient, matrix, _rows, failed = evaluate(jnp.asarray(x))
-        return cost, gradient, matrix, failed
-
-    return gauss_newton
-
-
-class _ResidualSeams:
-    """The scalar seams of a residual problem that defines none of its own."""
-
-    def __init__(self, residual: Callable):
-        self.loss_fn = _loss_fn_from_residual(residual)
-        self._residual = residual
-        self._gradients: dict = {}
-        self.supported_compositions = frozenset({"forward-over-forward"})
-
-    def loss_and_grad_fn(self, ad: str = "reverse") -> Callable:
-        if ad not in self._gradients:
-            self._gradients[ad] = _loss_and_grad_from_residual(self._residual, ad)
-        return self._gradients[ad]
-
-    def loss_grad_hessian_fn(self, composition: str = "auto") -> Callable:
-        if "hessian" not in self._gradients:
-            self._gradients["hessian"] = _loss_grad_hessian_from_gradient(
-                self.loss_and_grad_fn("forward")
-            )
-        return self._gradients["hessian"]
-
-
-def _resolve_spec_declared_bounds(inference_problem: Any, problem: Any):
-    """Resolve bounds declared on the problem's spec params to flat ``(lb, ub)``.
-
-    A declared bound binds a column when its parameter is a decision variable of
-    this inference problem — learnable and selected into the flat vector. Columns are
-    found by slot key through its stable Recipe handle (a declared
-    parameter's public name need not be a θ-leaf path token). A bounded learnable intentionally
-    omitted by a nonempty
-    [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
-    is fixed for this fit and
-    needs no bound, so it is ignored silently. A declared non-learnable, or a
-    learnable explicitly selected but absent from the decision vector, warns
-    instead. Returns ``None`` when nothing binds or when an explicit
-    ``InferenceProblem(bounds=...)`` overrides the declarations; the window-state
-    tail always stays unbounded.
-    """
-    declared = getattr(problem, "_declared_param_bounds", ())
-    if not declared:
-        return None
-
-    parameters = inference_problem.parameters
-    explicit_selection = bool(parameters.local or parameters.shared)
-    unenforceable = [
-        getattr(handle, "name", str(handle)) for handle, _b, learnable in declared if not learnable
-    ]
-    entries = []
-    if inference_problem.bounds is None:
-        leaf_ids = inference_problem._seam.theta_leaf_ids
-        for handle, (lo, hi), learnable in declared:
-            name = getattr(handle, "name", str(handle))
-            if not learnable:
-                continue
-            if explicit_selection and not _parameter_groups_select_name(parameters, name):
-                # A nonempty ParameterGroups is an explicit decision set. Omitted
-                # learnables are fixed at their declared values for this fit.
-                continue
-            ids = parameter_handle_leaf_ids(handle, problem=problem)
-            cols = tuple(i for i, lid in enumerate(leaf_ids) if lid in ids)
-            if not cols:
-                unenforceable.append(name)
-                continue
-            entries.append((cols, lo, hi))
-
-    if unenforceable:
-        warn_user(
-            f"bounds declared on parameter(s) {sorted(set(unenforceable))} cannot "
-            "be enforced: they are not decision variables of this inference problem. "
-            "A parameter bound binds only when the parameter is declared "
-            "learnable=True and selected into the fit; otherwise drop its "
-            "bounds or pass bounds explicitly to the InferenceProblem.",
-        )
-
-    if inference_problem.bounds is not None or not entries:
-        return None
-
-    n = int(np.asarray(inference_problem._x0).size)
-    lb = np.full(n, -np.inf)
-    ub = np.full(n, np.inf)
-    for cols, lo, hi in entries:
-        idx = np.asarray(cols, dtype=int)
-        lb[idx] = -np.inf if lo is None else float(lo)
-        ub[idx] = np.inf if hi is None else float(hi)
-    return jnp.asarray(lb), jnp.asarray(ub)
-
-
 @dataclasses.dataclass(frozen=True)
 class _ThetaOnlyRegularizer:
     """Apply a parameter regularizer only to the leading theta block."""
@@ -1349,11 +147,11 @@ class _ThetaOnlyRegularizer:
     base: Any
     n_theta: int
 
-    def residual(self, x: Any):
+    def residual(self, x: ArrayLike):
         """Return the wrapped regularizer rows for ``x[:n_theta]``."""
         return self.base.residual(jnp.asarray(x)[: self.n_theta])
 
-    def penalty(self, x: Any):
+    def penalty(self, x: ArrayLike):
         """Return the wrapped regularizer penalty for ``x[:n_theta]``."""
         return self.base.penalty(jnp.asarray(x)[: self.n_theta])
 
@@ -1383,7 +181,7 @@ def _as_named_series_tuple(data: Any) -> tuple:
     return series
 
 
-def _resolve_y0(data: tuple, y0: Any) -> Any:
+def _resolve_y0(data: tuple, y0: Optional[ArrayLike | Sequence]) -> jax.Array:
     """Resolve the trajectory IC: explicit ``y0`` else full-state ``data[0]``.
 
     Raises:
@@ -1402,31 +200,7 @@ def _resolve_y0(data: tuple, y0: Any) -> Any:
     return s0.values[0]
 
 
-def _check_initial_state_time(initial_state: Any, data: tuple) -> None:
-    """Reject a FixedInitialState time that contradicts the frame it labels.
-
-    A [FixedInitialState][diff_soup.optimization.inference.fitting.inference_problem.FixedInitialState]
-    with no ``y0`` takes its state from the first stream's first observed frame, so
-    the only time that state can carry is that frame's own time.
-
-    Raises:
-        ValueError: If ``y0`` is ``None`` and ``time`` names a different instant.
-    """
-    if not isinstance(initial_state, FixedInitialState) or initial_state.y0 is not None:
-        return
-    first = float(np.asarray(data[0].ts).reshape((-1,))[0])
-    stated = float(initial_state.time)
-    if abs(stated - first) > 1e-12 * max(1.0, abs(first)):
-        raise ValueError(
-            f"FixedInitialState(time={stated}) with no y0 takes its state from the "
-            f"first frame of Series {data[0].name!r}, which is observed at t={first}. "
-            f"State time={first} to match the frame, pass FixedInitialState(y0, "
-            f"time={stated}) to state a different instant with an explicit y0, or omit "
-            "initial_state to take both the state and the time from the first frame."
-        )
-
-
-def _reached_tend(ts: Any, t_end: float) -> bool:
+def _reached_tend(ts: ArrayLike, t_end: float) -> bool:
     """Host-side loud-status check: did the solve reach ``t_end``?"""
     return abs(float(ts[-1]) - t_end) <= 1e-9 * max(1.0, abs(t_end))
 
@@ -1466,55 +240,55 @@ class InferenceProblem:
     problem: Any
     data: tuple
     solver: Any
-    objective: Any
-    trajectory: Any
-    initial_state: Any
-    parameters: Any
-    parameter_schema: Any
+    objective: Objective
+    trajectory: Trajectory
+    initial_state: InitialState
+    parameters: ParameterGroups
+    parameter_schema: Optional[ParameterSchema]
     regularization: Any
-    _seam: Any
+    _seam: ForwardSeam
     _segment_fns: tuple
-    _residual_builder: Any
-    _batched_r: Any
-    _batched_rj: Any
+    _residual_builder: Callable
+    _batched_r: Optional[Callable]
+    _batched_rj: Optional[Callable]
     # Lazily-built jitted (r, rj) pair over ``segment_fns`` — one compile per
     # inference problem, reused by every subsequent solve.
-    _stacked_r: Any
-    _stacked_rj: Any
+    _stacked_r: Optional[Callable]
+    _stacked_rj: Optional[Callable]
     _residual_seams: dict
-    _loss_fn: Any
+    _loss_fn: Optional[Callable]
     _loss_grad_fns: dict
     _loss_grad_hessian_fns: dict
     _x0: np.ndarray
     _n_seg: int
     _baseline_reached_tend: Optional[bool]
-    _baseline_probe: Any
+    _baseline_probe: Optional[Callable]
     _residual_rows: int
-    _parameters_argument: Any
-    _reused_seam: Any
-    _window_content_key: Any
+    _parameters_argument: Optional[ParameterGroups]
+    _reused_seam: Optional[ForwardSeam]
+    _window_content_key: Optional[str]
     _window_record_pending: bool
-    _dv_build: Any
+    _dv_build: Optional[DecisionWindowBuild]
     _stream_names: tuple
     _stream_slices: tuple
     _param_group_names: tuple
     _param_group_cols: tuple
-    _union_ts: Any
-    _solve_probe: Any
+    _union_ts: Optional[np.ndarray]
+    _solve_probe: Optional[dict]
     state_prior_weight: float
     theta_only_steps: int
     project_windows: bool
-    window_initialization: Any
-    restart_step: Any
-    trial_predicate: Any
+    window_initialization: Optional[WindowInitialization]
+    restart_step: Optional[RestartStep]
+    trial_predicate: Optional[Callable]
     bounds: Optional[Bounds]
     # Flat (lb, ub) resolved from bounds declared on the problem's spec params;
     # ``None`` when nothing is declared or an explicit ``bounds=`` overrides.
-    _declared_bounds: Any
+    _declared_bounds: Optional[tuple[jax.Array, jax.Array]]
     # The operating protocol the single shoot follows, and its segment arrays
     # against the problem's mode names; both ``None`` without a schedule.
-    schedule: Any
-    _schedule_arrays: Any
+    schedule: Optional[Schedule]
+    _schedule_arrays: Optional[ScheduleArrays]
 
     def __init__(
         self,
@@ -1525,16 +299,16 @@ class InferenceProblem:
         parameters: Optional[ParameterGroups] = None,
         objective: Optional[Objective] = None,
         trajectory: Optional[Trajectory] = None,
-        initial_state: Any = None,
+        initial_state: Optional[InitialState | ArrayLike | Sequence] = None,
         regularizer: Any = None,
         state_prior_weight: float = 0.0,
         theta_only_steps: int = 0,
         project_windows: bool = True,
-        window_initialization: Any = None,
-        restart_step: Any = None,
+        window_initialization: Optional[WindowInitialization] = None,
+        restart_step: Optional[RestartStep] = None,
         trial_predicate: Any = None,
         bounds: Optional[Bounds] = None,
-        schedule: Any = None,
+        schedule: Optional[Schedule] = None,
     ):
         """Eagerly build the residual closures for the chosen trajectory.
 
@@ -1633,7 +407,9 @@ class InferenceProblem:
         _set(self, "_loss_grad_fns", {})
         _set(self, "_loss_grad_hessian_fns", {})
 
-    def _seam_for(self, theta_spec: Any) -> Any:
+    def _seam_for(
+        self, theta_spec: Optional[GroupedThetaSelection | str | Iterable[str]]
+    ) -> ForwardSeam:
         """The forward seam of this problem: the one handed over by ``with_data`` or a new one."""
         seam = self._reused_seam
         return build_forward_seam(self.problem, theta_spec) if seam is None else seam
@@ -2029,7 +805,7 @@ class InferenceProblem:
         """Eagerly build the decision-variable window stack.
 
         With
-        [LearnedInitialState][diff_soup.optimization.inference.fitting.inference_problem.LearnedInitialState],
+        [LearnedInitialState][diff_soup.optimization.inference.fitting.formulation.LearnedInitialState],
         the first window's differential start
         ``s_0`` joins the decision vector (``x = [theta | s_0 | s_1 | ... ]``); an
         observation at ``t_0`` then constrains it directly (the window-0 obs row uses
@@ -2260,7 +1036,7 @@ class InferenceProblem:
             _set(self, "_stacked_rj", rj_fn)
         return self._stacked_r
 
-    def _forward_window_build(self) -> Any:
+    def _forward_window_build(self) -> DecisionWindowBuild:
         """The window build whose ``residual`` is the forward seam's, as ``stacked_r_fn`` evaluates it."""
         (residual,) = self._residual_seam("forward")[0]
         return residual.__self__
@@ -2411,7 +1187,7 @@ class InferenceProblem:
             return ()
         return tuple(i for i, leaf_id in enumerate(self._seam.theta_leaf_ids) if leaf_id in ids)
 
-    def values(self, x: Any) -> ParameterValues:
+    def values(self, x: ArrayLike) -> ParameterValues:
         """Return the parameter values a flat vector in this problem's fit order holds.
 
         Args:
@@ -2433,7 +1209,7 @@ class InferenceProblem:
         """
         return self._seam.theta_names
 
-    def persist_window_initialization(self) -> Any:
+    def persist_window_initialization(self) -> Optional[Path]:
         """Store this problem's window initialization under its content key.
 
         Called by the process that owns the experiment once its sweep has run;
@@ -2643,54 +1419,3 @@ def _learned_ic_not_wired_error(where: str):
         "a latent-window Multishoot (Windows.uniform(...) / Windows.at(...)), which place "
         "s_0 in the decision vector and constrain it through the trajectory observations."
     )
-
-
-@dataclasses.dataclass(frozen=True, init=False)
-class _FrozenStateMultishoot:
-    """Theta-only reduced view of a decision-variable InferenceProblem.
-
-    The window states are frozen at the manifold-init values; the decision vector
-    is only θ̃.  Drives the LM engine through the same residual stack with the
-    state blocks pinned.  Submodule-internal: the freeze-then-relax warm-start.
-    """
-
-    _build: Any
-    regularization: Any
-    _x0: np.ndarray
-
-    def __init__(self, build: Any, regularization: Any):
-        """Pin the window states at init; expose θ̃ as the only decision variable."""
-        _set = object.__setattr__
-        _set(self, "_build", build)
-        _set(self, "regularization", regularization)
-        _set(self, "_x0", np.asarray(build.x0)[: build.layout.n_theta])
-
-    def _full_x(self, theta_flat: jnp.ndarray) -> jnp.ndarray:
-        """Reassemble the full x with frozen (init) window states."""
-        tail = jnp.asarray(self._build.x0)[self._build.layout.n_theta :]
-        return jnp.concatenate([jnp.asarray(theta_flat), tail])
-
-    @property
-    def x0(self) -> np.ndarray:
-        """Theta-only init vector."""
-        return self._x0
-
-    @property
-    def n_segments(self) -> int:
-        """Single residual block."""
-        return 1
-
-    @property
-    def segment_fns(self) -> tuple:
-        """The full residual stack, but over the theta-only reduced vector."""
-        return (lambda th: self._build.residual(self._full_x(th)),)
-
-    @property
-    def unflatten_fn(self):
-        """Inverse ravel of θ̃ (for reconstruct; the LM reads this)."""
-        return self._build.seam.unflatten
-
-    @property
-    def prob_static(self):
-        """Frozen theta partition."""
-        return self._build.seam.theta_frozen

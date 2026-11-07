@@ -25,15 +25,16 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
+from jaxtyping import PyTree
 
 from diff_soup._distributed import assert_decision_value, local_value
 from diff_soup._errors import ConfigurationError
 from diff_soup._logging import log as logger
 from diff_soup._warnings import warn_user
-from diff_soup.optimization._abc import RESUME, OptimizationProblem
+from diff_soup.optimization._abc import RESUME, OptimizationProblem, OptSolver
 from diff_soup.optimization.inference.fitting._protocols import StatisticalInferenceProblem
 from diff_soup.optimization.inference.fitting.result import OptResult, TerminationStatus
 from diff_soup.optimization.problem import AbstractOptimizationProblem
@@ -51,7 +52,7 @@ _BUILT_IN = (
 )
 
 
-def _numeric_problem(problem: Any, optimizer: Any) -> Any:
+def _numeric_problem(problem: Any, optimizer: OptSolver) -> OptimizationProblem:
     """The optimization problem ``optimizer`` solves for the declared ``problem``.
 
     A problem of the hierarchy (an ``InferenceProblem``, a lowered study, a
@@ -64,7 +65,7 @@ def _numeric_problem(problem: Any, optimizer: Any) -> Any:
     if isinstance(problem, OptimizationProblem):
         return problem
     if getattr(problem, "segment_fns", None) is not None:
-        from diff_soup.optimization.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting._residual_lowering import (
             lower_residual_problem,
         )
 
@@ -75,7 +76,7 @@ def _numeric_problem(problem: Any, optimizer: Any) -> Any:
     )
 
 
-def _refuse_unmet(numeric: Any, optimizer: Any) -> None:
+def _refuse_unmet(numeric: OptimizationProblem, optimizer: OptSolver) -> None:
     """Refuse ``optimizer`` when ``numeric`` lacks structure it requires, or has rows it would drop."""
     structure = frozenset(numeric.structure)
     requires = frozenset(getattr(optimizer, "requires", ()))
@@ -96,7 +97,9 @@ def _refuse_unmet(numeric: Any, optimizer: Any) -> None:
     )
 
 
-def _solve(optimizer: Any, numeric: Any, callbacks: tuple, state: Any = None):
+def _solve(
+    optimizer: OptSolver, numeric: OptimizationProblem, callbacks: tuple, state: PyTree = None
+):
     """``optimizer.solve`` on ``numeric`` after the structure check; ``state=`` when it resumes.
 
     A compiled solver reads the problem's closures alone, so it is handed them with the
@@ -238,7 +241,7 @@ def _recorded_failures(result: OptResult, problem: Any) -> tuple[int, tuple[int,
 
 def _maybe_freeze_then_relax(
     problem: Any,
-    engine: Any,
+    engine: OptSolver,
     *,
     callbacks: tuple = (),
 ) -> tuple[Any, dict]:
@@ -355,7 +358,7 @@ def _attach_diagnostics(result: OptResult, problem: Any) -> OptResult:
     return dataclasses.replace(result, diagnostics=diag, window_states=ws)
 
 
-def _recorded_fingerprint(result: OptResult) -> Any:
+def _recorded_fingerprint(result: OptResult) -> Optional[str]:
     """The parameter schema fingerprint an earlier result records, or ``None``."""
     recorded = result.info.get("schema_fingerprint") or (
         None if result.parameter_schema is None else result.parameter_schema.fingerprint
@@ -366,7 +369,7 @@ def _recorded_fingerprint(result: OptResult) -> Any:
     return recorded
 
 
-def _foreign(problem: Any, recorded: Any) -> bool:
+def _foreign(problem: Any, recorded: Optional[str]) -> bool:
     """Whether a recorded fingerprint names another problem than ``problem``."""
     schema = getattr(problem, "parameter_schema", None)
     return bool(
@@ -389,7 +392,7 @@ def _recorded_layout_text(text: str) -> str:
     return "; ".join(label for _, label in sorted(labels))
 
 
-def _checkpoint_source(problem: Any, directory: Any) -> Any:
+def _checkpoint_source(problem: Any, directory: str | os.PathLike) -> Optional[OptResult]:
     """The newest checkpoint of ``directory`` as a result to resume from, or ``None``.
 
     The newest ``attempt-`` file of a solver that resumes its state, else the
@@ -426,7 +429,7 @@ def _checkpoint_source(problem: Any, directory: Any) -> Any:
     return result
 
 
-def _resume_from(problem: Any, resume: Any) -> tuple[Any, Any]:
+def _resume_from(problem: Any, resume: OptResult | str | os.PathLike) -> tuple[Any, PyTree]:
     """``problem`` warm-started at the point of an earlier result, and that result's state."""
     if isinstance(resume, OptResult):
         result = resume
@@ -486,7 +489,7 @@ def _has_data_rows(problem: Any) -> bool:
     )
 
 
-def _resolved_optimizer(problem: Any, optimizer: Any) -> Any:
+def _resolved_optimizer(problem: Any, optimizer: Optional[OptSolver]) -> OptSolver:
     """``optimizer`` with its ``"auto"`` curvature resolved for ``problem``.
 
     `NewtonTrustRegion(hessian="auto")` steps on the Gauss-Newton matrix
@@ -504,14 +507,14 @@ def _resolved_optimizer(problem: Any, optimizer: Any) -> Any:
 
 def optsolve(
     problem: Any,
-    optimizer: Any = None,
+    optimizer: Optional[OptSolver] = None,
     *,
     callbacks: tuple = (),
     diagnostics: bool = True,
     run_restricted_initialization: bool = True,
     restricted_callbacks: tuple = (),
-    resume: Any = None,
-    checkpoint: Any = None,
+    resume: Optional[OptResult | str | os.PathLike] = None,
+    checkpoint: Optional[str | os.PathLike] = None,
 ) -> OptResult:
     """Fit a problem with an optimizer and return the result.
 

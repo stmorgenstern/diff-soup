@@ -15,11 +15,15 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-from typing import Any, Iterable, Sequence
+from collections.abc import Hashable
+from typing import Iterable, Sequence
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
+
+from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
 
 Array = jax.Array
 
@@ -57,14 +61,14 @@ class OwnerChildPointPlan:
         """Number of structurally active coordinates for this child."""
         return len(self.source_positions)
 
-    def child_point(self, owner_point: Any) -> Array:
+    def child_point(self, owner_point: ArrayLike | Sequence[ArrayLike]) -> Array:
         """Reconstruct the child's flat point from a compact owner point."""
         owner_point = jnp.asarray(owner_point)
         values = owner_point[jnp.asarray(self.source_positions, dtype=jnp.int32)]
         out = jnp.zeros((self.child_width,), dtype=owner_point.dtype)
         return out.at[jnp.asarray(self.target_positions, dtype=jnp.int32)].set(values)
 
-    def child_point_from_active(self, active_point: Any) -> Array:
+    def child_point_from_active(self, active_point: ArrayLike | Sequence[ArrayLike]) -> Array:
         """Reconstruct the child directly from its active coordinate vector."""
         active_point = jnp.asarray(active_point)
         if active_point.shape != (self.derivative_width,):
@@ -89,7 +93,7 @@ class OwnerPointPlan:
     cohort width.
     """
 
-    owner_id: Any
+    owner_id: Hashable
     owner_index: int
     shared_indices: tuple[int, ...]
     local_indices: tuple[int, ...]
@@ -117,7 +121,7 @@ class OwnerPointPlan:
         """Total compact input width."""
         return self.shared_width + self.local_width
 
-    def gather(self, point: Any) -> Array:
+    def gather(self, point: ArrayLike | Sequence[ArrayLike]) -> Array:
         """Gather this owner's compact point without a host round trip."""
         point = jnp.asarray(point)
         if point.shape != (self.n_parameters,):
@@ -126,7 +130,9 @@ class OwnerPointPlan:
             )
         return point[jnp.asarray(self.indices, dtype=jnp.int32)]
 
-    def scatter_into(self, compact: Any, point: Any) -> Array:
+    def scatter_into(
+        self, compact: ArrayLike | Sequence[ArrayLike], point: ArrayLike | Sequence[ArrayLike]
+    ) -> Array:
         """Scatter one compact point into an existing full joint point."""
         compact = jnp.asarray(compact)
         point = jnp.asarray(point)
@@ -141,12 +147,12 @@ class OwnerPointPlan:
         return point.at[jnp.asarray(self.indices, dtype=jnp.int32)].set(compact)
 
 
-def _fingerprint(payload: dict[str, Any]) -> str:
+def _fingerprint(payload: dict[str, int | list[dict[str, int | tuple[int, ...]]]]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
-def build_owner_point_plans(joint: Any) -> tuple[OwnerPointPlan, ...]:
+def build_owner_point_plans(joint: JointInferenceProblem) -> tuple[OwnerPointPlan, ...]:
     """Build compact point plans from an ownership-aware joint problem.
 
     A child's sources are the shared coordinates, then the blocks of its
@@ -264,14 +270,16 @@ def build_owner_point_plans(joint: Any) -> tuple[OwnerPointPlan, ...]:
     return tuple(plans)
 
 
-def gather_owner_points(plans: Iterable[OwnerPointPlan], point: Any) -> tuple[Array, ...]:
+def gather_owner_points(
+    plans: Iterable[OwnerPointPlan], point: ArrayLike | Sequence[ArrayLike]
+) -> tuple[Array, ...]:
     """Gather compact points in deterministic plan order."""
     return tuple(plan.gather(point) for plan in plans)
 
 
 def scatter_owner_points(
     plans: Sequence[OwnerPointPlan],
-    compact_points: Sequence[Any],
+    compact_points: Sequence[ArrayLike | Sequence[ArrayLike]],
     *,
     check_shared: bool = True,
 ) -> Array:

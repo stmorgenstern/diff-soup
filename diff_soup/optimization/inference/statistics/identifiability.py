@@ -13,12 +13,13 @@ kernel.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.fitting._layout import require_layout
 from diff_soup.optimization.inference.fitting.result import OptResult
@@ -30,6 +31,7 @@ from diff_soup.optimization.inference.statistics.report import (
 from diff_soup.optimization.inference.statistics.report import (
     identifiability_report,
 )
+from diff_soup.problem.parameters import ParameterSchema
 
 
 @dataclasses.dataclass(frozen=True)
@@ -44,7 +46,7 @@ class IdentifiabilityCoordinate:
     column: int
     name: str
     handle: Any
-    owner: Any
+    owner: object
     component: int
 
 
@@ -66,7 +68,7 @@ class IdentifiabilityReport:
     scaled: SpectrumReport
     coordinates: tuple[IdentifiabilityCoordinate, ...]
     parameter_scales: np.ndarray
-    parameter_schema: Any
+    parameter_schema: ParameterSchema
     schema_fingerprint: str
     study_fingerprint: str
     objective_kind: str
@@ -82,7 +84,7 @@ class IdentifiabilityReport:
         return tuple(coordinate.name for coordinate in self.coordinates)
 
 
-def _coordinate_name(handle: Any, owner: Any, component: int, size: int) -> str:
+def _coordinate_name(handle: Any, owner: object, component: int, size: int) -> str:
     """Build the same readable owner suffix used by Study joint groups."""
     name = str(handle.name)
     if size != 1:
@@ -92,7 +94,9 @@ def _coordinate_name(handle: Any, owner: Any, component: int, size: int) -> str:
     return name
 
 
-def _schema_coordinates(schema: Any, n_params: int) -> tuple[IdentifiabilityCoordinate, ...]:
+def _schema_coordinates(
+    schema: ParameterSchema, n_params: int
+) -> tuple[IdentifiabilityCoordinate, ...]:
     """Compile and validate a complete schema-to-column provenance table."""
     by_column: list[IdentifiabilityCoordinate | None] = [None] * n_params
     for entry in schema.entries:
@@ -133,7 +137,9 @@ def _schema_coordinates(schema: Any, n_params: int) -> tuple[IdentifiabilityCoor
     return tuple(by_column)  # type: ignore[arg-type]
 
 
-def _require_problem_schema(problem: Any, schema: Any, *, where: str) -> None:
+def _require_problem_schema(
+    problem: EstimationProblem, schema: ParameterSchema, *, where: str
+) -> None:
     """Require a fit whose columns hold the same handles and owners as ``problem``'s.
 
     The fit is only a point here, so a fit of the same layout under another solver
@@ -145,7 +151,7 @@ def _require_problem_schema(problem: Any, schema: Any, *, where: str) -> None:
     require_layout(problem, schema, where=where)
 
 
-def _scale_block(value: Any, size: int, *, label: str) -> np.ndarray:
+def _scale_block(value: ArrayLike | Sequence, size: int, *, label: str) -> np.ndarray:
     """Broadcast one scalar or require one flattened scale per handle component."""
     block = np.asarray(value, dtype=float)
     if block.ndim == 0:
@@ -161,7 +167,7 @@ def _scale_block(value: Any, size: int, *, label: str) -> np.ndarray:
 def _parameter_scales(
     scales: Any,
     *,
-    schema: Any,
+    schema: ParameterSchema,
     coordinates: tuple[IdentifiabilityCoordinate, ...],
 ) -> np.ndarray:
     """Resolve flat or handle-keyed scale declarations to column order."""
