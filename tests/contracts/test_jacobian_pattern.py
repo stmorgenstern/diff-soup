@@ -42,6 +42,18 @@ def _scan(y):
     return jax.lax.fori_loop(0, 2, lambda i, v: v * v + 0.1 * jnp.roll(v, 1), y)
 
 
+@jax.custom_jvp
+def _neighbour_product(v):
+    """``v_i v_{i-1}``, with its tangent rule."""
+    return v * jnp.roll(v, 1)
+
+
+@_neighbour_product.defjvp
+def _neighbour_product_jvp(primals, tangents):
+    (v,), (t,) = primals, tangents
+    return _neighbour_product(v), t * jnp.roll(v, 1) + v * jnp.roll(t, 1)
+
+
 _EXACT = {
     "elementwise": lambda y: jnp.sin(y) / (1.0 + y**2) - y,
     "mul by a known zero": lambda y: y * _HALF + jnp.roll(y, 1) ** 2,
@@ -69,6 +81,8 @@ _EXACT = {
     "conv_general_dilated": lambda y: jnp.convolve(
         y**2, jnp.asarray([1.0, -2.0, 1.0]), mode="same"
     ),
+    "nested jit": lambda y: jax.jit(lambda v: jnp.sin(v) * jnp.roll(v, 1))(y),
+    "custom_jvp": lambda y: _neighbour_product(y) - y,
 }
 _UNKNOWN_OUTCOME = {
     "cond on the state": lambda y: jax.lax.cond(y[0] > 1.0, jnp.sin, lambda v: jnp.roll(v, 1), y),
