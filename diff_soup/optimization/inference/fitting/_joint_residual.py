@@ -69,10 +69,8 @@ def _resolve_child_y0(child: InferenceProblem) -> np.ndarray:
     that learns its initial state is classified ``"latent"`` and reconstructs that
     state from its own slice of the joint decision vector.
     """
-    from diff_soup.optimization.inference.fitting.inference_problem import (
-        FixedInitialState,
-        _resolve_y0,
-    )
+    from diff_soup.optimization.inference.fitting.formulation import FixedInitialState
+    from diff_soup.optimization.inference.fitting.inference_problem import _resolve_y0
 
     init = child.initial_state
     y0 = init.y0 if isinstance(init, FixedInitialState) else None

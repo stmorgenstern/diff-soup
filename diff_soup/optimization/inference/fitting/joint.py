@@ -79,15 +79,15 @@ from diff_soup.optimization.inference.fitting._joint_structure import (
     _validate_layout,
     child_lanes,
 )
-from diff_soup.optimization.inference.fitting.bounds import Bounds
-from diff_soup.optimization.inference.fitting.inference_problem import (
-    InferenceProblem,
+from diff_soup.optimization.inference.fitting._residual_lowering import (
     _loss_and_grad_from_residual,
     _loss_fn_from_residual,
     _loss_grad_hessian_from_gradient,
     _stacked_residual_fn,
     build_stacked_residual_fns,
 )
+from diff_soup.optimization.inference.fitting.bounds import Bounds
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 from diff_soup.optimization.inference.fitting.result import ChildFit
 
 # ---------------------------------------------------------------------------

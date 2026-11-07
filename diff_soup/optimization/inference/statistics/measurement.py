@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup.optimization.inference.data.deferred import DeferredValues
-from diff_soup.optimization.inference.fitting.inference_problem import Trajectory
+from diff_soup.optimization.inference.fitting.formulation import Trajectory
 from diff_soup.optimization.inference.fitting.observables import Observable
 from diff_soup.optimization.inference.statistics.experiment import Channel, _CompiledExperiment
 from diff_soup.optimization.inference.statistics.likelihoods import Gaussian, Likelihood
@@ -321,7 +321,7 @@ def _check_schedule(schedule: Any, model: Any, t_span: tuple, trajectory: Any) -
     """Refuse a schedule the model cannot follow over ``t_span`` in one shoot."""
     from diff_soup._errors import ConfigurationError
     from diff_soup._schedule import Schedule, schedule_arrays
-    from diff_soup.optimization.inference.fitting.inference_problem import SingleShoot
+    from diff_soup.optimization.inference.fitting.formulation import SingleShoot
 
     if not isinstance(schedule, Schedule):
         raise TypeError(

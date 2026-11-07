@@ -12,7 +12,7 @@ from diff_soup.optimization.inference.fitting.diagnostics import (
     IdentifiabilityWarning,
     OptDiagnostics,
 )
-from diff_soup.optimization.inference.fitting.inference_problem import (
+from diff_soup.optimization.inference.fitting.formulation import (
     FixedInitialState,
     LearnedInitialState,
     LeastSquares,

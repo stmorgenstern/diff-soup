@@ -14,11 +14,9 @@ from diff_soup._precision import cast_floating_leaves
 from diff_soup.optimization._binding import Derived, Held
 from diff_soup.optimization._derived import half_sum_of_squares
 from diff_soup.optimization.inference.fitting._layout import resolve_point
-from diff_soup.optimization.inference.fitting.inference_problem import (
-    _MemoryCheckedHessian,
-    lower_residual_problem,
-    parameter_values,
-)
+from diff_soup.optimization.inference.fitting._residual_lowering import lower_residual_problem
+from diff_soup.optimization.inference.fitting._residual_memory import _MemoryCheckedHessian
+from diff_soup.optimization.inference.fitting.parameter_groups import parameter_values
 from diff_soup.optimization.inference.fitting.regularization import NoReg
 from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.optimization.inference.statistics.likelihoods import (

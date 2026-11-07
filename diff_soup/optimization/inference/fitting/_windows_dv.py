@@ -5,7 +5,7 @@
 # splitting it would scatter the residual-stack pieces that must stay co-located.
 """_windows_dv.py — decision-variable multishoot machinery.
 
-A decision-variable [Multishoot][diff_soup.optimization.inference.fitting.inference_problem.Multishoot] optimizes
+A decision-variable [Multishoot][diff_soup.optimization.inference.fitting.formulation.Multishoot] optimizes
 ``x = [θ̃ | s̃₁ … s̃_{W−1}]`` where ``s̃_w`` are the *differential* components
 of the window-start state (window 0 starts at the fixed IC ``y0``).  The
 residual stack is:
@@ -506,7 +506,7 @@ def warn_if_over_ceiling(n_decision: int) -> Optional[str]:
 
 
 class DecisionWindowBuild:
-    """Built closures + host metadata for a decision-variable [Multishoot][diff_soup.optimization.inference.fitting.inference_problem.Multishoot].
+    """Built closures + host metadata for a decision-variable [Multishoot][diff_soup.optimization.inference.fitting.formulation.Multishoot].
 
     Encapsulates the residual stack so ``inference_problem.py`` stays thin: the
     per-window propagation through ``pdesolve`` (theta threaded for AD,

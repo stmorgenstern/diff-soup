@@ -13,10 +13,8 @@ from diff_soup._layout import Layout
 from diff_soup.optimization.inference.engine._plan import n_padded, refuse_shared_storage
 from diff_soup.optimization.inference.fitting._joint_groups import _normalise_ownership
 from diff_soup.optimization.inference.fitting._joint_layout import _child_n_theta
-from diff_soup.optimization.inference.fitting.inference_problem import (
-    InferenceProblem,
-    LearnedInitialState,
-)
+from diff_soup.optimization.inference.fitting.formulation import LearnedInitialState
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 
 
 def _host_tree_equal(a: Any, b: Any) -> bool:

@@ -272,7 +272,7 @@ class Predictor:
 
 def _trajectory_keywords(trajectory: Any, state_prior: Any) -> dict:
     """The leaf keywords a public trajectory declaration and state prior lower to."""
-    from diff_soup.optimization.inference.fitting.inference_problem import Multishoot
+    from diff_soup.optimization.inference.fitting.formulation import Multishoot
 
     keywords: dict = {}
     if isinstance(trajectory, Multishoot):
@@ -325,7 +325,7 @@ class _CompiledExperiment:
 
     def __post_init__(self):
         """Validate channel uniqueness, data binding, and source overlap."""
-        from diff_soup.optimization.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting.formulation import (
             InitialState,
             _initial_state_array,
         )
@@ -531,12 +531,12 @@ class _CompiledExperiment:
                 with `with_data` first), or a scored channel's
                 likelihood has no exact least-squares representation.
         """
-        from diff_soup.optimization.inference.fitting.inference_problem import (
-            InferenceProblem,
+        from diff_soup.optimization.inference.fitting.formulation import (
             LeastSquares,
             SingleShoot,
             _initial_state_policy,
         )
+        from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 
         series = self._response_series(load_data=load_data)
         if reuse is not None and series:
@@ -573,7 +573,7 @@ class _CompiledExperiment:
         solve over the union of every channel's observation times.
 
         Args:
-            parameters: Optional [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
+            parameters: Optional [ParameterGroups][diff_soup.optimization.inference.fitting.parameter_groups.ParameterGroups]
                 choosing the learnable theta; defaults to the problem's declared
                 learnables, matching ``InferenceProblem``'s default.
 
@@ -585,11 +585,9 @@ class _CompiledExperiment:
             resolve_forward_adjoint,
             union_prediction_factory,
         )
-        from diff_soup.optimization.inference.fitting.inference_problem import (
-            _initial_state_array,
-            _lowered_schedule,
-            _resolve_parameters,
-        )
+        from diff_soup.optimization.inference.fitting.formulation import _initial_state_array
+        from diff_soup.optimization.inference.fitting.inference_problem import _lowered_schedule
+        from diff_soup.optimization.inference.fitting.parameter_groups import _resolve_parameters
 
         theta_spec, groups = _resolve_parameters(parameters, self.problem)
         # Resolved group records contain names and frozensets of selected leaf

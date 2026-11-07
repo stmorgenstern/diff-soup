@@ -126,7 +126,7 @@ def resolve_point(problem: Any, at: Any, *, where: str) -> Any:
     and a mapping is assembled by handle. A caller that needs a schema refuses a fit
     without one first. Anything else is returned unchanged for the caller's own shape check.
     """
-    from diff_soup.optimization.inference.fitting.inference_problem import _is_structural_schema
+    from diff_soup.optimization.inference.fitting.parameter_groups import _is_structural_schema
 
     if hasattr(at, "params") and hasattr(at, "parameter_schema"):
         schema = at.parameter_schema
