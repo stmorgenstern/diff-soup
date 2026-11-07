@@ -228,7 +228,7 @@
     },
     {
       "file": "tests/public_api/test_solve_outputs_ad.py",
-      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap, lanes that cover their save times at different steps equal to their unbatched solves, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
+      "feature": "Solve outputs under transformations: named outputs equal under jit and vmap on a save grid whose lanes cover a cluster at different steps, the reverse-mode gradient through a terminal sample that replaced a requested row, the Diffrax outputs mapping"
     },
     {
       "file": "tests/public_api/test_adjoints.py",
