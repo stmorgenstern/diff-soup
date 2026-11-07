@@ -25,14 +25,16 @@ import dataclasses
 import functools
 import operator
 import types
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple, Optional
 
 import equinox as eqx
 import jax
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.engine._kernel import LaneResult, LaneWork
+from diff_soup.optimization.inference.engine._levels import LevelBlocks, LevelGradients
 from diff_soup.optimization.inference.engine._status import ABSENT, KINDS, LaneStatus
 
 
@@ -200,7 +202,7 @@ class Results:
     seconds: Mapping
     retries: tuple = ()
     batches: Mapping = dataclasses.field(default_factory=lambda: types.MappingProxyType({}))
-    levels: Any = None
+    levels: LevelBlocks | LevelGradients | None = None
     lane_seconds: Optional[np.ndarray] = None
     normal_diagonal: Optional[np.ndarray] = None
 
@@ -224,7 +226,7 @@ class Results:
             for row, column in np.argwhere((kinds != 0) & (kinds != ABSENT))
         )
 
-    def lane_result(self, member: Any, device: Any = None) -> LaneResult:
+    def lane_result(self, member: Any, device: jax.Device | None = None) -> LaneResult:
         """The results of one population member as a lane result for the reducers.
 
         Args:
@@ -288,11 +290,13 @@ class CallOutput(NamedTuple):
 
     rows: np.ndarray
     columns: np.ndarray
-    output: Any
+    output: LaneResult
     frames: tuple
 
 
-def unit_values(calls: Sequence, shape: tuple, read: Any) -> Optional[np.ndarray]:
+def unit_values(
+    calls: Sequence, shape: tuple, read: Callable[..., ArrayLike | None]
+) -> Optional[np.ndarray]:
     """One field of every call's own units, written to canonical positions.
 
     ``read(output)`` gives the field of a call's output, leading with the

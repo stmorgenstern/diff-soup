@@ -31,7 +31,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
+from numpy.typing import DTypeLike
 
+from diff_soup.optimization.inference.engine._kernel import LaneResult
 from diff_soup.optimization.inference.engine._status import ABSENT, LaneStatus, failures
 
 Array = jax.Array
@@ -127,7 +130,11 @@ class OwnerGradients(eqx.Module):
 
 
 def tree_tables(
-    owner_of_lane: Any, local_positions: Any, local_widths: Any, n_shared: int, device: Any = None
+    owner_of_lane: Any,
+    local_positions: Any,
+    local_widths: Any,
+    n_shared: int,
+    device: jax.Device | None = None,
 ):
     """Build the tables of a two-tier tree on the host and place them on ``device``.
 
@@ -220,7 +227,7 @@ def refuse_failed(status: LaneStatus, lane_ids: tuple, weights: Any = None) -> N
         raise LaneFailure(records)
 
 
-def _lane_weights_of_owners(tables: TreeTables, owner_weights: Any) -> np.ndarray:
+def _lane_weights_of_owners(tables: TreeTables, owner_weights: ArrayLike) -> np.ndarray:
     """Each lane's weight on the host: that of its owner."""
     owner_weights = np.asarray(owner_weights).reshape(-1)
     lanes = np.asarray(tables.lanes)
@@ -296,7 +303,7 @@ def _reduce_gradient(tables: TreeTables, gradient, cost, rows, weights) -> Owner
     )
 
 
-def _owner_weights(weights: Any, tables: TreeTables, dtype: Any) -> np.ndarray:
+def _owner_weights(weights: Any, tables: TreeTables, dtype: DTypeLike) -> np.ndarray:
     """One weight per owner, on the host; the compiled reduction takes them where it runs."""
     n_owners = int(tables.mask.shape[0])
     if weights is None:
@@ -309,7 +316,7 @@ def _owner_weights(weights: Any, tables: TreeTables, dtype: Any) -> np.ndarray:
     return weights
 
 
-def reduce_blocks(tables: TreeTables, results: Any, lane_ids: tuple, weights: Any = None):
+def reduce_blocks(tables: TreeTables, results: LaneResult, lane_ids: tuple, weights: Any = None):
     """Sum the blocks of a set of lanes into the blocks of their owners.
 
     Args:
@@ -343,7 +350,7 @@ def reduce_blocks(tables: TreeTables, results: Any, lane_ids: tuple, weights: An
     )
 
 
-def reduce_gradient(tables: TreeTables, results: Any, lane_ids: tuple, weights: Any = None):
+def reduce_gradient(tables: TreeTables, results: LaneResult, lane_ids: tuple, weights: Any = None):
     """Sum the gradients of a set of lanes into the gradient of every tier.
 
     Args:

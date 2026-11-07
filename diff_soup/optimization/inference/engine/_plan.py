@@ -33,12 +33,14 @@ import dataclasses
 import itertools
 import numbers
 import types
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from typing import Any, NamedTuple
 
 import jax
 import numpy as np
+from jax.sharding import Mesh
 
+from diff_soup.linear import LinearSolver
 from diff_soup.optimization.inference.engine._capacity import (
     WASTE_BOUND,
     Frames,
@@ -61,6 +63,7 @@ from diff_soup.optimization.inference.engine._layout import (
     lane_layout,
     lane_problems,
 )
+from diff_soup.optimization.inference.statistics.measurement import Experiment
 
 WIDTH_CAP: int = 1024
 """The widest chunk chosen when none is given: the widest batch that was measured."""
@@ -89,7 +92,7 @@ class Refusal(NamedTuple):
         reason: What the lanes cannot take, and what would make them take it.
     """
 
-    lane: Any
+    lane: Hashable
     reason: str
 
 
@@ -135,7 +138,7 @@ class Bucket:
     owners: tuple
     frames: Frames
     width: int
-    segments: Any
+    segments: int | None
     padding: float
     chunk: Mapping
     children: tuple
@@ -185,9 +188,9 @@ class Plan:
     buckets: tuple
     refused: tuple
     splits: tuple
-    device: Any
+    device: jax.Device | None
     waste_bound: float
-    mesh: Any = None
+    mesh: Mesh | None = None
 
     @property
     def devices(self) -> int:
@@ -251,7 +254,7 @@ def _model_name(model: Any) -> str:
     return type(model).__name__
 
 
-def _recipes(experiment: Any) -> tuple:
+def _recipes(experiment: Experiment) -> tuple:
     """The recipes an experiment's model was built from, as ``(key, name)`` pairs.
 
     An experiment holds the model its recipe built from its inputs, not the
@@ -389,7 +392,7 @@ def _splits(buckets: tuple, experiments: tuple) -> tuple:
     return tuple(splits)
 
 
-def _linear_backend(child: Any, platform: str) -> Any:
+def _linear_backend(child: Any, platform: str) -> LinearSolver | None:
     """The linear backend an experiment's solver resolves to on ``platform``.
 
     The solver's ``linear`` setting resolves as its engine resolves it: a
@@ -397,7 +400,6 @@ def _linear_backend(child: Any, platform: str) -> Any:
     platform. ``None`` for a solver without a linear backend, and for a name
     this host cannot serve, whose solve reports why.
     """
-    from diff_soup.linear import LinearSolver
     from diff_soup.linear._resolver import BackendResolver
     from diff_soup.problem.implicit.solver_problem import solver_view
     from diff_soup.timestepping.vsvo.common.backends import resolve_backend
@@ -414,7 +416,7 @@ def _linear_backend(child: Any, platform: str) -> Any:
         return None
 
 
-def refuse_shared_storage(problems: tuple, mesh: Any) -> None:
+def refuse_shared_storage(problems: tuple, mesh: Mesh) -> None:
     """Refuse native factor storage that the devices of a mesh's data axis would share.
 
     The experiments placed over the devices of a data axis run in one
@@ -474,7 +476,7 @@ def refuse_shared_storage(problems: tuple, mesh: Any) -> None:
         )
 
 
-def _placement_mesh(joint: Any, device: Any) -> Any:
+def _placement_mesh(joint: Any, device: Any) -> Mesh | None:
     """The mesh whose data axis places the lanes inside this process; ``None`` for one device.
 
     The placement is the [Layout][diff_soup.Layout] the fitted problem was

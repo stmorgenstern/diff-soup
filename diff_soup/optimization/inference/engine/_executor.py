@@ -55,6 +55,7 @@ import sys
 import time
 import types
 from collections.abc import Mapping
+from os import PathLike
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -67,10 +68,12 @@ from diff_soup.optimization.inference.engine._ledger import attributed_seconds
 from diff_soup.optimization.inference.engine._levels import (
     LevelBlocks,
     LevelGradients,
+    LevelTables,
     partial_levels,
 )
-from diff_soup.optimization.inference.engine._order import canonical_lanes
-from diff_soup.optimization.inference.engine._plan import population_plan
+from diff_soup.optimization.inference.engine._order import StepMemory, canonical_lanes
+from diff_soup.optimization.inference.engine._placement import Placement
+from diff_soup.optimization.inference.engine._plan import Plan, population_plan
 from diff_soup.optimization.inference.engine._request import Request
 from diff_soup.optimization.inference.engine._result import Batch, Results, Status, Work
 from diff_soup.optimization.inference.engine._status import ABSENT
@@ -91,10 +94,10 @@ class Remote(NamedTuple):
         key: The [ProgramKey][diff_soup.optimization.inference.engine._batched.ProgramKey].
     """
 
-    key: Any
+    key: _batched.ProgramKey
 
 
-def plan_fingerprint(plan: Any) -> str:
+def plan_fingerprint(plan: Plan) -> str:
     """The SHA-256 of what every process must agree on: lanes, bucket identities, widths, chunks."""
     digest = hashlib.sha256()
     for bucket in plan.buckets:
@@ -126,11 +129,11 @@ class Shard:
         origin: Per bucket of ``lanes``, its index in the study's plan.
     """
 
-    lanes: Any
+    lanes: _batched.BatchedLanes | None
     origin: tuple
 
 
-def _pack_levels(sums: Any) -> tuple:
+def _pack_levels(sums: LevelBlocks | LevelGradients) -> tuple:
     """``(kind, leaves)`` of level sums whose leaves lead with the member axis."""
     depth = len(sums.cost) - 1
     leaves = [np.asarray(sums.gradient[level]) for level in range(1, depth + 1)]
@@ -147,7 +150,7 @@ def _pack_levels(sums: Any) -> tuple:
     return "gradient", leaves
 
 
-def _unpack_levels(kind: str, depth: int, leaves: list) -> Any:
+def _unpack_levels(kind: str, depth: int, leaves: list) -> LevelBlocks | LevelGradients:
     """The level sums ``_pack_levels`` packed."""
     leaves = list(leaves)
 
@@ -180,7 +183,7 @@ def _unpack_levels(kind: str, depth: int, leaves: list) -> Any:
     )
 
 
-def _numbers_per_member(tables: Any, mode: str) -> int:
+def _numbers_per_member(tables: LevelTables, mode: str) -> int:
     """The numbers of one member's level sums in ``mode``."""
     widths, counts = tables.widths, tables.counts
     size = 2 * sum(counts) + int(counts[0]) * int(widths[0])
@@ -216,7 +219,14 @@ class Cluster:
     evaluation is requested and recorded there, and a worker records nothing.
     """
 
-    def __init__(self, transport: Transport, study: Any, joint: Any, metadata: Any, placement: Any):
+    def __init__(
+        self,
+        transport: Transport,
+        study: Any,
+        joint: Any,
+        metadata: _batched.BatchedLanes,
+        placement: Placement,
+    ):
         """Keep this process's lanes of the study's plan and build their inputs."""
         self.transport = transport
         self.rank = transport.rank
@@ -227,7 +237,7 @@ class Cluster:
         self.fingerprint = plan_fingerprint(metadata.plan)
         self.mine = frozenset(placement.lanes_of(self.rank))
         self.shards: dict = {}
-        self.fit: Any = None
+        self.fit: int | None = None
         self.fit_shards: dict = {}
         self._tables: dict = {}
         self._view: Any = None
@@ -245,7 +255,7 @@ class Cluster:
         meshes here, also when every program comes from the persistent cache.
         """
 
-    def shard(self, cut: Any, fit: Any = None) -> Shard:
+    def shard(self, cut: tuple[int, int | None] | None, fit: int | None = None) -> Shard:
         """This process's lanes of the cut ``cut`` (``None``, or ``(members, chunk)``).
 
         With ``fit`` (the token process 0 gives a fit), the lanes of that fit:
@@ -266,7 +276,7 @@ class Cluster:
             self.fit_shards[cut] = shard
         return shard
 
-    def _study_shard(self, cut: Any) -> Shard:
+    def _study_shard(self, cut: tuple[int, int | None] | None) -> Shard:
         shard = self.shards.get(cut)
         if shard is not None:
             return shard
@@ -279,7 +289,7 @@ class Cluster:
         self.shards[cut] = shard
         return shard
 
-    def tables(self, lane_ids: tuple) -> Any:
+    def tables(self, lane_ids: tuple) -> LevelTables:
         """The study's level tables for the lanes ``lane_ids`` (a subset, in canonical order)."""
         key = tuple(lane_ids)
         tables = self._tables.get(key)
@@ -320,7 +330,7 @@ class Cluster:
             if not np.any(units):
                 return empty, ()
 
-        def part(array: Any) -> Any:
+        def part(array: np.ndarray | None) -> np.ndarray | None:
             return None if array is None else np.asarray(array)[:, columns]
 
         own = tuple(chosen[c] for c in columns)
@@ -386,7 +396,9 @@ class Cluster:
         share = None
         records, refusals = [], []
 
-        def compile_with_share(lanes: Any, entry: Any, key: Any) -> Any:
+        def compile_with_share(
+            lanes: _batched.BatchedLanes, entry: _batched.BucketLanes, key: _batched.ProgramKey
+        ) -> _batched.CompiledProgram:
             return preparing.compile_program(lanes, entry, key, budget_share=share)
 
         writes = phase == "A"
@@ -524,9 +536,9 @@ class Coordinator(Cluster):
         super().__init__(*args, **kwargs)
         self.closed = False
         self._fits = 0
-        self._fit_memory: Any = None
+        self._fit_memory: StepMemory | None = None
 
-    def _fit_token(self, lanes: Any) -> Any:
+    def _fit_token(self, lanes: _batched.BatchedLanes) -> int | None:
         """The token of the fit whose lanes ``lanes`` are; ``None`` for the study's own lanes.
 
         A fit is told apart by its step memory, which every fit's lanes own
@@ -551,7 +563,13 @@ class Coordinator(Cluster):
     # Evaluation -----------------------------------------------------------------------
 
     def evaluate(
-        self, lanes: Any, request: Request, *, cut: Any, retry: tuple, longest: float
+        self,
+        lanes: _batched.BatchedLanes,
+        request: Request,
+        *,
+        cut: tuple[int, int | None] | None,
+        retry: tuple,
+        longest: float,
     ) -> Results:
         """Evaluate ``request`` over every process; the results in canonical order.
 
@@ -649,17 +667,17 @@ class Coordinator(Cluster):
 
     def _evaluate_rows(
         self,
-        fit: Any,
+        fit: int | None,
         mode: str,
         points: np.ndarray,
         chosen: tuple,
         request: Request,
-        cut: Any,
+        cut: tuple[int, int | None] | None,
         retry: tuple,
         longest: float,
-        rungs: Any,
-        bases: Any,
-        present: Any,
+        rungs: np.ndarray | None,
+        bases: np.ndarray | None,
+        present: np.ndarray | None,
     ) -> list:
         """Every process's reply for one group of members, in rank order."""
         points = np.ascontiguousarray(points)
@@ -700,7 +718,14 @@ class Coordinator(Cluster):
 
     # Prepare --------------------------------------------------------------------------
 
-    def prepare(self, lanes: Any, *, cut: Any, modes: Any, setup: Mapping) -> Any:
+    def prepare(
+        self,
+        lanes: _batched.BatchedLanes,
+        *,
+        cut: tuple[int, int | None] | None,
+        modes: Any,
+        setup: Mapping,
+    ) -> preparing.PrepareReport:
         """Compile every process's programs of ``modes`` in two phases; one gathered report.
 
         Args:
@@ -770,7 +795,7 @@ class Coordinator(Cluster):
 
     # The private tier and the end of the run -----------------------------------------
 
-    def private(self, message: str, directory: Any, attempt: int) -> None:
+    def private(self, message: str, directory: str | PathLike[str], attempt: int) -> None:
         """Send ``PRIVATE_SAVE`` or ``PRIVATE_LOAD``: nothing is written or read yet."""
         self._check_open()
         if message not in ("PRIVATE_SAVE", "PRIVATE_LOAD"):
@@ -823,8 +848,8 @@ def _results(
     members: np.ndarray,
     bucket_of: np.ndarray,
     parts: list,
-    present: Any,
-    tables: Any,
+    present: np.ndarray | None,
+    tables: LevelTables | None,
 ) -> Results:
     """The results of every group of members, every process's reply placed in canonical order."""
     shape = (int(members.shape[0]), len(chosen))
@@ -844,11 +869,11 @@ def _results(
     rows = np.zeros(shape, dtype=dtypes.get("rows", np.int64))
     work = {name: np.zeros(shape, dtype=dtypes.get(name, np.int64)) for name in _WORK}
     lane_seconds = np.zeros(shape, dtype=np.float64)
-    normal_diagonal: Any = None
+    normal_diagonal: np.ndarray | None = None
     seconds: dict = {}
     batches: dict = {}
     retries = []
-    summed: Any = None
+    summed: tuple[str, int] | None = None
     group_sums = []
     start = 0
     for count, replies in parts:

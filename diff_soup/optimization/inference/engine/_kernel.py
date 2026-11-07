@@ -58,9 +58,12 @@ from typing import Any, Optional
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jaxtyping import PyTree
+from numpy.typing import DTypeLike
 
 from diff_soup._schedule import ScheduleArrays, SegmentEnds, solve_schedule
 from diff_soup.optimization.inference.engine._status import LaneStatus, lane_status
+from diff_soup.timestepping.vsvo.solution import Solution
 
 Array = jax.Array
 
@@ -170,7 +173,7 @@ class LaneInputs(eqx.Module):
     """
 
     columns: Array
-    frozen: Any
+    frozen: PyTree
     y0: Array
     t0: Array
     t1: Array
@@ -241,7 +244,7 @@ class LaneResult(eqx.Module):
     end_sensitivity: Optional[Array] = None
 
 
-def _work(solution: Any, dtype: Any) -> LaneWork:
+def _work(solution: Solution, dtype: DTypeLike) -> LaneWork:
     """The work counters of a solve, and its first step in ``dtype``."""
     stats = getattr(solution, "stats", None)
 
