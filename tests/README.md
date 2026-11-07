@@ -27,13 +27,13 @@ There is no `linear/` tier. Timeouts apply when `pytest-timeout` is installed.
 
 | scope | files | test functions | collected items | source lines |
 |---|---|---|---|---|
-| whole suite | 51 | 486 | 832 | 17,076 |
-| `public_api` | 21 | 206 | 333 | 6,630 |
-| `contracts` | 22 | 221 | 427 | 6,937 |
-| `performance_contracts` | 2 | 12 | 29 | 510 |
-| `multi_device` | 3 | 32 | 37 | 1,074 |
-| `integration` | 2 | 11 | 32 | 680 |
-| `validation` | 1 | 4 | 20 | 420 |
+| whole suite | 51 | 461 | 782 | 16,733 |
+| `public_api` | 21 | 202 | 323 | 6,569 |
+| `contracts` | 22 | 199 | 385 | 6,630 |
+| `performance_contracts` | 2 | 15 | 19 | 471 |
+| `multi_device` | 3 | 31 | 32 | 1,040 |
+| `integration` | 2 | 10 | 19 | 524 |
+| `validation` | 1 | 4 | 4 | 132 |
 
 Source lines count every Python file under `tests/`, the infrastructure and
 `support/` included; the tier lines count the files in the tier's directory.

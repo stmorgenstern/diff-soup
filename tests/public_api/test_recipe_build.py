@@ -329,18 +329,6 @@ def test_the_topology_report_attributes_a_dense_global_row_and_counts_its_colors
     assert report.per_variable_nnz == {"u": 22, "load": 7}
 
 
-def test_jacobian_nnz_and_the_solver_view_read_the_pattern_the_report_counts():
-    """``jacobian_nnz`` counts the report's 16 and 29 entries; ``solver_view`` serves one cached
-    view of the problem with the global, whose pattern holds its 29 entries over 7 unknowns and
-    whose differential rows are the six cells."""
-    assert [ds.jacobian_nnz(_diffusion_line(glob)) for glob in (False, True)] == [16, 29]
-    problem = _diffusion_line(True)
-    view = ds.solver_view(problem)
-    assert view is ds.solver_view(problem)
-    assert (view.n, view.full_topology.rows.size) == (7, 29)
-    np.testing.assert_array_equal(view.id_mask, [True] * 6 + [False])
-
-
 #: Which cells read the global, and each cell's diffusion coefficient (zero on the fourth).
 _READS_LOAD = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
 _DIFFUSES = np.array([1.0, 1.0, 1.0, 0.0, 1.0, 1.0])

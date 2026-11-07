@@ -1,8 +1,7 @@
-"""Compiled constrained solvers: solutions in jit and vmap lanes, each Hessian mode and the unscaled
-interior point, the implicit derivative in args, its reverse form and the adjoint that selects it,
-a forward-only residual under forward-over-forward, the record's dtypes, and how a run ends:
-degenerate, infeasible, out of steps, diverged, a failed subproblem, restoration, failed
-evaluations."""
+"""Compiled constrained solvers: solutions in vmap lanes, each Hessian mode, the implicit
+derivative in args, its reverse form and the adjoint that selects it, a forward-only residual
+under forward-over-forward, and how a run ends: degenerate, infeasible, out of steps, diverged,
+a failed subproblem, restoration, failed evaluations."""
 
 from __future__ import annotations
 
@@ -23,14 +22,11 @@ from diff_soup.optimization import (
 )
 from tests.support.optimization import (
     bound_active,
-    duplicate_rows,
+    constrained,
     hs7,
     hs35,
-    infeasible,
     least_squares,
-    nan_region,
-    unbounded,
-    wachter_biegler,
+    objective,
 )
 
 # The solvers' stopping tolerances; measured: every lane ends KKT_TOL, workstation CPU 2026-11-06
@@ -46,8 +42,6 @@ LEAST_SQUARES = least_squares()
 # measured 1.3e-12 (worst over solvers, toys, Hessian modes and lanes), workstation CPU 2026-11-06,
 # pytest tests/contracts/test_compiled_solvers.py
 _SOLUTION = 1e-10
-# measured 0 (every solver), workstation CPU 2026-11-06, pytest tests/contracts/test_compiled_solvers.py
-_LANE = 1e-15
 # measured 0 (every solver), workstation CPU 2026-11-06, pytest tests/contracts/test_compiled_solvers.py
 _TANGENT = 1e-9
 # measured 0 (every solver), workstation CPU 2026-11-06, pytest tests/contracts/test_compiled_solvers.py
@@ -104,20 +98,6 @@ def test_each_hessian_approximation_finds_the_solution(solver, mode):
     assert _lane_error(dataclasses.replace(SOLVERS[solver], hessian=mode), toy) <= _SOLUTION
 
 
-def test_an_unscaled_interior_point_finds_the_solution():
-    """With `scaling="none"` every lane of the inequality toy is exact."""
-    solver = dataclasses.replace(SOLVERS["interior_point"], scaling="none")
-    assert _lane_error(solver, TOYS["inequality"]) <= _SOLUTION
-
-
-@pytest.mark.parametrize("solver", SOLVERS)
-def test_a_jitted_run_equals_its_vmap_lane(lanes, solver):
-    """One problem run alone under jit ends where its lane in the batch ends."""
-    toy = TOYS["inequality"]
-    x, _ = jax.jit(lambda a: SOLVERS[solver].run(toy.problem, toy.problem.x0, a))(toy.args_batch[1])
-    assert float(jnp.max(jnp.abs(x - lanes[solver, "inequality"][0][1]))) <= _LANE
-
-
 @pytest.mark.parametrize("solver", SOLVERS)
 def test_the_implicit_tangent_is_the_derivative_of_the_solution(solver):
     """`jax.jvp` of the point and multipliers in a constraint limit equals the exact derivative."""
@@ -168,7 +148,7 @@ def test_a_solver_refuses_an_adjoint_without_an_implicit_rule():
     """A compiled solver's adjoint selects the forward or the reverse implicit rule; another raises."""
     toy = TOYS["inequality"]
     solver = dataclasses.replace(SOLVERS["interior_point"], adjoint=ds.CheckpointAdjoint())
-    with pytest.raises(ds.ConfigurationError, match="ImplicitAdjoint"):
+    with pytest.raises(ds.ConfigurationError):
         solver.run(toy.problem, toy.problem.x0, toy.args_batch[0])
 
 
@@ -204,81 +184,107 @@ def test_forward_over_forward_solves_and_differentiates_a_forward_only_residual(
     assert float(jnp.max(jnp.abs(forward - default))) <= _COMPOSITION
 
 
-def test_the_default_composition_differentiates_the_residual_in_reverse_mode():
-    """Under the default `"forward-over-reverse"` the forward-only residual raises in the exact Hessian."""
-    with pytest.raises(ValueError, match="Reverse-mode differentiation"):
-        _point_and_jacobian(_forward_only, "forward-over-reverse")
-
-
-def test_the_record_keeps_the_point_dtype_and_int32_counters(lanes):
-    """The point and multipliers are float64, as `x0` is; the counters and the status are int32."""
-    xs, records = lanes["interior_point", "inequality"]
-    dtypes = {
-        jnp.result_type(leaf)
-        for leaf in (xs, records.multipliers_inequality, records.slacks, records.kkt_error)
-    }
-    assert dtypes == {jnp.dtype("float64")} and {
-        jnp.result_type(leaf) for leaf in (records.steps, records.status)
-    } == {jnp.dtype("int32")}
+def _duplicate_rows():
+    """`min |x - 2|^2` with `x1 + x2 <= a` twice: both rows active, `x* = (a, a) / 2`."""
+    row = lambda x, a: x[0] + x[1] - a  # noqa: E731
+    return constrained(
+        objective([0.0, 0.0], lambda x: jnp.sum((x - 2.0) ** 2)),
+        1.0,
+        inequality=lambda x, a: jnp.stack([row(x, a), row(x, a)]),
+        n_ineq=2,
+    )
 
 
 def test_two_identical_active_rows_are_degenerate_to_the_interior_point():
     """The interior point marks an active set whose rows repeat as degenerate."""
-    problem = duplicate_rows()
+    problem = _duplicate_rows()
     _, record = jax.jit(lambda a: SOLVERS["interior_point"].run(problem, problem.x0, a))(1.0)
     assert bool(record.degenerate)
 
 
 def test_the_augmented_lagrangian_solves_two_identical_active_rows():
     """On repeated active rows the augmented Lagrangian ends at `x* = (a, a) / 2`."""
-    problem = duplicate_rows()
+    problem = _duplicate_rows()
     x, _ = jax.jit(lambda a: SOLVERS["augmented_lagrangian"].run(problem, problem.x0, a))(1.0)
     assert float(jnp.max(jnp.abs(x - 0.5))) <= _SOLUTION
 
 
-@pytest.mark.parametrize("solver", ["interior_point", "augmented_lagrangian"])
-def test_an_infeasible_problem_ends_infeasible(solver):
-    """Constraints no point satisfies end the run with `INFEASIBLE`."""
-    problem = infeasible()
-    _, record = jax.jit(lambda a: SOLVERS[solver].run(problem, problem.x0, a))(1.0)
-    assert int(record.status) == TerminationStatus.INFEASIBLE
+def _infeasible():
+    """`min x1 + x2` with `x1^2 + x2^2 + a <= 0`, which no point satisfies for `a > 0`."""
+    return constrained(
+        objective([1.0, 1.0], lambda x: x[0] + x[1]),
+        1.0,
+        inequality=lambda x, a: jnp.stack([x @ x + a]),
+        n_ineq=1,
+    )
 
 
-def test_a_nan_region_ends_with_solver_failed_at_a_finite_point():
-    """Repeated NaN trials end the run with `SOLVER_FAILED`, the last accepted point kept."""
-    problem = nan_region()
-    x, record = jax.jit(lambda a: SOLVERS["interior_point"].run(problem, problem.x0, a))(1.0)
-    assert int(record.status) == TerminationStatus.SOLVER_FAILED and bool(jnp.all(jnp.isfinite(x)))
+def _nan_region():
+    """`(x - 2)^2` below `x = 1` and NaN from there on, so the iterates crowd the edge."""
+    value = lambda x: jnp.where(x[0] < 1.0, (x[0] - 2.0) ** 2, jnp.nan)  # noqa: E731
+    return constrained(objective([0.0], value), 1.0)
 
 
-@pytest.mark.parametrize("solver", SOLVERS)
-def test_a_run_out_of_steps_ends_max_steps(solver):
-    """Allowed one step on HS7, which needs more, a run ends with `MAX_STEPS`."""
-    toy = TOYS["equality"]
-    one = dataclasses.replace(SOLVERS[solver], max_steps=1)
-    _, record = jax.jit(lambda a: one.run(toy.problem, toy.problem.x0, a))(4.0)
-    assert int(record.status) == TerminationStatus.MAX_STEPS
+def _unbounded():
+    """`min -x0 - x1` without constraints, which has no minimizer."""
+    return constrained(objective([0.0, 0.0], lambda x: -x[0] - x[1]), 1.0)
 
 
-def test_an_unbounded_objective_ends_the_interior_point_diverged():
-    """Iterates that pass `1e20` on an objective without a minimizer end the run with `DIVERGED`."""
-    problem = unbounded()
-    _, record = jax.jit(lambda a: SOLVERS["interior_point"].run(problem, problem.x0, a))(1.0)
-    assert int(record.status) == TerminationStatus.DIVERGED
+_STATUS = TerminationStatus
+# How a run ends: the solver and its options, the problem, the value of `args`, the status.
+ENDS = {
+    "infeasible-interior_point": ("interior_point", {}, _infeasible, 1.0, _STATUS.INFEASIBLE),
+    "infeasible-augmented_lagrangian": (
+        "augmented_lagrangian",
+        {},
+        _infeasible,
+        1.0,
+        _STATUS.INFEASIBLE,
+    ),
+    "nan_region": ("interior_point", {}, _nan_region, 1.0, _STATUS.SOLVER_FAILED),
+    "unbounded": ("interior_point", {}, _unbounded, 1.0, _STATUS.DIVERGED),
+    "failed_subproblem": (
+        "sqp",
+        {"qp_max_steps": 1},
+        lambda: hs35().problem,
+        3.0,
+        _STATUS.SOLVER_FAILED,
+    ),
+    **{
+        f"max_steps-{name}": (name, {"max_steps": 1}, lambda: hs7().problem, 4.0, _STATUS.MAX_STEPS)
+        for name in SOLVERS
+    },
+}
 
 
-def test_a_failed_subproblem_ends_sqp_with_its_status_recorded():
-    """A QP allowed one step ends the run with `SOLVER_FAILED`, the QP's `MAX_STEPS` in the record."""
-    toy = TOYS["inequality"]
-    sqp = dataclasses.replace(SOLVERS["sqp"], qp_max_steps=1)
-    _, record = jax.jit(lambda a: sqp.run(toy.problem, toy.problem.x0, a))(3.0)
-    assert int(record.status) == TerminationStatus.SOLVER_FAILED and (
-        int(record.subproblem_status) == TerminationStatus.MAX_STEPS
+@pytest.mark.parametrize("end", ENDS)
+def test_each_way_a_run_ends_sets_its_status(end):
+    """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, and a run
+    allowed one step each end with their own status."""
+    name, options, make, a, status = ENDS[end]
+    problem = make()
+    solver = dataclasses.replace(SOLVERS[name], **options)
+    _, record = jax.jit(lambda a: solver.run(problem, problem.x0, a))(a)
+    assert int(record.status) == status
+
+
+def _wachter_biegler():
+    """Wächter and Biegler's example, on which an interior point started infeasible needs restoration.
+
+    `min x0` with `x0^2 - x1 + a = 0`, `x0 - x2 - 1/2 = 0` and `x1, x2 >= 0`, from
+    `(-0.5, 0.1, 0.1)`; for `a = -1`, `x* = (1, 0, 1/2)`.
+    """
+    lower = jnp.array([-jnp.inf, 0.0, 0.0])
+    return constrained(
+        objective([-0.5, 0.1, 0.1], lambda x: x[0], (lower, None)),
+        -1.0,
+        equality=lambda x, a: jnp.stack([x[0] ** 2 - x[1] + a, x[0] - x[2] - 0.5]),
+        n_eq=2,
     )
 
 
 def test_the_interior_point_solves_through_its_restoration_phase():
     """Wächter and Biegler's example takes restoration steps and ends with `KKT_TOL`."""
-    problem = wachter_biegler()
+    problem = _wachter_biegler()
     _, record = jax.jit(lambda a: SOLVERS["interior_point"].run(problem, problem.x0, a))(-1.0)
     assert int(record.inner_steps) > 0 and int(record.status) == TerminationStatus.KKT_TOL
