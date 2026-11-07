@@ -342,7 +342,7 @@ class LevenbergMarquardt(OptSolver):
         # free memory, else in tiles; the problem's structured Jacobian when it has one.
         jacobian = None
         if not (use_reduced or use_lanes):
-            from diff_soup.optimization.inference.fitting.inference_problem import (
+            from diff_soup.optimization.inference.fitting._residual_memory import (
                 checked_residual_jacobian,
             )
 

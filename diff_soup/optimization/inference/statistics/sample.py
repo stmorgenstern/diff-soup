@@ -916,7 +916,7 @@ def _target_batches_its_solves(problem: Any) -> tuple[bool, bool]:
     targets answer ``(False, False)``.
     """
     from diff_soup.optimization.inference.fitting._sharding import sharding_active
-    from diff_soup.optimization.inference.fitting.inference_problem import Multishoot
+    from diff_soup.optimization.inference.fitting.formulation import Multishoot
 
     batched = sharded = False
     seen: set[int] = set()

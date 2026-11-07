@@ -10,7 +10,7 @@ happens to be an array.
 Everything here reads those declarations. A fit that states no selection of its
 own fits exactly the declared learnables, a name matches a declared learnable,
 and a leaf that was never declared is reached only by naming it explicitly in a
-[ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups].
+[ParameterGroups][diff_soup.optimization.inference.fitting.parameter_groups.ParameterGroups].
 """
 
 from __future__ import annotations
@@ -233,7 +233,7 @@ class LearnableSelector:
     to label a parameter group and to build the optimizer's decision-variable
     selection) and the problem-structured boolean mask (used to partition the
     problem pytree).  Pass it as a
-    [ParameterGroups][diff_soup.optimization.inference.fitting.inference_problem.ParameterGroups]
+    [ParameterGroups][diff_soup.optimization.inference.fitting.parameter_groups.ParameterGroups]
     group value.
 
     Attributes:

@@ -176,7 +176,7 @@ class InferenceProblem(EstimationProblem):
         Returns:
             A read-only mapping from each fitted parameter to its value, as `fit[rate]` reads it.
         """
-        from diff_soup.optimization.inference.fitting.inference_problem import parameter_values
+        from diff_soup.optimization.inference.fitting.parameter_groups import parameter_values
 
         return parameter_values(self.parameter_schema, x)
 

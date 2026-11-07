@@ -64,7 +64,7 @@ def _numeric_problem(problem: Any, optimizer: Any) -> Any:
     if isinstance(problem, OptimizationProblem):
         return problem
     if getattr(problem, "segment_fns", None) is not None:
-        from diff_soup.optimization.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting._residual_lowering import (
             lower_residual_problem,
         )
 

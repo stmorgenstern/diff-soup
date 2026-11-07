@@ -592,7 +592,7 @@ class NewtonTrustRegion(OptSolver):
         reuses the compilation; under ``hessian_tile="auto"`` a tile that does
         not fit is narrowed down to 8 directions before the error is raised.
         """
-        from diff_soup.optimization.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting._residual_memory import (
             _HESSIAN_GUARD_MIN_WIDTH,
             _HessianMemoryError,
             _MemoryCheckedHessian,
@@ -627,7 +627,7 @@ class NewtonTrustRegion(OptSolver):
         window starts give. Under ``hessian_tile="auto"`` it is formed whole
         when that fits in the free memory, else in tiles of 32, 16 or 8.
         """
-        from diff_soup.optimization.inference.fitting.inference_problem import (
+        from diff_soup.optimization.inference.fitting._residual_memory import (
             checked_residual_jacobian,
         )
 

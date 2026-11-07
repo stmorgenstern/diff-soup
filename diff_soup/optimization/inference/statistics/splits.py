@@ -339,7 +339,7 @@ def _conditioning_records(
     experiment_set: Any, indices: tuple[int, ...]
 ) -> tuple[ConditioningRecord, ...]:
     """Build deterministic held-out conditioning provenance."""
-    from diff_soup.optimization.inference.fitting.inference_problem import _initial_state_array
+    from diff_soup.optimization.inference.fitting.formulation import _initial_state_array
 
     experiment_ids = _experiment_ids(experiment_set)
     experiments = tuple(experiment_set.experiments)
