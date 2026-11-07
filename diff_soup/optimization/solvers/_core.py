@@ -19,6 +19,7 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array, ArrayLike, Bool, Float, Int, PyTree
 
+from diff_soup._adjoints import AbstractAdjoint
 from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.kkt import DenseKKT, KKTSolve
@@ -191,6 +192,7 @@ class ConstrainedSolver(CompiledSolver):
     tol: eqx.AbstractVar[float]
     max_steps: eqx.AbstractVar[int]
     hessian: eqx.AbstractVar[str]
+    adjoint: eqx.AbstractVar[AbstractAdjoint]
 
     @abc.abstractmethod
     def _place(self, x0: Float[Array, "n"], bounds: Bounds, warm: bool) -> Float[Array, "n"]:
@@ -325,7 +327,9 @@ class ConstrainedSolver(CompiledSolver):
     ) -> tuple[Float[Array, "n"], SolveRecord]:
         """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
-        return implicit_run(solver._run_primal, _raw, self._kkt, problem, x0, args, warm_start)
+        return implicit_run(
+            solver._run_primal, _raw, self._kkt, problem, x0, args, warm_start, self.adjoint
+        )
 
     def _run_primal(
         self,
