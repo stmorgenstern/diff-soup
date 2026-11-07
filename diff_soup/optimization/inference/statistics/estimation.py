@@ -10,15 +10,21 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, ArrayLike
+from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup._precision import cast_floating_leaves
 from diff_soup.optimization._binding import Derived, Held
 from diff_soup.optimization._derived import half_sum_of_squares
+from diff_soup.optimization._least_squares import LeastSquaresProblem
 from diff_soup.optimization.inference.fitting._layout import resolve_point
 from diff_soup.optimization.inference.fitting._residual_lowering import lower_residual_problem
 from diff_soup.optimization.inference.fitting._residual_memory import _MemoryCheckedHessian
-from diff_soup.optimization.inference.fitting.parameter_groups import parameter_values
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
+from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
+from diff_soup.optimization.inference.fitting.parameter_groups import (
+    ParameterValues,
+    parameter_values,
+)
 from diff_soup.optimization.inference.fitting.regularization import NoReg
 from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.optimization.inference.statistics.likelihoods import (
@@ -268,7 +274,7 @@ class EstimationProblem(AbstractOptimizationProblem):
     study: Study
     objective: MLE | MAP
     parameter_schema: ParameterSchema
-    _inference_problem: Any
+    _inference_problem: InferenceProblem | JointInferenceProblem
     _x0: np.ndarray
     _data_r: Callable
     _data_residual_jacobian: Callable
@@ -282,7 +288,7 @@ class EstimationProblem(AbstractOptimizationProblem):
     _loss_grad_fns: dict
     _loss_grad_hessian_fns: dict
     regularization: NoReg
-    trial_predicate: Any
+    trial_predicate: Callable[..., ArrayLike] | None
 
     #: What the constraint functions take as ``args``.
     _args = None
@@ -561,11 +567,11 @@ class EstimationProblem(AbstractOptimizationProblem):
         return bool(getattr(self._inference_problem, "is_sharded", False))
 
     @property
-    def diagnostic_problem(self) -> Any:
+    def diagnostic_problem(self) -> InferenceProblem | JointInferenceProblem:
         """Data-only problem for practical-identifiability diagnostics."""
         return self._inference_problem
 
-    def joint_view(self) -> Any:
+    def joint_view(self) -> EstimationProblem | JointInferenceProblem:
         """The joint problem with its level structure, warm-started at this problem's start.
 
         For a study of several experiments this is the underlying
@@ -598,7 +604,7 @@ class EstimationProblem(AbstractOptimizationProblem):
             problem = problem.with_trial_predicate(self.trial_predicate)
         return problem
 
-    def numeric_problem(self, optimizer: Any) -> Any:
+    def numeric_problem(self, optimizer: Any) -> LeastSquaresProblem:
         """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] ``optimizer`` solves.
 
         Its residual is the whitened data rows followed by the MAP prior
@@ -630,7 +636,7 @@ class EstimationProblem(AbstractOptimizationProblem):
             lowered = held[1][key] = lower_estimation(self, self, optimizer)
         return lowered
 
-    def args(self) -> Any:
+    def args(self) -> PyTree:
         """What the constraint functions take as ``args``, the numeric problem's ``args`` leaf.
 
         The data residual closes over its measurements and reads no ``args``.
@@ -766,7 +772,9 @@ def _reduced_gauss_newton(problem: EstimationProblem) -> Callable:
     return gauss_newton
 
 
-def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any = None) -> Any:
+def lower_estimation(
+    problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any = None
+) -> LeastSquaresProblem:
     """The [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] of an estimation problem.
 
     Args:
@@ -814,7 +822,7 @@ def lower_estimation(problem: Any, evaluator: Any, optimizer: Any, *, lanes: Any
     return constrained.with_args(problem.args())
 
 
-def _values_of(schema: Held, x: ArrayLike) -> Any:
+def _values_of(schema: Held, x: ArrayLike) -> ParameterValues:
     """The fitted values by parameter at the flat vector `x`."""
     return parameter_values(schema.value, x)
 

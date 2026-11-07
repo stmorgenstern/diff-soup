@@ -32,6 +32,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, ArrayLike
 
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
 from diff_soup.optimization.inference.statistics.information import (
     _expected_information_core,
@@ -681,7 +682,7 @@ def compare_compression(
     key: ArrayLike | None = None,
     n_simulations: int = 2048,
     n_batches: int = 8,
-    parameters: Any = None,
+    parameters: ParameterGroups | None = None,
 ) -> CompressionReport:
     """Compare deterministic summaries of one experiment's full observation.
 

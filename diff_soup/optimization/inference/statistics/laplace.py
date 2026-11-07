@@ -180,7 +180,7 @@ class LaplacePosterior(eqx.Module):
 
     parameter_schema: ParameterSchema | None = None
     _data_curvature: Optional[Array] = None
-    _evidence_prior: Any = None
+    _evidence_prior: _DeclaredPrior | str | None = None
 
     def __getitem__(self, handle):
         """Return the marginal for a shared handle, or marginals keyed by owner."""

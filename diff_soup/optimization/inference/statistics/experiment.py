@@ -32,7 +32,7 @@ unless deliberately acknowledged, and every acknowledgment is recorded.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional
 
 import equinox as eqx
@@ -42,6 +42,7 @@ from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup.optimization.inference.data.base import ObservationOperator
 from diff_soup.optimization.inference.data.deferred import DeferredValues
+from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 from diff_soup.optimization.inference.fitting.observables import Observable, _ObservableOperator
 from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.fitting.series import Series
@@ -500,9 +501,9 @@ class _CompiledExperiment:
         bounds: Any = None,
         t0: Optional[float] = None,
         load_data: bool = True,
-        reuse: Any = None,
+        reuse: InferenceProblem | None = None,
         state_prior: Any = None,
-    ) -> Any:
+    ) -> InferenceProblem:
         """Lower the data-bearing declaration to a standard ``InferenceProblem``.
 
         Only response channels with attached data become residual streams;
@@ -663,7 +664,9 @@ def _validated_experiment_ids(experiments: tuple, experiment_ids: Any) -> tuple:
     return experiment_ids
 
 
-def _normalized_ownership(ownership: Any, n_experiments: int) -> Any:
+def _normalized_ownership(
+    ownership: Any, n_experiments: int
+) -> dict[str, dict[int, Hashable]] | Callable[..., Hashable]:
     """Normalize JointInferenceProblem's map vocabulary without resolving groups."""
     if ownership is None:
         return {}
@@ -788,7 +791,7 @@ class ExperimentSet(eqx.Module):
     """
 
     experiments: tuple
-    ownership: Any
+    ownership: dict[str, dict[int, Hashable]] | Callable[..., Hashable]
     independent: bool = eqx.field(static=True)
     experiment_ids: tuple
     joint_likelihood: Any

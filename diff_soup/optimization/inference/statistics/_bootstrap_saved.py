@@ -15,6 +15,8 @@ import numpy as np
 from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.fitting.result import OptResult
+from diff_soup.optimization.inference.hierarchical._population import PopulationCheckpoint
+from diff_soup.optimization.inference.hierarchical._replicates import FitProducts
 from diff_soup.problem.parameters import ParameterEntry, parameter_decoder
 
 
@@ -154,10 +156,14 @@ class _AtFit(NamedTuple):
     failures: tuple
     fit_rmse: float
     score_balance: float
-    inverse: Any  # inverse_columns and inverse_block of the Gauss-Newton matrix at the fit
+    inverse: (
+        FitProducts | _SavedInverse
+    )  # inverse_columns and inverse_block of the Gauss-Newton matrix at the fit
 
 
-def _at_fit(products: Any, jackknife: np.ndarray, lane_members: np.ndarray, count: int) -> _AtFit:
+def _at_fit(
+    products: FitProducts, jackknife: np.ndarray, lane_members: np.ndarray, count: int
+) -> _AtFit:
     """The evaluation at the fit's products, its leave-one-member-out rows those of ``jackknife``."""
     from diff_soup.optimization.inference.hierarchical._replicates import fit_training_rmse
 
@@ -246,7 +252,7 @@ def _saved_at_fit(record: Mapping) -> _AtFit:
     )
 
 
-def _resume(writer: Any, on_conflict: str) -> Any:
+def _resume(writer: PopulationCheckpoint, on_conflict: str) -> dict | None:
     """The newest population file's contents when this bootstrap wrote it, else ``None``.
 
     A file of another declaration (or one that cannot be read) is refused
