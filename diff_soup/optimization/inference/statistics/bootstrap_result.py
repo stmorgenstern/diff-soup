@@ -35,8 +35,6 @@ from diff_soup.optimization.inference.statistics.bootstrap_outcomes import _KEPT
 from diff_soup.problem.parameters import ParameterEntry, ParameterOccurrence
 
 _FORMAT = "diff_soup bootstrap result, version 1"
-
-
 _OUTCOME_ARRAYS = (
     "index",
     "attempts",
@@ -51,11 +49,7 @@ _OUTCOME_ARRAYS = (
     "data_rows",
     "training_rmse",
 )
-
-
 _OUTCOME_TEXTS = ("kind", "status", "reason", "stop", "error")
-
-
 _ONE_STEP_ARRAYS = ("estimates", "jackknife", "laplace", "sandwich", "influence")
 
 

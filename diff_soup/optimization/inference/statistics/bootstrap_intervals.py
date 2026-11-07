@@ -9,8 +9,6 @@ import jax.numpy as jnp
 import numpy as np
 
 _KINDS = ("bca", "percentile")
-
-
 # An interval is withheld when more than this share of the requested replicates failed, and
 # flagged when more than this share of the kept ones never left the fit's point.
 _SHARE = 0.05

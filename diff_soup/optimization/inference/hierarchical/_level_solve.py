@@ -267,12 +267,8 @@ def _vectors(system):
 
 # The phases of the multiplier search on the device, as ``_secular_search`` runs it.
 _AT_ZERO, _PROBE, _BRACKET, _NEWTON, _FINAL, _NEARLY, _FOUND = range(7)
-
-
 # The search's iteration limits: the bracket's doublings and the Newton iterations.
 _BRACKETS = 80
-
-
 _NEWTONS = 30
 
 

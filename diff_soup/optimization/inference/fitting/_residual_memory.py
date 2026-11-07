@@ -19,8 +19,6 @@ from diff_soup._errors import ConfigurationError
 # 2026-10-28): 4.2 / 16.1 / 63.2 GB of compiled temporaries at 83 / 163 / 323
 # parameters. Below this width the Hessian is used without measuring it first.
 _HESSIAN_GUARD_MIN_WIDTH = 64
-
-
 #: The share of the free device memory one Hessian evaluation may take.
 _HESSIAN_MEMORY_SHARE = 0.9
 

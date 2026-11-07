@@ -234,7 +234,6 @@ def _noise_trial_limit(solver: Any, route: Any) -> Any:
 # does not follow the corrector's band; the margin is taken at the tighter tolerance.
 _FLOOR_FACTOR = 1.0
 
-
 # The band within which a lane's nonlinear corrector accepts its iterate, per unit of the
 # solver's rtol and newton_tol_factor, relative: the derivative at that iterate differs from
 # the slope of the computed values by about this band.

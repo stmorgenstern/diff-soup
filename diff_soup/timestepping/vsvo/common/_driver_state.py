@@ -40,22 +40,11 @@ from .trace import (
 # 3 nonlinear divergence, 4 max steps, 5 event stop, 6 inconsistent IC,
 # 7 accuracy limit.
 _CODE_UNKNOWN = 0
-
-
 _CODE_SUCCESS = 1
-
-
 _CODE_MAX_STEPS = 4
-
-
 _CODE_EVENT_STOP = 5
-
-
 _CODE_INCONSISTENT_IC = 6
-
-
 _CODE_ACCURACY_LIMIT = 7
-
 
 # Endpoint tolerance so the final save time, reached up to a rounding error, is
 # still claimed by the last step, and so an exact landing on t1 terminates.
