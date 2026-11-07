@@ -21,12 +21,13 @@ Provides two observation operators:
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
 from scipy.interpolate import RegularGridInterpolator
 from scipy.signal import fftconvolve
 
@@ -59,7 +60,7 @@ class PixelAveragingOperator(ObservationOperator):
     # or JAX — in a static field.
     valid_mask: np.ndarray
 
-    def predict(self, nodal_field: jax.Array, t: Any, theta: Any) -> jax.Array:
+    def predict(self, nodal_field: jax.Array, t: ArrayLike | None, theta: PyTree) -> jax.Array:
         """Map nodal field → valid pixel values, shape ``(n_valid,)``; ``t``/``theta`` unused."""
         del t, theta
         # Gather node values for each pixel's element
@@ -304,7 +305,7 @@ class UpConvDownOperator(ObservationOperator):
     n_nodes_: int = eqx.field(static=True)
     upscale_: int = eqx.field(static=True)
 
-    def predict(self, nodal_field: jax.Array, t: Any, theta: Any) -> jax.Array:
+    def predict(self, nodal_field: jax.Array, t: ArrayLike | None, theta: PyTree) -> jax.Array:
         """Map nodal field → valid pixel values.
 
         Args:

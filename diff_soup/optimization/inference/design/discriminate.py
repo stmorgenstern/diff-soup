@@ -8,7 +8,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, PyTree
 
 __all__ = ["DiscriminationEnsemble", "t_optimal"]
 
@@ -83,7 +83,7 @@ class DiscriminationEnsemble(eqx.Module):
 def t_optimal(
     model_a: Callable,
     model_b: Callable,
-    design: Any,
+    design: PyTree,
     *,
     ensemble: DiscriminationEnsemble,
 ) -> Array:
