@@ -58,10 +58,9 @@ LAYERS: tuple[str, ...] = (
     # The solver stack.
     "linear",  # linear solvers; imports only the leaves
     "nonlinear",  # Newton solvers built on linear
-    # The modeling spine: domains -> problem -> _lowering -> timestepping -> optimization.
+    # The modeling spine: domains -> problem -> timestepping -> optimization.
     "domains",  # meshes and geometry; the base of the modeling spine
-    "problem",  # the Recipe API and residual IR; builds on linear and nonlinear
-    "_lowering",  # turns a problem and its domains into solver-ready arrays
+    "problem",  # the Recipe API, the residual IR and its lowering; on linear, nonlinear, domains
     "timestepping",  # time integrators over nonlinear and linear
     "pdesolve",  # the solve entry point; wires timestepping together
     "_compile",  # ds.compile: compiles one pdesolve call ahead of time

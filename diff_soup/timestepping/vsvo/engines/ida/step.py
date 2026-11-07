@@ -54,6 +54,7 @@ from diff_soup.timestepping.vsvo.common.backends import (
 )
 from diff_soup.timestepping.vsvo.common.contract import (
     ENDPOINT_CLAMP_FUZZ,
+    ENGINE_CACHE_SIZE,
     ENGINE_CAPABILITIES,
     EngineCapabilities,
     clamp_initial_step,
@@ -1434,7 +1435,7 @@ def _build_ida_engine(
     )
 
 
-_ida_engine_cached = functools.lru_cache(maxsize=None)(_build_ida_engine)
+_ida_engine_cached = functools.lru_cache(maxsize=ENGINE_CACHE_SIZE)(_build_ida_engine)
 
 
 def ida_engine(
@@ -1460,9 +1461,9 @@ def ida_engine(
     carries the algebraic-suppression flag, the identification-mask override,
     and the consistent-initialization mode through to the engine.
 
-    Identical configurations return one memoised engine object, so repeated
-    solves share the driver's compiled program instead of recompiling per
-    construction. An unhashable ``id`` mask falls back to an uncached build.
+    Identical configurations return one memoised engine object (of the last
+    ``ENGINE_CACHE_SIZE``), so repeated solves share the driver's compiled
+    program instead of recompiling per construction. An unhashable ``id`` mask falls back to an uncached build.
 
     Args:
         profile: The solver execution profile (``nonlinear_mode`` selects the

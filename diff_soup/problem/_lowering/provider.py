@@ -1,16 +1,10 @@
 """Lowering analysis provider: builds residual/Jacobian/sparsity/mass kernels.
 
 ``lower()`` (in ``diff_soup.problem``) builds a ``LoweredProblem`` from an
-``EquationSet`` but cannot author the residual / Jacobian / sparsity /
-mass-diagonal kernels itself: those require the ``diff_soup.domains.operators``
-bank, which ``problem`` cannot import directly.  The injection seam —
-``diff_soup.problem._ir.lower.set_lowering_ops(provider)`` — accepts an
-``analyze(eqset, *, precision) -> _LoweringAnalysis`` callable from a layer
-that may freely import both sides.  This module is that provider.
-
-``diff_soup/_lowering/`` sits outside the layer-rank map, so it may legally
-import both ``diff_soup.domains`` and ``diff_soup.problem._ir``.  It wires the
-seam at import time (see [diff_soup._lowering][diff_soup._lowering]).
+``EquationSet`` and calls [analyze][diff_soup.problem._lowering.provider.analyze]
+for the residual / Jacobian / sparsity / mass-diagonal kernels, which this module
+builds from the ``diff_soup.domains.operators`` bank. ``lower()`` imports it on
+first call, since this module imports the IR that ``lower()`` belongs to.
 
 Two branches, selected by ``_has_family_layer``:
 
@@ -109,7 +103,7 @@ def _geometry_scale_value(boundary_context, comp) -> jax.Array:
     """The current value of the declared parameter that scales ``comp``'s grid.
 
     ``boundary_context`` is the evaluation's declared namespaces
-    ([_boundary_context][diff_soup._lowering.bcs._boundary_context]), read from
+    ([_boundary_context][diff_soup.problem._lowering.bcs._boundary_context]), read from
     the runtime equation leaves, so the value is the one this evaluation carries
     (a fixed input, a fitted iterate, or a traced lane value).
     """
@@ -555,7 +549,7 @@ def _build_full_residual_fn(
     current of those tables constant under differentiation; the derivative
     kernel adds that current's Jacobian row from the assembled blocks.
     ``border_probe``
-    (a [_ConstraintBorderProbe][diff_soup._lowering.provider._ConstraintBorderProbe])
+    (a [_ConstraintBorderProbe][diff_soup.problem._lowering.provider._ConstraintBorderProbe])
     records, at trace time, which equations, family blocks, and bordered-global
     rows this kernel evaluated.
     """
@@ -1819,9 +1813,9 @@ def _build_full_jac_blocks_fn(
     the full residual's ``g``.  ``B = df/dlam`` stays a full physics
     derivative.  The returned kernel publishes its border introspection as
     ``constraint_border_plan``
-    (a [_ConstraintBorderPlan][diff_soup._lowering.provider._ConstraintBorderPlan])
+    (a [_ConstraintBorderPlan][diff_soup.problem._lowering.provider._ConstraintBorderPlan])
     and ``constraint_border_probe``
-    (a [_ConstraintBorderProbe][diff_soup._lowering.provider._ConstraintBorderProbe]).
+    (a [_ConstraintBorderProbe][diff_soup.problem._lowering.provider._ConstraintBorderProbe]).
     """
     sparse_jac = _lazy_coloring(topo)
     n_c = int(sum(int(c.dim) for c in eqset.constraints))
@@ -2180,7 +2174,7 @@ def _build_observe_fn(eqset: EquationSet, offset_of=None, per_vars=None):  # noq
 
     The bordered globals are read from ``lam_si`` in the global-row order the
     residual and
-    [_build_global_layout_entries][diff_soup._lowering.layout._build_global_layout_entries]
+    [_build_global_layout_entries][diff_soup.problem._lowering.layout._build_global_layout_entries]
     use, so an observation reads ``view[global]`` exactly as the residual
     closures do.  An observation that reads a global when no ``lam_si`` was
     passed raises a
@@ -2303,7 +2297,7 @@ class _ControlsEvaluator:
     Controls are authored in dimensional units, so each ``fn`` is called at ``time_ref * t``
     and its dimensional return value is passed back unchanged.  ``bindings`` is the
     compiled
-    [ControlBindingSet][diff_soup._lowering.control_bindings.ControlBindingSet]
+    [ControlBindingSet][diff_soup.problem._lowering.control_bindings.ControlBindingSet]
     — the operational form of the declarations: the driven algebraic-global
     slice ``(lam_offset, dim)`` per derived control, the direct controls'
     names, and the ``bound_values`` / ``internal_values`` evaluation surface
@@ -2390,11 +2384,11 @@ def _analyze_family_layer(
 ) -> _LoweringAnalysis:
     """Host analysis for the multi-component family / coupling / BC path.
 
-    Uses the family-aware [_layout][diff_soup._lowering.layout._layout]
+    Uses the family-aware [_layout][diff_soup.problem._lowering.layout._layout]
     (member-major slabs after components), the multi-component family
     self-block + cross-block `_sparsity_full`, the family mass-diagonal
     branch (`_mass_diagonal_full`), the resolved boundary conditions
-    ([_bc_dofs][diff_soup._lowering.bcs._bc_dofs]: Dirichlet pin rows + mass-zero +
+    ([_bc_dofs][diff_soup.problem._lowering.bcs._bc_dofs]: Dirichlet pin rows + mass-zero +
     topology ``bc_indices`` + FEM RobinBC face-stencil pairs + symmetry
     normal-projection rows and their cross-component columns), and the full
     residual / Jacobian builders (N-component physics + BCs + family residual +

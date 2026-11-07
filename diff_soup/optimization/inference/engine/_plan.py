@@ -399,14 +399,14 @@ def _linear_backend(child: Any, platform: str) -> Any:
     """
     from diff_soup.linear import LinearSolver
     from diff_soup.linear._resolver import BackendResolver
+    from diff_soup.problem.implicit.solver_problem import solver_view
     from diff_soup.timestepping.vsvo.common.backends import resolve_backend
-    from diff_soup.timestepping.vsvo.common.contract import coerce_problem
 
     linear = getattr(getattr(child, "solver", None), "linear", None)
     if linear is None or isinstance(linear, LinearSolver):
         return linear
     try:
-        size = int(coerce_problem(child._seam.problem).n_u)
+        size = int(solver_view(child._seam.problem).n_u)
         return resolve_backend(
             BackendResolver(backend=linear).choose(block_size=size, platform=platform)
         )
