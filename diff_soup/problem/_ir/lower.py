@@ -94,8 +94,8 @@ def _build_analysis(
         eqset: The EquationSet to analyse.
         precision: The dtype policy (its ``compute_dtype`` drives the
             boundary-cast law at closure entry).
-        probe_stencils: Whether to measure stencils at probe states. The exact
-            pattern of an ``exact_sparsity`` build needs no probes.
+        probe_stencils: Whether to measure stencils at probe states, or else read
+            them from the residual's tangent map, as an ``exact_sparsity`` build does.
 
     Returns:
         The [_LoweringAnalysis][].
@@ -217,7 +217,7 @@ def lower_declared(
     *,
     layout: Optional[Layout] = None,
     precision: Optional[Precision] = None,
-    exact_sparsity: bool = False,
+    exact_sparsity: Optional[bool] = None,
     bounds: Optional[tuple] = None,
     declarations: Optional[tuple] = None,
     geometry_scales: Optional[tuple] = None,
@@ -234,7 +234,7 @@ def lower_declared(
         layout: Device-placement policy (default = single device).
         precision: Dtype policy (default = fp64).
         exact_sparsity: Hold only the Jacobian entries a tangent can reach; see
-            ``ProblemSpec.build``.
+            ``ProblemSpec.build``. ``None`` does so unless an equation uses ``q.dt``.
         bounds: ``(handle, (lower, upper), learnable)`` per bounded declared
             parameter; ``None`` attaches none.
         declarations: The declaration handles of the build, matched by name.
@@ -257,20 +257,28 @@ def lower_declared(
     key = compose_content_key(
         structure_hash, layout=layout, precision=precision, scales=eqset.scales
     )
-    if exact_sparsity:
-        key = ("exact_sparsity", key)
+    if exact_sparsity is not False:
+        key = ("exact_sparsity" if exact_sparsity else "sparsity", key)
     built: list = []
 
-    def _build() -> tuple:
-        analysis = _build_analysis(eqset, precision=precision, probe_stencils=not exact_sparsity)
+    def _assemble(exact: bool) -> tuple:
+        analysis = _build_analysis(eqset, precision=precision, probe_stencils=not exact)
         template = _assemble_lowered_problem(
             analysis,
             eqset,
             layout=layout,
             precision=precision,
             structure_key=key,
-            exact_sparsity=exact_sparsity,
+            exact_sparsity=exact,
         )
+        return template, analysis
+
+    def _build() -> tuple:
+        template, analysis = _assemble(exact_sparsity is not False)
+        if exact_sparsity is None and template.derivative_forms():
+            # The tangent walk reads a residual with an explicit mass; a q.dt
+            # form keeps the declared blocks, measured at probe states.
+            template, analysis = _assemble(False)
         built.append(template)
         return template, analysis
 
@@ -285,7 +293,7 @@ def lower_declared(
             layout=layout,
             precision=precision,
             structure_key=key,
-            exact_sparsity=exact_sparsity,
+            exact_sparsity=template._exact_sparsity,
             boundary=_rewrapped_boundary_slots(analysis, eqset),
             initial_lambda_si=_initial_bordered_values(eqset, analysis.initial_lambda_si),
         )

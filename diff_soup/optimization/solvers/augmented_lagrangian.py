@@ -25,6 +25,7 @@ import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, PyTree
 
+from diff_soup._adjoints import AbstractAdjoint, ForwardAdjoint
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.solvers import _hessian, _projected_newton
@@ -114,6 +115,7 @@ class AugmentedLagrangian(ConstrainedSolver):
         inner_max_steps: The step budget of each inner minimization, `200` by default.
         hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`, as for `InteriorPoint`.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
+        adjoint: How the solution is differentiated in `args`. [ForwardAdjoint][diff_soup.ForwardAdjoint] (default) is one forward rule: `jax.jvp` and `jax.jacfwd` cost one KKT solve per tangent, and `jax.grad` transposes it. [ImplicitAdjoint][diff_soup.nonlinear.ImplicitAdjoint] is one reverse rule: `jax.grad` and `jax.vjp` cost one transposed KKT solve whatever the size of `args`, and forward mode raises. Choose it for a large `args`, or for closures that run a solve under `CheckpointAdjoint(reverse_over_reverse=True)`, with `hessian="exact"` or `"bfgs"` there, since Gauss-Newton takes the residual's Jacobian in forward mode.
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
@@ -126,6 +128,7 @@ class AugmentedLagrangian(ConstrainedSolver):
     inner_max_steps: int = eqx.field(static=True, default=200)
     hessian: str = eqx.field(static=True, default="auto")
     max_failed_evaluations: int = eqx.field(static=True, default=10)
+    adjoint: AbstractAdjoint = eqx.field(static=True, default_factory=ForwardAdjoint)
 
     def _check(self, raw: Closures) -> None:
         """Refuse a Hessian mode the problem cannot serve, or a penalty that cannot grow."""

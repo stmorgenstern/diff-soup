@@ -150,7 +150,13 @@ class Program:
                 self._mark(sub, set(inputs), needed)
 
     def _evaluate(self, needed: list[int]):
-        """Compute the ``needed`` known values in one compiled program."""
+        """Compute the ``needed`` known values in one compiled program on this process's device.
+
+        The known values are build-time constants, so the program runs on
+        ``jax.local_devices()[0]``: in a world of several processes the default device
+        belongs to process 0, and the other processes could not read the result. In one
+        process it is the default device.
+        """
         if not needed:
             return
         const_ids = sorted(self.consts)
@@ -160,7 +166,8 @@ class Program:
             self._run(self.top, env)
             return [env[number] for number in needed]
 
-        results = jax.jit(run)(*(self.consts[number] for number in const_ids))
+        with jax.default_device(jax.local_devices()[0]):
+            results = jax.jit(run)(*(self.consts[number] for number in const_ids))
         self.values.update(zip(needed, (np.asarray(result) for result in results)))
 
     def _run(self, block: Block, env: dict):
