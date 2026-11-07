@@ -13,9 +13,7 @@ from diff_soup.optimization.inference.fitting.scales import ConstantScale, Hessi
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._lane_route import _lane_positions
-from diff_soup.optimization.solvers._loop import (
-    _floor_radius,
-)
+from diff_soup.optimization.solvers._loop_judge import _floor_radius
 
 
 def _full_step_decrease(

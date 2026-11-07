@@ -64,15 +64,12 @@ from diff_soup.optimization.solvers._loop import (
     _WINDOW,
     Trials,
     _after_attempt,
-    _judge,
-    _median,
-    _next_radius,
     _saved_window,
     _stop_after,
-    cost_scale,
     loop_tolerances,
     step_small,
 )
+from diff_soup.optimization.solvers._loop_judge import _judge, _median, _next_radius, cost_scale
 
 # ---------------------------------------------------------------------------------------
 # The evaluation at the fit, and what it serves with no further evaluation
