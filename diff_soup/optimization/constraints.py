@@ -16,7 +16,7 @@ from typing import Any, NamedTuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, ArrayLike, Float, PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization._binding import Derived, Lowered
@@ -100,7 +100,7 @@ class Constraints(eqx.Module):
                     f"Constraints declares n_{name}={count} and no {name} function."
                 )
 
-    def row_scales(self) -> tuple[Any, Any] | None:
+    def row_scales(self) -> tuple[Array, Array] | None:
         """The scales, one per row, or `None` for the solver's own scaling."""
         return self.scales
 
@@ -140,7 +140,7 @@ class Constraints(eqx.Module):
         }
 
 
-def _side_scales(scales: Any, count: int, name: str) -> Any:
+def _side_scales(scales: Any, count: int, name: str) -> Array:
     """One side's scales as a `(count,)` array; ones for `None`."""
     dtype = jnp.result_type(float)
     if scales is None:
@@ -165,7 +165,7 @@ def _side(function, count, params, args, dtype, name):
     return values
 
 
-def _rows(spec: _Spec, unflatten: Callable, x: Any, args: Any) -> tuple[Any, Any]:
+def _rows(spec: _Spec, unflatten: Callable, x: ArrayLike, args: PyTree) -> tuple[Array, Array]:
     """`(equality, inequality)` on the flat vector."""
     params = unflatten(x)
     dtype = jnp.result_type(x)
@@ -175,7 +175,7 @@ def _rows(spec: _Spec, unflatten: Callable, x: Any, args: Any) -> tuple[Any, Any
     )
 
 
-def _rows_and_jacobians(spec: _Spec, unflatten: Callable, x: Any, args: Any) -> tuple:
+def _rows_and_jacobians(spec: _Spec, unflatten: Callable, x: ArrayLike, args: PyTree) -> tuple:
     """`(equality, inequality, J_eq, J_ineq)`, the Jacobians in the mode `spec.jacobian` picks."""
     rows = spec.n_equality + spec.n_inequality
     forward = spec.jacobian == "forward" or (spec.jacobian == "auto" and rows > jnp.shape(x)[-1])

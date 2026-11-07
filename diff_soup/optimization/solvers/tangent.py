@@ -27,11 +27,11 @@ additional tile.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jaxtyping import ArrayLike
 
 _VALID_TILES = (8, 16, 32, 64, 128)
 
@@ -58,12 +58,12 @@ class _MaterializedPushforward(eqx.Module):
     jacobian: jax.Array
     out_shape: tuple = eqx.field(static=True)
 
-    def __call__(self, tangent: Any) -> jax.Array:
+    def __call__(self, tangent: ArrayLike) -> jax.Array:
         return jnp.reshape(self.jacobian @ jnp.asarray(tangent), self.out_shape)
 
 
 def _tiled_value_and_jacobian(
-    function: Callable[[Any], Any], point: jax.Array, tile: str | int | None
+    function: Callable[[jax.Array], ArrayLike], point: jax.Array, tile: str | int | None
 ) -> tuple[jax.Array, jax.Array, tuple]:
     """Evaluate ``function`` and its Jacobian in fused primal-and-tangent tiles.
 
@@ -101,7 +101,7 @@ def _tiled_value_and_jacobian(
 
 
 def linearize_value(
-    function: Callable[[Any], Any], point: Any, *, tile: str | int | None = "full"
+    function: Callable[[jax.Array], ArrayLike], point: ArrayLike, *, tile: str | int | None = "full"
 ) -> tuple[jax.Array, Callable]:
     """Evaluate a vector function once and return its reusable push-forward.
 
@@ -117,7 +117,7 @@ def linearize_value(
 
 
 def deferred_value_and_grad(
-    function: Callable[[Any], Any], point: Any, *, ad: str
+    function: Callable[[jax.Array], ArrayLike], point: ArrayLike, *, ad: str
 ) -> tuple[jax.Array, Callable[[], jax.Array]]:
     """Evaluate a scalar function once and defer its gradient sweep.
 
@@ -138,8 +138,8 @@ def deferred_value_and_grad(
 
 def jacfwd_from_pushforward(
     pushforward: Callable,
-    point: Any,
-    value: Any,
+    point: ArrayLike,
+    value: ArrayLike,
     *,
     tile: str | int | None = "full",
 ) -> jax.Array:
@@ -180,8 +180,8 @@ def jacfwd_from_pushforward(
 
 
 def value_and_jacfwd_tiled(
-    function: Callable[[Any], Any],
-    point: Any,
+    function: Callable[[jax.Array], ArrayLike],
+    point: ArrayLike,
     *,
     tile: str | int | None = "full",
 ) -> tuple[jax.Array, jax.Array]:
@@ -193,7 +193,9 @@ def value_and_jacfwd_tiled(
     return value, jacobian
 
 
-def value_and_jacfwd(function: Callable[[Any], Any], point: Any) -> tuple[jax.Array, jax.Array]:
+def value_and_jacfwd(
+    function: Callable[[jax.Array], ArrayLike], point: ArrayLike
+) -> tuple[jax.Array, jax.Array]:
     """Evaluate a vector function once together with its forward Jacobian."""
     return value_and_jacfwd_tiled(function, point, tile="full")
 
