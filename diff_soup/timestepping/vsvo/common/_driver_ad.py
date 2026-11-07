@@ -27,7 +27,6 @@ _COMPOSABLE_REVERSE_ERROR = (
     "solve with adjoint=CheckpointAdjoint() instead."
 )
 
-
 _COMPOSABLE_NESTED_FORWARD_ERROR = (
     "A second forward-mode differentiation was applied to a solve running the "
     "composable forward-sensitivity mode (ForwardAdjoint(composable=True)). "
@@ -36,7 +35,6 @@ _COMPOSABLE_NESTED_FORWARD_ERROR = (
     "forward-over-forward compositions, solve with the default "
     "ForwardAdjoint() instead."
 )
-
 
 # The reverse-linearization check below recognises the partial-evaluation
 # tracer through the public ``jax.interpreters`` module. If a JAX release
@@ -73,26 +71,17 @@ _FORWARD_ONLY_REVERSE_ERROR = (
     "use adjoint=ds.ForwardAdjoint(composable=True)."
 )
 
-
 # An identity on the forward-only loop's input tangents. Forward mode passes
 # through it unchanged. Reverse mode partially evaluates it with unknown
 # tangents before it reaches the loop (top level and inside jit alike), and
 # its rule raises the public message there instead of JAX's raw while-loop
 # error. The transpose rule is a second line of defence.
 _forward_only_tangent_p = _Primitive("diffsoup_forward_only_tangent")
-
-
 _forward_only_tangent_p.def_impl(lambda x: x)
-
-
 _forward_only_tangent_p.def_abstract_eval(lambda aval: aval)
-
-
 _mlir.register_lowering(
     _forward_only_tangent_p, _mlir.lower_fun(lambda x: x, multiple_results=False)
 )
-
-
 _batching.primitive_batchers[_forward_only_tangent_p] = lambda args, dims: (
     _forward_only_tangent_p.bind(args[0]),
     dims[0],
@@ -116,11 +105,7 @@ def _forward_only_tangent_transpose(cotangent, x):
 
 
 _ad.primitive_jvps[_forward_only_tangent_p] = _forward_only_tangent_jvp
-
-
 _ad.primitive_transposes[_forward_only_tangent_p] = _forward_only_tangent_transpose
-
-
 _partial_eval.custom_partial_eval_rules[_forward_only_tangent_p] = (
     _forward_only_tangent_partial_eval
 )

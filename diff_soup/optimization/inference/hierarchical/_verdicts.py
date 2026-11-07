@@ -90,7 +90,6 @@ _STOP_STATUS = {
     "invalid_trials": TerminationStatus.STALLED,
 }
 
-
 # What a step or a cost test found within its tolerance, in a stalled fit's message.
 _ENDED_BY = {"step_tolerance": "the step", "cost_tolerance": "the cost change"}
 

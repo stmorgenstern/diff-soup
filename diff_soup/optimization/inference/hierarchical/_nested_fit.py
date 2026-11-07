@@ -70,47 +70,22 @@ if TYPE_CHECKING:
 
 # Why a member's polish ended at an attempt: the codes of the record's ``inner_stop``.
 _NOT_POLISHED = 0  # no polish: the outer trial was not evaluated, or the member holds no data
-
-
 _ACCURACY = 1  # its predicted decrease fell to inner_fraction of the outer step's
-
-
 _AT_MAX_STEPS = 2  # it made the polish's largest number of iterations
-
-
 _STEP_TOLERANCE = 3  # its step test
-
-
 _COST_TOLERANCE = 4  # its cost test
-
-
 _GRADIENT_TOLERANCE = 5  # its gradient test
-
-
 _STATIONARITY = 6  # its stationarity number at most the inner stationarity_tol
-
-
 _EVALUATION_NOISE = 7  # three noise-dominated rejected trials in a row
-
-
 _RADIUS = 8  # its radius fell to the smallest positive float
-
-
 _SKIPPED = 9  # the polish was switched off at this attempt
-
-
 _NO_FINITE_STEP = 10  # no finite step inside its radius: its subtree's model is not finite
-
 
 # The polish's iterations per member when the nested solver is given no inner solver.
 _DEFAULT_POLISH = 2
-
-
 # A polish whose gain is below this fraction of the outer step's predicted decrease on
 # _SMALL_GAINS accepted attempts in a row is switched off until an outer rejection.
 _POLISH_GAIN = 1e-3
-
-
 _SMALL_GAINS = 2
 
 
