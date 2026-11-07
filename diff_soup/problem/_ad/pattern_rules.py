@@ -123,19 +123,48 @@ def _known_operands(walk, op, data):
 
 
 def _gather(walk, op):
-    """A gather at known indices moves elements."""
-    values = _known_operands(walk, op, (0,))
-    if values is None:
-        return walk.fallback(op, "reads an index not known at build time")
+    """A gather at known indices moves elements; at other indices it reads any of them."""
     tables, stacked = walk.tables(op.invars[:1])
+    indices = walk.value(op.invars[1])
+    if indices is None:
+        return [_gather_anywhere(walk, op, tables[0], stacked)]
     table = F.gather_table(
         tables[0],
-        values[1],
+        indices,
         op.params["dimension_numbers"],
         op.params["slice_sizes"],
         op.params["mode"],
     )
     return [F.select(stacked, table)]
+
+
+def _gather_anywhere(walk, op, table, stacked):
+    """Each output reads what its window reaches from every start in bounds.
+
+    An index out of bounds is clipped into bounds or reads the fill value, so the starts in
+    bounds hold every element a gather can read. Exact for a scalar read from a table.
+    """
+    numbers, sizes = op.params["dimension_numbers"], op.params["slice_sizes"]
+    upper = [table.shape[axis] - sizes[axis] + 1 for axis in numbers.start_index_map]
+    starts = np.indices(upper).reshape(len(upper), -1).T
+    batch = walk.shape(op.invars[1])[:-1]
+    every = np.broadcast_to(
+        starts.reshape((starts.shape[0],) + (1,) * len(batch) + (len(upper),)),
+        (starts.shape[0], *batch, len(upper)),
+    )
+    shifted = numbers._replace(
+        offset_dims=tuple(axis + 1 for axis in numbers.offset_dims),
+        start_indices_batching_dims=tuple(axis + 1 for axis in numbers.start_indices_batching_dims),
+    )
+    reads = F.gather_table(table, every, shifted, sizes, op.params["mode"])
+    reads = reads.reshape(starts.shape[0], -1)
+    outputs = np.broadcast_to(np.arange(reads.shape[1]), reads.shape)
+    kept = reads >= 0
+    rows = sparse.csr_matrix(
+        (np.ones(int(kept.sum()), dtype=bool), (outputs[kept], reads[kept])),
+        shape=(reads.shape[1], stacked.shape[0]),
+    )
+    return (rows @ stacked).tocsr()
 
 
 def _dynamic_slice(walk, op):

@@ -42,6 +42,10 @@ Probing evaluates a handful of JVPs of the physics-only residual (boundary
 row scatters excluded — their topology is declared by the dedicated BC
 cross-block paths) and costs a few residual evaluations per read field at
 build time; nothing here runs during the solve.
+
+An ``exact_sparsity`` build reads the same offsets from the residual's tangent
+map instead, with no probe state, so no zero coefficient at a state hides a
+read; a block that a fallback of that walk reaches is probed as above.
 """
 
 from __future__ import annotations
@@ -426,6 +430,15 @@ def _infer_stencil_offsets(
         )
         return {}
 
+    return _declared_offsets(accum)
+
+
+def _declared_offsets(accum: dict) -> dict:
+    """The offsets to declare per block from the offsets it reaches.
+
+    A block inside the radius-1 star is omitted, one reaching past
+    ``_GLOBAL_COUPLING_RADIUS`` is ``None`` (dense), and any other keeps the star too.
+    """
     result: dict[tuple[str, str, str], np.ndarray | None] = {}
     for key, offs in accum.items():
         ndim = len(next(iter(offs)))
@@ -436,4 +449,81 @@ def _infer_stencil_offsets(
             result[key] = None  # global coupling: declare the block dense.
             continue
         result[key] = np.asarray(sorted(offs | star), dtype=np.int64)
+    return result
+
+
+def _walked_stencil_offsets(
+    eqset,
+    offset_of,
+    state_size: int,
+    constraint_dim: int,
+    f_of_u,
+    compute_dtype,
+) -> dict:
+    """Each node-field block's stencil offsets, read from the residual's tangent map.
+
+    The same result as [_infer_stencil_offsets][diff_soup._lowering.stencil_infer._infer_stencil_offsets]
+    with no probe state: an entry is reached when a tangent can carry it (see
+    [tangent_flow][diff_soup.problem._ad.tangent_pattern.tangent_flow]), so a limiter's
+    upstream read counts whatever the state. A block a fallback of the walk reaches is
+    measured by the probes instead.
+
+    Args:
+        eqset: The equation set being lowered.
+        offset_of: Callable mapping ``(comp_name, var_name)`` to the variable's offset.
+        state_size: Flat state size (the residual's length).
+        constraint_dim: Length of the bordered-global vector ``lam``.
+        f_of_u: The physics residual restricted to its state output.
+        compute_dtype: Dtype of the state.
+
+    Returns:
+        Dict mapping ``(comp_name, write_name, read_name)`` to an integer offset array
+        ``(n_offsets, ndim)`` or ``None`` (dense).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from diff_soup.problem._ad.tangent_pattern import tangent_flow
+
+    blocks = _eligible_blocks(eqset)
+    if not blocks:
+        return {}
+    compute_dtype = jax.dtypes.canonicalize_dtype(compute_dtype)
+    flow = tangent_flow(
+        f_of_u,
+        jnp.zeros(state_size, compute_dtype),
+        jnp.zeros(constraint_dim, compute_dtype),
+        jnp.zeros((), compute_dtype),
+        taint=True,
+    ).tocsc()
+    tainted = flow[:, state_size].toarray().ravel()
+    accum: dict[tuple[str, str, str], set] = {}
+    probed: list[tuple[str, str, str]] = []
+    for comp, shape, periodic_axes, pairs in blocks:
+        nodes = int(np.prod(shape))
+        for read_var, d_in, writes in pairs.values():
+            col_off = offset_of((comp.name, read_var.name))
+            columns = flow[:, col_off : col_off + nodes * d_in].tocsr()
+            for write_var, d_out in writes.values():
+                row_off = offset_of((comp.name, write_var.name))
+                key = (comp.name, write_var.name, read_var.name)
+                if tainted[row_off : row_off + write_var.size].any():
+                    probed.append(key)
+                    continue
+                block = columns[row_off : row_off + write_var.size].tocoo()
+                if block.nnz == 0:
+                    continue
+                reach = _multi_index(shape, block.col // d_in) - _multi_index(
+                    shape, block.row // d_out
+                )
+                for axis in periodic_axes:
+                    size = int(shape[axis])
+                    reach[:, axis] = (reach[:, axis] + size // 2) % size - size // 2
+                accum[key] = set(map(tuple, np.unique(reach, axis=0).tolist()))
+    result = _declared_offsets(accum)
+    if probed:
+        measured = _infer_stencil_offsets(
+            eqset, offset_of, state_size, constraint_dim, f_of_u, compute_dtype
+        )
+        result.update({key: measured[key] for key in probed if key in measured})
     return result
