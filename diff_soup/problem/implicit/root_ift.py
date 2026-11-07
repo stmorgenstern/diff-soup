@@ -62,6 +62,7 @@ from diff_soup.linear import (
 from diff_soup.linear._context import DEFAULT_CONTEXT
 from diff_soup.linear._krylov import exact_analysis
 from diff_soup.nonlinear._kkt import linear_route, transposable_solve
+from diff_soup.problem.implicit.tangent_gates import poison, zero_where_not
 from diff_soup.utils.lanes import lane_cond
 
 __all__ = [
@@ -403,27 +404,6 @@ def _inexact_cotangent_solver(route, values):
     return solve
 
 
-def _poison(x, valid):
-    """Replace ``x`` with NaN when the root or its sensitivity solve is invalid."""
-    return jnp.where(valid, x, jnp.full_like(x, jnp.nan))
-
-
-def _zero_where_not(keep, tree):
-    """Replace every inexact leaf of ``tree`` with exact zeros where ``keep`` is false.
-
-    A selection, not a product: an infinite or NaN leaf that is not kept
-    becomes zero instead of NaN. Integer (``float0``) leaves pass unchanged.
-    """
-    keep = jnp.asarray(keep)
-
-    def gate(leaf):
-        if getattr(leaf, "dtype", None) == jax.dtypes.float0:
-            return leaf
-        return jnp.where(keep, leaf, jnp.zeros_like(leaf))
-
-    return jax.tree_util.tree_map(gate, tree)
-
-
 @functools.partial(jax.custom_jvp, nondiff_argnums=(0, 1, 2, 3, 4, 12))
 def implicit_step_root(
     plan,
@@ -537,7 +517,7 @@ def _implicit_step_root_jvp(
     # rule then gives a discarded attempt exact zero input cotangents, even
     # where the step residual's partials at its failed iterate are infinite
     # (zero times infinity would be NaN).
-    dq, dtheta, dcontrol = _zero_where_not(ok, (dq, dtheta, dcontrol))
+    dq, dtheta, dcontrol = zero_where_not(ok, (dq, dtheta, dcontrol))
     offering = _offering_from(certificate_extractor, aux, t, cj, theta, control, primal_args)
 
     def step_residual(q_in, theta_in, control_in):
@@ -560,7 +540,7 @@ def _implicit_step_root_jvp(
         certificate=offering,
     )
     return out, (
-        _poison(dy, jnp.asarray(ok)),
+        poison(dy, jnp.asarray(ok)),
         _zero_cotangent(ok),
         _zero_cotangent(aux),
     )

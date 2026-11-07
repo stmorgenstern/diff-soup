@@ -566,7 +566,9 @@ def _declared_part(tree: Any, row: tuple) -> Any:
     raise ValueError(f"theta holds no namespace for {name!r}.")  # pragma: no cover
 
 
-@functools.lru_cache(maxsize=None)
+# One reader per copy count (ours: a process declares few distinct counts; an evicted reader
+# is rebuilt and the programs that used it trace again).
+@functools.lru_cache(maxsize=64)
 def _copy_reader(count: int):
     """A read of the first of ``count`` equal copies whose tangent is their mean.
 

@@ -65,6 +65,7 @@ from diff_soup.timestepping.vsvo.common.backends import (
 )
 from diff_soup.timestepping.vsvo.common.contract import (
     ENDPOINT_CLAMP_FUZZ,
+    ENGINE_CACHE_SIZE,
     ENGINE_CAPABILITIES,
     EngineCapabilities,
     clamp_initial_step,
@@ -1458,7 +1459,7 @@ class BDFEngine(eqx.Module):
         return bdf_dense(carry.state, carry.tn, t)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.lru_cache(maxsize=ENGINE_CACHE_SIZE)
 def bdf_engine(
     profile,
     *,
@@ -1477,9 +1478,9 @@ def bdf_engine(
     Resolves the linear backend from ``linear`` (the dense CPU backend for the
     default and ``"auto"`` names) and reads the corrector loop shape, the
     Jacobian setup policy, and the accepted-step controller mode from
-    ``profile``. Identical configurations return one memoised engine object,
-    so repeated solves share the driver's compiled program instead of
-    recompiling per construction.
+    ``profile``. Identical configurations return one memoised engine object
+    (of the last ``ENGINE_CACHE_SIZE``), so repeated solves share the driver's
+    compiled program instead of recompiling per construction.
 
     Args:
         profile: The solver execution profile (``nonlinear_mode`` selects the

@@ -115,9 +115,8 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
         A [`TopologyReport`][diff_soup.problem.TopologyReport].
     """
     from diff_soup.problem.implicit.solver_problem import solver_view
-    from diff_soup.timestepping.vsvo.common.contract import coerce_problem
 
-    solver_contract = coerce_problem(problem)
+    solver_contract = solver_view(problem)
     view = solver_view(solver_contract)
     owner_sources = (problem, solver_contract, view.source)
     linearization = view.plan.linearization

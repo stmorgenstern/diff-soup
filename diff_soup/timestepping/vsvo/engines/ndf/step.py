@@ -65,6 +65,7 @@ from diff_soup.timestepping.vsvo.common.backends import (
 )
 from diff_soup.timestepping.vsvo.common.contract import (
     ENDPOINT_CLAMP_FUZZ,
+    ENGINE_CACHE_SIZE,
     ENGINE_CAPABILITIES,
     EngineCapabilities,
     clamp_initial_step,
@@ -1097,7 +1098,7 @@ class NDFEngine(eqx.Module):
         return ndf_interpolant(st.d_basis, st.k_used, carry.tn, st.dt_basis, t)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.lru_cache(maxsize=ENGINE_CACHE_SIZE)
 def ndf_engine(
     profile,
     *,
@@ -1122,8 +1123,8 @@ def ndf_engine(
     binds only for seeds far from the algebraic manifold).
     ``precision`` selects the linear solve mode; a mode the backend does not
     declare is rejected here, eagerly. Identical configurations return one
-    memoised engine object, so repeated solves share the driver's compiled
-    program.
+    memoised engine object (of the last ``ENGINE_CACHE_SIZE``), so repeated
+    solves share the driver's compiled program.
     """
     backend = resolve_backend(linear)
     backend._validate_capabilities(Layout(), precision)

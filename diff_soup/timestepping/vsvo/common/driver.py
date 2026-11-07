@@ -64,6 +64,7 @@ from diff_soup._jax_compat import mlir as _mlir
 from diff_soup._jax_compat import partial_eval as _partial_eval
 from diff_soup._precision import Precision, cast_to_compute_dtype
 from diff_soup._solution import result_from_code
+from diff_soup.problem.implicit.solver_problem import solver_view
 from diff_soup.timestepping._affect import apply_affect
 from diff_soup.timestepping.control_state import ControlState
 from diff_soup.timestepping.event_records import EventLog, TerminalRecord
@@ -96,7 +97,6 @@ from .backends import initialization_policy
 from .checkpointed_loop import checkpointed_while_loop
 from .contract import (
     EngineCapabilities,
-    coerce_problem,
     consume_consistent_init,
     ic_gate_rtol,
     ic_gate_tolerance,
@@ -713,7 +713,7 @@ def run_engine(engine, problem, t0, t1, y0, saveat, cfg: DriverConfig) -> Soluti
             "max_events must be at least 1 so the bounded event log has "
             f"capacity for a fired event; got {cfg.max_events!r}."
         )
-    problem = coerce_problem(problem)
+    problem = solver_view(problem)
     # A coerced problem may carry a user-to-internal state translation (unit
     # rescale / pytree flattening) that the entry owns: the engines and their
     # consistent-initialization iterate in the problem's internal units. Raw

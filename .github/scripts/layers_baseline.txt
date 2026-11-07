@@ -4,4 +4,3 @@
 #
 # This list may only shrink. Remove an entry once its import is moved; do not
 # add one: put the import in a function or move the code to the right layer.
-diff_soup.problem -> diff_soup.timestepping.vsvo.common.contract

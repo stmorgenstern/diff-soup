@@ -3,14 +3,10 @@
 ``lower()`` (in ``diff_soup.problem``) builds a ``LoweredProblem`` from an
 ``EquationSet`` but cannot author the residual / Jacobian / sparsity /
 mass-diagonal kernels itself: those require the ``diff_soup.domains.operators``
-bank, which ``problem`` cannot import directly.  The injection seam —
-``diff_soup.problem._ir.lower.set_lowering_ops(provider)`` — accepts an
-``analyze(eqset, *, precision) -> _LoweringAnalysis`` callable from a layer
-that may freely import both sides.  This module is that provider.
-
-``diff_soup/_lowering/`` sits outside the layer-rank map, so it may legally
-import both ``diff_soup.domains`` and ``diff_soup.problem._ir``.  It wires the
-seam at import time (see [diff_soup._lowering][diff_soup._lowering]).
+bank, which ``problem`` sits below in the layer order. ``lower()`` calls
+[analyze][diff_soup._lowering.provider.analyze] from this module, importing it
+on first call; ``diff_soup._lowering`` sits above both ``domains`` and
+``problem``, so it imports both at module level.
 
 Two branches, selected by ``_has_family_layer``:
 
