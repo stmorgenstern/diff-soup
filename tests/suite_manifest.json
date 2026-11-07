@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 482,
-    "collected_tests": 826,
-    "source_lines": 17004
+    "test_functions": 486,
+    "collected_tests": 832,
+    "source_lines": 17076
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 22,
-      "functions": 217,
-      "collected": 421,
-      "lines": 6879
+      "functions": 221,
+      "collected": 427,
+      "lines": 6937
     },
     "performance_contracts": {
       "files": 2,
@@ -320,7 +320,7 @@
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",
-      "feature": "Second-order AD through solves: Hessians under the checkpoint adjoint against the composable reverse-over-forward reference, the replay guard, run-time failures on an asynchronous device, a declared reverse-sweep dtype"
+      "feature": "Second-order AD through solves: Hessians under the checkpoint adjoint against the composable reverse-over-forward reference, reverse over reverse against forward over reverse, alone and through lanes sharing theta, the replay guard, run-time failures on an asynchronous device, a declared reverse-sweep dtype"
     },
     {
       "file": "tests/contracts/test_second_order_ad_precision.py",
@@ -380,7 +380,7 @@
     },
     {
       "file": "tests/contracts/test_compiled_solvers.py",
-      "feature": "Compiled constrained solvers: InteriorPoint, SQP and AugmentedLagrangian in jit and vmap lanes, each Hessian mode and the unscaled interior point, the implicit derivative in args under jvp and grad, the record's dtypes, degenerate and infeasible problems, the step budget, divergence, a failed subproblem, the restoration phase, failed evaluations"
+      "feature": "Compiled constrained solvers: InteriorPoint, SQP and AugmentedLagrangian in jit and vmap lanes, each Hessian mode and the unscaled interior point, the implicit derivative in args under jvp and grad, its reverse form under grad in vmap lanes against the forward form's jacfwd, the adjoint that selects it, the record's dtypes, degenerate and infeasible problems, the step budget, divergence, a failed subproblem, the restoration phase, failed evaluations"
     },
     {
       "file": "tests/public_api/test_optimization_solvers.py",

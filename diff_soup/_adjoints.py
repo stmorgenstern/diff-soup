@@ -176,11 +176,15 @@ class CheckpointAdjoint(AbstractAdjoint):
 
     Pass `adjoint=CheckpointAdjoint()` to use `jax.grad` or `jax.vjp` on a solve. It cannot be combined with `SaveAt(steps=...)`.
 
+    The gradient composes with forward mode over it, as in `jax.hessian`. Reverse mode over the gradient, as in `jax.grad` of `jax.grad`, needs `reverse_over_reverse=True`: a fit whose closures run this solve and that is differentiated by the reverse implicit derivative ([ImplicitAdjoint][diff_soup.nonlinear.ImplicitAdjoint] on a compiled solver) needs it too. The solve then also takes `jax.jvp`, and forward mode over the gradient costs about twice as much, so leave it off unless you need it.
+
     Args:
         checkpoints: Number of states the forward pass stores for the backward replay, chosen from `max_steps` when `None`.
+        reverse_over_reverse: Whether the replay is itself differentiable, so that every composition of two derivatives works. `False` by default.
     """
 
     checkpoints: Optional[int] = None
+    reverse_over_reverse: bool = False
 
     @property
     def uses_online_checkpoints(self) -> bool:
@@ -188,7 +192,7 @@ class CheckpointAdjoint(AbstractAdjoint):
         return True
 
     def compositions(self, lowered_problem: Any) -> frozenset[str]:
-        """Declare reverse modes supported by checkpointed replay.
+        """Declare the derivative modes checkpointed replay supports.
 
         A precision policy that explicitly changes the reverse sweep binds an
         explicit transpose rule. That rule provides first-order gradients but
@@ -199,10 +203,11 @@ class CheckpointAdjoint(AbstractAdjoint):
             getattr(precision, "adjoint_compute_dtype", None) is not None
             or getattr(precision, "reverse_sensitivity_solve_mode", None) is not None
         )
-        modes = {"reverse"}
-        if not has_reverse_policy:
-            modes.add("forward-over-reverse")
-        return frozenset(modes)
+        if has_reverse_policy:
+            return frozenset({"reverse"})
+        if self.reverse_over_reverse:
+            return frozenset({"forward", "forward-over-forward", "reverse", "forward-over-reverse"})
+        return frozenset({"reverse", "forward-over-reverse"})
 
 
 class BacksolveAdjoint(AbstractAdjoint):
