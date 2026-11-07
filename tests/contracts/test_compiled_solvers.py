@@ -1,7 +1,7 @@
 """Compiled constrained solvers: solutions in vmap lanes, each Hessian mode, the implicit
 derivative in args, its reverse form and the adjoint that selects it, a forward-only residual
 under forward-over-forward, and how a run ends: degenerate, infeasible, out of steps, diverged,
-a failed subproblem, restoration, failed evaluations."""
+a failed subproblem, restoration, failed evaluations, float32."""
 
 from __future__ import annotations
 
@@ -254,18 +254,30 @@ ENDS = {
         f"max_steps-{name}": (name, {"max_steps": 1}, lambda: hs7().problem, 4.0, _STATUS.MAX_STEPS)
         for name in SOLVERS
     },
+    # measured: KKT error 2.1e-6, |x - x*| 5.2e-6, multiplier error 4.3e-6 in float32,
+    # workstation CPU 2026-11-07
+    "float32": (
+        "interior_point",
+        {"tol": 1e-5},
+        lambda: hs35(jnp.float32).problem,
+        jnp.float32(3.0),
+        _STATUS.KKT_TOL,
+    ),
 }
 
 
 @pytest.mark.parametrize("end", ENDS)
 def test_each_way_a_run_ends_sets_its_status(end):
-    """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, and a run
-    allowed one step each end with their own status."""
+    """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, a run
+    allowed one step and a float32 run each end with their own status, with every floating
+    record in the iterate's dtype."""
     name, options, make, a, status = ENDS[end]
     problem = make()
     solver = dataclasses.replace(SOLVERS[name], **options)
-    _, record = jax.jit(lambda a: solver.run(problem, problem.x0, a))(a)
+    x, record = jax.jit(lambda a: solver.run(problem, problem.x0, a))(a)
     assert int(record.status) == status
+    floating = [v for v in jax.tree.leaves(record) if jnp.issubdtype(v.dtype, jnp.floating)]
+    assert x.dtype == problem.x0.dtype and {v.dtype for v in floating} == {x.dtype}
 
 
 def _wachter_biegler():

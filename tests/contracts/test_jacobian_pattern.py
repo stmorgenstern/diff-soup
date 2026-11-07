@@ -1,5 +1,5 @@
 """Jacobian patterns read from a tangent map: each rule holds exactly the entries ``jax.jacfwd``
-finds nonzero at random states, a branch or loop of unknown outcome holds every one of them,
+finds nonzero at random states (``jax.jacrev`` for a ``custom_vjp``, which forward mode refuses), a branch or loop of unknown outcome holds every one of them,
 a gather at an index passed in holds what it reads at every index, an operation no rule covers
 falls back to every entry with a warning, and ``within`` bounds the rows a fallback reaches."""
 
@@ -19,12 +19,12 @@ _KNOWN = jnp.eye(_N) * 2.0 + jnp.diag(jnp.ones(_N - 1), 1)
 _HALF = jnp.asarray([0.0, 1.0] * (_N // 2))
 
 
-def _reached(fn):
-    """Entries ``jax.jacfwd`` finds nonzero at three random states."""
+def _reached(fn, jacobian_of=jax.jacfwd):
+    """Entries ``jacobian_of`` finds nonzero at three random states."""
     rng = np.random.default_rng(1)
     seen = None
     for _ in range(3):
-        jacobian = np.asarray(jax.jacfwd(fn)(jnp.asarray(rng.uniform(0.5, 1.5, _N)))) != 0
+        jacobian = np.asarray(jacobian_of(fn)(jnp.asarray(rng.uniform(0.5, 1.5, _N)))) != 0
         seen = jacobian if seen is None else seen | jacobian
     return seen.reshape(-1, _N)
 
@@ -53,6 +53,22 @@ def _neighbour_product_jvp(primals, tangents):
     (v,), (t,) = primals, tangents
     return _neighbour_product(v), t * jnp.roll(v, 1) + v * jnp.roll(t, 1)
 
+
+@jax.custom_vjp
+def _reversed_square(v):
+    """``v_{n-1-i}^2``, with its reverse rule."""
+    return v[::-1] ** 2
+
+
+def _reversed_square_fwd(v):
+    return v[::-1] ** 2, v
+
+
+def _reversed_square_bwd(v, cotangent):
+    return (2.0 * v * cotangent[::-1],)
+
+
+_reversed_square.defvjp(_reversed_square_fwd, _reversed_square_bwd)
 
 _EXACT = {
     "elementwise": lambda y: jnp.sin(y) / (1.0 + y**2) - y,
@@ -83,7 +99,10 @@ _EXACT = {
     ),
     "nested jit": lambda y: jax.jit(lambda v: jnp.sin(v) * jnp.roll(v, 1))(y),
     "custom_jvp": lambda y: _neighbour_product(y) - y,
+    "checkpoint": lambda y: jax.checkpoint(lambda v: jnp.sin(v) * jnp.roll(v, 2))(y),
+    "custom_vjp": lambda y: _reversed_square(y) + y,
 }
+_REVERSE_ONLY = {"custom_vjp"}
 _UNKNOWN_OUTCOME = {
     "cond on the state": lambda y: jax.lax.cond(y[0] > 1.0, jnp.sin, lambda v: jnp.roll(v, 1), y),
     "while": lambda y: jax.lax.while_loop(
@@ -100,8 +119,9 @@ _FALLBACK = {
 
 @pytest.mark.parametrize("name", sorted(_EXACT))
 def test_each_rule_holds_exactly_the_entries_jacfwd_finds(name):
-    """The pattern of each rule's toy equals the entries ``jax.jacfwd`` finds nonzero."""
-    reached = _reached(_EXACT[name])
+    """The pattern of each rule's toy equals the entries ``jax.jacfwd`` finds nonzero, or
+    ``jax.jacrev`` for a ``custom_vjp``."""
+    reached = _reached(_EXACT[name], jax.jacrev if name in _REVERSE_ONLY else jax.jacfwd)
     np.testing.assert_array_equal(_pattern(_EXACT[name], reached.shape), reached)
 
 

@@ -24,19 +24,21 @@ class Toy(NamedTuple):
     solution: Callable
 
 
-def objective(x0, value, bounds=None) -> OptimizationProblem:
+def objective(x0, value, bounds=None, dtype=jnp.float64) -> OptimizationProblem:
     """`value(x)` from `x0`, with its gradient and exact Hessian by autodiff."""
     return OptimizationProblem.from_value(
-        jnp.asarray(x0, jnp.float64), value, bounds=bounds, hessian=True
+        jnp.asarray(x0, dtype), value, bounds=bounds, hessian=True
     )
 
 
-def constrained(problem, args, *, equality=None, n_eq=0, inequality=None, n_ineq=0):
+def constrained(
+    problem, args, *, equality=None, n_eq=0, inequality=None, n_ineq=0, dtype=jnp.float64
+):
     """`problem` under `equality(x, args) = 0` and `inequality(x, args) <= 0`, holding `args`."""
     constraints = Constraints(
         equality=equality, inequality=inequality, n_equality=n_eq, n_inequality=n_ineq
     )
-    return problem.with_constraints(constraints).with_args(jnp.asarray(args, jnp.float64))
+    return problem.with_constraints(constraints).with_args(jnp.asarray(args, dtype))
 
 
 def hs7() -> Toy:
@@ -66,8 +68,10 @@ _G35 = jnp.array([-8.0, -6.0, -4.0])
 _A35 = jnp.array([1.0, 1.0, 2.0])
 
 
-def hs35() -> Toy:
-    """Hock and Schittkowski 35, the inequality's limit `a` in `args` (3 in HS), x >= 0."""
+def hs35(dtype=jnp.float64) -> Toy:
+    """Hock and Schittkowski 35, the inequality's limit `a` in `args` (3 in HS), x >= 0, posed
+    in `dtype`."""
+    h, g, row = (matrix.astype(dtype) for matrix in (_H35, _G35, _A35))
 
     def solution(a):
         kkt = jnp.zeros((4, 4)).at[:3, :3].set(_H35).at[:3, 3].set(_A35).at[3, :3].set(_A35)
@@ -76,11 +80,15 @@ def hs35() -> Toy:
 
     problem = constrained(
         objective(
-            [0.5, 0.5, 0.5], lambda x: 9.0 + _G35 @ x + 0.5 * x @ _H35 @ x, (jnp.zeros(3), None)
+            [0.5, 0.5, 0.5],
+            lambda x: 9.0 + g @ x + 0.5 * x @ h @ x,
+            (jnp.zeros(3, dtype), None),
+            dtype,
         ),
         3.0,
-        inequality=lambda x, a: jnp.stack([_A35 @ x - a]),
+        inequality=lambda x, a: jnp.stack([row @ x - a]),
         n_ineq=1,
+        dtype=dtype,
     )
     return Toy(problem, jnp.array([3.0, 2.5, 3.4, 2.9]), solution)
 

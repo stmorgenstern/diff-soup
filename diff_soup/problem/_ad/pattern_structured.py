@@ -1,4 +1,4 @@
-"""Pattern rules for primitives that run a jaxpr or a window: branches, loops, solves, convolutions.
+"""Pattern rules for primitives that run a jaxpr or a window: branches, loops, solves, VJPs, convolutions.
 
 A loop either is walked once per iteration, when its trip count times its body is
 small, or its carry is walked to a fixed point: the union of every iteration's reach,
@@ -7,6 +7,7 @@ reached in at most as many passes as the loop has iterations.
 
 from __future__ import annotations
 
+import jax
 import numpy as np
 from scipy import sparse
 
@@ -158,6 +159,46 @@ def _linear_solve(walk, op):
     return [solved[edges[i] : edges[i + 1]] for i in range(len(rhs))]
 
 
+def _custom_lin(walk, op):
+    """A ``custom_vjp``'s tangent reads each input whose cotangent ``bwd`` builds from its output.
+
+    The entry ``(i, j)`` of the tangent map is the entry ``(j, i)`` of ``bwd`` in its
+    cotangents, so the pattern of ``bwd``'s tangent map, walked with one seed per output
+    element, is transposed. Integer outputs carry no tangent.
+    """
+    count = op.params["num_res"]
+    if any(walk.flow(atom) is not None for atom in op.invars[:count]):
+        return walk.fallback(op, "has residuals a tangent reaches")
+    inexact = [aval.dtype != jax.dtypes.float0 for aval in op.params["out_avals"]]
+    outs = [var for var, keep in zip(op.outvars, inexact) if keep]
+    sizes = [walk.size(var) for var in outs]
+    edges = np.cumsum([0, *sizes])
+    total = int(edges[-1])
+    identity = sparse.identity(total, dtype=bool, format="csr")
+    inner = Walk(walk.program, total)
+    inner.fallbacks = walk.fallbacks
+    back = op.blocks[0]
+    seeds = [identity[edges[i] : edges[i + 1]] for i in range(len(outs))]
+    leading = [None] * (len(back.invars) - len(outs))
+    tangents = op.invars[count:]
+    in_sizes = [walk.size(atom) for atom in tangents]
+    pattern = F.stack(
+        [
+            _empty(size, total) if f is None else f
+            for f, size in zip(inner.block(back, leading + seeds), in_sizes)
+        ],
+        total,
+    )
+    flows = [walk.flow(atom) for atom in tangents]
+    stacked = F.stack(
+        [_empty(size, walk.seeds) if f is None else f for f, size in zip(flows, in_sizes)],
+        walk.seeds,
+    )
+    reached = (pattern.T @ stacked).tocsr()
+    found = iter(reached[edges[i] : edges[i + 1]] for i in range(len(outs)))
+    return [next(found) if keep else None for keep in inexact]
+
+
 def _conv_taps(params, lhs_shape, rhs_shape, out_shape, numbers):
     """Per spatial axis, the ``(output, kernel tap, input)`` triples a convolution pairs."""
     taps = []
@@ -241,4 +282,5 @@ register_pattern_rule("cond", _cond)
 register_pattern_rule("scan", _scan)
 register_pattern_rule("while", _while)
 register_pattern_rule("custom_linear_solve", _linear_solve)
+register_pattern_rule("custom_lin", _custom_lin)
 register_pattern_rule("conv_general_dilated", _conv)
