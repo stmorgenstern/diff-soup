@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from numbers import Real
 from typing import Any, ClassVar
 
 import equinox as eqx
@@ -12,7 +13,12 @@ from diff_soup.optimization._abc import RESUME, OptSolver
 from diff_soup.optimization.inference.fitting.result import (
     OptResult,
 )
-from diff_soup.optimization.inference.fitting.scales import ConstantScale, HessianScale, JacScale
+from diff_soup.optimization.inference.fitting.scales import (
+    ConstantScale,
+    HessianScale,
+    JacScale,
+    XScale,
+)
 from diff_soup.optimization.inference.hierarchical._joint_fit import _JointFit
 from diff_soup.optimization.inference.hierarchical._lane_route import _LABEL, _LaneRoute, _lowered
 from diff_soup.optimization.inference.hierarchical._nested_fit import _NestedFit
@@ -93,26 +99,26 @@ class TrustRegion(OptSolver):
 
     hessian: str = eqx.field(static=True)
     nested_at: Any = eqx.field(static=True)
-    inner: Any
-    radius_init: Any = eqx.field(static=True)
-    radius_max: Any = eqx.field(static=True)
-    eta: Any = eqx.field(static=True)
-    grad_tol: Any = eqx.field(static=True)
-    step_tol: Any = eqx.field(static=True)
-    cost_tol: Any = eqx.field(static=True)
-    cost_atol: Any = eqx.field(static=True)
-    stationarity_tol: Any = eqx.field(static=True)
-    max_consecutive_invalid_trials: Any = eqx.field(static=True)
-    noise_trial_limit: Any = eqx.field(static=True)
-    noise_relaxed_ratio: Any = eqx.field(static=True)
-    gradient_floor: Any = eqx.field(static=True)
-    max_steps: Any = eqx.field(static=True)
-    max_evaluations: Any = eqx.field(static=True)
-    inner_start_iterations: Any = eqx.field(static=True)
-    inner_fraction: Any = eqx.field(static=True)
-    inner_retreats: Any = eqx.field(static=True)
-    target_accepted_steps: Any = eqx.field(static=True)
-    x_scale: Any
+    inner: TrustRegion | None
+    radius_init: Real = eqx.field(static=True)
+    radius_max: Real = eqx.field(static=True)
+    eta: Real = eqx.field(static=True)
+    grad_tol: Real | None = eqx.field(static=True)
+    step_tol: Real | None = eqx.field(static=True)
+    cost_tol: Real | None = eqx.field(static=True)
+    cost_atol: Real | None = eqx.field(static=True)
+    stationarity_tol: Real | None = eqx.field(static=True)
+    max_consecutive_invalid_trials: int = eqx.field(static=True)
+    noise_trial_limit: float | None = eqx.field(static=True)
+    noise_relaxed_ratio: bool = eqx.field(static=True)
+    gradient_floor: str | float | None = eqx.field(static=True)
+    max_steps: Real = eqx.field(static=True)
+    max_evaluations: int | None = eqx.field(static=True)
+    inner_start_iterations: int = eqx.field(static=True)
+    inner_fraction: float = eqx.field(static=True)
+    inner_retreats: int = eqx.field(static=True)
+    target_accepted_steps: Real | None = eqx.field(static=True)
+    x_scale: XScale
     weights: Any
     weight_priors: bool = eqx.field(static=True)
     constraints: tuple

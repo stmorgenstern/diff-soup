@@ -21,7 +21,7 @@ method.  Construct the solver and call [LevenbergMarquardt.solve][diff_soup.opti
 from __future__ import annotations
 
 import time
-from typing import Any, ClassVar
+from typing import ClassVar, Literal
 
 import equinox as eqx
 import jax
@@ -115,7 +115,7 @@ class LevenbergMarquardt(OptSolver):
     max_step_norm: float = eqx.field(static=True, default=5.0)
     linear_solver: str = eqx.field(static=True, default="auto")
     x_scale: XScale = eqx.field(default_factory=JacScale)
-    jacobian_tile: Any = eqx.field(static=True, default="auto")
+    jacobian_tile: Literal["auto", "full"] | int = eqx.field(static=True, default="auto")
     callbacks: tuple = eqx.field(static=True, default=())
 
     def solve(self, problem, *, callbacks=()) -> OptResult:

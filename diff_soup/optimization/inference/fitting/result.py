@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import enum
 import operator
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -19,6 +20,9 @@ from typing import Any, Optional, TypedDict
 
 import equinox as eqx
 import numpy as np
+from jaxtyping import PyTree
+
+from diff_soup.optimization.inference.fitting.diagnostics import OptDiagnostics
 
 
 class TerminationStatus(int, enum.Enum):
@@ -663,7 +667,7 @@ class OptResult(eqx.Module):
     """
 
     # The fitted point and the numbers of the fit: dynamic leaves.
-    opt_params: Any = None
+    opt_params: PyTree = None
     params: np.ndarray = field(default_factory=lambda: np.array([]))
     initial_params: np.ndarray = field(default_factory=lambda: np.array([]))
     cost: float = float("inf")
@@ -690,8 +694,8 @@ class OptResult(eqx.Module):
 
     # Conditioning and identifiability evidence at the solution, and the final
     # decision-variable window-start states (``None`` outside that mode).
-    diagnostics: Any = eqx.field(static=True, default=None)
-    window_states: Any = None
+    diagnostics: OptDiagnostics | None = eqx.field(static=True, default=None)
+    window_states: PyTree = None
 
     experiments: Mapping = eqx.field(static=True, default_factory=dict, converter=_read_only)
     parameter_schema: Any = eqx.field(static=True, default=None)
@@ -703,9 +707,9 @@ class OptResult(eqx.Module):
 
     # Appended so positional construction keeps the field order above.
     projected_grad_norm: Optional[float] = None
-    work: Any = eqx.field(static=True, default=None, converter=_read_only)
-    state: Any = eqx.field(static=True, default=None, converter=_read_only)
-    trust_region: Any = None
+    work: Mapping | None = eqx.field(static=True, default=None, converter=_read_only)
+    state: Mapping | None = eqx.field(static=True, default=None, converter=_read_only)
+    trust_region: TrustRegionReport | None = None
 
     @property
     def converged(self) -> bool:
@@ -717,7 +721,7 @@ class OptResult(eqx.Module):
         """Cumulative objective and derivative evaluation counts."""
         return self.eval_counts
 
-    def save(self, path: Any) -> None:
+    def save(self, path: str | os.PathLike) -> None:
         """Save the result to an `.npz` file that `OptResult.load` reads.
 
         `opt_params`, `diagnostics`, `experiments` and `wall_time` are not saved.
