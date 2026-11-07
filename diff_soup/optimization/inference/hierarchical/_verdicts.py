@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable
+from numbers import Real
 
 import numpy as np
 
 from diff_soup.optimization.inference.fitting.result import (
     TerminationStatus,
 )
-from diff_soup.optimization.inference.hierarchical._lane_route import _listed
+from diff_soup.optimization.inference.hierarchical._lane_route import _Failure, _listed
 
 NONFINITE_BLOCKS = "nonfinite_blocks_at_finite_cost"
 """The failure kind of a lane whose solve reached a finite cost with non-finite Gauss-Newton blocks."""
 
 
-def _rungs_text(rungs: Any) -> str:
+def _rungs_text(rungs: Iterable[Real]) -> str:
     """``after rung 0`` or ``after rungs 0, 1, 2``; empty when the rungs are not known."""
     rungs = tuple(rungs)
     if not rungs:
@@ -24,7 +25,7 @@ def _rungs_text(rungs: Any) -> str:
     return f", after {label} {', '.join(str(rung) for rung in rungs)}"
 
 
-def _failures_text(failures: Any) -> str:
+def _failures_text(failures: Iterable[_Failure]) -> str:
     return _listed(
         f"{failure.lane}: {failure.kind} at t = {failure.t_reached:.6g}{_rungs_text(failure.rungs)}"
         for failure in failures
@@ -32,7 +33,11 @@ def _failures_text(failures: Any) -> str:
 
 
 def _stop_report(
-    status: Any, cost_changes: list, decreases: list, stalled: Any = None, budget: Any = None
+    status: TerminationStatus,
+    cost_changes: list,
+    decreases: list,
+    stalled: str | None = None,
+    budget: str | None = None,
 ) -> tuple:
     """The message and the ``info`` entries of a fit, from its window of rejected trials.
 
@@ -94,7 +99,7 @@ _STOP_STATUS = {
 _ENDED_BY = {"step_tolerance": "the step", "cost_tolerance": "the cost change"}
 
 
-def _stationarity_limit(tolerance: Any, cost_tol: float, noise: float) -> float:
+def _stationarity_limit(tolerance: Real | None, cost_tol: float, noise: float) -> float:
     """``stationarity_tol``, or for ``None`` the yardstick ``max(cost_tol, 3 * noise)``."""
     return max(float(cost_tol), 3.0 * float(noise)) if tolerance is None else float(tolerance)
 
@@ -108,7 +113,7 @@ def _verdict(
     members: bool = True,
     floor_sigma: float = 0.0,
     floor_known: bool = False,
-    jump_yardstick: Any = None,
+    jump_yardstick: Real | None = None,
     jump_members: bool = True,
 ) -> tuple:
     """The status and the stall reason of a loop that the event ``stop`` ended.
@@ -187,8 +192,8 @@ def _stalled_message(
     radius: float,
     sigma: float,
     noise: float,
-    ceiling: Any,
-    member: Any = None,
+    ceiling: float | None,
+    member: tuple | None = None,
 ) -> str:
     """What ended a stalled fit and its numbers, to two significant digits.
 
@@ -216,7 +221,7 @@ def _stalled_text(
     radius: float,
     sigma: float,
     noise: float,
-    ceiling: Any,
+    ceiling: float | None,
 ) -> str:
     """``_stalled_message`` without the member's clause."""
     if reason == "evaluation_noise":

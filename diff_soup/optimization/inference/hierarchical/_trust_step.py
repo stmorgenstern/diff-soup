@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+from numbers import Real
 from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.engine._layout import lane_layout
 from diff_soup.optimization.inference.fitting._trial import trial_is_valid
-from diff_soup.optimization.inference.fitting.scales import ConstantScale, HessianScale
+from diff_soup.optimization.inference.fitting.scales import ConstantScale, HessianScale, XScale
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
-from diff_soup.optimization.inference.hierarchical._lane_route import _lane_positions
+from diff_soup.optimization.inference.hierarchical._lane_route import _lane_positions, _LaneRoute
 from diff_soup.optimization.solvers._loop_judge import _floor_radius
 
 
 def _full_step_decrease(
-    system: Any, gradient: np.ndarray, scale: Any, zero: tuple, addition: Any = None
+    system: elimination.LevelSystem,
+    gradient: np.ndarray,
+    scale: ArrayLike,
+    zero: tuple,
+    addition: ArrayLike | None = None,
 ) -> float:
     """The decrease the model predicts for its full step.
 
@@ -42,12 +48,12 @@ def _full_step_decrease(
 
 
 def _stationarity(
-    system: Any,
+    system: elimination.LevelSystem,
     gradient: np.ndarray,
-    scale: Any,
+    scale: ArrayLike,
     zero: tuple,
     relative_to: float,
-    addition: Any = None,
+    addition: ArrayLike | None = None,
 ) -> float:
     """The decrease the model predicts for its full step, relative to the cost scale.
 
@@ -72,11 +78,15 @@ class _FullStep(NamedTuple):
     norm: float
     length: float
     decrease: float
-    scale: Any
+    scale: ArrayLike
 
 
 def _full_step(
-    system: Any, gradient: np.ndarray, scale: Any, zero: tuple, addition: Any = None
+    system: elimination.LevelSystem,
+    gradient: np.ndarray,
+    scale: ArrayLike,
+    zero: tuple,
+    addition: ArrayLike | None = None,
 ) -> _FullStep:
     """The full step of ``zero``, the solve at zero damping, with ``_full_step_decrease``'s decrease."""
     z = np.asarray(zero[0])
@@ -86,7 +96,12 @@ def _full_step(
     return _FullStep(float(np.linalg.norm(z)), length, decrease, scale)
 
 
-def _subproblem(x: np.ndarray, gradient: np.ndarray, scale: np.ndarray, bounds: Any) -> Any:
+def _subproblem(
+    x: np.ndarray,
+    gradient: np.ndarray,
+    scale: np.ndarray,
+    bounds: tuple[ArrayLike, ArrayLike] | None,
+) -> box.Scaling:
     """The coordinates of the trust-region subproblem at ``x``.
 
     Without bounds they are ``z = scale * s`` and the matrix has no diagonal
@@ -99,16 +114,18 @@ def _subproblem(x: np.ndarray, gradient: np.ndarray, scale: np.ndarray, bounds: 
     return box.coleman_li_scaling(x, gradient, bounds[0], bounds[1], scale)
 
 
-def _bounded_gradient(gradient: np.ndarray, coordinates: Any, bounds: Any) -> np.ndarray:
+def _bounded_gradient(
+    gradient: np.ndarray, coordinates: box.Scaling, bounds: tuple[ArrayLike, ArrayLike] | None
+) -> np.ndarray:
     """The gradient the gradient test reads: ``g * v`` under bounds, ``g`` without."""
     return gradient if bounds is None else gradient * coordinates.v
 
 
 def _choose(
-    system: Any,
+    system: elimination.LevelSystem,
     x: np.ndarray,
     gradient: np.ndarray,
-    coordinates: Any,
+    coordinates: box.Scaling,
     step: np.ndarray,
     radius: float,
     bounds: tuple,
@@ -146,15 +163,15 @@ def _choose(
 
 
 def _trial_point(
-    system: Any,
+    system: elimination.LevelSystem,
     x: np.ndarray,
     gradient: np.ndarray,
-    coordinates: Any,
+    coordinates: box.Scaling,
     radius: float,
     *,
     first: tuple,
     fixed: np.ndarray,
-    bounds: Any,
+    bounds: tuple[ArrayLike, ArrayLike] | None,
     equality: bool,
 ) -> tuple:
     """The step of radius ``radius`` from ``x`` in the subproblem's ``coordinates``, and its trial.
@@ -205,13 +222,13 @@ def _trial_valid(view: Any, point: np.ndarray) -> bool:
         return False
 
 
-def _noise_ceiling(route: Any) -> Any:
+def _noise_ceiling(route: Any) -> float | None:
     """The route's ceiling of the evaluation noise as a float, or ``None`` when it is unknown."""
     ceiling = getattr(route, "evaluation_noise", None)
     return None if ceiling is None else float(ceiling)
 
 
-def _noise_trial_limit(solver: Any, route: Any) -> Any:
+def _noise_trial_limit(solver: Any, route: Any) -> float | None:
     """The largest relative predicted decrease of a trial counted toward the evaluation noise.
 
     It is ``noise_trial_limit`` times the route's ceiling of the evaluation
@@ -238,7 +255,7 @@ _FLOOR_FACTOR = 1.0
 _BAND = 0.33
 
 
-def _lane_tolerances(route: Any) -> tuple:
+def _lane_tolerances(route: _LaneRoute) -> tuple:
     """Per lane, its experiment solver's ``rtol`` and ``newton_tol_factor``, as host arrays.
 
     Both are read as ``LoweredStudy.evaluation_noise`` reads ``rtol``: from
@@ -266,7 +283,7 @@ def _lane_tolerances(route: Any) -> tuple:
     return rtols, factors
 
 
-def _lane_bands(route: Any) -> Any:
+def _lane_bands(route: _LaneRoute) -> np.ndarray | None:
     """Every lane's corrector band ``0.33 * newton_tol_factor * rtol``, or ``None``.
 
     A lane whose solver has no ``rtol`` has the band 0 and adds nothing to the
@@ -280,7 +297,7 @@ def _lane_bands(route: Any) -> Any:
     return np.where(known, _BAND * factors * np.where(known, rtols, 0.0), 0.0)
 
 
-def _lane_columns(route: Any) -> np.ndarray:
+def _lane_columns(route: _LaneRoute) -> np.ndarray:
     """Per lane, the joint column of each of its narrow coordinates, shape ``(lanes, width)``.
 
     A lane's narrow coordinates are the shared block, then the block of its
@@ -320,7 +337,7 @@ class _GradientFloor:
     when the results carry neither the lanes' blocks nor their diagonals.
     """
 
-    def __init__(self, solver: Any, route: Any):
+    def __init__(self, solver: Any, route: _LaneRoute):
         """Read the solver's ``gradient_floor`` and the lanes' weights, bands and columns."""
         setting = solver.gradient_floor
         self.route = route
@@ -338,10 +355,10 @@ class _GradientFloor:
         # A fixed coordinate never moves: its share of a gradient's error is never taken.
         self.free = np.ones((route.n,), dtype=np.float64)
         self.free[np.asarray(route.fixed, dtype=np.int64)] = 0.0
-        self.current: Any = None
-        self.latest: Any = None
+        self.current: tuple[np.ndarray, np.ndarray] | None = None
+        self.latest: tuple[np.ndarray, np.ndarray] | None = None
 
-    def record(self, results: Any) -> Any:
+    def record(self, results: Any) -> tuple[np.ndarray, np.ndarray] | None:
         """Keep the lanes' terms of a ``blocks`` (or ``hessian``) request as ``latest``; return them.
 
         The terms are host arrays ``(lanes, width)`` and ``(lanes,)``: every
@@ -378,7 +395,7 @@ class _GradientFloor:
         self.latest = (diagonals, costs)
         return self.latest
 
-    def bound(self, scale: Any) -> Any:
+    def bound(self, scale: ArrayLike) -> float | None:
         """The bound at the current point in the coordinates ``z = scale * s``, or ``None``."""
         if self.coefficients is None or self.current is None:
             return None
@@ -421,13 +438,15 @@ class _FloorEnd(NamedTuple):
     the nested mode (``None`` otherwise, or while ``level`` is ``None``).
     """
 
-    level: Any
+    level: float | None
     sigma: float
-    members: Any
+    members: np.ndarray | None
     entries: dict
 
 
-def _radius_floor(level: Any, full_norm: float, gradient: Any, scale: Any) -> float:
+def _radius_floor(
+    level: Real | None, full_norm: float, gradient: ArrayLike, scale: ArrayLike
+) -> float:
     """``_floor_radius`` with the gradient's norm in the coordinates ``z = scale * s``.
 
     0 before the first floor sample, and where the radius is not finite.
@@ -440,7 +459,9 @@ def _radius_floor(level: Any, full_norm: float, gradient: Any, scale: Any) -> fl
     return value if np.isfinite(value) else 0.0
 
 
-def _scale_candidate(system: Any, strategy: Any, diagonal: np.ndarray) -> np.ndarray:
+def _scale_candidate(
+    system: elimination.LevelSystem, strategy: XScale, diagonal: np.ndarray
+) -> np.ndarray:
     """The scale this attempt proposes, from the diagonal of the system's matrix."""
     dtype = diagonal.dtype
     if isinstance(strategy, ConstantScale):

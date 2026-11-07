@@ -3,25 +3,31 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Iterable
 from typing import Any, NamedTuple
 
 import jax
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.inference.engine._layout import lane_layout
 from diff_soup.optimization.inference.engine._levels import (
+    LevelBlocks,
+    LevelGradients,
     LevelTables,
     _lane_weights,
     member_row,
     reduce_levels,
     weigh_levels,
 )
+from diff_soup.optimization.inference.engine._plan import Plan
 from diff_soup.optimization.inference.engine._reducers import refuse_failed
 from diff_soup.optimization.inference.engine._request import Request
 from diff_soup.optimization.inference.engine._status import LaneStatus
 from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._bounds import Scaling
 from diff_soup.optimization.inference.hierarchical._constraints import _constraint_rows
 from diff_soup.optimization.inference.hierarchical._level_system import regularizer_block_members
 
@@ -53,11 +59,11 @@ def _lowered(solver: Any, problem: Any) -> Any:
     return problem
 
 
-def _quoted(names: Any) -> str:
+def _quoted(names: Iterable[str]) -> str:
     return ", ".join(repr(name) for name in names)
 
 
-def _listed(values: Any, limit: int = 8) -> str:
+def _listed(values: Iterable, limit: int = 8) -> str:
     values = tuple(values)
     text = ", ".join(str(value) for value in values[:limit])
     if len(values) > limit:
@@ -86,7 +92,7 @@ class _Failure(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
-def _level_weights(weights: Any) -> Any:
+def _level_weights(weights: Any) -> tuple | None:
     """``weights=`` as ``None`` or ``(level, values)``; a 1-D array weighs level 1."""
     if weights is None:
         return None
@@ -100,7 +106,7 @@ def _level_weights(weights: Any) -> Any:
     return (1, weights)
 
 
-def _lane_positions(plan: Any, ids: tuple) -> np.ndarray:
+def _lane_positions(plan: Plan, ids: tuple) -> np.ndarray:
     """Per lane of ``ids``, its index in the study's lane layout, as the plan's buckets give it."""
     index = {
         lane: child for bucket in plan.buckets for lane, child in zip(bucket.lanes, bucket.children)
@@ -108,7 +114,7 @@ def _lane_positions(plan: Any, ids: tuple) -> np.ndarray:
     return np.asarray([index[lane] for lane in ids], dtype=np.int64)
 
 
-def _experiment_level(problem: Any, ids: tuple, plan: Any) -> tuple:
+def _experiment_level(problem: Any, ids: tuple, plan: Plan) -> tuple:
     """The experiment level of a ``ParameterSet`` study: experiment indices, lane tables, width.
 
     Returns the study's experiment ids, each lane's experiment index, the
@@ -133,7 +139,9 @@ def _experiment_level(problem: Any, ids: tuple, plan: Any) -> tuple:
     return experiments, lane_experiments, lanes, present, widths.pop()
 
 
-def _experiment_level_tables(problem: Any, ids: tuple, plan: Any, device: Any) -> LevelTables:
+def _experiment_level_tables(
+    problem: Any, ids: tuple, plan: Plan, device: jax.Device | None
+) -> LevelTables:
     """The depth-1 level tables of a ``ParameterSet`` study without an owner tier, on ``device``.
 
     Level 1 is the experiments, of narrow width 0: every lane reads the shared
@@ -153,7 +161,9 @@ def _experiment_level_tables(problem: Any, ids: tuple, plan: Any, device: Any) -
     )
 
 
-def _owner_level_tables(problem: Any, view: Any, ids: tuple, plan: Any, device: Any) -> LevelTables:
+def _owner_level_tables(
+    problem: Any, view: Any, ids: tuple, plan: Plan, device: jax.Device | None
+) -> LevelTables:
     """The depth-2 level tables of a study declared with a ``ParameterSet``, on ``device``.
 
     Level 1 is the owner tier, level 2 the experiments; a lane's nodes are its
@@ -190,7 +200,9 @@ def _owner_level_tables(problem: Any, view: Any, ids: tuple, plan: Any, device: 
     )
 
 
-def _route_tables(problem: Any, view: Any, ids: tuple, plan: Any, device: Any) -> tuple:
+def _route_tables(
+    problem: Any, view: Any, ids: tuple, plan: Plan, device: jax.Device | None
+) -> tuple:
     """``(tables, members)``: the level tables of the lanes ``ids`` and the labels of every level.
 
     A [Hierarchy][diff_soup.optimization.inference.Hierarchy] study takes the tables of its
@@ -232,14 +244,14 @@ class _LaneRoute:
     that names no device) places them on the default device.
     """
 
-    block_weights: Any = None
-    device: Any = None
+    block_weights: tuple[float, ...] | None = None
+    device: jax.Device | None = None
     # The gradient and diagonal of the last system, and the regularizer's blocks at the
     # last point it was evaluated at, each kept for the next request of the same.
-    kept_vectors: Any = None
-    kept_regularizer: Any = None
+    kept_vectors: tuple[elimination.LevelSystem, np.ndarray, np.ndarray] | None = None
+    kept_regularizer: tuple[tuple[str, bytes, tuple[float, ...] | None], tuple] | None = None
     # The index tables of every level system of the fit, built and placed once.
-    layout: Any = None
+    layout: elimination.LevelLayout | None = None
 
     def __init__(self, solver: Any, problem: Any):
         lowered = _lowered(solver, problem)
@@ -395,9 +407,9 @@ class _LaneRoute:
         mode: str,
         point: np.ndarray,
         *,
-        lanes: Any = None,
-        rungs: Any = None,
-        first_steps: Any = None,
+        lanes: Iterable[str] | None = None,
+        rungs: ArrayLike | None = None,
+        first_steps: ArrayLike | None = None,
     ) -> Any:
         """One request at one point: every planned lane, or the planned lanes ``lanes``.
 
@@ -459,7 +471,9 @@ class _LaneRoute:
                 counted.append(failure)
         return tuple(counted), tuple(ignored)
 
-    def system(self, results: Any, point: np.ndarray, *, member: int = 0) -> Any:
+    def system(
+        self, results: Any, point: np.ndarray, *, member: int = 0
+    ) -> elimination.LevelSystem:
         """The level system at ``point`` from a ``blocks`` (or ``hessian``) evaluation there.
 
         ``member`` is the population member of ``results`` whose lanes are
@@ -496,13 +510,13 @@ class _LaneRoute:
             regularizer_blocks=self.regularizer_at(point, dtype),
         )
 
-    def levels(self) -> Any:
+    def levels(self) -> elimination.LevelLayout:
         """The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_system.LevelLayout] of the tables, built once."""
         if self.layout is None:
             self.layout = elimination.level_layout(self.tables, self.device)
         return self.layout
 
-    def regularizer_at(self, point: np.ndarray, dtype: Any = None) -> Any:
+    def regularizer_at(self, point: np.ndarray, dtype: Any = None) -> tuple | None:
         """The regularizer's blocks, cost and touched nodes at ``point`` under the route's weights.
 
         ``elimination.regularizer_blocks_at``'s; the blocks of the last point
@@ -529,7 +543,7 @@ class _LaneRoute:
             kept = self.kept_regularizer = (key, blocks)
         return kept[1]
 
-    def vectors(self, system: Any) -> tuple:
+    def vectors(self, system: elimination.LevelSystem) -> tuple:
         """``elimination.level_vectors(system)``, kept for the last system asked for.
 
         The attempts of a fit that reject their trials step from the same
@@ -541,7 +555,9 @@ class _LaneRoute:
             kept = self.kept_vectors = (system, *elimination.level_vectors(system))
         return kept[1].copy(), kept[2].copy()
 
-    def solve_attempt(self, system: Any, coordinates: Any, radius: float) -> Any:
+    def solve_attempt(
+        self, system: elimination.LevelSystem, coordinates: Scaling, radius: float
+    ) -> elimination.AttemptSolve:
         """The solve at zero damping, its predicted decrease and the step of ``radius``, at once.
 
         ``elimination.attempt_solve`` in the subproblem's ``coordinates``: one
@@ -550,7 +566,7 @@ class _LaneRoute:
         """
         return elimination.attempt_solve(system, coordinates.scale, radius, coordinates.addition)
 
-    def _summed_levels(self, results: Any, member: int) -> Any:
+    def _summed_levels(self, results: Any, member: int) -> LevelBlocks | LevelGradients:
         """The level blocks of ``member`` from results that carry the sums of the levels.
 
         The lanes' failures and unevaluated units are refused under the

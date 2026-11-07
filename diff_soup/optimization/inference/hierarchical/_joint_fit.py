@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from collections.abc import Iterable, Mapping
+from numbers import Real
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._distributed import any_process, assert_decision, is_primary
 from diff_soup.optimization.inference.fitting._trial import trial_is_valid
@@ -90,7 +93,7 @@ class _JointFit:
         # tolerances and blocks.
         self.floor = _GradientFloor(solver, route)
 
-    def evaluate(self, mode: str, point: np.ndarray, lanes: Any = None) -> Any:
+    def evaluate(self, mode: str, point: np.ndarray, lanes: Iterable[str] | None = None) -> Any:
         """One request at ``point``, every lane (or ``lanes``) at the rung it holds.
 
         A lane the evaluation solved at a higher rung holds that rung from then on.
@@ -163,7 +166,7 @@ class _JointFit:
         self.floor.current = self.floor.record(results)
         return system, np.array(results.cost, dtype=np.float64)[0]
 
-    def state(self, loop: LoopState, **nested: Any) -> MappingProxyType:
+    def state(self, loop: LoopState, **nested: ArrayLike) -> MappingProxyType:
         """The state after an attempt, read-only host arrays; ``nested``: the nested mode's own."""
         route = self.route
         entries = {
@@ -192,8 +195,12 @@ class _JointFit:
         return {}
 
     def member_above(
-        self, members: Any, noise: float, tolerance: Any = None, floors: Any = None
-    ) -> Any:
+        self,
+        members: ArrayLike | None,
+        noise: float,
+        tolerance: Real | None = None,
+        floors: ArrayLike | None = None,
+    ) -> None:
         """The member whose model predicts the most beyond the members' yardstick (none here)."""
         return None
 
@@ -207,8 +214,8 @@ class _JointFit:
         invalid_run: int,
         radius: float,
         windows: tuple,
-        members: Any = None,
-        floor: Any = None,
+        members: ArrayLike | None = None,
+        floor: _FloorEnd | None = None,
     ) -> tuple:
         """The status, the message and the ``info`` entries of the fit's end.
 
@@ -345,9 +352,9 @@ class _JointFit:
         grad_norm: float,
         projected_grad_norm: float,
         stationarity: float,
-        members: Any = None,
-        floor: Any = None,
-        **nested: Any,
+        members: ArrayLike | None = None,
+        floor: _FloorEnd | None = None,
+        **nested: ArrayLike,
     ) -> OptResult:
         """The fit's result, ended by ``stop`` after attempt ``attempt``, handed to the callbacks.
 
@@ -434,11 +441,11 @@ class _JointFit:
         self,
         loop: LoopState,
         step: _FullStep,
-        scale: Any,
+        scale: ArrayLike,
         cost_tol: float,
         relative_to: float,
-        member_steps: Any = None,
-        system: Any = None,
+        member_steps: ArrayLike | None = None,
+        system: elimination.LevelSystem | None = None,
     ) -> _FloorEnd:
         """The gradient floor at the end point: what the verdict reads, and the ``info`` entries.
 
@@ -492,7 +499,7 @@ class _JointFit:
             level, float(_floor_sigma(level, step.norm, relative_to)), members, entries
         )
 
-    def run(self, state: Any = None) -> OptResult:
+    def run(self, state: Mapping | None = None) -> OptResult:
         """Fit from the start point, or continue the fit whose ``state`` is given."""
         solver, route, work = self.solver, self.route, self.work
         dtype = np.asarray(route.problem.x0).dtype
