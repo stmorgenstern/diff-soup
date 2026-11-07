@@ -27,12 +27,14 @@ reported as open rather than extrapolated.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from typing import Any, Callable, Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 from scipy.stats import chi2
 
 from diff_soup.optimization.inference.approx.legendre import Legendre
@@ -81,9 +83,11 @@ class At(eqx.Module):
     name: str = eqx.field(static=True)
     c: float = eqx.field(static=True)
     basis: Any = None
-    row: Optional[Any] = None
+    row: Optional[np.ndarray] = None
 
-    def __init__(self, name: str, *, c: Any, basis: Any = None, row: Any = None):
+    def __init__(
+        self, name: str, *, c: ArrayLike, basis: Any = None, row: ArrayLike | Sequence | None = None
+    ):
         """Validate the target declaration.
 
         Raises:
@@ -458,7 +462,7 @@ class _PinnedView:
             self.prob_static = getattr(inner, "prob_static", None)
 
 
-def _chain(inner_rj: Callable, lift: Callable, basis: Any, u: Any) -> tuple:
+def _chain(inner_rj: Callable, lift: Callable, basis: Any, u: ArrayLike) -> tuple:
     r, jac = inner_rj(lift(u))
     return r, jac @ basis
 
@@ -475,11 +479,11 @@ class _ReducedRegularizer:
         self._inner = inner
         self._lift = lift
 
-    def residual(self, u: Any):
+    def residual(self, u: ArrayLike):
         """Regularizer rows at the lifted full vector."""
         return self._inner.residual(self._lift(u))
 
-    def penalty(self, u: Any):
+    def penalty(self, u: ArrayLike):
         """Scalar penalty at the lifted full vector."""
         return self._inner.penalty(self._lift(u))
 

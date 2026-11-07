@@ -29,18 +29,23 @@ inverse is ever formed on these paths.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike, PyTree
 
+from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics.experiment import _channel_likelihood_view
 from diff_soup.optimization.inference.statistics.laplace import LaplacePosterior
-from diff_soup.optimization.inference.statistics.likelihoods import CorrelatedGaussian, Gaussian
+from diff_soup.optimization.inference.statistics.likelihoods import (
+    CorrelatedGaussian,
+    Gaussian,
+    Likelihood,
+)
 
 __all__ = [
     "ComparisonReport",
@@ -115,11 +120,11 @@ class HeldOutEvent:
     experiment_id: str
     channel_name: str
     source_id: str | None
-    row_ids: tuple[Any, ...]
-    observed: Any
-    predicted: Any
-    likelihood: Any
-    context: Any = None
+    row_ids: tuple[object, ...]
+    observed: ArrayLike
+    predicted: ArrayLike
+    likelihood: Likelihood
+    context: PyTree = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -131,7 +136,7 @@ class HeldOutPrediction:
     """
 
     events: tuple[HeldOutEvent, ...]
-    conditioning_manifest: tuple[Any, ...]
+    conditioning_manifest: tuple[object, ...]
     training_score: float
 
 
@@ -159,11 +164,11 @@ class ComparisonReport:
     scores: dict[str, ModelScore]
     ranking: tuple[str, ...]
     winner: str
-    held_out_response_manifest: tuple[Any, ...]
-    conditioning_manifest: tuple[Any, ...]
+    held_out_response_manifest: tuple[object, ...]
+    conditioning_manifest: tuple[object, ...]
 
 
-def _record_field(record: Any, name: str) -> Any:
+def _record_field(record: object, name: str) -> object:
     """Read a manifest field from a dataclass/object or mapping."""
     if isinstance(record, Mapping):
         if name not in record:
@@ -175,7 +180,7 @@ def _record_field(record: Any, name: str) -> Any:
         raise ValueError(f"held-out response manifest entry is missing {name!r}.") from exc
 
 
-def _freeze_manifest_value(value: Any) -> Any:
+def _freeze_manifest_value(value: object) -> object:
     """Return an equality-safe, immutable representation of manifest data."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         value = {field.name: getattr(value, field.name) for field in dataclasses.fields(value)}
@@ -204,7 +209,9 @@ def _freeze_manifest_value(value: Any) -> Any:
     return value
 
 
-def _host_event_array(value: Any, *, model: str, event: int, role: str) -> np.ndarray:
+def _host_event_array(
+    value: ArrayLike | Sequence, *, model: str, event: int, role: str
+) -> np.ndarray:
     """Materialize one held-out array with an event-specific error."""
     try:
         array = np.asarray(value)
@@ -219,7 +226,7 @@ def _host_event_array(value: Any, *, model: str, event: int, role: str) -> np.nd
     return array
 
 
-def _held_out_contract(split: Any) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+def _held_out_contract(split: Any) -> tuple[tuple[object, ...], tuple[object, ...]]:
     """Validate the split and return its response and conditioning manifests."""
     try:
         response_manifest = tuple(split.held_out_response_manifest)
@@ -233,8 +240,8 @@ def _held_out_contract(split: Any) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     if not response_manifest:
         raise ValueError("compare_predictive needs at least one held-out response event.")
 
-    held_rows: list[Any] = []
-    event_keys: list[tuple[Any, Any, Any]] = []
+    held_rows: list[object] = []
+    event_keys: list[tuple[object, object, object]] = []
     for index, group in enumerate(response_manifest):
         key = (
             _record_field(group, "experiment_id"),
@@ -275,8 +282,8 @@ def _held_out_contract(split: Any) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
 def _validate_prediction(
     name: str,
     prediction: HeldOutPrediction,
-    response_manifest: tuple[Any, ...],
-    conditioning_manifest: tuple[Any, ...],
+    response_manifest: tuple[object, ...],
+    conditioning_manifest: tuple[object, ...],
     reference_observed: list[np.ndarray] | None,
 ) -> tuple[list[tuple[HeldOutEvent, np.ndarray, np.ndarray]], list[np.ndarray]]:
     """Validate one model against the split and common observed cohort."""
@@ -466,7 +473,7 @@ def compare_predictive(
     )
 
 
-def _observation_noise_variance(likelihood: Any, mean: Array) -> Array:
+def _observation_noise_variance(likelihood: Likelihood, mean: Array) -> Array:
     """Return the per-output observation-noise variance, broadcast to ``mean``."""
     if isinstance(likelihood, Gaussian):
         return jnp.broadcast_to(jnp.asarray(likelihood.scale) ** 2, mean.shape)
@@ -482,10 +489,10 @@ def _observation_noise_variance(likelihood: Any, mean: Array) -> Array:
 
 def band_from_jacobian(
     posterior: LaplacePosterior,
-    jacobian: Any,
+    jacobian: ArrayLike | Sequence,
     *,
-    mean: Any,
-    likelihood: Any = None,
+    mean: ArrayLike | Sequence,
+    likelihood: Likelihood | None = None,
     channel: str = "",
     kind: Optional[str] = None,
 ) -> PredictiveBand:
@@ -594,7 +601,9 @@ def _check_flat_coordinate(coordinate: str, *, who: str) -> None:
         )
 
 
-def _linearized_predictions(posterior: LaplacePosterior, experiment: Any, parameters: Any):
+def _linearized_predictions(
+    posterior: LaplacePosterior, experiment: Any, parameters: ParameterGroups | None
+):
     """Predict every band channel at the mode and linearize there.
 
     One shared solve evaluates the means; one ``jax.jacfwd`` pass through the
@@ -631,7 +640,9 @@ def _linearized_predictions(posterior: LaplacePosterior, experiment: Any, parame
     return channels, means, jacobians
 
 
-def _latent_band(posterior: LaplacePosterior, experiment: Any, *, parameters: Any = None) -> dict:
+def _latent_band(
+    posterior: LaplacePosterior, experiment: Any, *, parameters: ParameterGroups | None = None
+) -> dict:
     """Return the parameter-uncertainty band of every predicted channel.
 
     Linearizes each response/reference channel of the experiment at the
@@ -670,7 +681,7 @@ def _latent_band(posterior: LaplacePosterior, experiment: Any, *, parameters: An
 
 
 def prior_predictive(
-    prior: Any, experiment: Any, *, key: Array, n: int, parameters: Any = None
+    prior: Any, experiment: Any, *, key: Array, n: int, parameters: ParameterGroups | None = None
 ) -> dict:
     """Simulate prior-predictive observations through the experiment's model.
 
@@ -753,11 +764,11 @@ class PredictionBand:
         upper: The upper end, `mean + z * sd`.
     """
 
-    times: Any
-    mean: Any
-    sd: Any
-    lower: Any
-    upper: Any
+    times: ArrayLike
+    mean: ArrayLike
+    sd: ArrayLike
+    lower: ArrayLike
+    upper: ArrayLike
 
 
 @dataclasses.dataclass(frozen=True)

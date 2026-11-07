@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple
@@ -12,11 +12,13 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
+from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.problem.parameters import ParameterEntry, parameter_decoder
 
 
-def _plain(value: Any) -> Any:
+def _plain(value: object) -> object:
     """``value`` as numbers, strings, lists and mappings that JSON holds; another object as its text."""
     if value is None or isinstance(value, (bool, str, int, float)):
         return value
@@ -58,7 +60,7 @@ _SOLVER_SETTINGS = (
 )
 
 
-def _digest(value: Any) -> str:
+def _digest(value: object) -> str:
     """Sixteen hexadecimal characters of a digest of ``value``'s numbers and structure.
 
     Arrays enter by their type, shape and bytes, other leaves by their text,
@@ -78,7 +80,7 @@ def _digest(value: Any) -> str:
     return hasher.hexdigest()[:16]
 
 
-def _key_text(key: Any) -> str:
+def _key_text(key: ArrayLike) -> str:
     """A digest of a JAX random key's bits, the same for a typed key and its raw bits."""
     try:
         data = jax.random.key_data(key)
@@ -87,7 +89,7 @@ def _key_text(key: Any) -> str:
     return _digest(np.asarray(data))
 
 
-def _setting_text(value: Any) -> str:
+def _setting_text(value: object) -> str:
     """A setting as text: a plain number, string or ``None`` as itself, anything else by its digest."""
     if value is None or isinstance(value, (bool, int, float, str)):
         return repr(value)
@@ -96,13 +98,13 @@ def _setting_text(value: Any) -> str:
 
 def _declaration(
     problem: Any,
-    fit: Any,
-    key: Any,
+    fit: OptResult,
+    key: ArrayLike,
     *,
     scheme: str,
     replicates: int,
-    steps: Any,
-    max_attempts: Any,
+    steps: int | str,
+    max_attempts: int | None,
     over: str,
     weight_priors: bool,
     solver: Any,
@@ -278,7 +280,7 @@ def _resume(writer: Any, on_conflict: str) -> Any:
     return None
 
 
-def _shard_of(shard: Any) -> Any:
+def _shard_of(shard: Any) -> tuple[int, int] | None:
     """``shard=`` as ``None`` or ``(i, n)``; refused unless ``0 <= i < n``, both integers."""
     from diff_soup._errors import ConfigurationError
 
@@ -302,7 +304,7 @@ def _shard_of(shard: Any) -> Any:
     return int(i), int(n)
 
 
-def _directory(checkpoint: Any) -> Any:
+def _directory(checkpoint: Any) -> Path | None:
     """``checkpoint=`` as ``None`` or a path; refused unless a path, or a file is in the way."""
     from diff_soup._errors import ConfigurationError
 
@@ -326,7 +328,7 @@ class _SavedHandle(NamedTuple):
     """A parameter of a saved result, by its name and kind."""
 
     name: str
-    kind: Any
+    kind: str
 
 
 class _SavedSchema:
@@ -348,7 +350,7 @@ class _SavedSchema:
         """The saved parameters, by name and kind, in the schema's order."""
         return tuple(entry.handle for entry in self.entries)
 
-    def entry(self, handle: Any) -> ParameterEntry:
+    def entry(self, handle: object) -> ParameterEntry:
         """The saved entry of the parameter ``handle`` names."""
         name = getattr(handle, "name", None)
         candidates = [entry for entry in self.entries if entry.handle.name == name]
@@ -374,11 +376,11 @@ class _SavedSchema:
         )
 
 
-def _saved_decode(kind: Any, shape: Any) -> Any:
+def _saved_decode(kind: str, shape: Iterable[int]) -> Callable[[ArrayLike], jax.Array]:
     """The decoder of a saved parameter: a value reshaped to its saved shape."""
     if kind == "function":
 
-        def decode(values: Any) -> Any:
+        def decode(values: ArrayLike) -> jax.Array:
             raise TypeError(
                 "a saved function is decoded through the study's own function handle: ask the "
                 "loaded result with that handle."
@@ -397,11 +399,11 @@ class _SavedInverse:
         self._columns = columns
 
     @property
-    def inverse_columns(self) -> Any:
+    def inverse_columns(self) -> Mapping[int, np.ndarray]:
         """The saved columns, by coordinate."""
         return MappingProxyType(dict(self._columns))
 
-    def inverse_block(self, columns: Any) -> np.ndarray:
+    def inverse_block(self, columns: ArrayLike) -> np.ndarray:
         """The inverse on ``columns`` x ``columns``, from the saved columns."""
         columns = [int(column) for column in np.ravel(np.asarray(columns, dtype=np.int64))]
         missing = [column for column in columns if column not in self._columns]
@@ -419,5 +421,5 @@ class _SavedInverse:
         return np.stack([self._columns[column][columns] for column in columns], axis=1)
 
 
-def _positive_integer(value: Any) -> bool:
+def _positive_integer(value: object) -> bool:
     return isinstance(value, (int, np.integer)) and not isinstance(value, bool) and int(value) >= 1

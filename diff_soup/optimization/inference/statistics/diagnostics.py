@@ -25,6 +25,7 @@ from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 from scipy.special import ndtri
 from scipy.stats import rankdata
 
@@ -122,7 +123,7 @@ def residual_report(problem, fit, *, experiment_id=None) -> ResidualReport:
     return _residual_report(experiment, _point(problem, fit)[columns], parameters=parameters)
 
 
-def _residual_report(experiment, x_flat: Any, *, parameters: Any = None) -> ResidualReport:
+def _residual_report(experiment, x_flat: ArrayLike, *, parameters: Any = None) -> ResidualReport:
     """Check each scored channel's residuals against its declared likelihood.
 
     Runs the experiment's shared prediction closure once at ``x_flat`` and

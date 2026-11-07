@@ -31,14 +31,14 @@ needed, and assembles the posterior precision when a prior is present.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 from diff_soup.optimization.inference.fitting._layout import resolve_point
 from diff_soup.optimization.inference.fitting.result import OptResult
@@ -228,7 +228,7 @@ class InformationResult(eqx.Module):
         return float(self.tolerances.get("null_tol", _DEFAULT_NULL_TOL))
 
 
-def _symmetrized(matrix: Any) -> Any:
+def _symmetrized(matrix: jax.Array | np.ndarray) -> jax.Array | np.ndarray:
     """Average a composed curvature with its transpose.
 
     A Hessian composed by differentiating twice through an adaptive implicit
@@ -240,7 +240,7 @@ def _symmetrized(matrix: Any) -> Any:
     return 0.5 * (matrix + matrix.T)
 
 
-def _validated_matrix(value: Any, name: str, n: Optional[int]) -> tuple:
+def _validated_matrix(value: ArrayLike | Sequence, name: str, n: Optional[int]) -> tuple:
     """Validate one square symmetric input; return (symmetrized, size).
 
     Symmetrizes within the documented relative roundoff tolerance and rejects
@@ -283,11 +283,11 @@ def _validated_matrix(value: Any, name: str, n: Optional[int]) -> tuple:
 
 def assemble_information(
     *,
-    whitened_jacobian: Any = None,
-    expected: Any = None,
-    observed: Any = None,
-    ggn: Any = None,
-    prior_precision: Any = None,
+    whitened_jacobian: ArrayLike | Sequence | None = None,
+    expected: ArrayLike | Sequence | None = None,
+    observed: ArrayLike | Sequence | None = None,
+    ggn: ArrayLike | Sequence | None = None,
+    prior_precision: ArrayLike | Sequence | None = None,
     coordinate: str = "x",
     provenance: Optional[dict] = None,
     tolerances: Optional[dict] = None,
@@ -402,7 +402,7 @@ def assemble_information(
     )
 
 
-def _resolve_at(predictor: Any, at: Any) -> Any:
+def _resolve_at(predictor: Any, at: Mapping | ArrayLike | Sequence | None) -> jax.Array:
     """Resolve the evaluation point of an experiment analysis to a flat vector.
 
     ``None`` evaluates at the declaration's own parameter values; a mapping
@@ -440,7 +440,7 @@ def _resolve_at(predictor: Any, at: Any) -> Any:
     return at
 
 
-def _expected_information_core(predictor: Any, x: Any, response: tuple) -> tuple:
+def _expected_information_core(predictor: Any, x: ArrayLike, response: tuple) -> tuple:
     """Evaluate predictions/Jacobians and assemble exact expected information.
 
     A likelihood's expected-information action is evaluated at the prediction
@@ -522,7 +522,7 @@ def _coordinate_names(problem: EstimationProblem) -> tuple[str, ...]:
     return tuple(name for name in _schema_names(problem) if name is not None)
 
 
-def _marginal_jacobian(jacobian: Any, split: tuple) -> jax.Array:
+def _marginal_jacobian(jacobian: ArrayLike, split: tuple) -> jax.Array:
     """The whitened Jacobian of the parameters with the window starts integrated out.
 
     Its Gram matrix is the Schur complement of the window-start block of ``J^T J``,
@@ -538,7 +538,7 @@ def _marginal_jacobian(jacobian: Any, split: tuple) -> jax.Array:
     return jnp.asarray(j_theta - basis @ (basis.T @ j_theta))
 
 
-def _marginal_curvature(matrix: Any, split: tuple, *, what: str) -> jax.Array:
+def _marginal_curvature(matrix: ArrayLike, split: tuple, *, what: str) -> jax.Array:
     """The Schur complement ``H_tt - H_ts H_ss^-1 H_st`` of the window-start block of ``matrix``.
 
     It is the precision of the parameters with the window starts integrated out of
@@ -561,7 +561,7 @@ def _marginal_curvature(matrix: Any, split: tuple, *, what: str) -> jax.Array:
     return jnp.asarray(0.5 * (schur + schur.T))
 
 
-def _observed_curvature(problem: EstimationProblem, point: Any) -> Any:
+def _observed_curvature(problem: EstimationProblem, point: ArrayLike) -> jax.Array | np.ndarray:
     """The observed data curvature at ``point``, window starts integrated out."""
     observed = _symmetrized(problem.observed_information(point))
     split = _window_split(problem)
@@ -570,7 +570,7 @@ def _observed_curvature(problem: EstimationProblem, point: Any) -> Any:
     return _marginal_curvature(observed, split, what="observed curvature")
 
 
-def _point(problem: EstimationProblem, at: Any) -> jax.Array:
+def _point(problem: EstimationProblem, at: object) -> jax.Array:
     """Resolve a flat vector, a mapping from handle to value, or a fit of the same layout."""
     if at is None:
         return jnp.asarray(problem.x0)
@@ -585,7 +585,9 @@ def _point(problem: EstimationProblem, at: Any) -> jax.Array:
     return point
 
 
-def _recorded_data_jacobian(problem: EstimationProblem, at: Any, point: Any) -> Any:
+def _recorded_data_jacobian(
+    problem: EstimationProblem, at: object, point: ArrayLike
+) -> jax.Array | None:
     """The whitened data Jacobian a fit recorded at ``point``, or ``None``.
 
     A fit of the same study (``info["uq"]["study_fingerprint"]``) whose
@@ -609,7 +611,9 @@ def _recorded_data_jacobian(problem: EstimationProblem, at: Any, point: Any) -> 
     return jnp.asarray(jacobian)
 
 
-def _recorded_data_residual(problem: EstimationProblem, at: Any, point: Any) -> Any:
+def _recorded_data_residual(
+    problem: EstimationProblem, at: object, point: ArrayLike
+) -> jax.Array | None:
     """The whitened data residual a fit recorded at ``point``, or ``None``.
 
     Recorded beside the Jacobian ``_recorded_data_jacobian`` reads, under the same checks.
@@ -627,9 +631,9 @@ def _recorded_data_residual(problem: EstimationProblem, at: Any, point: Any) -> 
 def _information_terms(
     problem: EstimationProblem,
     *,
-    at: Any = None,
+    at: object = None,
     kind: str = "expected",
-) -> tuple[InformationResult, Any]:
+) -> tuple[InformationResult, ArrayLike | None]:
     """Information of an ``InferenceProblem`` and the whitened data residual it was formed from.
 
     Expected/GGN information is the Gram matrix of the exact whitened
@@ -700,14 +704,16 @@ def _information_terms(
 def _information_facade(
     problem: EstimationProblem,
     *,
-    at: Any = None,
+    at: object = None,
     kind: str = "expected",
 ) -> InformationResult:
     """Information of an ``InferenceProblem`` (the estimation-problem route of ``information``)."""
     return _information_terms(problem, at=at, kind=kind)[0]
 
 
-def information(problem: Any, *, at: Any, kind: str = "observed") -> InformationResult:
+def information(
+    problem: Any, *, at: OptResult | Mapping | ArrayLike | Sequence | None, kind: str = "observed"
+) -> InformationResult:
     """Assemble the information matrix, the curvature of the negative log likelihood, at a point.
 
     For a `MAP` problem the result also holds the prior's curvature and their sum, the posterior

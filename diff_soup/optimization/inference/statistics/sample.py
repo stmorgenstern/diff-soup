@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+from collections.abc import Iterable, Sequence
 from typing import Any, Callable, Optional
 
 import equinox as eqx
@@ -61,7 +62,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import solve_triangular
-from jaxtyping import Array
+from jaxtyping import Array, ArrayLike
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._warnings import warn_user
@@ -274,7 +275,9 @@ class LogDensity:
         """Whether a recorded gradient audit exists and passed."""
         return self.gradient_check is not None and self.gradient_check.passed
 
-    def verify_gradient(self, at: Any = None, rtol: float = 1e-3) -> GradientCheck:
+    def verify_gradient(
+        self, at: ArrayLike | Sequence | None = None, rtol: float = 1e-3
+    ) -> GradientCheck:
         """Audit the gradient against central finite differences, and record the check.
 
         Each component is probed at two step sizes and Richardson-extrapolated. The check
@@ -375,8 +378,8 @@ class LogDensity:
         cls,
         fn: Callable,
         *,
-        init: Any,
-        names: Any = None,
+        init: ArrayLike | Sequence,
+        names: Iterable[str] | None = None,
         _coordinate: str = "x",
         gradient: Optional[str] = "forward",
         _source: Any = None,
@@ -1162,7 +1165,7 @@ def _audit_chain_start(
     logdensity: LogDensity,
     key: Array,
     whitening: Optional["WhiteningTransform"],
-    init: Any,
+    init: ArrayLike | Sequence | None,
 ) -> GradientCheck:
     """Audit the gradient at a perturbed chain start, and once more if inconclusive.
 
@@ -1200,7 +1203,7 @@ def _sample_target(
     chains: int = 4,
     num_steps: int,
     whitening: Optional[WhiteningTransform] = None,
-    init: Any = None,
+    init: ArrayLike | Sequence | None = None,
     num_warmup: int = 200,
     adapt: Optional[str] = "pooled",
     mass: str = "diag",
