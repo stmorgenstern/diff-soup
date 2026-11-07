@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 481,
-    "collected_tests": 825,
-    "source_lines": 16964
+    "test_functions": 482,
+    "collected_tests": 826,
+    "source_lines": 17004
   },
   "tier_budgets": {
     "public_api": {
@@ -26,9 +26,9 @@
     },
     "multi_device": {
       "files": 3,
-      "functions": 31,
-      "collected": 36,
-      "lines": 1034
+      "functions": 32,
+      "collected": 37,
+      "lines": 1074
     },
     "integration": {
       "files": 2,
@@ -360,7 +360,7 @@
     },
     {
       "file": "tests/multi_device/test_sharded_joint.py",
-      "feature": "Sharded joints: reverse- and forward-mode fits equal to the mesh-free joint, robust reductions without all-gather, global meshes and submeshes, two-process rows (owed)"
+      "feature": "Sharded joints: reverse- and forward-mode fits equal to the mesh-free joint, robust reductions without all-gather, global meshes and submeshes, two-process rows (owed), a two-process world building the one-process Jacobian pattern"
     },
     {
       "file": "tests/multi_device/test_mgmn.py",
