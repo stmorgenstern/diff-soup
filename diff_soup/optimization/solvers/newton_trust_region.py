@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import equinox as eqx
 import jax
@@ -14,6 +14,7 @@ import numpy as np
 from diff_soup._distributed import any_process, assert_decision_value, local_value
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization._abc import OptSolver
+from diff_soup.optimization._numeric import OptimizationProblem
 from diff_soup.optimization.inference.fitting._forward_seam import _FAILED_SENTINEL
 from diff_soup.optimization.inference.fitting.bounds import projected_gradient_norm
 from diff_soup.optimization.inference.fitting.callbacks import StopFit
@@ -95,8 +96,8 @@ class NewtonTrustRegion(OptSolver):
     cost_atol: float | None = eqx.field(static=True, default=None)
     x_scale: XScale = eqx.field(default_factory=HessianScale)
     composition: str = eqx.field(static=True, default="auto")
-    hessian_refresh: Any = eqx.field(static=True, default="adaptive")
-    hessian_tile: Any = eqx.field(static=True, default="auto")
+    hessian_refresh: Literal["adaptive", "every"] | int = eqx.field(static=True, default="adaptive")
+    hessian_tile: Literal["auto", "full"] | int = eqx.field(static=True, default="auto")
     cg_max_iter: int | None = eqx.field(static=True, default=None)
     callbacks: tuple = eqx.field(static=True, default=())
 
@@ -306,7 +307,7 @@ class NewtonTrustRegion(OptSolver):
             decrease = -(gradient @ step + 0.5 * step @ product)
         return model_held_the_step(float(local_value(decrease)), predicted, threshold)
 
-    def solve(self, problem: Any, *, callbacks: tuple = ()) -> OptResult:
+    def solve(self, problem: OptimizationProblem, *, callbacks: tuple = ()) -> OptResult:
         """Optimize an inference problem with a scaled Newton trust region."""
         if self.hessian == "auto":
             solver = self._for_problem("gauss_newton" in problem.structure)
