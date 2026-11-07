@@ -10,7 +10,7 @@
   dependency rows with the transfer-op's source columns to produce the
   cross-block (rows, cols) tuple.
 
-This module lives under ``diff_soup/_lowering`` and may import
+This module lives under ``diff_soup/problem/_lowering`` and may import
 ``diff_soup.problem._ir`` IR nodes.
 """
 

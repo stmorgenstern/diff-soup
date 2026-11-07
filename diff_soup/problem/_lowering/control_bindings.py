@@ -50,7 +50,7 @@ Control callables are read off the runtime ``controls`` tuple — not captured
 at compile time — so learnable array leaves inside a callable control reach
 AD, matching the residual kernels' hybrid-cache contract.
 
-This module lives under ``diff_soup/_lowering`` and may import
+This module lives under ``diff_soup/problem/_lowering`` and may import
 ``diff_soup.problem._ir`` IR nodes.
 """
 
