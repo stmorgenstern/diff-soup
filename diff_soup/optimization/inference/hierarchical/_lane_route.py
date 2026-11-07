@@ -496,7 +496,7 @@ class _LaneRoute:
         )
 
     def levels(self) -> Any:
-        """The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_elimination.LevelLayout] of the tables, built once."""
+        """The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_system.LevelLayout] of the tables, built once."""
         if self.layout is None:
             self.layout = elimination.level_layout(self.tables, self.device)
         return self.layout
