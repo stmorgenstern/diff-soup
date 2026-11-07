@@ -162,7 +162,7 @@ def _grid_face_geometry(domain, indices, *, bc_desc: str, face=None):
     On a one-dimensional grid each end cell exposes a single outer face: the low
     end's normal points along ``-x``, the high end's along ``+x``. On a grid of
     two or three dimensions the cells must lie on one face, named by ``face`` or
-    inferred by [_grid_face_of][diff_soup._lowering.bcs._grid_face_of], and every
+    inferred by [_grid_face_of][diff_soup.problem._lowering.bcs._grid_face_of], and every
     cell takes that face's normal.
 
     Raises:
@@ -208,8 +208,8 @@ def _face_flux_accessed_names(
 ) -> set:
     """Probe a ``face``-style flux and return the names it reads, failing loud.
 
-    Mirrors [_flux_fn_accessed_names][diff_soup._lowering.bcs._flux_fn_accessed_names]
-    but builds a [_FaceView][diff_soup._lowering.bcs._FaceView] over
+    Mirrors [_flux_fn_accessed_names][diff_soup.problem._lowering.bcs._flux_fn_accessed_names]
+    but builds a [_FaceView][diff_soup.problem._lowering.bcs._FaceView] over
     full-shape zero dummies for the permitted names and calls ``fn(face, t)``.
     Reading a name outside the permitted set raises a directing
     [LoweringError][diff_soup._errors.LoweringError].
@@ -358,7 +358,7 @@ def _flux_fn_accessed_names(flux_fn, comp, eqset, *, bc_var, bc_desc: str) -> se
     """Probe ``flux_fn`` and return the names it reads, failing closed on misuse.
 
     Runs ``flux_fn(view, ctx, t)`` once against zero dummies for the permitted
-    names (see [_flux_permitted_dummies][diff_soup._lowering.bcs._flux_permitted_dummies]).
+    names (see [_flux_permitted_dummies][diff_soup.problem._lowering.bcs._flux_permitted_dummies]).
     Reading a name outside that set raises
     [LoweringError][diff_soup._errors.LoweringError], directing the author to
     couple it in or declare a global; any other exception the closure raises
@@ -429,7 +429,7 @@ class _SITimeFn(eqx.Module):
     reproduces the un-scaled behaviour bit-for-bit.
 
     An ``eqx.Module`` for the same reason as
-    [_ScaledDirichletValueFn][diff_soup._lowering.bcs._ScaledDirichletValueFn]:
+    [_ScaledDirichletValueFn][diff_soup.problem._lowering.bcs._ScaledDirichletValueFn]:
     ``eqx.partition`` must recurse into ``inner`` so traced parameters carried
     by a module-valued callback reach AD.
     """
@@ -649,7 +649,7 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
 
     * ``want == "nodes"`` (a node view): a unique, sorted ``int32`` array of node
       indices.  Tag leaves expand to the union of every node on the named
-      facets (via [_resolve_tag][diff_soup._lowering.bcs._resolve_tag]), node
+      facets (via [_resolve_tag][diff_soup.problem._lowering.bcs._resolve_tag]), node
       leaves contribute their indices
       directly, unions take the set union, and differences take the set
       difference (left minus right).
@@ -657,7 +657,7 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
       ``(face_indices, face_lengths, face_normals)`` triple from
       [boundary_face_assembly_for_ids][diff_soup.domains.mesh.fem._boundary.
       boundary_face_assembly_for_ids] for the resolved set of boundary
-      facets ([_resolve_facet_mask][diff_soup._lowering.bcs._resolve_facet_mask]):
+      facets ([_resolve_facet_mask][diff_soup.problem._lowering.bcs._resolve_facet_mask]):
       a tag leaf selects its facets, a node leaf the outer facets whose vertices
       all lie in the node set.
     * ``want == "weighted_facets"``: that triple plus the per-entry weights of a
@@ -667,7 +667,7 @@ def _resolve_selector(domain, selector, *, want, bc_desc=None):
         domain: The domain to resolve against.  A facet view requires a tagged
             FEM mesh ([TaggedMesh][diff_soup.domains.mesh.core.TaggedMesh]);
             a node view works on any domain whose tags
-            [_resolve_tag][diff_soup._lowering.bcs._resolve_tag] understands.
+            [_resolve_tag][diff_soup.problem._lowering.bcs._resolve_tag] understands.
         selector: The
             [BoundarySet][diff_soup.domains.boundary_set.BoundarySet]
             to resolve.
@@ -874,7 +874,7 @@ def _grid_face_factor(domain, indices: np.ndarray, *, face=None, bc_desc=None) -
     outer face into the value added to that cell's residual row. Each cell is
     weighted by one face: the face named by ``face`` (``(axis, side)``) or, on a
     grid of two or three dimensions, the one face the cells lie on
-    ([_grid_face_of][diff_soup._lowering.bcs._grid_face_of]). That face's area
+    ([_grid_face_of][diff_soup.problem._lowering.bcs._grid_face_of]). That face's area
     at a cell is the axis' end face area times the other axes' cell volumes, so
     the factor is the end face area over the axis' cell volume at the cell.
 
@@ -992,7 +992,7 @@ def _wrap_dirichlet_value_fn(value_fn, scales, comp_name: str, var_name: str):
     """Wrap a DirichletBC value_fn for dimensional time + internal-units value.
 
     The wrapper is an
-    [_ScaledDirichletValueFn][diff_soup._lowering.bcs._ScaledDirichletValueFn]
+    [_ScaledDirichletValueFn][diff_soup.problem._lowering.bcs._ScaledDirichletValueFn]
     ``eqx.Module`` so traced ``eqx.Module`` value functions surface their
     array leaves to AD via `eqx.partition`.  When the per-variable scale is
     ``1.0`` and
@@ -1254,7 +1254,7 @@ def _bc_dofs(eqset: EquationSet, layout: _BlockLayout) -> _ResolvedBCs:
 
     Handles DirichletBC, FluxBC, RobinBC, TractionBC, and SymmetryBC.  A
     SymmetryBC resolves to one normal-projection row per tagged node (see
-    [_ResolvedSymmetry][diff_soup._lowering.bcs._ResolvedSymmetry]) rather than
+    [_ResolvedSymmetry][diff_soup.problem._lowering.bcs._ResolvedSymmetry]) rather than
     to a Dirichlet pin, because ``n·u = 0`` couples the node's components on any
     boundary that is not axis aligned.
     """

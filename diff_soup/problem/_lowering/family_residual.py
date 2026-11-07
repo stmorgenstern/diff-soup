@@ -3,7 +3,7 @@
 A [Family][diff_soup.problem._ir.family.Family] is a population of ``count``
 structurally-identical members (e.g. MPM particles).  Assembling its residual
 member-by-member in a Python loop re-traces the per-member kernel ``count``
-times.  [_build_family_residual][diff_soup._lowering.family_residual._build_family_residual] instead traces the per-member kernel
+times.  [_build_family_residual][diff_soup.problem._lowering.family_residual._build_family_residual] instead traces the per-member kernel
 **exactly once** and batches it with **one** ``jax.vmap``'d primitive:
 
 1. ``u_mem = u[fam_base : fam_base+state_size].reshape(count, member_state_size)``
@@ -1144,7 +1144,7 @@ def _build_family_residual(
 
     Returns:
         A
-        [_FamilyResidualBlock][diff_soup._lowering.family_residual._FamilyResidualBlock]
+        [_FamilyResidualBlock][diff_soup.problem._lowering.family_residual._FamilyResidualBlock]
         callable as ``block(f, u, t,
         member_globals)`` that scatter-adds the family residual into ``f`` with
         one trace + one vmap'd primitive.  ``member_globals`` is a

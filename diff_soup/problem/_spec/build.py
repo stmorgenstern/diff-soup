@@ -25,7 +25,7 @@ The family / population and cross-component coupling emit arms
 (``_emit_coupling``, ``_resolve_coupling_endpoint``, ``_phantom_self_rhs``,
 read-through alias threading, and per-family scale propagation) are fully
 wired. The build walk emits ``couplings`` / ``families`` onto the EquationSet
-(consumed by the [diff_soup._lowering][] provider). Specs with no coupling
+(consumed by the [diff_soup.problem._lowering][] provider). Specs with no coupling
 or family emit only the core same-domain IR (components, globals, BCs, the four
 typed constraint kinds, observations, controls, and Scales / residual_scale
 resolution).
@@ -366,7 +366,7 @@ def _make_flux_fn(value: Any, value_fn: Optional[Callable]) -> Callable:
 
 def _resolve_where(where: dict[str, Any], domain=None) -> BoundarySpec:
     if where.get("face") is not None:
-        from diff_soup._lowering.bcs import _grid_face_cells
+        from diff_soup.problem._lowering.bcs import _grid_face_cells
 
         axis, side = where["face"]
         if getattr(domain, "discretization_type", None) not in ("fvm", "fdm"):
@@ -831,7 +831,7 @@ class _ObservationTracer:
 
     def bank(self, dname: str):
         if dname not in self._banks:
-            from diff_soup._lowering.operator_resolve import resolve_operator
+            from diff_soup.problem._lowering.operator_resolve import resolve_operator
 
             factory = getattr(self.spec, "_operator_factories", {}).get(dname)
             self._banks[dname] = resolve_operator(self.spec._domains[dname], factory)
@@ -991,8 +991,8 @@ def _mean_observation(o: ObservationSpec, fn, tracer: _ObservationTracer, owner:
         )
     if o.kind == "spatial_mean":
         return _MeanObservationFn(inner=fn)
-    from diff_soup._lowering.bcs import _boundary_integral_measure
     from diff_soup.domains.boundary_set import tags
+    from diff_soup.problem._lowering.bcs import _boundary_integral_measure
 
     tag = (o.where or {}).get("tag", "")
     try:
@@ -1635,7 +1635,7 @@ class _NeumannRhs(eqx.Module):
 
 def _neumann_conditions(spec, var_map) -> dict[str, tuple]:
     """Resolve every ``spec.bc.neumann`` to its grid face or mesh facets, grouped by domain name."""
-    from diff_soup._lowering.bcs import (
+    from diff_soup.problem._lowering.bcs import (
         _grid_face_cells,
         _grid_face_of,
         _grid_shape,

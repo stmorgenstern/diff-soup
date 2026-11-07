@@ -21,7 +21,7 @@ give every entry of ``U``.
 
 [MemberMeanCoupling][diff_soup.problem._ir._low_rank.MemberMeanCoupling]
 declares the coupling; with the lowered problem's
-[FamilyView][diff_soup._lowering.family_view.FamilyView],
+[FamilyView][diff_soup.problem._lowering.family_view.FamilyView],
 [member_mean_term][diff_soup.problem._ir._low_rank.member_mean_term] builds
 the [LowRankTerm][diff_soup.linear.LowRankTerm],
 [member_mean_values][diff_soup.problem._ir._low_rank.member_mean_values]

@@ -17,7 +17,7 @@ wired.  ``couple`` is the smart auto-phantom verb (GATHER / SCATTER direction
 inferred from arg-0's kind), the explicit ``source=/target=/via=`` escape
 hatch, and the NO-DOF read-through form ``couple(..., as_=)``.  ``family`` registers a [Family][] population via the
 [diff_soup.problem._spec.family_builder][].  The lowering arms (residual /
-sparsity / Schur) live in [diff_soup._lowering][].
+sparsity / Schur) live in [diff_soup.problem._lowering][].
 """
 
 from __future__ import annotations
@@ -1567,7 +1567,7 @@ class ProblemSpec:
         # Family-field IC keys are ``"<fam.name>.<field>"``.
         families = getattr(eqset, "families", ())
         if families:
-            from diff_soup._lowering.family_assemble import assemble_family_pieces
+            from diff_soup.problem._lowering.family_assemble import assemble_family_pieces
 
             pieces.extend(assemble_family_pieces(families, values, default))
         return jnp.concatenate(pieces) if pieces else jnp.zeros(0)

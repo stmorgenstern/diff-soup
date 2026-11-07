@@ -1,9 +1,9 @@
 """State layout for the lowered problem (component + Family blocks).
 
-- [_BlockLayout][diff_soup._lowering.layout._BlockLayout]: dataclass describing per-component variable offsets
+- [_BlockLayout][diff_soup.problem._lowering.layout._BlockLayout]: dataclass describing per-component variable offsets
   and per-family member-major slab offsets in the assembled state vector,
   plus the global-layout helper used by the bordered-global vector.
-- [_layout][]: build a [_BlockLayout][diff_soup._lowering.layout._BlockLayout] from an [EquationSet][diff_soup._lowering.layout.EquationSet].
+- [_layout][]: build a [_BlockLayout][diff_soup.problem._lowering.layout._BlockLayout] from an [EquationSet][diff_soup.problem._lowering.layout.EquationSet].
 - [_build_global_layout_entries][]: per-global ``(name, off, size)`` for
   the bordered-vector rewrap (used by ``_initial_lambda`` and the IFT path).
 
@@ -12,7 +12,7 @@ contiguous slab placed AFTER all [Component][diff_soup.problem._ir.component.Com
 layout so content_hash / codec / ``assemble_state`` concatenation agree.
 Each member field emits ONE entry keyed ``(fam.name, field_name)`` of size
 ``count * field_size`` and shape ``(count, *field_shape)``; a multi-field
-family records a per-entry stride so [unpack][diff_soup._lowering.layout._BlockLayout.unpack] reconstructs
+family records a per-entry stride so [unpack][diff_soup.problem._lowering.layout._BlockLayout.unpack] reconstructs
 the member-major interleave (``[m0_f0, m0_f1, m1_f0, m1_f1, ...]``).
 
 This module lives under ``diff_soup/_lowering`` and may import
@@ -87,7 +87,7 @@ class _BlockLayout:
 
 
 def _layout(eqset: EquationSet) -> _BlockLayout:
-    """Build the assembled-state [_BlockLayout][diff_soup._lowering.layout._BlockLayout] for ``eqset``.
+    """Build the assembled-state [_BlockLayout][diff_soup.problem._lowering.layout._BlockLayout] for ``eqset``.
 
     Components first (variable order), then families in ``EquationSet.families``
     order. Each family's whole population slab is contiguous and MEMBER-MAJOR

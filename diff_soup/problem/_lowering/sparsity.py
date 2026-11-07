@@ -2,7 +2,7 @@
 
 ``_sparsity`` builds the (rows, cols) tuple representing the static Jacobian
 topology from per-equation node-field rules + coupling cross-blocks.  Used by
-the provider's ``analyze`` to construct the [SparseTopology][diff_soup._lowering.sparsity.SparseTopology] that
+the provider's ``analyze`` to construct the [SparseTopology][diff_soup.problem._lowering.sparsity.SparseTopology] that
 ``physics_jacobian_blocks`` evaluates against.
 
 This module lives under ``diff_soup/_lowering`` and may import
@@ -209,7 +209,7 @@ def _sparsity(
     plus the diagonal.
 
     ``stencil_offsets`` carries the probe-inferred stencils (see
-    [_infer_stencil_offsets][diff_soup._lowering.stencil_infer._infer_stencil_offsets]): a
+    [_infer_stencil_offsets][diff_soup.problem._lowering.stencil_infer._infer_stencil_offsets]): a
     ``(comp, write, read)`` entry replaces that block's default radius-1
     pattern with the measured offset set, or with the dense block when the
     measured dependency is not a local stencil.  Blocks without an entry keep
@@ -439,7 +439,7 @@ def _family_self_block_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, 
     member's BLOCKED per-field coordinates and stamps it ``count`` times at
     member-major offsets ``fam_base + member * member_state_size`` (`Pattern.stamp`).  Returns
     the stamped ``(rows, cols)`` in global indexing, member by member;
-    [_sparsity][diff_soup._lowering.sparsity._sparsity] unions them with the
+    [_sparsity][diff_soup.problem._lowering.sparsity._sparsity] unions them with the
     rest of the topology.
 
     One member's slab blocks its fields in declaration order: member field
@@ -448,7 +448,7 @@ def _family_self_block_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, 
     therefore built in THOSE blocked coordinates — for every declared
     ``(out_field, in_field)`` pair the domain node-stencil block is placed at
     the fields' local offsets, exactly the construction the component path
-    uses ([_node_field_block][diff_soup._lowering.sparsity._node_field_block]).
+    uses ([_node_field_block][diff_soup.problem._lowering.sparsity._node_field_block]).
     Flux callbacks have no reads tuple, so their written rows conservatively
     include every member field. The tile must NOT use the interleaved
     ``sparsity_pattern(n_vars=fields_per_member)`` (which orders DOFs
@@ -820,13 +820,13 @@ def _flux_bc_cross_block_sparsity(
     A component ``FluxBC``'s density may read any field of its own component, a
     variable coupled into that component (an ordinary coupling target or a
     NO-DOF read-through alias), or a global (see
-    [_flux_fn_accessed_names][diff_soup._lowering.bcs._flux_fn_accessed_names]).  The residual
+    [_flux_fn_accessed_names][diff_soup.problem._lowering.bcs._flux_fn_accessed_names]).  The residual
     scatters the flux into the BC's boundary rows, so those rows depend on:
 
     * the read field's own columns — the per-face vertex-vertex stencil on FEM
       domains (the flux is a per-face quantity scattered to that face's
       vertices, so ``dR_a/du_b`` is nonzero only for vertices ``a, b`` sharing a
-      face — exactly [_robin_face_stencil_pairs][diff_soup._lowering.bcs._robin_face_stencil_pairs]).
+      face — exactly [_robin_face_stencil_pairs][diff_soup.problem._lowering.bcs._robin_face_stencil_pairs]).
       Non-FEM (grid/FVM) fluxes carry no facet geometry, so they fall back to the
       conservative whole field (``boundary_rows × all columns``);
     * the transfer SOURCE columns for a coupled-in value — the post-transfer
