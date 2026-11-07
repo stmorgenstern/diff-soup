@@ -8,7 +8,7 @@ A [Family][diff_soup.problem._ir.family.Family] is a population of ``count``
 structurally-identical members (e.g. an MPM electrode's many particles) sharing
 ONE member domain and per-member variable / equation / BC / coupling templates.
 This module is the declarative front-end that compiles down to that IR node +
-``diff_soup._lowering.family_residual`` lowering — it does NOT re-implement the
+``diff_soup.problem._lowering.family_residual`` lowering — it does NOT re-implement the
 vmapped residual / sparsity / Schur machinery.
 
 The user writes::

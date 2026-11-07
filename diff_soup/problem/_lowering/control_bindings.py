@@ -5,17 +5,17 @@ protocol.  This module turns the declarations into a compiled artifact at
 lowering time:
 
 * a [DerivedControl][diff_soup.problem._ir.control.DerivedControl] becomes a
-  [CompiledControlBinding][diff_soup._lowering.control_bindings.CompiledControlBinding] naming the
+  [CompiledControlBinding][diff_soup.problem._lowering.control_bindings.CompiledControlBinding] naming the
   driven [GlobalVariable][diff_soup.problem._ir.variable.GlobalVariable]'s
   algebraic slice ``(lam_offset, dim)`` in the concatenated bordered-global
   vector (global declaration order — the same layout
   ``_build_global_layout_entries`` records);
 * a [DirectControl][diff_soup.problem._ir.control.DirectControl] becomes a
-  [CompiledDirectControl][diff_soup._lowering.control_bindings.CompiledDirectControl].
+  [CompiledDirectControl][diff_soup.problem._lowering.control_bindings.CompiledDirectControl].
   It drives no global and writes no row: its value is prescribed outright, so
   the compiled entry carries only the name and the clock its ``fn`` reads;
-* the whole set is a [ControlBindingSet][diff_soup._lowering.control_bindings.ControlBindingSet], whose
-  [bound_values][diff_soup._lowering.control_bindings.ControlBindingSet.bound_values] evaluates every
+* the whole set is a [ControlBindingSet][diff_soup.problem._lowering.control_bindings.ControlBindingSet], whose
+  [bound_values][diff_soup.problem._lowering.control_bindings.ControlBindingSet.bound_values] evaluates every
   control at an internal time ``t`` — from the authored callables, or from an
   explicit ``{control_name: value}`` payload that overrides them.  Both kinds
   share that payload channel, so an override mapping names every declared
@@ -39,10 +39,10 @@ control's dimensional return value reaches the driven global's slice as
 would have returned.  Under the default identity scales both conversions are
 the identity and the authored value is written through unchanged.
 
-[bound_values][diff_soup._lowering.control_bindings.ControlBindingSet.bound_values]
+[bound_values][diff_soup.problem._lowering.control_bindings.ControlBindingSet.bound_values]
 returns the dimensional values — the quantity a model or event callback reads —
 and
-[internal_values][diff_soup._lowering.control_bindings.ControlBindingSet.internal_values]
+[internal_values][diff_soup.problem._lowering.control_bindings.ControlBindingSet.internal_values]
 returns them in the driven global's internal units, which is what the
 closing row is written from.
 
@@ -138,10 +138,10 @@ class ControlBindingSet(NamedTuple):
     """The compiled control artifact for one lowered problem.
 
     Attributes:
-        bindings: One [CompiledControlBinding][diff_soup._lowering.control_bindings.CompiledControlBinding] per
+        bindings: One [CompiledControlBinding][diff_soup.problem._lowering.control_bindings.CompiledControlBinding] per
             derived-quantity control.
         lam_dim: Total bordered-global-vector size (for shape checks by consumers).
-        direct: One [CompiledDirectControl][diff_soup._lowering.control_bindings.CompiledDirectControl] per
+        direct: One [CompiledDirectControl][diff_soup.problem._lowering.control_bindings.CompiledDirectControl] per
             direct control.  These drive no bordered-global slice; they share
             the override payload and nothing else.
     """
@@ -219,7 +219,7 @@ class ControlBindingSet(NamedTuple):
         internal time; each authored callable is handed the dimensional time it
         corresponds to.  The returned values are dimensional — the quantity a model or
         an event callback reads.  Use
-        [internal_values][diff_soup._lowering.control_bindings.ControlBindingSet.internal_values]
+        [internal_values][diff_soup.problem._lowering.control_bindings.ControlBindingSet.internal_values]
         for a driven algebraic-global's own units.
         """
         payload = self._unwrap_state(payload)
@@ -239,7 +239,7 @@ class ControlBindingSet(NamedTuple):
         """Derived-control values in the driven algebraic-globals' internal units.
 
         The dimensional values from
-        [bound_values][diff_soup._lowering.control_bindings.ControlBindingSet.bound_values]
+        [bound_values][diff_soup.problem._lowering.control_bindings.ControlBindingSet.bound_values]
         rescaled by each driven global's ``(state_ref, state_offset)``; the
         closing row is written from these.  Direct controls drive no algebraic-global
         and so do not appear.
@@ -293,7 +293,7 @@ def _authored_value_size(fn) -> object:
 
 
 def compile_control_bindings(eqset: EquationSet) -> ControlBindingSet:
-    """Compile ``eqset``'s control declarations into a [ControlBindingSet][diff_soup._lowering.control_bindings.ControlBindingSet].
+    """Compile ``eqset``'s control declarations into a [ControlBindingSet][diff_soup.problem._lowering.control_bindings.ControlBindingSet].
 
     Resolves each derived-quantity control's target global against the
     bordered-global layout (one slice per global, declaration order), and

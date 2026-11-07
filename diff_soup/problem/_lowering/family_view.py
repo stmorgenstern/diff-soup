@@ -73,7 +73,7 @@ class FamilyView:
 
         Returns:
             The ``slice`` into a member row (axis 1 of
-            [extract][diff_soup._lowering.family_view.FamilyView.extract]'s output).
+            [extract][diff_soup.problem._lowering.family_view.FamilyView.extract]'s output).
 
         Raises:
             KeyError: when ``field`` is not a member field of this family.
@@ -104,7 +104,7 @@ class FamilyView:
 
 
 def _build_family_view(fam, base: int) -> FamilyView:
-    """Build the [FamilyView][diff_soup._lowering.family_view.FamilyView] for one family.
+    """Build the [FamilyView][diff_soup.problem._lowering.family_view.FamilyView] for one family.
 
     Builds the view for one [Family][diff_soup.problem._ir.family.Family] at slab
     offset ``base``.

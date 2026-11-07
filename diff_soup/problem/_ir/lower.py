@@ -24,9 +24,8 @@ Three responsibilities:
 
 The host analysis that needs the ``domains`` operator bank (residual and
 Jacobian kernels, boundary geometry, FEM sparsity stencils) is
-``diff_soup._lowering.provider.analyze``, imported where it is called: the
-``problem`` layer sits below ``_lowering`` in the layer order, so the import
-runs on first call rather than at module import.
+``diff_soup.problem._lowering.provider.analyze``, imported where it is called,
+since the provider imports this module.
 """
 
 from __future__ import annotations
@@ -89,7 +88,7 @@ class _LoweringAnalysis:
 def _build_analysis(
     eqset: EquationSet, *, precision: Precision, probe_stencils: bool = True
 ) -> _LoweringAnalysis:
-    """Run the host analysis pass, ``diff_soup._lowering.provider.analyze``.
+    """Run the host analysis pass, ``diff_soup.problem._lowering.provider.analyze``.
 
     Args:
         eqset: The EquationSet to analyse.
@@ -101,7 +100,7 @@ def _build_analysis(
     Returns:
         The [_LoweringAnalysis][].
     """
-    from diff_soup._lowering.provider import analyze
+    from diff_soup.problem._lowering.provider import analyze
 
     return analyze(eqset, precision=precision, probe_stencils=probe_stencils)
 

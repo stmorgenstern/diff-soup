@@ -9,7 +9,7 @@ parameter slice ``m`` — and is vmapped over ``fam.member_params`` to a
 
 The family slab is laid out MEMBER-MAJOR (member 0's full profile, then member
 1's, ...) directly after all [Component][diff_soup.problem._ir.component.Component] blocks, in ``EquationSet.families`` order (matching
-[_layout][diff_soup._lowering.layout._layout]).  Each member field's
+[_layout][diff_soup.problem._lowering.layout._layout]).  Each member field's
 ``(count, member_field_size)`` materialisation is written into the field's
 column band ``[var_local_off : var_local_off + var.size]`` of a
 ``(count, member_state_size)`` slab, which flattens to the member-major flat
