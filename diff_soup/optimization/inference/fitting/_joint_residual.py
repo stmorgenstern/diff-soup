@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
-from typing import Any, Optional
+from collections.abc import Callable, Sequence
+from typing import Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup._layout import Layout
 from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
+    ForwardSeam,
     _solution_failed,
 )
 from diff_soup.optimization.inference.fitting._joint_layout import JointLayout, _child_n_theta
@@ -30,9 +32,11 @@ from diff_soup.optimization.inference.fitting._sharding import (
 from diff_soup.optimization.inference.fitting.inference_problem import (
     InferenceProblem,
 )
+from diff_soup.optimization.inference.fitting.series import Series
+from diff_soup.timestepping.vsvo.solution import Solution
 
 
-def _stack_frozen_theta(children: tuple) -> Any:
+def _stack_frozen_theta(children: tuple) -> PyTree:
     """Stack each child's frozen numeric theta leaves on a leading child axis."""
     frozen = tuple(child._seam.theta_frozen for child in children)
 
@@ -48,9 +52,9 @@ def _stack_frozen_theta(children: tuple) -> Any:
 
 def _stacked_full_theta(
     children: tuple,
-    seam: Any,
+    seam: ForwardSeam,
     theta_flat: jax.Array,
-) -> Any:
+) -> PyTree:
     """Reconstruct a batched full-theta pytree with child-specific frozen leaves."""
     learn = jax.vmap(seam.unflatten)(theta_flat)
     return eqx.combine(learn, _stack_frozen_theta(children))
@@ -82,7 +86,7 @@ def _single_shoot_data(child: InferenceProblem):
     return _resolve_child_y0(child)
 
 
-def _stream_weight(series: Any) -> jax.Array:
+def _stream_weight(series: Series) -> jax.Array:
     """Return a weight array broadcast to one stream's observed-value shape."""
     if series.weight is None:
         return jnp.ones_like(series.values)
@@ -550,7 +554,7 @@ def _build_homogeneous_residual(
     )
 
 
-def _trial_steps(sol: Any) -> jax.Array:
+def _trial_steps(sol: Solution) -> jax.Array:
     """The integrator's trial-step count of one solve, as an int32 scalar."""
     stats = getattr(sol, "stats", None)
     steps = getattr(stats, "trial_steps", None)
@@ -583,7 +587,9 @@ class _StepBalance:
     stepping; ``reorder`` applies an assignment directly.
     """
 
-    def __init__(self, n_children: int, placement: Optional[Layout], inputs: Any, active: Any):
+    def __init__(
+        self, n_children: int, placement: Optional[Layout], inputs: PyTree, active: jax.Array
+    ):
         self.n_children = int(n_children)
         self.placement = placement
         self.sharded = _sharding_requested(placement)
@@ -642,7 +648,7 @@ class _StepBalance:
             self.order = assignment.row_order()
             self.reassignments += 1
 
-    def reorder(self, order: Any) -> None:
+    def reorder(self, order: ArrayLike | Sequence[int]) -> None:
         """Use *order* (one child index per slot, ``-1`` empty) from the next evaluation on."""
         order = np.asarray(order, dtype=np.int32)
         if self.order is None or order.shape != self.order.shape:

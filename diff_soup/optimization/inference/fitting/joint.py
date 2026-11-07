@@ -39,12 +39,13 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Hashable, Sequence
 from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
@@ -71,7 +72,10 @@ from diff_soup.optimization.inference.fitting._joint_layout import (
     _joint_theta_names,
     _reconstruct_child_flat,
 )
-from diff_soup.optimization.inference.fitting._joint_residual import _build_homogeneous_residual
+from diff_soup.optimization.inference.fitting._joint_residual import (
+    _build_homogeneous_residual,
+    _StepBalance,
+)
 from diff_soup.optimization.inference.fitting._joint_structure import (
     _child_mode,
     _is_homogeneous,
@@ -183,28 +187,28 @@ class JointInferenceProblem:
     data_holders: tuple
     regularization: Any
     bounds: Optional[Bounds]
-    _layout: Any
-    _placement: Any
+    _layout: JointLayout
+    _placement: Optional[Layout]
     _x0: np.ndarray
     _segment_fns: tuple
-    _batched_r: Any
-    _batched_rj: Any
-    _stacked_r: Any
-    _stacked_rj: Any
-    _residual_builder: Any
+    _batched_r: Optional[Callable]
+    _batched_rj: Optional[Callable]
+    _stacked_r: Optional[Callable]
+    _stacked_rj: Optional[Callable]
+    _residual_builder: Optional[Callable]
     _residual_seams: dict
-    _loss_fn: Any
+    _loss_fn: Optional[Callable]
     _loss_grad_fns: dict
     _loss_grad_hessian_fns: dict
-    _evaluate_lsq: Any
-    _evaluate_cost: Any
-    _owner_residual_fns: Any
-    _owner_reducer_fns: Any
-    _owner_reducer_inputs: Any
-    _owner_narrow_kernel_cache: Any
-    _owner_point_plan_cache: Any
+    _evaluate_lsq: Optional[Callable]
+    _evaluate_cost: Optional[Callable]
+    _owner_residual_fns: Optional[tuple]
+    _owner_reducer_fns: Optional[tuple]
+    _owner_reducer_inputs: Optional[tuple]
+    _owner_narrow_kernel_cache: Optional[dict]
+    _owner_point_plan_cache: Optional[tuple]
     _restricted_initialization: bool
-    _trial_predicate: Any
+    _trial_predicate: Optional[Callable]
     _n_seg: int
     _rows_per_child: tuple
     _homogeneous: bool
@@ -416,7 +420,7 @@ class JointInferenceProblem:
         """Joint initial vector ``[global | owners | child locals | states]``."""
         return self._x0
 
-    def with_start(self, start: Any) -> "JointInferenceProblem":
+    def with_start(self, start: ArrayLike | Sequence) -> "JointInferenceProblem":
         """Return an immutable warm-started view with unchanged residual kernels.
 
         Joint construction compiles the experiment structure and its residual
@@ -475,7 +479,7 @@ class JointInferenceProblem:
         object.__setattr__(out, "_trial_predicate", predicate)
         return out
 
-    def trial_is_valid(self, x: Any):
+    def trial_is_valid(self, x: ArrayLike):
         """Validate a joint point before any residual/PDE trial is launched."""
         point = jnp.asarray(x)
         valid = jnp.asarray(True)
@@ -697,7 +701,7 @@ class JointInferenceProblem:
         return self._residual_seam("forward")[4]
 
     @property
-    def step_balance(self) -> Any:
+    def step_balance(self) -> Optional[_StepBalance]:
         """The step planner state behind the homogeneous reduction, or ``None``.
 
         Exposes the last trial-step counts per child (``last_steps``), the current
@@ -937,7 +941,7 @@ class JointInferenceProblem:
         """
         return self._layout.child_owner_indices
 
-    def child_flat(self, x_flat: Any, child_index: int) -> jax.Array:
+    def child_flat(self, x_flat: ArrayLike, child_index: int) -> jax.Array:
         """Reconstruct one child's complete flat vector from a joint vector."""
         if not 0 <= int(child_index) < len(self.problems):
             raise IndexError(
@@ -945,7 +949,7 @@ class JointInferenceProblem:
             )
         return _reconstruct_child_flat(jnp.asarray(x_flat), int(child_index), self._layout)
 
-    def owner_parameter_indices(self, owner: Any) -> tuple:
+    def owner_parameter_indices(self, owner: Hashable) -> tuple:
         """Indices of ``[global | owner | its child locals/states]``.
 
         ``owner`` is an ID from

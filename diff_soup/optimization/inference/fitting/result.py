@@ -13,16 +13,17 @@ from __future__ import annotations
 import enum
 import operator
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Optional, TypedDict
 
 import equinox as eqx
 import numpy as np
-from jaxtyping import PyTree
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup.optimization.inference.fitting.diagnostics import OptDiagnostics
+from diff_soup.problem.parameters import ParameterSchema
 
 
 class TerminationStatus(int, enum.Enum):
@@ -158,7 +159,7 @@ class StepInfo:
     # Everything a solver that resumes needs to make the next attempt as the
     # uninterrupted run would: a read-only mapping from names to host arrays,
     # taken after this attempt. None for solvers that do not resume a state.
-    state: Any = None
+    state: Optional[Mapping[str, PyTree]] = None
     # The relative decrease the Gauss-Newton model predicts for its full step at
     # the point the attempt steps from, and in the nested mode every member's.
     stationarity: Optional[float] = None
@@ -200,20 +201,20 @@ class ChildFit:
             window states, or ``None`` for a fixed-IC child.
     """
 
-    opt_params: Any = None
+    opt_params: PyTree = None
     local: dict = field(default_factory=dict)
-    window_states: Any = None
+    window_states: PyTree = None
 
 
 @dataclass(frozen=True)
 class ExperimentFit:
     """Fitted parameters for one experiment, indexed by Recipe handle."""
 
-    opt_params: Any = None
-    parameter_schema: Any = None
-    params: Any = None
+    opt_params: PyTree = None
+    parameter_schema: Optional[ParameterSchema] = None
+    params: Optional[ArrayLike] = None
     owners: dict = field(default_factory=dict)
-    window_states: Any = None
+    window_states: PyTree = None
 
     def __getitem__(self, handle):
         """Return the parameter value used in this experiment."""
@@ -221,7 +222,7 @@ class ExperimentFit:
         return value[self.owners[handle.name]] if handle.name in self.owners else value
 
 
-def _read_only(value: Any) -> Any:
+def _read_only(value: Optional[Mapping]) -> Optional[MappingProxyType]:
     """A mapping as a read-only view (``None`` stays ``None``).
 
     The view is one opaque leaf, so the arrays a mapping holds are never
@@ -232,22 +233,22 @@ def _read_only(value: Any) -> Any:
     return MappingProxyType(dict(value))
 
 
-def _host_float(value: Any) -> Any:
+def _host_float(value: Optional[ArrayLike]) -> Optional[float]:
     """``value`` as a Python float, ``None`` kept."""
     return None if value is None else float(value)
 
 
-def _host_int(value: Any) -> Any:
+def _host_int(value: Optional[ArrayLike]) -> Optional[int]:
     """``value`` as a Python int, ``None`` kept."""
     return None if value is None else int(value)
 
 
-def _host_floats(value: Any) -> Any:
+def _host_floats(value: Optional[Iterable]) -> Optional[tuple[float, ...]]:
     """``value`` as a tuple of Python floats, ``None`` kept."""
     return None if value is None else tuple(float(item) for item in value)
 
 
-def _float_vector(value: Any) -> Any:
+def _float_vector(value: ArrayLike | Sequence) -> np.ndarray:
     """``value`` as a 1-D float64 array (``()`` gives the empty one)."""
     return np.asarray(value, dtype=np.float64).reshape(-1)
 
@@ -357,7 +358,7 @@ class TrustRegionReport(eqx.Module):
     stall_reason: Optional[str] = eqx.field(static=True, default=None)
     consecutive_invalid_trials: int = eqx.field(static=True, default=0, converter=_host_int)
     failed_lanes: tuple = eqx.field(static=True, default=())
-    radius_history: Any = eqx.field(default=(), converter=_float_vector)
+    radius_history: np.ndarray = eqx.field(default=(), converter=_float_vector)
     stationarity: Optional[float] = eqx.field(static=True, default=None, converter=_host_float)
     member_stationarity: Optional[tuple] = eqx.field(
         static=True, default=None, converter=_host_floats
@@ -457,7 +458,7 @@ class OptInfo(TypedDict, total=False):
     linear_solver_fallbacks: int
     linear_factorizations: int
     ad_mode: Optional[str]
-    final_opt_state: Any
+    final_opt_state: PyTree
     final_residual: np.ndarray
     final_jacobian: np.ndarray
     final_data_residual: np.ndarray
@@ -484,7 +485,7 @@ class OptInfo(TypedDict, total=False):
 _SCALARS = (str, int, float, bool)
 
 
-def _persisted(value: Any) -> bool:
+def _persisted(value: PyTree) -> bool:
     """Whether ``OptResult.save`` keeps an ``info`` value.
 
     Kept: a JSON scalar, a sequence of numbers, or a sequence of rows whose
@@ -495,7 +496,7 @@ def _persisted(value: Any) -> bool:
     if not isinstance(value, (tuple, list)):
         return False
 
-    def plain(item: Any) -> bool:
+    def plain(item: PyTree) -> bool:
         return item is None or isinstance(item, _SCALARS)
 
     return all(isinstance(item, (int, float)) for item in value) or all(
@@ -508,7 +509,7 @@ def _persisted(value: Any) -> bool:
     )
 
 
-def _tupled(value: Any) -> Any:
+def _tupled(value: PyTree) -> PyTree:
     """A JSON value with every list turned into a tuple, rows included."""
     if isinstance(value, list):
         return tuple(_tupled(item) for item in value)
@@ -522,7 +523,7 @@ def _report_fields() -> tuple:
     return tuple(item.name for item in dataclasses.fields(TrustRegionReport))
 
 
-def _jsonable_report(value: Any) -> Any:
+def _jsonable_report(value: PyTree) -> PyTree:
     """A static field of a ``TrustRegionReport`` as JSON: tuples as lists, numbers as floats."""
     if isinstance(value, (tuple, list)):
         return [_jsonable_report(item) for item in value]
@@ -531,7 +532,7 @@ def _jsonable_report(value: Any) -> Any:
     return value
 
 
-def _layout_text(schema: Any, info: Any) -> str:
+def _layout_text(schema: Optional[ParameterSchema], info: Mapping) -> str:
     """The parameter layout ``OptResult.save`` writes: the schema's, else the one loaded."""
     if schema is None:
         return str(info.get("schema_layout", ""))
@@ -540,7 +541,7 @@ def _layout_text(schema: Any, info: Any) -> str:
     return layout_text(schema)
 
 
-def _uq_text(uq: Any) -> str:
+def _uq_text(uq: PyTree) -> str:
     """``info["uq"]`` as JSON when it is a mapping of JSON scalars, else ``""``."""
     if not isinstance(uq, dict) or not all(
         isinstance(key, str) and (value is None or isinstance(value, _SCALARS))
@@ -552,7 +553,7 @@ def _uq_text(uq: Any) -> str:
     return json.dumps(uq)
 
 
-def _saved_outcome(data: Any, files: set) -> dict:
+def _saved_outcome(data: Mapping, files: set) -> dict:
     """The failed segments, log likelihood and log prior a saved file holds, as fields."""
     fields: dict = {}
     if "n_failed_segments" in files:
@@ -566,7 +567,7 @@ def _saved_outcome(data: Any, files: set) -> dict:
     return fields
 
 
-def _attached(result: Any, problem: Any, recorded_uq: Any, file: str) -> Any:
+def _attached(result: OptResult, problem: Any, recorded_uq: PyTree, file: str) -> OptResult:
     """``result`` with ``problem``'s schema, objective and ``info["uq"]``, after the checks."""
     import dataclasses
 
@@ -698,7 +699,7 @@ class OptResult(eqx.Module):
     window_states: PyTree = None
 
     experiments: Mapping = eqx.field(static=True, default_factory=dict, converter=_read_only)
-    parameter_schema: Any = eqx.field(static=True, default=None)
+    parameter_schema: Optional[ParameterSchema] = eqx.field(static=True, default=None)
     objective: Any = eqx.field(static=True, default=None)
     log_likelihood: Optional[float] = eqx.field(static=True, default=None)
     log_prior: Optional[float] = eqx.field(static=True, default=None)
@@ -789,7 +790,7 @@ class OptResult(eqx.Module):
         np.savez(str(path) if str(path).endswith(".npz") else f"{path}.npz", **payload)
 
     @classmethod
-    def load(cls, path: Any, *, problem: Any = None) -> "OptResult":
+    def load(cls, path: str | os.PathLike, *, problem: Any = None) -> "OptResult":
         """Load a result saved with `OptResult.save`.
 
         Args:
@@ -862,7 +863,7 @@ class OptResult(eqx.Module):
             )
         return result if problem is None else _attached(result, problem, recorded_uq, file)
 
-    def __getitem__(self, handle: Any) -> Any:
+    def __getitem__(self, handle: Any) -> PyTree:
         """Reconstruct a fitted physical value by its Recipe handle."""
         if self.parameter_schema is None:
             raise TypeError(

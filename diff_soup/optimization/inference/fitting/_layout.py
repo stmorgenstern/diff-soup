@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
+from jaxtyping import PyTree
+
+from diff_soup.problem.parameters import ParameterSchema
 
 
-def schema_layout(schema: Any) -> tuple:
+def schema_layout(schema: ParameterSchema) -> tuple:
     """Each entry's handle name, kind and size, and the columns of each owner, sorted by name.
 
     Handle identity is left out, so a rebuilt recipe with the same declarations has the
@@ -40,12 +43,12 @@ def schema_layout(schema: Any) -> tuple:
     )
 
 
-def layout_text(schema: Any) -> str:
+def layout_text(schema: Optional[ParameterSchema]) -> str:
     """The layout of ``schema`` as JSON, or ``""`` for ``None``; `OptResult.save` writes it."""
     return "" if schema is None else json.dumps(schema_layout(schema))
 
 
-def describe_layout(schema: Any) -> str:
+def describe_layout(schema: ParameterSchema) -> str:
     """The columns of ``schema`` as text, for example ``rate: 0, source@cell-a: 1``."""
     labels = []
     for name, _, _, occurrences in schema_layout(schema):
@@ -61,7 +64,7 @@ _AS_POINT = (
 )
 
 
-def require_layout(problem: Any, schema: Any, *, where: str) -> None:
+def require_layout(problem: Any, schema: ParameterSchema, *, where: str) -> None:
     """Refuse a fit whose columns hold other handles than ``problem``'s.
 
     Raises:
@@ -119,7 +122,7 @@ def mapping_point(problem: Any, values: Mapping, *, where: str) -> np.ndarray:
     return point
 
 
-def resolve_point(problem: Any, at: Any, *, where: str) -> Any:
+def resolve_point(problem: Any, at: PyTree, *, where: str) -> PyTree:
     """``at`` as a flat point of ``problem``.
 
     A fit (an `OptResult` or `ExperimentFit`) gives its `params` after the layout check,

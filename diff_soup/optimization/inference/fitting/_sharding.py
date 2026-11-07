@@ -16,13 +16,14 @@ path and are the primary parity/debugging surface.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import shard_map
 from jax.sharding import NamedSharding, PartitionSpec
+from jaxtyping import PyTree
 
 from diff_soup._layout import Layout
 from diff_soup.optimization.inference.engine._plan import n_padded
@@ -52,7 +53,7 @@ def _pad_leading(x: jax.Array, n_pad: int) -> jax.Array:
     return jnp.concatenate([x, pad], axis=0)
 
 
-def pad_children(inputs: Any, active: jax.Array, n_pad: int) -> tuple[Any, jax.Array]:
+def pad_children(inputs: PyTree, active: jax.Array, n_pad: int) -> tuple[PyTree, jax.Array]:
     """Pad every child-axis leaf in *inputs*, and the active mask, by *n_pad* rows.
 
     Input leaves repeat the first child (valid data); the active mask pads with
@@ -73,7 +74,7 @@ def child_spec(layout: Layout) -> PartitionSpec:
     return PartitionSpec(layout.experiment_axis)
 
 
-def place_children(inputs: Any, active: jax.Array, layout: Layout) -> tuple[Any, jax.Array]:
+def place_children(inputs: PyTree, active: jax.Array, layout: Layout) -> tuple[PyTree, jax.Array]:
     """Place padded child-axis inputs on the mesh with a child-sharded ``NamedSharding``.
 
     The leaf count is assumed already padded to a multiple of the device count
@@ -84,7 +85,7 @@ def place_children(inputs: Any, active: jax.Array, layout: Layout) -> tuple[Any,
     return jax.device_put(inputs, sharding), jax.device_put(active, sharding)
 
 
-def _residual_and_steps(r_child_from_x: Callable, x: jax.Array, inp: Any) -> tuple:
+def _residual_and_steps(r_child_from_x: Callable, x: jax.Array, inp: PyTree) -> tuple:
     """Split a child residual function's output into rows and its trial-step count.
 
     A residual function returns either the rows alone or ``(rows, steps)``,
@@ -110,7 +111,7 @@ def identity_order(n_real: int, layout: Layout) -> np.ndarray:
     return order
 
 
-def order_children(inputs: Any, active: jax.Array, order: jax.Array) -> tuple[Any, jax.Array]:
+def order_children(inputs: PyTree, active: jax.Array, order: jax.Array) -> tuple[PyTree, jax.Array]:
     """Arrange child-axis inputs by *order*, an int32 slot-to-child map with ``-1`` empty.
 
     Empty slots repeat child zero's inputs and are inactive. Under ``jit`` on
@@ -124,12 +125,12 @@ def order_children(inputs: Any, active: jax.Array, order: jax.Array) -> tuple[An
 
 
 def reduce_child_lsq(
-    r_child_from_x: Callable[[jax.Array, Any], jax.Array],
+    r_child_from_x: Callable[[jax.Array, PyTree], jax.Array],
     x: jax.Array,
-    inputs: Any,
+    inputs: PyTree,
     active: jax.Array,
     layout: Optional[Layout],
-    columns: Optional[Any] = None,
+    columns: Optional[jax.Array] = None,
     *,
     order: Optional[jax.Array] = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
@@ -281,9 +282,9 @@ def unorder_steps(placed: jax.Array, order: jax.Array, n_real: int, layout: Layo
 
 
 def reduce_child_cost(
-    r_child_from_x: Callable[[jax.Array, Any], jax.Array],
+    r_child_from_x: Callable[[jax.Array, PyTree], jax.Array],
     x: jax.Array,
-    inputs: Any,
+    inputs: PyTree,
     active: jax.Array,
     layout: Optional[Layout],
     *,
@@ -345,8 +346,8 @@ def reduce_child_cost(
 
 
 def run_child_kernel(
-    kernel: Callable[[Any, jax.Array], jax.Array],
-    inputs: Any,
+    kernel: Callable[[PyTree, jax.Array], jax.Array],
+    inputs: PyTree,
     active: jax.Array,
     layout: Optional[Layout],
     *,

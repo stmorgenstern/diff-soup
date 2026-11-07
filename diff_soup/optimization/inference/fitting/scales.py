@@ -14,10 +14,11 @@ Protocols
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any
+from collections.abc import Sequence
 
 import equinox as eqx
 import jax.numpy as jnp
+from jaxtyping import ArrayLike
 
 
 class XScale(eqx.Module):
@@ -105,7 +106,7 @@ class ConstantScale(XScale):
         scale: The typical magnitude of the parameters, one scalar or one entry per parameter.
     """
 
-    scale: Any
+    scale: ArrayLike | Sequence[float]
 
     def damping_diagonal(self, J: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
         """Return ``1 / scale**2`` broadcast to length ``x.shape[0]``.

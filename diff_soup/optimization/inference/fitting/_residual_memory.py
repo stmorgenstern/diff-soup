@@ -10,6 +10,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._errors import ConfigurationError
 
@@ -81,7 +82,7 @@ def _host_available_memory() -> Optional[int]:
     return available
 
 
-def _free_device_memory(device: Any) -> Optional[int]:
+def _free_device_memory(device: jax.Device) -> Optional[int]:
     """The bytes ``device`` can still allocate, or ``None`` when it cannot say."""
     if device.platform == "cpu":
         return _host_available_memory()
@@ -95,7 +96,7 @@ def _free_device_memory(device: Any) -> Optional[int]:
     return int(limit) - int(stats.get("bytes_in_use", 0))
 
 
-def _memory_need_and_free(compiled: Any) -> Optional[tuple]:
+def _memory_need_and_free(compiled: jax.stages.Compiled) -> Optional[tuple]:
     """``(need, free, platform)`` of a compiled evaluation, or ``None`` when unmeasured."""
     try:
         analysis = compiled.memory_analysis()
@@ -113,7 +114,9 @@ def _memory_need_and_free(compiled: Any) -> Optional[tuple]:
     return need, free, device.platform
 
 
-def _check_hessian_memory(compiled: Any, width: int, tile: Any) -> None:
+def _check_hessian_memory(
+    compiled: jax.stages.Compiled, width: int, tile: Optional[int | str]
+) -> None:
     """Raise `_HessianMemoryError` when a compiled Hessian needs more than the free memory.
 
     ``compiled`` is the ahead-of-time compiled evaluation of ``width``
@@ -146,7 +149,7 @@ class _JacobianMemoryError(ConfigurationError):
 def _jacobian_memory_reporter(knob: str) -> Callable:
     """The memory check of a residual Jacobian whose tile the option ``knob`` sets."""
 
-    def check(compiled: Any, width: int, tile: Any) -> None:
+    def check(compiled: jax.stages.Compiled, width: int, tile: Optional[int | str]) -> None:
         measured = _memory_need_and_free(compiled)
         if measured is None or measured[0] <= _HESSIAN_MEMORY_SHARE * measured[1]:
             return
@@ -187,7 +190,9 @@ class _MemoryCheckedHessian:
     `_jacobian_memory_reporter`.
     """
 
-    def __init__(self, fn: Callable, *, tile: Any = "full", report: Callable = None):
+    def __init__(
+        self, fn: Callable, *, tile: Optional[int | str] = "full", report: Callable = None
+    ):
         self._fn = fn if hasattr(fn, "lower") else jax.jit(fn)
         self.tile = tile
         self._report = _check_hessian_memory if report is None else report
@@ -197,7 +202,7 @@ class _MemoryCheckedHessian:
         """Lower the wrapped jitted function, as `jax.jit(...).lower` does."""
         return self._fn.lower(*args, **kwargs)
 
-    def check(self, x: Any) -> None:
+    def check(self, x: ArrayLike) -> None:
         """Compile for ``x`` and raise the memory error of the evaluation when it does not fit."""
         shape = tuple(np.shape(x))
         if len(shape) != 1 or shape[0] <= _HESSIAN_GUARD_MIN_WIDTH:
@@ -216,7 +221,7 @@ class _MemoryCheckedHessian:
         self._report(compiled, shape[0], self.tile)
         self._checked.add(key)
 
-    def __call__(self, x: Any):
+    def __call__(self, x: ArrayLike):
         self.check(x)
         return self._fn(x)
 
@@ -238,22 +243,24 @@ class _TiledJacobian:
         self._build = build
         self._jitted: dict = {}
 
-    def at_tile(self, tile: Any) -> Callable:
+    def at_tile(self, tile: Optional[int | str]) -> Callable:
         """The jitted evaluation in tiles of ``tile`` tangents, built once per tile."""
         key = "full" if tile is None else tile
         if key not in self._jitted:
             self._jitted[key] = jax.jit(self._build(key))
         return self._jitted[key]
 
-    def lower(self, x: Any):
+    def lower(self, x: ArrayLike):
         """Lower the whole evaluation, as `jax.jit(...).lower` does."""
         return self.at_tile("full").lower(x)
 
-    def __call__(self, x: Any):
+    def __call__(self, x: ArrayLike):
         return self.at_tile("full")(x)
 
 
-def checked_residual_jacobian(problem: Any, x: Any, tile: Any, *, knob: str) -> Any:
+def checked_residual_jacobian(
+    problem: Any, x: ArrayLike, tile: Optional[int | str], *, knob: str
+) -> _MemoryCheckedHessian:
     """``x -> (residual, jacobian)`` of a least-squares problem, memory-checked at ``x``.
 
     The problem's structured Jacobian (a `_TiledJacobian`, such as fitted

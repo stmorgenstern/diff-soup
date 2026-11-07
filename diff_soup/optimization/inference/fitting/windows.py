@@ -28,12 +28,14 @@ is what keeps decision-variable windows tractable on a large state.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Optional, Union
+from collections.abc import Sequence
+from typing import Optional, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike, PyTree
 
 # Mode tags (static; selected by the constructor, never a user string flag).
 _MODE_FROM_DATA = "from_data"
@@ -66,10 +68,10 @@ class WindowInitialization:
             source fingerprint, mesh key, and so on). It is never traced.
     """
 
-    anchors: Any
-    initial_coordinates: Any = None
+    anchors: ArrayLike
+    initial_coordinates: Optional[ArrayLike] = None
     reached_tend: bool = True
-    provenance: Any = None
+    provenance: PyTree = None
 
 
 class RestartStep(eqx.Module):
@@ -89,7 +91,7 @@ class RestartStep(eqx.Module):
     value: float = eqx.field(static=True, default=0.0)
     min_step: float = eqx.field(static=True, default=0.0)
     max_step: float = eqx.field(static=True, default=0.0)
-    hints: Any = None
+    hints: Optional[jax.Array] = None
 
     @classmethod
     def auto(cls) -> "RestartStep":
@@ -128,7 +130,7 @@ class RestartStep(eqx.Module):
     @classmethod
     def hinted(
         cls,
-        hints: Any,
+        hints: ArrayLike | Sequence[float],
         *,
         max_step: float = 0.0,
     ) -> "RestartStep":
@@ -142,7 +144,7 @@ class RestartStep(eqx.Module):
             raise ValueError("RestartStep max_step must be nonnegative.")
         return cls(mode="hinted", max_step=float(max_step), hints=array)
 
-    def resolve(self, t0: Any, t1: Any, segment_index: Any = 0) -> jax.Array:
+    def resolve(self, t0: ArrayLike, t1: ArrayLike, segment_index: ArrayLike = 0) -> jax.Array:
         """Return the signed, gradient-dead ``dt0`` for one segment."""
         t0 = jnp.asarray(t0)
         t1 = jnp.asarray(t1, dtype=t0.dtype)
@@ -184,8 +186,8 @@ class Windows(eqx.Module):
     boundaries: Optional[tuple] = eqx.field(static=True, default=None)
     n_windows: Optional[int] = eqx.field(static=True, default=None)
     source: Optional[str] = eqx.field(static=True, default=None)
-    seed_times: Optional[Any] = None
-    seed_states: Optional[Any] = None
+    seed_times: Optional[jax.Array] = None
+    seed_states: Optional[jax.Array] = None
 
     @classmethod
     def from_data(cls, source: Optional[str] = None) -> "Windows":
@@ -197,7 +199,7 @@ class Windows(eqx.Module):
         return cls(mode=_MODE_FROM_DATA, source=source)
 
     @classmethod
-    def from_states(cls, times: Any, states: Any) -> "Windows":
+    def from_states(cls, times: ArrayLike | Sequence, states: ArrayLike | Sequence) -> "Windows":
         """Start every window from a given full state, one window per consecutive pair of frames.
 
         The frame times must equal those of the experiment's one measurement.
@@ -225,7 +227,7 @@ class Windows(eqx.Module):
         )
 
     @classmethod
-    def at(cls, ts: Any) -> "Windows":
+    def at(cls, ts: ArrayLike | Sequence) -> "Windows":
         """Place window boundaries at the times `ts` and fit the window starts.
 
         Args:
@@ -273,7 +275,7 @@ class StateBasis(eqx.Module):
         return cls(modes=None)
 
     @classmethod
-    def from_modes(cls, modes: Any) -> "StateBasis":
+    def from_modes(cls, modes: ArrayLike | Sequence) -> "StateBasis":
         """Fit each window start in the span of the columns of `modes`.
 
         Args:

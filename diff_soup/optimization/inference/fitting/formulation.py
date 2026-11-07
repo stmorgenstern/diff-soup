@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.fitting.windows import (
     Continuity,
@@ -109,7 +111,7 @@ class FixedInitialState(InitialState):
         time: The start time, which the experiment sets to the start of its span.
     """
 
-    y0: Any = None
+    y0: ArrayLike | Sequence | None = None
     time: float = 0.0
 
 
@@ -124,11 +126,13 @@ class LearnedInitialState(InitialState):
         time: The start time, which the experiment sets to the start of its span.
     """
 
-    guess: Any
+    guess: ArrayLike | Sequence
     time: float = 0.0
 
 
-def _initial_state_array(initial_state: Any) -> Any:
+def _initial_state_array(
+    initial_state: InitialState | ArrayLike | Sequence,
+) -> ArrayLike | Sequence | None:
     """Return the state array a declaration carries.
 
     A policy carries it as ``y0`` (fixed) or ``guess`` (learned); a bare array
@@ -142,7 +146,9 @@ def _initial_state_array(initial_state: Any) -> Any:
     return initial_state
 
 
-def _initial_state_policy(initial_state: Any, *, time: float) -> InitialState:
+def _initial_state_policy(
+    initial_state: InitialState | ArrayLike | Sequence, *, time: float
+) -> InitialState:
     """Return the trajectory initial-state policy of a declaration, timed at ``time``.
 
     A bare array becomes ``FixedInitialState``; a policy keeps its kind and is
@@ -154,7 +160,9 @@ def _initial_state_policy(initial_state: Any, *, time: float) -> InitialState:
     return FixedInitialState(initial_state, time=float(time))
 
 
-def _check_initial_state_time(initial_state: Any, data: tuple) -> None:
+def _check_initial_state_time(
+    initial_state: InitialState | ArrayLike | Sequence, data: tuple
+) -> None:
     """Reject a FixedInitialState time that contradicts the frame it labels.
 
     A [FixedInitialState][diff_soup.optimization.inference.fitting.formulation.FixedInitialState]

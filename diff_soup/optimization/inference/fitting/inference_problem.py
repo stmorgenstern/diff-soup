@@ -33,16 +33,21 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup._precision import Precision, cast_to_compute_dtype, compute_dtype_of
+from diff_soup._schedule.records import Schedule, ScheduleArrays
 from diff_soup.optimization.inference.fitting._forward_seam import (
     _FAILED_SENTINEL,
+    ForwardSeam,
+    GroupedThetaSelection,
     batched_transition_residual_factory,
     build_forward_seam,
     count_failed_frames,
@@ -93,8 +98,11 @@ from diff_soup.optimization.inference.fitting.parameter_groups import (
 from diff_soup.optimization.inference.fitting.regularization import NoReg
 from diff_soup.optimization.inference.fitting.series import FullState, Series, observes_full_state
 from diff_soup.optimization.inference.fitting.windows import (
+    RestartStep,
     StateBasis,
+    WindowInitialization,
 )
+from diff_soup.problem.parameters import ParameterSchema
 
 # ---------------------------------------------------------------------------
 # Initial-state policy objects
@@ -115,7 +123,7 @@ def _declared_precision(problem: Any) -> Precision:
     return getattr(view, "precision", None) or Precision()
 
 
-def _lowered_schedule(schedule: Any, problem: Any) -> Any:
+def _lowered_schedule(schedule: Optional[Schedule], problem: Any) -> Optional[ScheduleArrays]:
     """The segment arrays of ``schedule`` against ``problem``'s mode names, or ``None``.
 
     The arrays carry the targets and durations at the compute dtype of the
@@ -139,11 +147,11 @@ class _ThetaOnlyRegularizer:
     base: Any
     n_theta: int
 
-    def residual(self, x: Any):
+    def residual(self, x: ArrayLike):
         """Return the wrapped regularizer rows for ``x[:n_theta]``."""
         return self.base.residual(jnp.asarray(x)[: self.n_theta])
 
-    def penalty(self, x: Any):
+    def penalty(self, x: ArrayLike):
         """Return the wrapped regularizer penalty for ``x[:n_theta]``."""
         return self.base.penalty(jnp.asarray(x)[: self.n_theta])
 
@@ -173,7 +181,7 @@ def _as_named_series_tuple(data: Any) -> tuple:
     return series
 
 
-def _resolve_y0(data: tuple, y0: Any) -> Any:
+def _resolve_y0(data: tuple, y0: Optional[ArrayLike | Sequence]) -> jax.Array:
     """Resolve the trajectory IC: explicit ``y0`` else full-state ``data[0]``.
 
     Raises:
@@ -192,7 +200,7 @@ def _resolve_y0(data: tuple, y0: Any) -> Any:
     return s0.values[0]
 
 
-def _reached_tend(ts: Any, t_end: float) -> bool:
+def _reached_tend(ts: ArrayLike, t_end: float) -> bool:
     """Host-side loud-status check: did the solve reach ``t_end``?"""
     return abs(float(ts[-1]) - t_end) <= 1e-9 * max(1.0, abs(t_end))
 
@@ -232,55 +240,55 @@ class InferenceProblem:
     problem: Any
     data: tuple
     solver: Any
-    objective: Any
-    trajectory: Any
-    initial_state: Any
-    parameters: Any
-    parameter_schema: Any
+    objective: Objective
+    trajectory: Trajectory
+    initial_state: InitialState
+    parameters: ParameterGroups
+    parameter_schema: Optional[ParameterSchema]
     regularization: Any
-    _seam: Any
+    _seam: ForwardSeam
     _segment_fns: tuple
-    _residual_builder: Any
-    _batched_r: Any
-    _batched_rj: Any
+    _residual_builder: Callable
+    _batched_r: Optional[Callable]
+    _batched_rj: Optional[Callable]
     # Lazily-built jitted (r, rj) pair over ``segment_fns`` — one compile per
     # inference problem, reused by every subsequent solve.
-    _stacked_r: Any
-    _stacked_rj: Any
+    _stacked_r: Optional[Callable]
+    _stacked_rj: Optional[Callable]
     _residual_seams: dict
-    _loss_fn: Any
+    _loss_fn: Optional[Callable]
     _loss_grad_fns: dict
     _loss_grad_hessian_fns: dict
     _x0: np.ndarray
     _n_seg: int
     _baseline_reached_tend: Optional[bool]
-    _baseline_probe: Any
+    _baseline_probe: Optional[Callable]
     _residual_rows: int
-    _parameters_argument: Any
-    _reused_seam: Any
-    _window_content_key: Any
+    _parameters_argument: Optional[ParameterGroups]
+    _reused_seam: Optional[ForwardSeam]
+    _window_content_key: Optional[str]
     _window_record_pending: bool
-    _dv_build: Any
+    _dv_build: Optional[DecisionWindowBuild]
     _stream_names: tuple
     _stream_slices: tuple
     _param_group_names: tuple
     _param_group_cols: tuple
-    _union_ts: Any
-    _solve_probe: Any
+    _union_ts: Optional[np.ndarray]
+    _solve_probe: Optional[dict]
     state_prior_weight: float
     theta_only_steps: int
     project_windows: bool
-    window_initialization: Any
-    restart_step: Any
-    trial_predicate: Any
+    window_initialization: Optional[WindowInitialization]
+    restart_step: Optional[RestartStep]
+    trial_predicate: Optional[Callable]
     bounds: Optional[Bounds]
     # Flat (lb, ub) resolved from bounds declared on the problem's spec params;
     # ``None`` when nothing is declared or an explicit ``bounds=`` overrides.
-    _declared_bounds: Any
+    _declared_bounds: Optional[tuple[jax.Array, jax.Array]]
     # The operating protocol the single shoot follows, and its segment arrays
     # against the problem's mode names; both ``None`` without a schedule.
-    schedule: Any
-    _schedule_arrays: Any
+    schedule: Optional[Schedule]
+    _schedule_arrays: Optional[ScheduleArrays]
 
     def __init__(
         self,
@@ -291,16 +299,16 @@ class InferenceProblem:
         parameters: Optional[ParameterGroups] = None,
         objective: Optional[Objective] = None,
         trajectory: Optional[Trajectory] = None,
-        initial_state: Any = None,
+        initial_state: Optional[InitialState | ArrayLike | Sequence] = None,
         regularizer: Any = None,
         state_prior_weight: float = 0.0,
         theta_only_steps: int = 0,
         project_windows: bool = True,
-        window_initialization: Any = None,
-        restart_step: Any = None,
+        window_initialization: Optional[WindowInitialization] = None,
+        restart_step: Optional[RestartStep] = None,
         trial_predicate: Any = None,
         bounds: Optional[Bounds] = None,
-        schedule: Any = None,
+        schedule: Optional[Schedule] = None,
     ):
         """Eagerly build the residual closures for the chosen trajectory.
 
@@ -399,7 +407,9 @@ class InferenceProblem:
         _set(self, "_loss_grad_fns", {})
         _set(self, "_loss_grad_hessian_fns", {})
 
-    def _seam_for(self, theta_spec: Any) -> Any:
+    def _seam_for(
+        self, theta_spec: Optional[GroupedThetaSelection | str | Iterable[str]]
+    ) -> ForwardSeam:
         """The forward seam of this problem: the one handed over by ``with_data`` or a new one."""
         seam = self._reused_seam
         return build_forward_seam(self.problem, theta_spec) if seam is None else seam
@@ -1026,7 +1036,7 @@ class InferenceProblem:
             _set(self, "_stacked_rj", rj_fn)
         return self._stacked_r
 
-    def _forward_window_build(self) -> Any:
+    def _forward_window_build(self) -> DecisionWindowBuild:
         """The window build whose ``residual`` is the forward seam's, as ``stacked_r_fn`` evaluates it."""
         (residual,) = self._residual_seam("forward")[0]
         return residual.__self__
@@ -1177,7 +1187,7 @@ class InferenceProblem:
             return ()
         return tuple(i for i, leaf_id in enumerate(self._seam.theta_leaf_ids) if leaf_id in ids)
 
-    def values(self, x: Any) -> ParameterValues:
+    def values(self, x: ArrayLike) -> ParameterValues:
         """Return the parameter values a flat vector in this problem's fit order holds.
 
         Args:
@@ -1199,7 +1209,7 @@ class InferenceProblem:
         """
         return self._seam.theta_names
 
-    def persist_window_initialization(self) -> Any:
+    def persist_window_initialization(self) -> Optional[Path]:
         """Store this problem's window initialization under its content key.
 
         Called by the process that owns the experiment once its sweep has run;

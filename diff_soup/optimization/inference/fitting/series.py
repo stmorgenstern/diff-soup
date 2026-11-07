@@ -20,18 +20,19 @@ a genuinely fp32 optimization.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Optional, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float
+from jax.typing import DTypeLike
+from jaxtyping import Array, ArrayLike, Bool, Float, PyTree
 
 from diff_soup.optimization.inference.data.base import ObservationOperator
 
 
-def _compute_dtype() -> Any:
+def _compute_dtype() -> jnp.dtype:
     """Return the active compute dtype (fp64 when x64 is enabled, else fp32).
 
     Derived from the active default float (``jnp.zeros(()).dtype``) — no hard fp64
@@ -54,13 +55,13 @@ class FullState(ObservationOperator):
         """Whether this operator reports the solver state unchanged (it does)."""
         return True
 
-    def predict(self, u: Array, t: Any, theta: Any) -> Array:
+    def predict(self, u: Array, t: Optional[ArrayLike], theta: PyTree) -> Array:
         """Return ``u`` unchanged, ignoring ``t`` and ``theta``."""
         del t, theta
         return u
 
 
-def observes_full_state(observable: Any) -> bool:
+def observes_full_state(observable: ObservationOperator) -> bool:
     """Whether an observation operator reports the solver state unchanged.
 
     [FullState][] is the plain spelling, but the same identity readout also
@@ -96,7 +97,7 @@ class Component(ObservationOperator):
     field: Union[str, int, slice] = eqx.field(static=True)
     field_index: Optional[dict] = eqx.field(static=True, default=None)
 
-    def predict(self, u: Array, t: Any, theta: Any) -> Array:
+    def predict(self, u: Array, t: Optional[ArrayLike], theta: PyTree) -> Array:
         """Slice the requested component out of the state, ignoring ``t`` and ``theta``."""
         del t, theta
         f = self.field
@@ -119,7 +120,7 @@ class FnObservable(ObservationOperator):
 
     fn: Callable = eqx.field(static=True)
 
-    def predict(self, u: Array, t: Any, theta: Any) -> Array:
+    def predict(self, u: Array, t: Optional[ArrayLike], theta: PyTree) -> Array:
         """Apply ``self.fn`` to the state, ignoring ``t`` and ``theta``."""
         del t, theta
         return self.fn(u)
@@ -187,20 +188,20 @@ class Series(eqx.Module):
     observable: ObservationOperator = eqx.field(default_factory=FullState)
     weight: Optional[Array] = None
     likelihood: Any = None
-    likelihood_context: Any = None
+    likelihood_context: PyTree = None
     frame_mask: Optional[Bool[Array, " n_frames"]] = None
 
     def __init__(
         self,
         name: str,
-        ts: Any,
-        values: Any,
+        ts: ArrayLike | Sequence,
+        values: ArrayLike | Sequence,
         observable: Any = None,
-        weight: Any = None,
+        weight: ArrayLike | Sequence | None = None,
         likelihood: Any = None,
-        likelihood_context: Any = None,
-        frame_mask: Any = None,
-        dtype: Any = None,
+        likelihood_context: PyTree = None,
+        frame_mask: ArrayLike | Sequence | None = None,
+        dtype: DTypeLike | None = None,
     ):
         """Build a frozen [Series][diff_soup.optimization.inference.fitting.series.Series].
 
@@ -271,7 +272,7 @@ class Series(eqx.Module):
         """Number of observation frames."""
         return int(self.ts.shape[0])
 
-    def observe(self, states: Array, ts: Optional[Array] = None, theta: Any = None) -> Array:
+    def observe(self, states: Array, ts: Optional[Array] = None, theta: PyTree = None) -> Array:
         """Map a ``(n_frames, ...)`` stack of states to observable space.
 
         Args:

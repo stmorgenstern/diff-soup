@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.inference.fitting.result import OptResult
 
 
@@ -20,7 +21,7 @@ class StatisticalInferenceProblem(Protocol):
     def diagnostic_problem(self) -> Any:
         """The data-only problem the end-of-fit diagnostics evaluate."""
 
-    def numeric_problem(self, optimizer: Any) -> Any:
+    def numeric_problem(self, optimizer: Any) -> OptimizationProblem:
         """The [OptimizationProblem][diff_soup.optimization.OptimizationProblem] ``optimizer`` solves.
 
         A [LeastSquaresProblem][diff_soup.optimization.LeastSquaresProblem] whose
