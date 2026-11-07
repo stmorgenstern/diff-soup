@@ -80,7 +80,7 @@ def _experiment_problems(problem: Any) -> tuple:
 
 def _window_count(child: Any) -> int:
     """The observed-start windows of one experiment's fitted problem; ``0`` when it has none."""
-    from diff_soup.optimization.inference.fitting.joint import _child_mode
+    from diff_soup.optimization.inference.fitting._joint_structure import _child_mode
 
     return int(child.n_segments) if _child_mode(child) == "observed_ic" else 0
 

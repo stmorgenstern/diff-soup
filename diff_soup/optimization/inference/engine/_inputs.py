@@ -282,7 +282,7 @@ def _lane_spans(child: Any, dtype: Any) -> tuple:
     that frame's time, and holds the one frame of the scored stream at its end.
     """
     from diff_soup.optimization.inference.fitting._forward_seam import observed_windows
-    from diff_soup.optimization.inference.fitting.joint import _resolve_child_y0
+    from diff_soup.optimization.inference.fitting._joint_residual import _resolve_child_y0
 
     if not _window_count(child):
         times = np.asarray(child._union_ts, dtype=dtype).reshape(-1)
