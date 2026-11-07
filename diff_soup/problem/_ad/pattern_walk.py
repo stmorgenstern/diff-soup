@@ -21,23 +21,60 @@ from jax.extend.core import ClosedJaxpr, Jaxpr, Literal
 from diff_soup._warnings import warn_user
 from diff_soup.problem._ad import flows as F
 
-# Primitives whose jaxpr the lowering splices into its caller.
+# Primitives whose jaxpr the lowering splices into its caller, by the names JAX 0.11 binds:
+# ``jax.jit``, ``core.closed_call``, ``jax.checkpoint``, and the primal of a custom rule.
 _INLINED = {
     "jit": "jaxpr",
-    "pjit": "jaxpr",
-    "closed_call": "call_jaxpr",
-    "core_call": "call_jaxpr",
-    "checkpoint": "jaxpr",
-    "remat": "jaxpr",
+    "eval_jaxpr": "call_jaxpr",
+    "remat2": "jaxpr",
     "custom_jvp_call": "call_jaxpr",
     "custom_vjp_call": "call_jaxpr",
 }
-# Parameters holding the jaxprs a rule walks, per primitive.
+
+
+def _bwd_tangent(eqn) -> ClosedJaxpr:
+    """The tangent map of a ``custom_lin``'s ``bwd`` in its cotangents.
+
+    A tangent map reaches a ``custom_vjp`` as ``custom_lin``, which holds no forward
+    map, only the residuals and ``bwd``: its tangent is the transpose of ``bwd`` in the
+    cotangents. The jaxpr takes the residuals, the cotangents of the inexact outputs and
+    their tangents, and returns the tangents of the cotangents ``bwd`` sends to each input
+    that has a tangent, zero where ``bwd`` sends none.
+    """
+    params = eqn.params
+    count = params["num_res"]
+    out_avals = params["out_avals"]
+    inexact = [aval.dtype != jax.dtypes.float0 for aval in out_avals]
+    inputs = [var.aval for var in eqn.invars[count:]]
+
+    def cotangents(res, cts):
+        given = iter(cts)
+        full = [
+            next(given) if keep else np.zeros(aval.shape, aval.dtype)
+            for keep, aval in zip(inexact, out_avals)
+        ]
+        cts_in, _ = params["bwd"].call_wrapped(*res, *full)
+        sent = [ct for ct, zero in zip(cts_in, params["in_zeros"]) if not zero]
+        return [
+            ct if isinstance(ct, jax.Array) else jax.numpy.zeros(aval.shape, aval.dtype)
+            for ct, aval in zip(sent, inputs)
+        ]
+
+    def tangent(res, cts, dcts):
+        return jax.jvp(lambda c: cotangents(res, c), (cts,), (dcts,))[1]
+
+    res = [jax.ShapeDtypeStruct(var.aval.shape, var.aval.dtype) for var in eqn.invars[:count]]
+    cts = [jax.ShapeDtypeStruct(a.shape, a.dtype) for a, keep in zip(out_avals, inexact) if keep]
+    return jax.make_jaxpr(tangent)(res, cts, cts)
+
+
+# The jaxprs a rule walks, per primitive.
 _NESTED = {
-    "cond": lambda params: params["branches"],
-    "scan": lambda params: (params["jaxpr"],),
-    "while": lambda params: (params["cond_jaxpr"], params["body_jaxpr"]),
-    "custom_linear_solve": lambda params: (params["jaxprs"].matvec,),
+    "cond": lambda eqn: eqn.params["branches"],
+    "scan": lambda eqn: (eqn.params["jaxpr"],),
+    "while": lambda eqn: (eqn.params["cond_jaxpr"], eqn.params["body_jaxpr"]),
+    "custom_linear_solve": lambda eqn: (eqn.params["jaxprs"].matvec,),
+    "custom_lin": lambda eqn: (_bwd_tangent(eqn),),
 }
 
 
@@ -125,9 +162,7 @@ class Program:
                 continue
             blocks = ()
             if name in _NESTED:
-                blocks = tuple(
-                    self._lower(*_opened(sub), None) for sub in _NESTED[name](eqn.params)
-                )
+                blocks = tuple(self._lower(*_opened(sub), None) for sub in _NESTED[name](eqn))
             outvars = tuple(self._new(var.aval.shape) for var in eqn.outvars)
             names.update(zip(eqn.outvars, outvars))
             ops.append(Op(eqn.primitive, eqn.params, tuple(operands_here), outvars, blocks, eqn))
@@ -225,6 +260,9 @@ def _known_block_inputs(op: Op, block: Block, is_known) -> dict:
             pairs = zip(block.invars[:body_n], op.invars[cond_n : cond_n + body_n])
     elif name == "custom_linear_solve":
         count = op.params["const_lengths"].matvec
+        pairs = zip(block.invars[:count], op.invars[:count])
+    elif name == "custom_lin":
+        count = op.params["num_res"]
         pairs = zip(block.invars[:count], op.invars[:count])
     else:
         pairs = ()
