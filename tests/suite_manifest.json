@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 471,
-    "collected_tests": 803,
-    "source_lines": 17138
+    "test_functions": 475,
+    "collected_tests": 807,
+    "source_lines": 17235
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 22,
-      "functions": 208,
-      "collected": 405,
-      "lines": 6982
+      "functions": 212,
+      "collected": 409,
+      "lines": 7079
     },
     "performance_contracts": {
       "files": 2,
@@ -72,7 +72,7 @@
     "tests/contracts/test_linear_structured.py": "diff_soup.problem._ir._low_rank",
     "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
-    "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference.hierarchical",
+    "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference",
     "tests/contracts/test_coloring.py": "diff_soup.problem._ad.coloring"
   },
   "support_data": [],
