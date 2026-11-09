@@ -335,7 +335,6 @@ struct Stats {
     int64_t released_context_errors = 0;    // calls refused because their context was released
     int64_t host_reads = 0;                 // handler calls that read their handle on the host
     int64_t zero_fills = 0;                 // solution buffers zeroed before a cuDSS solve
-    int64_t perturbed_pivot_factorizations = 0;  // factorizations with perturbed pivots
     int64_t reanalyses = 0;  // sides analysed again because a stale analysis left them singular
     int64_t static_dispatches = 0;  // handler calls that found their slot from attributes
     int64_t predicate_reads = 0;    // refactor calls that read their predicate on the host
@@ -6056,7 +6055,6 @@ nb::dict StatsDict() {
     d["pinned_blocks_allocated"] = s.pinned_blocks_allocated;
     d["pinned_blocks_reused"] = s.pinned_blocks_reused;
     d["downcast_configurations"] = s.downcast_configurations;
-    d["perturbed_pivot_factorizations"] = s.perturbed_pivot_factorizations;
     d["reanalyses"] = s.reanalyses;
     d["static_dispatches"] = s.static_dispatches;
     d["predicate_reads"] = s.predicate_reads;

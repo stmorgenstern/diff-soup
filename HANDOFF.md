@@ -173,6 +173,27 @@ Docs: the stale warnings "SuperLU_MT on more than one thread ... an upstream def
 false since R17's patch, are now notes: bit-identical to one thread, and more threads are not always
 faster.
 
+## Milestone 4: rows 14 and 15
+
+- Row 14: `perturbed_pivot_factorizations` removed from cuDSS's `Stats` and `StatsDict` (it was never
+  incremented; no Python docstring or doc page named it). SuperLU's `Stats` gains `singular` (factor
+  requests whose `pdgstrf`/`pzgstrf` info is 1 to n), in `stats()` and `SuperLU.native_stats`'s
+  docstring, as KLU counts it.
+- Row 15: `87-real` (Jetson Orin) in the default `DIFF_SOUP_CUDA_ARCHITECTURES` (and the comment);
+  the installation page's source build says that the vendored SuiteSparse is x86-64 and names
+  `-C cmake.define.KLU_VENDOR_DIR=<tree>` for ARM.
+- Changelog: one line under Features (SuperLU's `singular`), two under Other (the removed key; the
+  default architectures and the ARM line).
+- Modules rebuilt from this tree: SuperLU `b6ce5203`, cuDSS cu12 `d22bfda9` (the default list now
+  gives sm_80, sm_87, sm_89, sm_90 code, `cuobjdump --list-elf`); KLU unchanged (`4473e5ae`). All three
+  in `/drive2/research2/diff_soup_wave2/rf-store/fx-native/m4/` with `SHA256SUMS`.
+
+| check | exit | reading |
+|---|---:|---|
+| `$SLOT ... .ports/m4_stats.py` (a 3 x 3 with a zero pivot on SuperLU) | 0 | status 1, `singular` +1 |
+| `SLOT_MEM=8G $SLOT ... pytest -q -p no:cacheprovider --run-integration tests/contracts/test_linear_{host,complex,dense,primitive,ad,cudss}.py tests/integration/test_native_backends.py` (CPU) | 0 | 114 passed, 57 skipped (cuDSS rows), 63 s |
+| `ruff check diff_soup tests`, `ruff format --check diff_soup tests` | 0, 0 | clean; 549 files formatted |
+
 ## Next
 
-Milestone 4 (rows 14, 15), 5 (Jetson), 6 (GPU files, suite rows, ruff).
+Milestone 5 (Jetson), 6 (GPU files, suite rows, ruff).

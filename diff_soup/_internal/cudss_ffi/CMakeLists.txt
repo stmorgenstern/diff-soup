@@ -33,12 +33,12 @@ set(DIFF_SOUP_CUDA_LINES "auto" CACHE STRING
     "CUDA lines to build the cuDSS extension for: auto, 12, 13, or 12;13")
 
 # DIFF_SOUP_CUDA_ARCHITECTURES lists the GPU architectures the extension's CUDA
-# kernels are compiled for: machine code for compute capability 8.0 (A100), 8.9
-# (L40S, RTX 40) and 9.0 (H100), plus PTX of 9.0 that the driver compiles for
-# newer GPUs. DIFF_SOUP_CUDA_KERNEL_BUILD selects how they are compiled: "auto"
+# kernels are compiled for: machine code for compute capability 8.0 (A100), 8.7
+# (Jetson Orin), 8.9 (L40S, RTX 40) and 9.0 (H100), plus PTX of 9.0 that the
+# driver compiles for newer GPUs. DIFF_SOUP_CUDA_KERNEL_BUILD selects how they are compiled: "auto"
 # uses CMake's CUDA language when one line is built and one custom nvcc command
 # per line when two are; "command" always uses the custom commands.
-set(DIFF_SOUP_CUDA_ARCHITECTURES "80-real;89-real;90-real;90-virtual" CACHE STRING
+set(DIFF_SOUP_CUDA_ARCHITECTURES "80-real;87-real;89-real;90-real;90-virtual" CACHE STRING
     "GPU architectures of the cuDSS extension's CUDA kernels (CUDA_ARCHITECTURES syntax)")
 set(DIFF_SOUP_CUDA_KERNEL_BUILD "auto" CACHE STRING
     "How the cuDSS extension's CUDA kernels are compiled: auto or command")
