@@ -12,6 +12,13 @@ active bound fixes its coordinate (`dx_j = 0`) and its multiplier takes the stat
 (`diff_soup.optimization.solvers._kkt_system` builds the system, degenerate active sets
 included).
 
+A solver that steps on Gauss-Newton (`hessian="gauss-newton"`) on a least-squares problem
+takes the Gauss-Newton form: `H = J_r^T J_r` of the residual rows, `d_args grad_x L =
+J_r^T (d_args r)` from one forward derivative of the rows, the constraint curvature dropped.
+It is first order throughout, and it equals the exact form at a zero-residual solution with
+linear rows. `rows_tangent` and `rows_cotangent` map the rows themselves, `r(x*(args), args)`:
+under the Gauss-Newton form their Jacobian is the projected one, `(I - P) J_args`.
+
 The forward form, the default, is one `custom_jvp` linear in the tangents (one `jvp` of the
 KKT residual in `args`, one solve), so JAX transposes it for reverse mode, as in
 `diff_soup.problem.implicit.root_ift`; its primal runs through the entry, so differentiating
@@ -45,34 +52,63 @@ from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.kkt import KKTSolve
 from diff_soup.optimization.solvers._barrier import Bounds
 from diff_soup.optimization.solvers._closures import Closures
-from diff_soup.optimization.solvers._kkt_system import active_set, residual_of, system_at
+from diff_soup.optimization.solvers._kkt_system import (
+    active_set,
+    residual_of,
+    rows_of,
+    system_at,
+)
 from diff_soup.optimization.solvers._protocol import SolveRecord
 from diff_soup.problem.implicit.tangent_gates import poison, zero_where_not
 
-__all__ = ["active_set", "implicit_run", "kkt_cotangent", "kkt_tangent"]
+__all__ = [
+    "active_set",
+    "implicit_run",
+    "kkt_cotangent",
+    "kkt_tangent",
+    "rows_cotangent",
+    "rows_tangent",
+]
 
 
-def kkt_tangent(
+def _tangent_terms(
     closures: Closures,
     bounds: Bounds,
-    kkt: KKTSolve,
     x: Float[Array, "n"],
     record: SolveRecord,
     args: PyTree,
     dargs: PyTree,
-) -> tuple[Float[Array, "n"], SolveRecord, Bool[Array, ""]]:
-    """The tangent of `(x*, record)` along `dargs`, linear in `dargs`, and whether its system solved.
+    jacobian: Float[Array, "m n"] | None,
+) -> tuple:
+    """`(d_f, d_grad, d_eq, d_ineq, system, d_rows, J_r)` along `dargs`, from one forward derivative.
 
-    One forward derivative of one evaluation gives the derivatives of the objective, of the
-    Lagrangian gradient and of the rows in `args`, and its primal gives the Jacobians. The
-    system goes through the solver's [KKTSolve][diff_soup.optimization.solvers.KKTSolve], with
-    the inactive rows' dual diagonal 1, and does not solve when its inertia is not `(n, m, 0)`.
+    The exact form differentiates the objective, the Lagrangian gradient and the rows in `args`;
+    `d_rows` and `J_r` are `None`. The Gauss-Newton form differentiates the residual rows and
+    the constraint rows, and its Lagrangian gradient's derivative is `J_r^T d_rows`, with `J_r`
+    the one given or else computed at `x`.
     """
-    n_eq = record.multipliers_equality.shape[0]
-    _, (d_f, d_grad, d_eq, d_ineq), derivatives = jax.jvp(
-        residual_of(closures, x, record), (args,), (dargs,), has_aux=True
+    if not closures.gauss_newton_rule:
+        _, (d_f, d_grad, d_eq, d_ineq), derivatives = jax.jvp(
+            residual_of(closures, x, record), (args,), (dargs,), has_aux=True
+        )
+        system = system_at(closures, bounds, x, record, args, derivatives)
+        return d_f, d_grad, d_eq, d_ineq, system, None, None
+    (rows, _, _), (d_rows, d_eq, d_ineq), (jac_eq, jac_ineq) = jax.jvp(
+        rows_of(closures, x), (args,), (dargs,), has_aux=True
     )
-    system = system_at(closures, bounds, x, record, args, derivatives)
+    if jacobian is None:
+        jacobian = closures.residual_and_jacobian(x, args)[1]
+    derivatives = (jacobian.T @ rows, jac_eq, jac_ineq)
+    system = system_at(closures, bounds, x, record, args, derivatives, jacobian)
+    return rows @ d_rows, jacobian.T @ d_rows, d_eq, d_ineq, system, d_rows, jacobian
+
+
+def _kkt_tangent(closures, bounds, kkt, x, record, args, dargs, jacobian):
+    """[kkt_tangent][], with the rows' tangent and Jacobian of the Gauss-Newton form beside it."""
+    n_eq = record.multipliers_equality.shape[0]
+    d_f, d_grad, d_eq, d_ineq, system, d_rows, jacobian = _tangent_terms(
+        closures, bounds, x, record, args, dargs, jacobian
+    )
     active, degenerate = system.active, system.active.degenerate
     dx, dlam, solved = kkt.solve(
         system.primal,
@@ -106,26 +142,93 @@ def kkt_tangent(
         jax.tree.map(_zero, record),
         (dlam_e, dlam_i, ds, (dz_lower, dz_upper), d_f + system.gradient @ dx),
     )
-    return dx, tangent, solved
+    return dx, tangent, solved, d_rows, jacobian
 
 
-def kkt_cotangent(
+def kkt_tangent(
     closures: Closures,
     bounds: Bounds,
     kkt: KKTSolve,
     x: Float[Array, "n"],
     record: SolveRecord,
     args: PyTree,
-    cotangents: tuple[Float[Array, "n"], SolveRecord],
-) -> tuple[PyTree, Bool[Array, ""]]:
-    """The cotangent on `args` of cotangents on `(x*, record)`, and whether its system solved.
+    dargs: PyTree,
+    jacobian: Float[Array, "m n"] | None = None,
+) -> tuple[Float[Array, "n"], SolveRecord, Bool[Array, ""]]:
+    """The tangent of `(x*, record)` along `dargs`, linear in `dargs`, and whether its system solved.
 
-    The transpose of [kkt_tangent][]: the cotangents on the point and the multipliers, carried
-    back through the slack and bound-multiplier rows, are the right-hand side of the transposed
-    KKT system, whose solution is the multiplier of the cotangent. The cotangent on `args` is
-    the vector-Jacobian product of one evaluation's objective, Lagrangian gradient and rows in
-    `args` with that multiplier and the cotangents the rows read directly.
+    One forward derivative of one evaluation gives the derivatives of the objective, of the
+    Lagrangian gradient and of the rows in `args`, and its primal gives the Jacobians. The
+    system goes through the solver's [KKTSolve][diff_soup.optimization.solvers.KKTSolve], with
+    the inactive rows' dual diagonal 1, and does not solve when its inertia is not `(n, m, 0)`.
+    Closures with the Gauss-Newton rule take its form, from `jacobian` when it is given.
     """
+    dx, tangent, solved, _, _ = _kkt_tangent(
+        closures, bounds, kkt, x, record, args, dargs, jacobian
+    )
+    return dx, tangent, solved
+
+
+def rows_tangent(
+    closures: Closures,
+    bounds: Bounds,
+    kkt: KKTSolve,
+    x: Float[Array, "n"],
+    record: SolveRecord,
+    args: PyTree,
+    dargs: PyTree,
+    jacobian: Float[Array, "m n"] | None = None,
+) -> tuple[Float[Array, "m"], Bool[Array, ""]]:
+    """The tangent of the residual rows at the solution, `d_rows + J_r dx*`, and whether it solved.
+
+    The rows move with `args` directly and through the solution; under the Gauss-Newton rule
+    this is the projected Jacobian `(I - P) J_args` applied to `dargs`.
+    """
+    dx, _, solved, d_rows, jacobian = _kkt_tangent(
+        closures, bounds, kkt, x, record, args, dargs, jacobian
+    )
+    return d_rows + jacobian @ dx, solved
+
+
+def _cotangent_terms(
+    closures: Closures,
+    bounds: Bounds,
+    x: Float[Array, "n"],
+    record: SolveRecord,
+    args: PyTree,
+    jacobian: Float[Array, "m n"] | None,
+) -> tuple:
+    """`(system, back, J_r)`: the system and the pullback of `(v, d_grad, d_eq, d_ineq, rows)`.
+
+    `back(v_bar, d_grad_bar, d_eq_bar, d_ineq_bar, rows_bar)` is the cotangent on `args`; the
+    transpose of [_tangent_terms][]. `rows_bar` is a cotangent on the residual rows themselves,
+    read only by the Gauss-Newton form, and `J_r` is `None` in the exact form.
+    """
+    if not closures.gauss_newton_rule:
+        _, pullback, derivatives = jax.vjp(residual_of(closures, x, record), args, has_aux=True)
+        system = system_at(closures, bounds, x, record, args, derivatives)
+
+        def back(v_bar, d_grad_bar, d_eq_bar, d_ineq_bar, rows_bar=None):
+            return pullback((v_bar, d_grad_bar, d_eq_bar, d_ineq_bar))[0]
+
+        return system, back, None
+    (rows, _, _), pullback, (jac_eq, jac_ineq) = jax.vjp(rows_of(closures, x), args, has_aux=True)
+    if jacobian is None:
+        jacobian = closures.residual_and_jacobian(x, args)[1]
+    derivatives = (jacobian.T @ rows, jac_eq, jac_ineq)
+    system = system_at(closures, bounds, x, record, args, derivatives, jacobian)
+
+    def back(v_bar, d_grad_bar, d_eq_bar, d_ineq_bar, rows_bar=None):
+        direct = v_bar * rows + jacobian @ d_grad_bar
+        if rows_bar is not None:
+            direct = direct + rows_bar
+        return pullback((direct, d_eq_bar, d_ineq_bar))[0]
+
+    return system, back, jacobian
+
+
+def _kkt_cotangent(closures, bounds, kkt, x, record, args, cotangents, jacobian, rows_bar):
+    """[kkt_cotangent][], with a cotangent on the residual rows besides (Gauss-Newton form)."""
     n_eq = record.multipliers_equality.shape[0]
     x_bar, record_bar = cotangents
     lam_e_bar, lam_i_bar, s_bar, (zl_bar, zu_bar), v_bar = (
@@ -133,8 +236,9 @@ def kkt_cotangent(
         for leaf, like in zip(_differentiable(record_bar), _differentiable(record))
     )
     x_bar = _materialise(x_bar, x)
-    _, pullback, derivatives = jax.vjp(residual_of(closures, x, record), args, has_aux=True)
-    system = system_at(closures, bounds, x, record, args, derivatives)
+    system, back, jacobian = _cotangent_terms(closures, bounds, x, record, args, jacobian)
+    if rows_bar is not None:
+        x_bar = x_bar + jacobian.T @ rows_bar
     active, degenerate = system.active, system.active.degenerate
     jac_eq, jac_ineq = system.jac_eq, system.jac_ineq
 
@@ -159,8 +263,47 @@ def kkt_cotangent(
     d_grad_bar = st_bar - system.keep * p
     d_eq_bar = -q[:n_eq]
     d_ineq_bar = -open_rows - system.rows_i * q[n_eq:]
-    (args_bar,) = pullback((v_bar, d_grad_bar, d_eq_bar, d_ineq_bar))
-    return args_bar, solved
+    return back(v_bar, d_grad_bar, d_eq_bar, d_ineq_bar, rows_bar), solved
+
+
+def kkt_cotangent(
+    closures: Closures,
+    bounds: Bounds,
+    kkt: KKTSolve,
+    x: Float[Array, "n"],
+    record: SolveRecord,
+    args: PyTree,
+    cotangents: tuple[Float[Array, "n"], SolveRecord],
+    jacobian: Float[Array, "m n"] | None = None,
+) -> tuple[PyTree, Bool[Array, ""]]:
+    """The cotangent on `args` of cotangents on `(x*, record)`, and whether its system solved.
+
+    The transpose of [kkt_tangent][]: the cotangents on the point and the multipliers, carried
+    back through the slack and bound-multiplier rows, are the right-hand side of the transposed
+    KKT system, whose solution is the multiplier of the cotangent. The cotangent on `args` is
+    the vector-Jacobian product of one evaluation's objective, Lagrangian gradient and rows in
+    `args` with that multiplier and the cotangents the rows read directly.
+    """
+    return _kkt_cotangent(closures, bounds, kkt, x, record, args, cotangents, jacobian, None)
+
+
+def rows_cotangent(
+    closures: Closures,
+    bounds: Bounds,
+    kkt: KKTSolve,
+    x: Float[Array, "n"],
+    record: SolveRecord,
+    args: PyTree,
+    rows_bar: Float[Array, "m"],
+    jacobian: Float[Array, "m n"] | None = None,
+) -> tuple[PyTree, Bool[Array, ""]]:
+    """The cotangent on `args` of a cotangent on the residual rows at the solution, and whether it solved.
+
+    The transpose of [rows_tangent][]: one transposed KKT solve and one vector-Jacobian product
+    of the rows in `args`, whatever the size of `args`. Gauss-Newton form only.
+    """
+    zeros = jax.tree.map(_zero, record)
+    return _kkt_cotangent(closures, bounds, kkt, x, record, args, (None, zeros), jacobian, rows_bar)
 
 
 def _differentiable(record: SolveRecord) -> tuple:

@@ -43,6 +43,7 @@ from diff_soup.optimization.solvers._protocol import (
     SolverState,
     _int,
     _raw,
+    _raw_gauss_newton,
 )
 
 #: Ipopt's `diverging_iterates_tol`: an iterate entry beyond it ends the run with `DIVERGED`.
@@ -328,8 +329,13 @@ class ConstrainedSolver(CompiledSolver):
         """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
         solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
         return implicit_run(
-            solver._run_primal, _raw, self._kkt, problem, x0, args, warm_start, self.adjoint
+            solver._run_primal, self._rule, self._kkt, problem, x0, args, warm_start, self.adjoint
         )
+
+    @property
+    def _rule(self):
+        """`prepare` of the implicit derivative: the Gauss-Newton form under Gauss-Newton steps."""
+        return _raw_gauss_newton if self.hessian == "gauss-newton" else _raw
 
     def _run_primal(
         self,
