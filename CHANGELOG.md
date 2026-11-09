@@ -31,7 +31,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `ds.optimization.NestedLeastSquares` and `ds.optimization.InnerSteps`: shared values fitted over a batch of inner least-squares fits as one `LeastSquaresProblem`, whose Jacobian is the projected one from the inner fits' Gauss-Newton system, its members run warm to a tolerance tied to the outer step, in `lanes` over a `Layout`. `NewtonTrustRegion` carries the members' state from step to step (the `"carried_args"` structure) and returns it in `result.info["args"]`.
 - `run(max_steps=, tol=)` of the compiled solvers and `ds.optimization.lanes(max_steps=, tol=, warm_start=)` take the budget and the tolerance as runtime values, one per lane or one for all, so a new value no longer compiles the loop again.
 - Added `adjoint=` to `InteriorPoint`, `SQP` and `AugmentedLagrangian`. `ds.nonlinear.ImplicitAdjoint()` differentiates the solution in `args` by one reverse rule, a transposed KKT solve, so `jax.grad` costs one solve however large `args` is and runs through closures that differentiate in reverse mode only. The default, `ds.ForwardAdjoint()`, keeps the forward rule.
-- `InteriorPoint`, `SQP` and `AugmentedLagrangian` run in float32 and return float32 records. Their default tolerances are set for float64, so pass ones float32 can reach, such as `tol=1e-5` (and `qp_tol=1e-5` for `SQP`).
+- `InteriorPoint`, `SQP` and `AugmentedLagrangian` run in float32 and return float32 records. A tolerance left unset follows the iterate's dtype: `max(default, 100 * eps)`, which is the float64 default unchanged and `1.2e-5` in float32.
 
 ### Bugfixes
 
