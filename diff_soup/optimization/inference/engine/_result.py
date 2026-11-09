@@ -133,8 +133,9 @@ class Results:
             the ``blocks`` mode, and the exact Hessian of the cost in the
             ``hessian`` mode; ``None`` otherwise.
         gradient: ``J^T r`` in narrow coordinates, shape ``(P, L, w)``, in
-            the ``blocks``, ``gradient`` and ``hessian`` modes; ``None``
-            otherwise.
+            the ``blocks``, ``gradient``, ``hessian`` and ``frozen`` modes (in
+            the ``frozen`` mode ``J`` is the one each unit's last ``blocks``
+            evaluation kept); ``None`` otherwise.
         observables: In the ``observe`` mode, ``observables[p][l][s]`` holds
             the predictions of stream ``s`` of lane ``l`` for member ``p`` at
             the lane's own frames; ``None`` otherwise.
@@ -166,7 +167,7 @@ class Results:
             member of ``members`` (the leading axis), the sums of the lanes'
             blocks (``blocks`` and ``hessian`` modes, a
             [LevelBlocks][diff_soup.optimization.inference.engine.LevelBlocks]) or of
-            their gradients (``gradient`` mode, a
+            their gradients (``gradient`` and ``frozen`` modes, a
             [LevelGradients][diff_soup.optimization.inference.engine.LevelGradients]) over
             the level tables of the study's fits, every lane weighing one; the
             lanes' own matrices stay in the processes that hold them, so

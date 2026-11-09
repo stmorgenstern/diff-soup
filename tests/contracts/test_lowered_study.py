@@ -16,6 +16,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.engine._kernel import _solve
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._lane_route import _LaneRoute
 from diff_soup.optimization.inference.hierarchical._trust_step import (
@@ -101,9 +102,111 @@ def test_joint_and_nested_fits_reach_the_same_optimum(lowered, joint_fit):
     _, study, _ = lowered
     nested = small_fit(study, inf.TrustRegion(max_steps=30, nested_at="cell"))
     assert joint_fit.converged and nested.converged
-    # measured 2.1e-7 absolute difference, CPU VM 2026-10-22,
+    # measured 3.0e-8 absolute difference, CPU workstation 2026-11-09,
     # pytest tests/contracts/test_lowered_study.py
     np.testing.assert_allclose(nested.params, joint_fit.params, atol=1e-5)
+
+
+def test_the_nested_mode_without_polish_makes_the_joint_attempts():
+    """With no polish iterations the nested mode's attempts are the joint mode's: at every attempt
+    the same acceptance, cost, point and radius, and the fits end with the same stop and status."""
+    study = ds.lower(_two_owners("zero_polish_decay"), objective=inf.MAP())
+    fits = []
+    for solver in (
+        inf.TrustRegion(max_steps=8),
+        inf.TrustRegion(max_steps=8, nested_at="cell", inner=inf.TrustRegion(max_steps=0)),
+    ):
+        records = _Records()
+        fits.append((small_fit(study, solver, callbacks=(records,)), records.steps))
+    (joint, joint_steps), (nested, nested_steps) = fits
+    assert (nested.status, nested.trust_region.stop) == (joint.status, joint.trust_region.stop)
+    assert [info.accepted for info, _ in nested_steps] == [info.accepted for info, _ in joint_steps]
+    rows = [
+        [(info.cost, info.radius, *info.params) for info, _ in steps]
+        for steps in (joint_steps, nested_steps)
+    ]
+    # measured 0.0 relative difference over every attempt and field, CPU workstation 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k without_polish
+    np.testing.assert_allclose(rows[1], rows[0], rtol=1e-10, atol=0.0)
+
+
+def test_inequality_rows_end_the_joint_fit_at_the_interior_point_solution():
+    """InequalityRows on a member's own value, active with a bound: the joint trust region ends at
+    the interior point's solution of the same objective, where its own gradient meets the KKT
+    conditions."""
+    import jax.numpy as jnp
+
+    from diff_soup.domains import cartesian_grid_1d
+    from tests.support.inference import NOISE, TIMES, decay_values, solver
+
+    # The lanes observe the exact mean, read from the parameters, so the fit's cost is the
+    # closed form below. The rate's lower bound and cell-b's row hold at the solution.
+    spec = ds.problem("inequality_rows_decay")
+    spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+    rate = spec.param("rate", value=0.9, learnable=True, bounds=(0.65, 1.2))
+    source = spec.param("source", value=0.0, learnable=True, bounds=(-0.25, 0.25))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    spec.equation(writes="u", reads=("u",))(lambda q: -q.p.rate * q.u + q.p.source)
+    mean = lambda r, s, t: s / r + (1.0 - s / r) * jnp.exp(-r * t)  # noqa: E731
+    spec.observe.scalar(name="exact", fn=lambda q: mean(q.p.rate, q.p.source, q.t))
+    model = spec.build()
+    data = [decay_values(TIMES, 0.6, s) + (i + 1) * NOISE for i, (_, s) in enumerate(CELLS[:2])]
+    experiments = tuple(
+        inf.Experiment(
+            model=model,
+            solver=solver(),
+            t_span=(0.0, 1.0),
+            initial_state=spec.assemble_state({}),
+            measurements=(
+                inf.Measurement(
+                    "exact",
+                    times=jnp.asarray(TIMES),
+                    values=data[i],
+                    observe="exact",
+                    likelihood=inf.Gaussian(scale=0.02),
+                ),
+            ),
+            id=owner,
+        )
+        for i, (owner, _) in enumerate(CELLS[:2])
+    )
+    study = inf.Study(
+        experiments,
+        parameters=ds.ParameterSet(shared=(rate,), varying={"cell": (source,)}),
+        clusters={"cell": ("cell-a", "cell-b")},
+        independent=True,
+    )
+    lowered = ds.lower(study).with_start(np.array([0.9, 0.0, -0.1]))
+    limits = {"cell-a": jnp.asarray(1.0), "cell-b": jnp.asarray(-0.02)}
+    rows = inf.InequalityRows(lambda own, w, d: own[0] + 0.01 * w[0] - d, level="cell", data=limits)
+    optimizer = inf.TrustRegion(max_steps=40, cost_tol=1e-14, step_tol=1e-14, inequalities=(rows,))
+    x = np.asarray(small_fit(lowered, optimizer).params)
+
+    def residual(z, args=None):
+        return jnp.concatenate(
+            [(data[i] - mean(z[0], z[1 + i], jnp.asarray(TIMES))) / 0.02 for i in range(2)]
+        )
+
+    c = lambda z, args=None: z[1:] + 0.01 * z[0] - jnp.asarray([1.0, -0.02])  # noqa: E731
+    reference = ds.optimization.LeastSquaresProblem.from_residual(
+        jnp.asarray([0.9, 0.0, -0.1]),
+        residual,
+        bounds=(jnp.asarray([0.65, -0.25, -0.25]), jnp.asarray([1.2, 0.25, 0.25])),
+    ).with_constraints(ds.optimization.Constraints(inequality=c, n_inequality=2))
+    # measured: the reference meets tol=1e-12 with status 0, workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k inequality
+    expected, _ = ds.optimization.InteriorPoint(tol=1e-12).run(reference, reference.x0, None)
+    # measured 4.2e-13 relative, workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k inequality
+    np.testing.assert_allclose(x, np.asarray(expected), rtol=1e-8)
+    # The gradient against the active bound's and row's normals: g = nu e_rate - mu C_b.
+    lowered.prepare(modes=("gradient",))
+    g = np.asarray(lowered.value_and_gradient(x).gradients).reshape(-1)
+    normals = np.array([[1.0, 0.0, 0.0], [-0.01, 0.0, -1.0]]).T
+    weights, *_ = np.linalg.lstsq(normals, g, rcond=None)
+    # measured 4.1e-15 relative KKT residual, weights 138.5 and 179.1, as above
+    assert np.linalg.norm(g - normals @ weights) <= 1e-8 * np.linalg.norm(g)
+    assert np.all(weights > 0.0)
 
 
 class _StopAtSecondAttempt(inf.Callback):
@@ -338,19 +441,18 @@ class _Records(inf.Callback):
         self.steps.append((info, dict(info.state)))
 
 
-def test_nested_attempt_records_split_the_cost_by_owner():
-    """A nested fit's record of every attempt holds each owner's cost at the current point and at
-    the trial, and the shared remainder; at every attempt they sum to the fit's cost there."""
+def _two_owners(name):
+    """Two owners sharing ``rate``, each with its own ``source``, under priors on both."""
     from tests.support.inference import NOISE, decay_experiment
 
     decay = decay_recipe(
-        "owner_cost_decay",
+        name,
         source=True,
         rate_prior=inf.NormalPrior(mean=0.5, scale=0.5),
         source_prior=inf.NormalPrior(mean=0.0, scale=0.2),
     )
     cells = CELLS[:2]
-    study = inf.Study(
+    return inf.Study(
         tuple(
             decay_experiment(decay, owner, source=source, noise=(index + 1) * NOISE)
             for index, (owner, source) in enumerate(cells)
@@ -359,9 +461,14 @@ def test_nested_attempt_records_split_the_cost_by_owner():
         clusters={"cell": tuple(owner for owner, _ in cells)},
         independent=True,
     )
+
+
+def test_nested_attempt_records_split_the_cost_by_owner():
+    """A nested fit's record of every attempt holds each owner's cost at the current point and at
+    the trial, and the shared remainder; at every attempt they sum to the fit's cost there."""
     records = _Records()
     fit = small_fit(
-        ds.lower(study, objective=inf.MAP()),
+        ds.lower(_two_owners("owner_cost_decay"), objective=inf.MAP()),
         inf.TrustRegion(max_steps=8, nested_at="cell"),
         callbacks=(records,),
     )
@@ -381,6 +488,104 @@ def test_nested_attempt_records_split_the_cost_by_owner():
             # measured 1.8e-16 relative difference, as above
             np.testing.assert_allclose(trial_total, float(info.cost), rtol=1e-10)
         current = float(info.cost)
+
+
+@pytest.fixture(scope="module")
+def frozen():
+    """The two-owner study prepared with the frozen mode, a route, and blocks at the start."""
+    study = ds.lower(_two_owners("frozen_decay"), objective=inf.MAP())
+    study.prepare(modes=("value", "frozen"))
+    route = _LaneRoute(inf.TrustRegion(), study)
+    point = np.asarray(study.x0, dtype=np.float64)
+    return route, point, route.evaluate("blocks", point)
+
+
+def _kept_times_rows(route, lane, kept_at, point):
+    """``(J^T r, |r|^2 / 2)`` of one lane, unbatched: ``J`` its rows' Jacobian at ``kept_at`` in
+    narrow coordinates, by forward mode, and ``r`` its rows at ``point``."""
+    lanes = route.problem._lanes
+    bucket, position = lanes.where[lane]
+    entry = lanes.buckets[bucket]
+    leaves = jax.device_put([leaf[position] for leaf in entry.leaves])
+    inputs = jax.tree_util.tree_unflatten(entry.tree, leaves)
+    columns = entry.gather[position]
+
+    def rows(narrow):
+        return _solve(entry.program, narrow, inputs)[0]
+
+    jacobian = jax.jacfwd(rows)(jax.device_put(np.asarray(kept_at)[columns]))
+    new = rows(jax.device_put(np.asarray(point)[columns]))
+    return np.asarray(jacobian.T @ new), float(0.5 * new @ new)
+
+
+def test_the_frozen_mode_at_the_blocks_point_gives_the_blocks_gradient_and_system(frozen):
+    """At the point of the last blocks request a frozen request of every lane, or of one, gives
+    the blocks gradient and cost, and the frozen system there is the blocks system."""
+    route, point, blocks = frozen
+    every = route.evaluate("frozen", point)
+    one = route.evaluate("frozen", point, lanes=route.ids[1:])
+    # measured 0.0 on every entry, workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k frozen
+    np.testing.assert_allclose(every.gradient, blocks.gradient, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(every.cost, blocks.cost, rtol=1e-12, atol=0.0)
+    # measured 0.0, as above
+    np.testing.assert_allclose(one.gradient[0, 0], blocks.gradient[0, 1], rtol=1e-12, atol=0.0)
+    system = route.system(blocks, point)
+    again = route.frozen_system(system, every, point)
+    for ours, expected in zip(route.vectors(again), route.vectors(system)):
+        # measured 0.0, as above
+        np.testing.assert_allclose(ours, expected, rtol=1e-12, atol=0.0)
+    # measured 0.0 relative, as above
+    np.testing.assert_allclose(float(again.cost), float(system.cost), rtol=1e-12)
+
+
+def test_the_frozen_mode_at_a_moved_point_steps_on_the_kept_jacobian(frozen):
+    """At a moved point a frozen request of every lane, and of each lane alone, gives each lane's
+    cost there and J^T r with J its Jacobian at the blocks point and r its rows there."""
+    route, point, _ = frozen
+    moved = point + np.asarray([0.03, -0.02, 0.01])
+    every = route.evaluate("frozen", moved)
+    for column, lane in enumerate(route.ids):
+        gradient, cost = _kept_times_rows(route, lane, point, moved)
+        alone = route.evaluate("frozen", moved, lanes=(lane,))
+        # measured at most 1.5e-14 relative on the gradient and 2.9e-14 on the cost (batched
+        # lanes against one unbatched solve), workstation CPU 2026-11-09, -k frozen
+        np.testing.assert_allclose(every.gradient[0, column], gradient, rtol=1e-12, atol=0.0)
+        np.testing.assert_allclose(alone.gradient[0, 0], gradient, rtol=1e-12, atol=0.0)
+        # measured as above
+        np.testing.assert_allclose(every.cost[0, column], cost, rtol=1e-12)
+
+
+def test_a_frozen_system_of_some_lanes_replaces_the_gradient_of_their_members_only(frozen):
+    """A frozen system from a request of one owner's lanes takes that owner's gradient from a
+    request of every lane and keeps every other gradient of the blocks system; its cost is NaN."""
+    route, point, blocks = frozen
+    moved = point + np.asarray([0.0, -0.02, 0.01])
+    system = route.system(blocks, point)
+    every = route.frozen_system(system, route.evaluate("frozen", moved), moved)
+    some = route.frozen_system(system, route.evaluate("frozen", moved, lanes=route.ids[1:]), moved)
+    # measured 0.0, workstation CPU 2026-11-09, -k frozen
+    np.testing.assert_allclose(some.gradient[1][1], every.gradient[1][1], rtol=1e-12, atol=0.0)
+    np.testing.assert_array_equal(some.gradient[1][0], system.gradient[1][0])
+    np.testing.assert_array_equal(some.root_gradient, system.root_gradient)
+    assert np.isnan(float(some.cost)) and np.isfinite(float(every.cost))
+
+
+def test_blocks_keep_no_jacobian_unless_the_frozen_mode_is_prepared(frozen):
+    """Without the frozen mode prepared a blocks request keeps nothing and a frozen request is
+    refused; with it, a lane that has no blocks result yet is refused by name."""
+    # A study of its own: a nested fit with a polish prepares the frozen mode on its study.
+    study = ds.lower(_two_owners("unkept_decay"), objective=inf.MAP())
+    study.prepare()
+    route = _LaneRoute(inf.TrustRegion(), study)
+    point = np.asarray(study.x0, dtype=np.float64)
+    route.evaluate("blocks", point)
+    assert route.problem._lanes.kept == {}
+    with pytest.raises(ValueError, match="prepare"):
+        route.evaluate("frozen", point)
+    fresh = _LaneRoute(inf.TrustRegion(), frozen[0].problem)
+    with pytest.raises(ValueError, match="no kept Jacobian"):
+        fresh.evaluate("frozen", frozen[1])
 
 
 def test_a_member_whose_step_cannot_be_bracketed_is_held_when_asked(attempt):
@@ -411,10 +616,11 @@ def test_a_member_whose_step_cannot_be_bracketed_is_held_when_asked(attempt):
     np.testing.assert_array_equal(multipliers[[0, 2]], clean_multipliers[[0, 2]])
 
 
-def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_and_fails(tmp_path):
-    """A member whose lanes solve at a finite cost but give non-finite Gauss-Newton blocks has its
-    lanes recorded as failed: it retreats, an outer trial it cannot solve names it in
-    failed_owners, and the fit ends at a finite cost instead of raising."""
+def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_in_the_polish():
+    """A member whose lanes solve at a finite cost but give non-finite Gauss-Newton blocks at its
+    polished point has its lanes recorded as failed: it retreats along its polish step and goes
+    back to where its lanes solved, at a finite cost; at an accepted step such blocks end the fit
+    with an error naming the member."""
     from tests.support.inference import (
         NOISE,
         TIMES,
@@ -460,18 +666,15 @@ def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_and_fa
         clusters={"cell": tuple(owner for owner, _ in CELLS)},
         independent=True,
     )
-    records = _Records()
+    lowered = ds.lower(study, objective=inf.MAP())
     fit = small_fit(
-        ds.lower(study, objective=inf.MAP()),
-        inf.TrustRegion(max_steps=6, nested_at="cell"),
-        callbacks=(records,),
+        lowered, inf.TrustRegion(max_steps=0, nested_at="cell", inner_start_iterations=2)
     )
-    assert np.isfinite(fit.cost)
-    named = [info for info, _ in records.steps if info.failed_owners]
-    assert named and all("cell-b" in str(info.failed_owners) for info in named)
-    assert any(int(np.asarray(state["record.inner_retreats"])[1]) > 0 for _, state in records.steps)
-    kinds = {str(k) for _, state in records.steps for k in np.ravel(state["record.failed_kinds"])}
-    assert "nonfinite_blocks_at_finite_cost" in kinds
+    assert np.isfinite(fit.cost) and int(fit.work["inner_retreats"][1]) > 0
+    assert {str(kind) for kind in fit.work["failure_kind"]} == {"nonfinite_blocks_at_finite_cost"}
+    assert all(fit.work["failure_inner"])
+    with pytest.raises(ValueError, match="cell-b"):
+        small_fit(lowered, inf.TrustRegion(max_steps=6, nested_at="cell"))
 
 
 @pytest.mark.parametrize(

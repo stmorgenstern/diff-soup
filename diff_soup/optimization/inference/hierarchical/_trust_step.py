@@ -433,14 +433,12 @@ class _FloorEnd(NamedTuple):
     """The gradient floor at a fit's end point: what its verdict reads, and its ``info`` entries.
 
     ``level`` is the floor (``None`` before the first floor sample or without
-    a floor), ``sigma`` its cost equivalent along the model's full step,
-    relative to the cost scale, and ``members`` every member's floor in
-    the nested mode (``None`` otherwise, or while ``level`` is ``None``).
+    a floor) and ``sigma`` its cost equivalent along the model's full step,
+    relative to the cost scale.
     """
 
     level: float | None
     sigma: float
-    members: np.ndarray | None
     entries: dict
 
 

@@ -67,8 +67,8 @@ class TrustRegion(OptSolver):
 
     Args:
         hessian: `"gauss-newton"` steps on the Gauss-Newton curvature, `"true"` on the exact Hessian.
-        nested_at: A level at which the fit splits into an outer step and a refit of each member's own parameters.
-        inner: A `TrustRegion` without `nested_at` whose budget and tolerances the member refits use, or `None` for two iterations per member.
+        nested_at: A level whose members polish their own parameters, the others held, after every accepted step.
+        inner: A `TrustRegion` without `nested_at` whose budget and tolerances the polish uses, or `None` for two iterations per member; with `max_steps=0` the fit makes the steps of `nested_at=None`.
         radius_init: The initial trust radius, in scaled parameter units.
         radius_max: The largest trust radius.
         eta: The ratio of achieved to predicted decrease a step must reach to be accepted.
@@ -83,14 +83,15 @@ class TrustRegion(OptSolver):
         gradient_floor: The relative accuracy of the derivatives, below which the fit ends `DERIVATIVE_ACCURACY`, `"auto"` to derive it from the solvers' `rtol`, or `None`.
         max_steps: The step budget, counted across resumes.
         max_evaluations: The budget of objective evaluations, which ends the fit as `MAX_STEPS`.
-        inner_start_iterations: The number of member refit iterations at the start point, before the first outer step.
-        inner_fraction: A member refit ends when its predicted decrease falls to this fraction of the outer step's.
-        inner_retreats: How many times a member whose solve fails halves its step before the attempt fails.
+        inner_start_iterations: The number of polish iterations at the start point, before the first step.
+        inner_fraction: A member's polish ends when its predicted decrease falls to this fraction of the accepted step's.
+        inner_retreats: How many times a member whose solve fails at its polished point halves its polish step before its polish ends where its lanes solved.
         target_accepted_steps: Ends the fit as `ACCEPTED_STEPS` after this many accepted steps.
         x_scale: The parameter scaling, `HessianScale()` when `None`, `JacScale()` or a `ConstantScale`, with `JacScale` refused under `hessian="true"`.
         weights: One weight per member of the first level, or a `(level, weights)` pair, multiplying each member's share of the objective.
         weight_priors: If `True`, the weights also multiply each member's prior and regularization terms.
         constraints: Linear equality constraints on the joint parameter vector, as `LinearConstraint` objects.
+        inequalities: Rows kept at or below zero, as [InequalityRows][diff_soup.optimization.inference.InequalityRows].
         gauges: [Gauge][diff_soup.optimization.inference.Gauge] constraints that pin directions the data leave free.
         fixed_indices: The indices of the joint parameter vector held at their starting values.
         callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
@@ -123,6 +124,7 @@ class TrustRegion(OptSolver):
     weights: Any
     weight_priors: bool = eqx.field(static=True)
     constraints: tuple
+    inequalities: tuple
     gauges: tuple
     fixed_indices: tuple = eqx.field(static=True)
     callbacks: tuple = eqx.field(static=True)
@@ -155,6 +157,7 @@ class TrustRegion(OptSolver):
         weights: Any = None,
         weight_priors: Any = True,
         constraints: Any = (),
+        inequalities: Any = (),
         gauges: Any = (),
         fixed_indices: Any = (),
         callbacks: Any = (),
@@ -317,6 +320,7 @@ class TrustRegion(OptSolver):
         self.weights = weights
         self.weight_priors = bool(weight_priors)
         self.constraints = tuple(constraints)
+        self.inequalities = tuple(inequalities)
         self.gauges = tuple(gauges)
         self.fixed_indices = tuple(fixed_indices)
         self.callbacks = tuple(callbacks)

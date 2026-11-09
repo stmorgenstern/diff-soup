@@ -264,15 +264,18 @@ def _build_full_residual_fn(
     constraint_field_slices = tuple(constraint_field_slices)
 
     # Family residual blocks built once (host-side, in EquationSet.families order).
+    # The build-time declared namespaces let the blocks' build-time member
+    # evaluations read ``q.p``; each residual call passes its own.
+    from .bcs import _boundary_context
+
+    build_context = _boundary_context(tuple(eq for c in comps for eq in c.equations))
     family_blocks = []
     for fam in eqset.families:
         fam_base = layout.offset_of((fam.name, fam.member_variables[0].name))
-        family_blocks.append(
-            (
-                fam_base,
-                _build_family_residual(fam, fam_base, total_size=total, time_ref=callback_time_ref),
-            )
+        block = _build_family_residual(
+            fam, fam_base, total_size=total, time_ref=callback_time_ref, context=build_context
         )
+        family_blocks.append((fam_base, block))
     fam_index_by_name = {fam.name: i for i, fam in enumerate(eqset.families)}
 
     # Resolve family couplings ONCE (host-side, by identity).

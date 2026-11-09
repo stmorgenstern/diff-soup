@@ -379,13 +379,6 @@ class NewtonTrustRegion(OptSolver):
                 "Jacobian, and a lowered study's lanes evaluate only J.T @ J and J.T @ r; use "
                 "linear_solver='cholesky'."
             )
-        # A problem that carries its args (a nested fit's member state) evaluates a trial with
-        # the length of its step and hands back the args an accepted trial leaves.
-        carry = None
-        if gauss_newton_lanes and "carried_args" in problem.structure:
-            carry = problem.closure("carried_gauss_newton")
-        carried_args = problem.args
-        trial_args = carried_args
         data_loss = problem.value
         data_gradient = None
         data_hessian = None
@@ -481,13 +474,8 @@ class NewtonTrustRegion(OptSolver):
             )
             return loss, gradient, hessian, jacobian, residual, failed
 
-        def lanes_gauss_newton(point, radius):
-            nonlocal trial_args
-            if carry is None:
-                loss, gradient, hessian, failed = gauss_newton(point)
-            else:
-                radius = jnp.asarray(radius, dtype=point.dtype)
-                (loss, gradient, hessian, failed), trial_args = carry(point, radius, carried_args)
+        def lanes_gauss_newton(point):
+            loss, gradient, hessian, failed = gauss_newton(point)
             reg_residual = reg.residual(point)
             if reg_residual.shape[0]:
                 reg_jacobian = jax.jacfwd(reg.residual)(point)
@@ -538,8 +526,7 @@ class NewtonTrustRegion(OptSolver):
         # The Gauss-Newton path holds the residual and Jacobian of its current point.
         current_residual = None
         if gauss_newton_lanes:
-            f, g, B, residual_failed = lanes_gauss_newton(x, self.radius_init)
-            carried_args = trial_args
+            f, g, B, residual_failed = lanes_gauss_newton(x)
             counts["jacobian"] += 1
             current_jacobian = None
         elif self.hessian == "gauss-newton":
@@ -687,7 +674,7 @@ class NewtonTrustRegion(OptSolver):
             else:
                 try:
                     if gauss_newton_lanes:
-                        trial_linearized = lanes_gauss_newton(trial, scaled_step_norm)
+                        trial_linearized = lanes_gauss_newton(trial)
                         trial_cost, *_unused, failed = trial_linearized
                     elif self.hessian == "gauss-newton":
                         trial_linearized = linearize_gauss_newton(trial)
@@ -730,7 +717,6 @@ class NewtonTrustRegion(OptSolver):
                     failure_growth_lock = max(0, failure_growth_lock - 1)
                 if gauss_newton_lanes:
                     f, g, B, _failed = trial_linearized
-                    carried_args = trial_args
                     counts["jacobian"] += 1
                 elif self.hessian == "gauss-newton":
                     f, data_residual, reg_residual, trial_jacobian, _failed = trial_linearized
@@ -901,7 +887,6 @@ class NewtonTrustRegion(OptSolver):
                 "linear_solver_fallbacks": counts["factorization_fallback"],
                 "linear_factorizations": counts["factorizations"],
                 **({} if stall_reason is None else {"stall_reason": stall_reason}),
-                **({} if carry is None else {"args": carried_args}),
                 **final_arrays,
             },
             trust_region=TrustRegionReport(radius_history=radius_history),

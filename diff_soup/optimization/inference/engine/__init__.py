@@ -34,6 +34,7 @@ the lanes among its processes, each evaluating its own on its one device.
 | [_balance][diff_soup.optimization.inference.engine._balance] | units dealt to the devices of a call, and experiment rows to the lanes of a mesh, by their step counts |
 | [_result][diff_soup.optimization.inference.engine._result] | the results of a request, in canonical order |
 | [_batched][diff_soup.optimization.inference.engine._batched] | compiled programs per bucket and mode, and the evaluation of a request |
+| [_kept][diff_soup.optimization.inference.engine._kept] | the Jacobians ``blocks`` evaluations keep on the device for ``frozen`` requests |
 | [_prepare][diff_soup.optimization.inference.engine._prepare] | compiling the programs of a study, and the report of what was compiled |
 | [_transport][diff_soup.optimization.inference.engine._transport] | the processes of a run and the messages between them, over MPI |
 | [_placement][diff_soup.optimization.inference.engine._placement] | which process evaluates which lanes: the process placement |

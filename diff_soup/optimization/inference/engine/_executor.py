@@ -23,8 +23,10 @@ per member, and replies with those sums and its lanes' costs, rows, statuses,
 work and seconds. Process 0 adds the partial tables in rank order and returns
 [Results][diff_soup.optimization.inference.engine.Results] whose ``levels`` carry the sums
 and whose ``normal`` and ``gradient`` are ``None``: the lanes' own matrices
-never leave the process that computed them. A request of many members is sent
-in groups of members whose sums fit the wire budget.
+never leave the process that computed them, nor do the Jacobians a ``blocks``
+evaluation keeps there for the ``frozen`` requests of the same fit. A request
+of many members is sent in groups of members whose sums fit the wire budget;
+each process keeps its members' Jacobians by their numbers in the request.
 
 What a series of evaluations learns (the step memory that orders a call's
 units, the inputs kept on the device) belongs to the lanes it went through on
@@ -64,6 +66,7 @@ from diff_soup._errors import BackendError
 from diff_soup.optimization.inference.engine import _batched
 from diff_soup.optimization.inference.engine import _prepare as preparing
 from diff_soup.optimization.inference.engine import _transport as transports
+from diff_soup.optimization.inference.engine._kernel import KEEPING_BLOCKS
 from diff_soup.optimization.inference.engine._ledger import attributed_seconds
 from diff_soup.optimization.inference.engine._levels import (
     LevelBlocks,
@@ -82,7 +85,7 @@ from diff_soup.optimization.inference.engine._transport import Transport
 WIRE_BUDGET: int = 1 << 30
 """The bytes of partial tables process 0 receives for one group of members, at most."""
 
-_REDUCED = ("blocks", "hessian", "gradient")
+_REDUCED = ("blocks", "hessian", "gradient", "frozen")
 _WORK = ("accepts", "rejects", "trial_steps", "newton_iters", "jac_refreshes", "factorizations",
          "first_step")  # fmt: skip
 
@@ -188,7 +191,7 @@ def _numbers_per_member(tables: LevelTables, mode: str) -> int:
     widths, counts = tables.widths, tables.counts
     size = 2 * sum(counts) + int(counts[0]) * int(widths[0])
     size += sum(int(count) * int(width) for count, width in zip(counts, widths[1:]))
-    if mode != "gradient":
+    if mode not in ("gradient", "frozen"):
         size += int(counts[0]) * int(widths[0]) ** 2
         for level in range(1, len(widths)):
             size += (
@@ -347,7 +350,11 @@ class Cluster:
         )
         kinds, factors = header["retry"]
         results = _batched.evaluate(
-            shard.lanes, request, retry_kinds=kinds, retry_first_step_factors=factors
+            shard.lanes,
+            request,
+            retry_kinds=kinds,
+            retry_first_step_factors=factors,
+            member_keys=header.get("member_keys"),
         )
         origin = shard.origin
         reply = {
@@ -415,6 +422,7 @@ class Cluster:
                             modes=(mode,),
                             compile_program=compile_with_share,
                             buckets=(local,),
+                            keeping="frozen" in header["modes"],
                         )
                     except preparing.ProgramOverBudget as refusal:
                         refusals.append(
@@ -431,6 +439,9 @@ class Cluster:
                         )
                         continue
                     for item in prepared:
+                        if item.mode != mode:
+                            # The blocks program the frozen mode brings, recorded under blocks.
+                            continue
                         record = item.program.record
                         if item.reused:
                             record = dataclasses.replace(
@@ -586,8 +597,8 @@ class Coordinator(Cluster):
         Returns:
             The [Results][diff_soup.optimization.inference.engine.Results]: ``levels`` holds
             every member's sums over the level tables in the ``blocks``,
-            ``hessian`` and ``gradient`` modes; ``normal``, ``gradient`` and
-            ``observables`` are ``None``.
+            ``hessian``, ``gradient`` and ``frozen`` modes; ``normal``,
+            ``gradient`` and ``observables`` are ``None``.
 
         Raises:
             ValueError: As a lowered study's ``evaluate`` in one process, and
@@ -661,6 +672,7 @@ class Coordinator(Cluster):
                 None if rungs is None else rungs[rows],
                 None if bases is None else bases[rows],
                 None if present is None else present[rows],
+                members[rows],
             )
             parts.append((int(rows.shape[0]), replies))
         return _results(mode, chosen, members, bucket_of, parts, present, tables)
@@ -678,8 +690,13 @@ class Coordinator(Cluster):
         rungs: np.ndarray | None,
         bases: np.ndarray | None,
         present: np.ndarray | None,
+        keys: np.ndarray,
     ) -> list:
-        """Every process's reply for one group of members, in rank order."""
+        """Every process's reply for one group of members, in rank order.
+
+        ``keys`` are the members' numbers in the request, by which every
+        process keeps their Jacobians for the ``frozen`` mode.
+        """
         points = np.ascontiguousarray(points)
         header = {
             "message": "EVALUATE",
@@ -691,6 +708,7 @@ class Coordinator(Cluster):
             "rungs": rungs,
             "first_steps": bases,
             "units": present,
+            "member_keys": np.asarray(keys, dtype=np.int64),
             "retry": (tuple(retry[0]), tuple(float(f) for f in retry[1])),
             "points_shape": points.shape,
             "points_dtype": points.dtype.str,
@@ -776,8 +794,12 @@ class Coordinator(Cluster):
         position = {mode: index for index, mode in enumerate(modes)}
         records.sort(key=lambda record: (record.bucket, position[record.mode], record.rank))
         for bucket in lanes.plan.buckets:
+            keep = "frozen" in modes or (int(bucket.index), "frozen") in lanes.programs
             for mode in modes:
-                key = _batched.ProgramKey(bucket.full_identity, mode, int(bucket.chunk[mode].width))
+                program_mode = KEEPING_BLOCKS if keep and mode == "blocks" else mode
+                key = _batched.ProgramKey(
+                    bucket.full_identity, program_mode, int(bucket.chunk[mode].width)
+                )
                 lanes.programs[(int(bucket.index), mode)] = Remote(key)
         stages = dict(setup)
         for record in records:

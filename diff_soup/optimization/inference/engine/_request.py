@@ -106,7 +106,8 @@ class Request:
 
     Attributes:
         mode: One of [MODES][diff_soup.optimization.inference.engine._kernel.MODES]:
-            ``value``, ``blocks``, ``gradient``, ``observe`` or ``hessian``.
+            ``value``, ``blocks``, ``gradient``, ``observe``, ``hessian`` or
+            ``frozen``.
         points: The joint parameter vector, shape ``(n,)``, or one per
             population member, shape ``(P, n)``. Stored as a read-only numpy
             array; a single vector is stored as one member, ``(1, n)``.

@@ -49,13 +49,16 @@ from diff_soup.optimization.inference.engine._batched import (
     ProgramKey,
     _first_call,
     _lane_leaves,
+    placement,
 )
 from diff_soup.optimization.inference.engine._batched import prepare as _prepare_programs
 from diff_soup.optimization.inference.engine._kernel import (
+    KEEPING_BLOCKS,
     LaneInputs,
     LaneProgram,
     LaneResult,
     batched_kernel,
+    public_mode,
 )
 from diff_soup.optimization.inference.engine._placement import Placement
 
@@ -443,14 +446,19 @@ def _over_budget(
             "ds.lower(study, chunk=) or LoweredStudy.for_population(members, chunk=) makes it "
             "fit on this device"
         )
+    named = (
+        "blocks program that keeps its lanes' Jacobians"
+        if key.mode == KEEPING_BLOCKS
+        else f"{key.mode} program"
+    )
     return ProgramOverBudget(
-        f"the {key.mode} program of bucket {bucket.index} (identity {bucket.identity}) at the "
+        f"the {named} of bucket {bucket.index} (identity {bucket.identity}) at the "
         f"chunk width W = {key.chunk} needs {needs} bytes of device memory ({_bytes_cell(needs)}), "
         f"more than the budget of {budget} bytes ({_bytes_cell(budget)}) one program may take on "
         f"{device}; {remedy}.",
         bucket=int(bucket.index),
         identity=str(bucket.identity),
-        mode=str(key.mode),
+        mode=public_mode(str(key.mode)),
         chunk=int(key.chunk),
         needs=int(needs),
         budget=int(budget),
@@ -523,14 +531,16 @@ def placed_kernel(
         between them. One program serves every device. Zero-size argument
         leaves stay outside the mapped body
         ([split_empty_leaves][diff_soup.optimization.inference.engine._prepare.split_empty_leaves]).
+        The ``frozen`` kernel takes the call's Jacobians as a third argument,
+        split like the others.
     """
     kernel = batched_kernel(program, mode)
     if mesh is None:
         return kernel
     split = PartitionSpec("data")
 
-    def placed(points: jax.Array, lanes: LaneInputs) -> LaneResult:
-        kept, restore = split_empty_leaves((points, lanes))
+    def placed(points: jax.Array, lanes: LaneInputs, *jacobians: jax.Array) -> LaneResult:
+        kept, restore = split_empty_leaves((points, lanes, *jacobians))
 
         def body(*local: jax.Array) -> LaneResult:
             return kernel(*restore(list(local), local[0].shape[0]))
@@ -540,6 +550,25 @@ def placed_kernel(
         )
 
     return jax.jit(placed)
+
+
+def _kept_jacobians(lanes: BatchedLanes, entry: BucketLanes, key: ProgramKey) -> tuple:
+    """The Jacobians the ``frozen`` program is traced with: zeros of the kept shape; ``()`` otherwise.
+
+    Their shape is the one the bucket's ``blocks`` program returns, which the
+    ``frozen`` mode brings and compiles first.
+    """
+    if key.mode != "frozen":
+        return ()
+    blocks = lanes.programs.get((entry.bucket.index, "blocks"))
+    if blocks is None or blocks.key.mode != KEEPING_BLOCKS:
+        raise RuntimeError(
+            f"the frozen program of bucket {entry.bucket.index} is compiled after the blocks "
+            "program that keeps the Jacobians, and the bucket holds none."
+        )
+    shape = blocks.compiled.out_info.jacobian
+    zeros = np.zeros(tuple(shape.shape), dtype=shape.dtype)
+    return (jax.device_put(zeros, placement(lanes.plan)),)
 
 
 def compile_program(
@@ -570,7 +599,7 @@ def compile_program(
         start = time.perf_counter()
         points, inputs = _first_call(lanes, entry, key.chunk)
         kernel = placed_kernel(entry.program, key.mode, lanes.plan.mesh)
-        traced = kernel.trace(points, inputs)
+        traced = kernel.trace(points, inputs, *_kept_jacobians(lanes, entry, key))
         traced_at = time.perf_counter()
         lowered = traced.lower()
         fingerprint = hashlib.sha256(lowered.as_text().encode("utf-8")).hexdigest()
@@ -585,7 +614,7 @@ def compile_program(
     record = ProgramRecord(
         bucket=int(entry.bucket.index),
         identity=str(entry.bucket.identity),
-        mode=str(key.mode),
+        mode=public_mode(str(key.mode)),
         chunk=int(key.chunk),
         trace_seconds=traced_at - start,
         lowering_seconds=lowered_at - traced_at,
@@ -621,6 +650,10 @@ def default_modes(lanes: BatchedLanes) -> tuple:
 
 def prepare(lanes: BatchedLanes, *, modes: Any = None, setup: Mapping) -> PrepareReport:
     """Compile the program of every bucket of a study in every mode of ``modes``.
+
+    The ``frozen`` mode brings the ``blocks`` mode, compiled as the program
+    that keeps its lanes' Jacobians for the ``frozen`` requests; without the
+    ``frozen`` mode the ``blocks`` program keeps nothing.
 
     Args:
         lanes: The lanes of the study.

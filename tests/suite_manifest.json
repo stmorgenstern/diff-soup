@@ -1,22 +1,22 @@
 {
   "budgets": {
-    "test_files": 52,
-    "test_functions": 470,
-    "collected_tests": 803,
-    "source_lines": 17093
+    "test_files": 51,
+    "test_functions": 475,
+    "collected_tests": 807,
+    "source_lines": 17237
   },
   "tier_budgets": {
     "public_api": {
-      "files": 22,
-      "functions": 204,
-      "collected": 326,
-      "lines": 6673
+      "files": 21,
+      "functions": 203,
+      "collected": 324,
+      "lines": 6614
     },
     "contracts": {
       "files": 22,
-      "functions": 206,
-      "collected": 403,
-      "lines": 6878
+      "functions": 212,
+      "collected": 409,
+      "lines": 7081
     },
     "performance_contracts": {
       "files": 2,
@@ -72,7 +72,7 @@
     "tests/contracts/test_linear_structured.py": "diff_soup.problem._ir._low_rank",
     "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
-    "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference.hierarchical",
+    "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference",
     "tests/contracts/test_coloring.py": "diff_soup.problem._ad.coloring"
   },
   "support_data": [],
@@ -133,7 +133,6 @@
     "tests/validation/test_physics.py",
     "tests/contracts/test_compiled_solvers.py",
     "tests/public_api/test_optimization_solvers.py",
-    "tests/public_api/test_nested_fit.py",
     "tests/multi_device/test_optimization_lanes.py",
     "tests/support/optimization.py",
     "tests/public_api/test_control.py",
@@ -188,7 +187,6 @@
     "tests/validation/test_physics.py",
     "tests/contracts/test_compiled_solvers.py",
     "tests/public_api/test_optimization_solvers.py",
-    "tests/public_api/test_nested_fit.py",
     "tests/multi_device/test_optimization_lanes.py",
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
@@ -205,7 +203,7 @@
     },
     {
       "file": "tests/public_api/test_recipe_families.py",
-      "feature": "Recipe API: family recipes, per-member parameters, member boundary flux, surface projection, declared stencil radius, member rows as wide as their member recovered by shared pullbacks, family graphs"
+      "feature": "Recipe API: family recipes, per-member parameters, declared parameters in member equations, member boundary flux, surface projection, declared stencil radius, member rows as wide as their member recovered by shared pullbacks, family graphs"
     },
     {
       "file": "tests/public_api/test_boundary_callbacks.py",
@@ -333,7 +331,7 @@
     },
     {
       "file": "tests/contracts/test_lowered_study.py",
-      "feature": "Lowered studies: TrustRegion defaults and refusals, joint and nested fits to one optimum, resume equality, prepare reports, StopFit with checkpoints, bootstrap and sample on a lowered study"
+      "feature": "Lowered studies: TrustRegion defaults and refusals, joint and nested fits to one optimum, the nested mode without polish making the joint attempts, inequality rows against the interior point, resume equality, prepare reports, StopFit with checkpoints, bootstrap and sample on a lowered study"
     },
     {
       "file": "tests/contracts/test_structural_fitting.py",
@@ -382,10 +380,6 @@
     {
       "file": "tests/public_api/test_optimization_solvers.py",
       "feature": "Optimization solvers through ds.optimization: each compiled solver through optsolve and its record, each solver's warm start from a record and from a record of zeros, lanes on one device"
-    },
-    {
-      "file": "tests/public_api/test_nested_fit.py",
-      "feature": "Nested least-squares fits: NestedLeastSquares through optsolve with the members' state carried by the trust region, against the joint fit, and the outer gradient by the forward and reverse Gauss-Newton rules against central differences"
     },
     {
       "file": "tests/multi_device/test_optimization_lanes.py",

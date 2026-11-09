@@ -32,14 +32,8 @@ if TYPE_CHECKING:
 #: - ``"batched_lanes"``: the objective is evaluated by the lanes of a lowered
 #:   study; ``problem.lanes`` is that study and ``problem.joint_view()`` its
 #:   joint problem with the level structure.
-#: - ``"carried_args"``: ``carried_gauss_newton(x, radius, args) -> ((cost, gradient,
-#:   matrix, failed), args)``, the Gauss-Newton statistics at a trial ``x`` whose step has
-#:   length ``radius`` in the trust region's scaled units, and the ``args`` the problem holds
-#:   once that trial is accepted. ``NewtonTrustRegion`` carries them from step to step (a
-#:   nested fit's member state) and returns the last in ``result.info["args"]``.
 STRUCTURE_KEYS = frozenset(
     {
-        "carried_args",
         "value_gradient",
         "hessian",
         "gauss_newton",
@@ -69,7 +63,6 @@ _KEY_OF = {
     "constraint_hessian": "constraint_hessian",
     "evaluate": "value_gradient",
     "evaluate_with_derivatives": "constraint_jacobian",
-    "carried_gauss_newton": "carried_args",
 }
 
 #: The closures every problem provides, with empty rows when it has no constraints.
@@ -89,7 +82,6 @@ _NEEDS = {
     "lagrangian_hessian": ("_lagrangian_hessian", "_lagrangian_hessian_vector"),
     "constraint_hessian": ("_constraint_hessian",),
     "batched_lanes": ("_joint_view",),
-    "carried_args": ("_carried_gauss_newton",),
 }
 
 
