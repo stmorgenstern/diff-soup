@@ -92,6 +92,7 @@ class OptimizationProblem(eqx.Module):
     _evaluate: Callable | None = eqx.field(static=True, default=None)
     _evaluate_with_derivatives: Callable | None = eqx.field(static=True, default=None)
     _joint_view: Callable | None = eqx.field(static=True, default=None)
+    _carried_gauss_newton: Callable | None = eqx.field(static=True, default=None)
 
     def __post_init__(self) -> None:
         """Store what follows from what is given; a problem without rows gets empty ones.
