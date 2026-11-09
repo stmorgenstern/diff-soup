@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 52,
-    "test_functions": 467,
-    "collected_tests": 798,
-    "source_lines": 17032
+    "test_functions": 468,
+    "collected_tests": 801,
+    "source_lines": 17059
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 22,
-      "functions": 203,
-      "collected": 398,
-      "lines": 6817
+      "functions": 204,
+      "collected": 401,
+      "lines": 6844
     },
     "performance_contracts": {
       "files": 2,

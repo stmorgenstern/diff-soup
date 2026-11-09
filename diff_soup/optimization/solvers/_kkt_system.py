@@ -42,12 +42,15 @@ class ActiveSet(eqx.Module):
         lower: Where a lower bound is active, `(n,)`.
         upper: Where an upper bound is active, `(n,)`.
         degenerate: Whether a multiplier and its slack (or bound distance) are both near zero.
+        pinned: Where equal bounds fix a coordinate; it counts as active on its lower bound
+            when that multiplier is the larger, else on its upper, and is never degenerate.
     """
 
     inequality: Bool[Array, "n_ineq"]
     lower: Bool[Array, "n"]
     upper: Bool[Array, "n"]
     degenerate: Bool[Array, ""]
+    pinned: Bool[Array, "n"]
 
 
 def active_set(
@@ -73,9 +76,13 @@ def active_set(
         degenerate = mask & (multiplier < threshold) & (gap < threshold)
         return active, jnp.any(degenerate)
 
+    pinned = bounds.has_lower & bounds.has_upper & (bounds.lower == bounds.upper)
     inequality, deg_i = side(lam, slack, jnp.ones_like(lam, dtype=bool))
-    lower, deg_l = side(z_lower, below, bounds.has_lower)
-    upper, deg_u = side(z_upper, above, bounds.has_upper)
+    lower, deg_l = side(z_lower, below, bounds.has_lower & ~pinned)
+    upper, deg_u = side(z_upper, above, bounds.has_upper & ~pinned)
+    on_lower = z_lower >= z_upper
+    lower = lower | (pinned & on_lower)
+    upper = upper | (pinned & ~on_lower)
     degenerate = deg_i | deg_l | deg_u
     if jac_eq is not None:
         free = (~(lower | upper)).astype(x.dtype)
@@ -83,7 +90,7 @@ def active_set(
         idle = jnp.concatenate([jnp.zeros(jac_eq.shape[0], bool), ~inequality])
         _, independent = cholesky(rows @ rows.T + jnp.diag(idle.astype(x.dtype)))
         degenerate = degenerate | ~independent
-    return ActiveSet(inequality, lower, upper, degenerate)
+    return ActiveSet(inequality, lower, upper, degenerate, pinned)
 
 
 def _lagrangian_gradient(
@@ -194,22 +201,22 @@ def system_at(
     z_lower, z_upper = record.bound_multipliers
     tiny = jnp.finfo(dtype).tiny
     cap = min(_CAP, float(jnp.finfo(dtype).max))
+    barrier_lower = bounds.has_lower & ~active.pinned
+    barrier_upper = bounds.has_upper & ~active.pinned
     sigma_lower = jnp.where(
-        bounds.has_lower, jnp.minimum(z_lower / jnp.maximum(below, tiny), cap), 0.0
+        barrier_lower, jnp.minimum(z_lower / jnp.maximum(below, tiny), cap), 0.0
     )
     sigma_upper = jnp.where(
-        bounds.has_upper, jnp.minimum(z_upper / jnp.maximum(above, tiny), cap), 0.0
+        barrier_upper, jnp.minimum(z_upper / jnp.maximum(above, tiny), cap), 0.0
     )
     # At `mu = 0` (SQP, the augmented Lagrangian) an active slack can be exactly 0, and two
     # identical active rows would then give an exact zero pivot; the floor keeps it finite.
     slack_ratio = jnp.clip(record.slacks / jnp.maximum(lam_i, tiny), jnp.finfo(dtype).eps, cap)
-    fixed = (active.lower | active.upper) & ~degenerate
+    # A coordinate equal bounds fix is fixed in the degenerate system too, without a barrier.
+    fixed = ((active.lower | active.upper) & ~degenerate) | active.pinned
     keep = (~fixed).astype(dtype)
-    primal = jnp.where(
-        degenerate,
-        hessian + jnp.diag(sigma_lower + sigma_upper),
-        keep[:, None] * hessian * keep[None, :] + jnp.diag(1.0 - keep),
-    )
+    curvature = hessian + jnp.where(degenerate, jnp.diag(sigma_lower + sigma_upper), 0.0)
+    primal = keep[:, None] * curvature * keep[None, :] + jnp.diag(1.0 - keep)
     rows_i = jnp.where(degenerate, 1.0, active.inequality.astype(dtype))
     rows = jnp.concatenate([jac_eq * keep[None, :], rows_i[:, None] * jac_ineq * keep[None, :]])
     dual_i = jnp.where(degenerate, slack_ratio, jnp.where(active.inequality, 0.0, 1.0))

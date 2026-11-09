@@ -136,13 +136,14 @@ def _kkt_tangent(closures, bounds, kkt, x, record, args, dargs, jacobian, dbound
     dlam_e, dlam_i = dlam[:n_eq], dlam[n_eq:]
 
     stationarity = system.hessian @ dx + jac_eq.T @ dlam_e + jac_ineq.T @ dlam_i + d_grad
+    barrier = degenerate & ~active.pinned
     dz_lower = jnp.where(
-        degenerate,
+        barrier,
         -system.sigma_lower * (dx - d_lower),
         jnp.where(active.lower, stationarity, 0.0),
     )
     dz_upper = jnp.where(
-        degenerate,
+        barrier,
         system.sigma_upper * (dx - d_upper),
         jnp.where(active.upper, -stationarity, 0.0),
     )
@@ -261,8 +262,9 @@ def _kkt_cotangent(closures, bounds, kkt, x, record, args, cotangents, jacobian,
     jac_eq, jac_ineq = system.jac_eq, system.jac_ineq
 
     open_rows = jnp.where(degenerate | active.inequality, 0.0, s_bar)
+    barrier = degenerate & ~active.pinned
     st_bar = jnp.where(
-        degenerate, 0.0, jnp.where(active.lower, zl_bar, 0.0) - jnp.where(active.upper, zu_bar, 0.0)
+        barrier, 0.0, jnp.where(active.lower, zl_bar, 0.0) - jnp.where(active.upper, zu_bar, 0.0)
     )
     dx_bar = (
         x_bar
