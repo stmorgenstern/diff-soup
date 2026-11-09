@@ -50,6 +50,9 @@ class LevelSystem(eqx.Module):
             a regularizer row of nonzero weight.
         counts: ``(N_1, ..., N_D)``.
         widths: ``(g, v_1, ..., v_D)``.
+        constraint_active: Optional ``(c,)``, boolean: which equality rows a step
+            keeps; ``None`` keeps every row. The inequality rows of a fit ride
+            here at a fixed count, so one program solves every active set.
 
     The fixed coordinates and the held nodes are arrays of the system, not
     part of its structure: systems of one hierarchy that fix or hold different
@@ -73,6 +76,7 @@ class LevelSystem(eqx.Module):
     held_mask: tuple
     counts: tuple = eqx.field(static=True)
     widths: tuple = eqx.field(static=True)
+    constraint_active: jax.Array | None = None
 
     @property
     def depth(self) -> int:

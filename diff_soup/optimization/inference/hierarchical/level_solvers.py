@@ -91,6 +91,7 @@ class TrustRegion(OptSolver):
         weights: One weight per member of the first level, or a `(level, weights)` pair, multiplying each member's share of the objective.
         weight_priors: If `True`, the weights also multiply each member's prior and regularization terms.
         constraints: Linear equality constraints on the joint parameter vector, as `LinearConstraint` objects.
+        inequalities: Rows kept at or below zero, as [InequalityRows][diff_soup.optimization.inference.InequalityRows].
         gauges: [Gauge][diff_soup.optimization.inference.Gauge] constraints that pin directions the data leave free.
         fixed_indices: The indices of the joint parameter vector held at their starting values.
         callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
@@ -123,6 +124,7 @@ class TrustRegion(OptSolver):
     weights: Any
     weight_priors: bool = eqx.field(static=True)
     constraints: tuple
+    inequalities: tuple
     gauges: tuple
     fixed_indices: tuple = eqx.field(static=True)
     callbacks: tuple = eqx.field(static=True)
@@ -155,6 +157,7 @@ class TrustRegion(OptSolver):
         weights: Any = None,
         weight_priors: Any = True,
         constraints: Any = (),
+        inequalities: Any = (),
         gauges: Any = (),
         fixed_indices: Any = (),
         callbacks: Any = (),
@@ -317,6 +320,7 @@ class TrustRegion(OptSolver):
         self.weights = weights
         self.weight_priors = bool(weight_priors)
         self.constraints = tuple(constraints)
+        self.inequalities = tuple(inequalities)
         self.gauges = tuple(gauges)
         self.fixed_indices = tuple(fixed_indices)
         self.callbacks = tuple(callbacks)

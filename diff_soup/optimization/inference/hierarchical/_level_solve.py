@@ -173,7 +173,15 @@ def _solve(system, damping):
     if n_rows:
         spread = stacked[:, 1:]
         target = system.constraint_rhs - matrix @ system.point
-        multipliers = jnp.linalg.solve(matrix @ spread, matrix @ step - target)
+        gram, residual = matrix @ spread, matrix @ step - target
+        if system.constraint_active is not None:
+            # An inactive row takes a zero multiplier: its row and column of the
+            # multipliers' system become the identity's.
+            on = system.constraint_active
+            identity = jnp.diag(jnp.where(on, 0.0, 1.0))
+            gram = jnp.where(on[:, None] & on[None, :], gram, 0.0) + identity
+            residual = jnp.where(on, residual, 0.0)
+        multipliers = jnp.linalg.solve(gram, residual)
         step = step - spread @ multipliers
     parts = _split(system, step)
     halves: list = [None] * (depth + 1)
@@ -516,6 +524,7 @@ def _reduce(system, *, level):
         held_mask=tuple(system.held_mask[:level]),
         counts=tuple(system.counts[: level - 1]),
         widths=tuple(system.widths[:level]),
+        constraint_active=system.constraint_active,
     )
 
 

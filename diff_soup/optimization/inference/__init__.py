@@ -48,6 +48,7 @@ from diff_soup.optimization.inference.fitting.windows import (
     StateBasis,
     Windows,
 )
+from diff_soup.optimization.inference.hierarchical._inequality import InequalityRows
 from diff_soup.optimization.inference.hierarchical.level_solvers import TrustRegion
 from diff_soup.optimization.inference.statistics.bootstrap import bootstrap
 from diff_soup.optimization.inference.statistics.bootstrap_intervals import (
@@ -141,6 +142,7 @@ __all__ = [
     "CheckpointCallback",
     "StopFit",
     "Gauge",
+    "InequalityRows",
     # Solver objects
     "LevenbergMarquardt",
     "NewtonTrustRegion",
