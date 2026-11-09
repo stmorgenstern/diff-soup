@@ -49,20 +49,6 @@ A solver with `hessian="gauss-newton"` on a least-squares problem takes the Gaus
 
 ---
 
-### Nested fits
-
-::: diff_soup.optimization.NestedLeastSquares
-    options:
-      members:
-        - pose
-        - solve
-
-::: diff_soup.optimization.InnerSteps
-    options:
-      members: false
-
----
-
 ### Results
 
 Every `run` returns the solution and a `SolveRecord`, whose `status` is a

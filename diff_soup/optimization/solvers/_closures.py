@@ -45,7 +45,6 @@ class Closures(NamedTuple):
             appended, or `None` for an objective without residual rows.
         residual_and_jacobian: `(x, args) -> (r, J_r)` of the same rows, or `None`.
         gauss_newton_rule: Whether the implicit derivative takes the Gauss-Newton form.
-        keep_jacobian: Whether a Gauss-Newton evaluation keeps `J_r` (`Evaluation.jacobian`).
         fixed: Where equal bounds fix a coordinate, whose derivatives the closures zero and
             whose curvature is 1; `None` for a problem without bounds.
     """
@@ -63,7 +62,6 @@ class Closures(NamedTuple):
     residual: Callable | None = None
     residual_and_jacobian: Callable | None = None
     gauss_newton_rule: bool = False
-    keep_jacobian: bool = False
     fixed: Bool[Array, " n"] | None = None
 
 
@@ -179,7 +177,6 @@ class Evaluation(eqx.Module):
         jacobian_equality: The equality rows' Jacobian.
         jacobian_inequality: The inequality rows' Jacobian.
         gauss_newton: The Gauss-Newton matrix, or `(0, 0)` when not used.
-        jacobian: The residual rows' Jacobian `J_r` when the closures keep it, else `None`.
     """
 
     value: Float[Array, ""]
@@ -189,7 +186,6 @@ class Evaluation(eqx.Module):
     jacobian_equality: Float[Array, "n_eq n"]
     jacobian_inequality: Float[Array, "n_ineq n"]
     gauss_newton: Float[Array, "k k"]
-    jacobian: Float[Array, "m n"] | None = None
 
     @property
     def rows_finite(self) -> Bool[Array, ""]:
@@ -225,7 +221,6 @@ class Evaluation(eqx.Module):
             scales.equality[:, None] * self.jacobian_equality,
             scales.inequality[:, None] * self.jacobian_inequality,
             objective * self.gauss_newton,
-            None if self.jacobian is None else jnp.sqrt(objective) * self.jacobian,
         )
 
 
@@ -350,7 +345,6 @@ def scaled_closures(closures: Closures) -> Closures:
         residual=residual if rows else None,
         residual_and_jacobian=residual_and_jacobian if rows else None,
         gauss_newton_rule=closures.gauss_newton_rule,
-        keep_jacobian=closures.keep_jacobian,
         fixed=closures.fixed,
     )
 
@@ -361,29 +355,8 @@ def evaluate(
     """The objective, the constraints and their first derivatives at `x`, from one evaluation.
 
     With `gauss_newton`, the objective, gradient and Gauss-Newton matrix come from the
-    problem's `gauss_newton` closure, and a reported failure makes the value NaN. Closures that
-    keep the Jacobian take them from the residual rows instead, and the evaluation holds `J_r`;
-    on closures that fix coordinates, `J_r` keeps their columns and the gradient and matrix
-    do not.
+    problem's `gauss_newton` closure, and a reported failure makes the value NaN.
     """
-    if gauss_newton and closures.keep_jacobian:
-        rows, jacobian = closures.residual_and_jacobian(x, args)
-        equality, inequality, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, args)
-        gradient, matrix = jacobian.T @ rows, jacobian.T @ jacobian
-        if closures.fixed is not None:
-            free = (~closures.fixed).astype(matrix.dtype)
-            gradient = gradient * free
-            matrix = free[:, None] * matrix * free[None, :] + jnp.diag(1.0 - free)
-        return Evaluation(
-            0.5 * jnp.sum(rows * rows),
-            gradient,
-            equality,
-            inequality,
-            jac_eq,
-            jac_ineq,
-            matrix,
-            jacobian,
-        )
     if gauss_newton:
         value, gradient, matrix, failed = closures.gauss_newton(x, args)
         value = jnp.where(jnp.asarray(failed) > 0, jnp.nan, value)

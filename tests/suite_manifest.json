@@ -1,16 +1,16 @@
 {
   "budgets": {
-    "test_files": 52,
-    "test_functions": 470,
-    "collected_tests": 803,
-    "source_lines": 17093
+    "test_files": 51,
+    "test_functions": 468,
+    "collected_tests": 800,
+    "source_lines": 16989
   },
   "tier_budgets": {
     "public_api": {
-      "files": 22,
-      "functions": 204,
-      "collected": 326,
-      "lines": 6673
+      "files": 21,
+      "functions": 202,
+      "collected": 323,
+      "lines": 6569
     },
     "contracts": {
       "files": 22,
@@ -133,7 +133,6 @@
     "tests/validation/test_physics.py",
     "tests/contracts/test_compiled_solvers.py",
     "tests/public_api/test_optimization_solvers.py",
-    "tests/public_api/test_nested_fit.py",
     "tests/multi_device/test_optimization_lanes.py",
     "tests/support/optimization.py",
     "tests/public_api/test_control.py",
@@ -188,7 +187,6 @@
     "tests/validation/test_physics.py",
     "tests/contracts/test_compiled_solvers.py",
     "tests/public_api/test_optimization_solvers.py",
-    "tests/public_api/test_nested_fit.py",
     "tests/multi_device/test_optimization_lanes.py",
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
@@ -382,10 +380,6 @@
     {
       "file": "tests/public_api/test_optimization_solvers.py",
       "feature": "Optimization solvers through ds.optimization: each compiled solver through optsolve and its record, each solver's warm start from a record and from a record of zeros, lanes on one device"
-    },
-    {
-      "file": "tests/public_api/test_nested_fit.py",
-      "feature": "Nested least-squares fits: NestedLeastSquares through optsolve with the members' state carried by the trust region, against the joint fit, and the outer gradient by the forward and reverse Gauss-Newton rules against central differences"
     },
     {
       "file": "tests/multi_device/test_optimization_lanes.py",
