@@ -16,6 +16,7 @@ from diff_soup.optimization import inference  # noqa: I001
 from diff_soup.optimization._abc import LeastSquaresProblem, OptimizationProblem
 from diff_soup.optimization.constraints import Constraints
 from diff_soup.optimization.lanes import lanes
+from diff_soup.optimization.nested import InnerSteps, NestedLeastSquares
 from diff_soup.optimization.problem import AbstractOptimizationProblem
 from diff_soup.optimization.solvers import (
     BFGS,
@@ -38,9 +39,11 @@ __all__ = [
     "BFGS",
     "Constraints",
     "GradientDescent",
+    "InnerSteps",
     "InteriorPoint",
     "LeastSquaresProblem",
     "LevenbergMarquardt",
+    "NestedLeastSquares",
     "NewtonTrustRegion",
     "OptResult",
     "Optax",

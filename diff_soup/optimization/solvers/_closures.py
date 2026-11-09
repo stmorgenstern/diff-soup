@@ -9,10 +9,12 @@ the problem as given.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from typing import NamedTuple
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array, ArrayLike, Bool, Float, PyTree
 
@@ -39,6 +41,11 @@ class Closures(NamedTuple):
         n_equality: The number of equality rows.
         n_inequality: The number of inequality rows.
         bounded: Whether the problem has bounds.
+        residual: `(x, args) -> r`, the least-squares rows with the regularization's rows
+            appended, or `None` for an objective without residual rows.
+        residual_and_jacobian: `(x, args) -> (r, J_r)` of the same rows, or `None`.
+        gauss_newton_rule: Whether the implicit derivative takes the Gauss-Newton form.
+        keep_jacobian: Whether a Gauss-Newton evaluation keeps `J_r` (`Evaluation.jacobian`).
     """
 
     evaluate: Callable
@@ -51,6 +58,10 @@ class Closures(NamedTuple):
     n_equality: int
     n_inequality: int
     bounded: bool
+    residual: Callable | None = None
+    residual_and_jacobian: Callable | None = None
+    gauss_newton_rule: bool = False
+    keep_jacobian: bool = False
 
 
 def _optional(problem: OptimizationProblem, name: str) -> Callable | None:
@@ -59,6 +70,45 @@ def _optional(problem: OptimizationProblem, name: str) -> Callable | None:
         return problem.closure(name)
     except ConfigurationError:
         return None
+
+
+def _with_rows(fn: Callable, regularization: object, x: ArrayLike, args: PyTree) -> Array:
+    """The residual rows with the regularization's rows appended."""
+    rows = fn(x, args)
+    if regularization is None:
+        return rows
+    return jnp.concatenate([rows, regularization.residual(x)])
+
+
+def _with_rows_and_jacobian(
+    fn: Callable, regularization: object, x: ArrayLike, args: PyTree
+) -> tuple[Array, Array]:
+    """The residual rows and their Jacobian with the regularization's rows appended."""
+    rows, jacobian = fn(x, args)
+    if regularization is None:
+        return rows, jacobian
+    extra = regularization.residual
+    return (
+        jnp.concatenate([rows, extra(x)]),
+        jnp.concatenate([jacobian, jax.jacfwd(extra)(x)]),
+    )
+
+
+def _residual_closures(problem: OptimizationProblem) -> tuple[Callable | None, Callable | None]:
+    """`(residual, residual_and_jacobian)` with the regularization's rows, or `None`s.
+
+    The regularization's rows read no `args`, and their Gauss-Newton matrix is the one the
+    problem's `gauss_newton` closure folds in, so `J_r^T J_r` of these rows is that closure's.
+    """
+    residual = _optional(problem, "residual")
+    residual_and_jacobian = _optional(problem, "residual_and_jacobian")
+    if residual is None or residual_and_jacobian is None:
+        return None, None
+    regularization = problem.regularization
+    return (
+        functools.partial(_with_rows, residual, regularization),
+        functools.partial(_with_rows_and_jacobian, residual_and_jacobian, regularization),
+    )
 
 
 def closures_of(problem: OptimizationProblem) -> Closures:
@@ -70,6 +120,7 @@ def closures_of(problem: OptimizationProblem) -> Closures:
     constraint_hessian = _optional(problem, "constraint_hessian")
     if constraint_hessian is None:
         constraint_hessian = getattr(problem, "_constraint_hessian", None)
+    residual, residual_and_jacobian = _residual_closures(problem)
     return Closures(
         evaluate=problem.closure("evaluate"),
         evaluate_with_derivatives=problem.closure("evaluate_with_derivatives"),
@@ -81,6 +132,8 @@ def closures_of(problem: OptimizationProblem) -> Closures:
         n_equality=int(problem.n_equality),
         n_inequality=int(problem.n_inequality),
         bounded=problem.bounds is not None,
+        residual=residual,
+        residual_and_jacobian=residual_and_jacobian,
     )
 
 
@@ -123,6 +176,7 @@ class Evaluation(eqx.Module):
         jacobian_equality: The equality rows' Jacobian.
         jacobian_inequality: The inequality rows' Jacobian.
         gauss_newton: The Gauss-Newton matrix, or `(0, 0)` when not used.
+        jacobian: The residual rows' Jacobian `J_r` when the closures keep it, else `None`.
     """
 
     value: Float[Array, ""]
@@ -132,6 +186,7 @@ class Evaluation(eqx.Module):
     jacobian_equality: Float[Array, "n_eq n"]
     jacobian_inequality: Float[Array, "n_ineq n"]
     gauss_newton: Float[Array, "k k"]
+    jacobian: Float[Array, "m n"] | None = None
 
     @property
     def rows_finite(self) -> Bool[Array, ""]:
@@ -167,6 +222,7 @@ class Evaluation(eqx.Module):
             scales.equality[:, None] * self.jacobian_equality,
             scales.inequality[:, None] * self.jacobian_inequality,
             objective * self.gauss_newton,
+            None if self.jacobian is None else jnp.sqrt(objective) * self.jacobian,
         )
 
 
@@ -266,6 +322,17 @@ def scaled_closures(closures: Closures) -> Closures:
     def is_valid(x, packed):
         return closures.is_valid(x, packed[0])
 
+    def residual(x, packed):
+        args, scales = packed
+        return jnp.sqrt(scales.objective) * closures.residual(x, args)
+
+    def residual_and_jacobian(x, packed):
+        args, scales = packed
+        rows, jacobian = closures.residual_and_jacobian(x, args)
+        root = jnp.sqrt(scales.objective)
+        return root * rows, root * jacobian
+
+    rows = closures.residual is not None
     return Closures(
         evaluate=evaluate,
         evaluate_with_derivatives=evaluate_with_derivatives,
@@ -277,6 +344,10 @@ def scaled_closures(closures: Closures) -> Closures:
         n_equality=closures.n_equality,
         n_inequality=closures.n_inequality,
         bounded=closures.bounded,
+        residual=residual if rows else None,
+        residual_and_jacobian=residual_and_jacobian if rows else None,
+        gauss_newton_rule=closures.gauss_newton_rule,
+        keep_jacobian=closures.keep_jacobian,
     )
 
 
@@ -286,8 +357,22 @@ def evaluate(
     """The objective, the constraints and their first derivatives at `x`, from one evaluation.
 
     With `gauss_newton`, the objective, gradient and Gauss-Newton matrix come from the
-    problem's `gauss_newton` closure, and a reported failure makes the value NaN.
+    problem's `gauss_newton` closure, and a reported failure makes the value NaN. Closures that
+    keep the Jacobian take them from the residual rows instead, and the evaluation holds `J_r`.
     """
+    if gauss_newton and closures.keep_jacobian:
+        rows, jacobian = closures.residual_and_jacobian(x, args)
+        equality, inequality, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, args)
+        return Evaluation(
+            0.5 * jnp.sum(rows * rows),
+            jacobian.T @ rows,
+            equality,
+            inequality,
+            jac_eq,
+            jac_ineq,
+            jacobian.T @ jacobian,
+            jacobian,
+        )
     if gauss_newton:
         value, gradient, matrix, failed = closures.gauss_newton(x, args)
         value = jnp.where(jnp.asarray(failed) > 0, jnp.nan, value)

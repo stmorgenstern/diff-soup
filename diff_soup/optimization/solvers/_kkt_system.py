@@ -5,6 +5,11 @@ multiplier exceeds its slack. Where both are below `DEGENERATE * sqrt(mu)` the a
 degenerate, and the system is instead the barrier solution's at the final `mu`, whose blocks
 replace the active-set masks with the barrier diagonals `Z / d` and `s / lam`; the record's
 `degenerate` says so. The exact Lagrangian Hessian is computed once, at the solution.
+
+The Gauss-Newton form, for a least-squares objective whose solver steps on Gauss-Newton,
+replaces that Hessian with `J_r^T J_r` of the residual rows and drops the constraint
+curvature: its derivatives in `args` are first order, the rows' (`rows_of`) and the
+constraints'. At a solution with zero residual and linear rows the two forms agree.
 """
 
 from __future__ import annotations
@@ -113,7 +118,7 @@ class KKTSystem(eqx.Module):
         gradient: The objective's gradient.
         jac_eq: The equality rows' Jacobian.
         jac_ineq: The inequality rows' Jacobian.
-        hessian: The exact Lagrangian Hessian.
+        hessian: The exact Lagrangian Hessian, or `J_r^T J_r` in the Gauss-Newton form.
         primal: The primal block: the Hessian on the free coordinates, or plus the barrier diagonals.
         rows: The constraint rows of the system, masked to the free coordinates and active rows.
         dual: The dual diagonal: 0 for an equality, 1 for an inactive row, `s / lam` degenerate.
@@ -152,6 +157,16 @@ def residual_of(closures: Closures, x: Float[Array, "n"], record: SolveRecord) -
     return residual
 
 
+def rows_of(closures: Closures, x: Float[Array, "n"]) -> Callable:
+    """`args -> ((r, c_E, c_I), (J_E, J_I))` at `x`: the Gauss-Newton form's first-order terms."""
+
+    def rows(a):
+        equality, inequality, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, a)
+        return (closures.residual(x, a), equality, inequality), (jac_eq, jac_ineq)
+
+    return rows
+
+
 def system_at(
     closures: Closures,
     bounds: Bounds,
@@ -159,14 +174,22 @@ def system_at(
     record: SolveRecord,
     args: PyTree,
     derivatives: tuple[Float[Array, "n"], Float[Array, "n_eq n"], Float[Array, "n_ineq n"]],
+    jacobian: Float[Array, "m n"] | None = None,
 ) -> KKTSystem:
-    """The KKT system at the solution, with the exact Lagrangian Hessian computed once."""
+    """The KKT system at the solution.
+
+    With the residual rows' Jacobian `jacobian` the primal block is `J_r^T J_r`, the
+    Gauss-Newton form; without it the exact Lagrangian Hessian, computed once.
+    """
     gradient, jac_eq, jac_ineq = derivatives
     lam_e, lam_i = record.multipliers_equality, record.multipliers_inequality
     dtype = x.dtype
     active = active_set(x, record, bounds, jac_eq, jac_ineq)
     degenerate = active.degenerate
-    hessian = _hessian(closures, x, lam_e, lam_i, args)
+    if jacobian is None:
+        hessian = _hessian(closures, x, lam_e, lam_i, args)
+    else:
+        hessian = jacobian.T @ jacobian
     below, above = distances(x, bounds)
     z_lower, z_upper = record.bound_multipliers
     tiny = jnp.finfo(dtype).tiny

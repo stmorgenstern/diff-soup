@@ -37,6 +37,14 @@ def _raw(problem: OptimizationProblem, x: Float[Array, " n"]) -> tuple[Closures,
     return closures_of(problem), bounds_from(*bounds_of(problem, x))
 
 
+def _raw_gauss_newton(
+    problem: OptimizationProblem, x: Float[Array, " n"]
+) -> tuple[Closures, Bounds]:
+    """`_raw`, with the Gauss-Newton rule when `problem` has residual rows."""
+    closures, bounds = _raw(problem, x)
+    return closures._replace(gauss_newton_rule=closures.residual is not None), bounds
+
+
 class SolverState(eqx.Module):
     """The state a compiled solver's loop carries, which each solver extends with its own fields.
 
@@ -168,13 +176,18 @@ class CompiledSolver(OptSolver):
         x0: Float[ArrayLike, " n"],
         args: PyTree,
         *,
-        max_steps: int | None = None,
+        max_steps: Int[ArrayLike, ""] | None = None,
         warm_start: SolveRecord | None = None,
+        tol: Float[ArrayLike, ""] | None = None,
     ) -> tuple[Float[Array, " n"], SolveRecord]:
         """Minimize from `x0` and return the solution and its record, arrays only.
 
-        The derivative in `args` is the implicit one at the solution, and `x0` and `warm_start`
-        carry none. A run that did not end with `KKT_TOL` has NaN tangents.
+        The derivative in `args` is the implicit one at the solution, and `x0`, `warm_start`,
+        `max_steps` and `tol` carry none. A run that did not end with `KKT_TOL` has NaN tangents.
+
+        `max_steps` and `tol` are runtime values of the loop, not part of the compiled
+        program: a traced or batched budget and tolerance run without a new compile, so the
+        lanes of one `vmap` can stop at different accuracies.
 
         Args:
             problem: The numeric problem.
@@ -182,6 +195,7 @@ class CompiledSolver(OptSolver):
             args: The problem's arguments, which the derivative is taken in.
             max_steps: The step budget, or `None` for the solver's own.
             warm_start: The `SolveRecord` of an earlier run whose multipliers start this one, or `None`.
+            tol: The scaled optimality error at which the run ends, or `None` for the solver's own.
 
         Returns:
             `(x, record)`: the solution and its [SolveRecord][diff_soup.optimization.SolveRecord].

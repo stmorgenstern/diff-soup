@@ -37,11 +37,29 @@ solver = ds.optimization.InteriorPoint(hessian="exact", adjoint=ds.nonlinear.Imp
 gradient = jax.grad(lambda a: loss(*solver.run(problem, problem.x0, a)))(args)
 ```
 
+A solver with `hessian="gauss-newton"` on a least-squares problem takes the Gauss-Newton form of the rule: the KKT system's Hessian is `J^T J` of the residual rows, its mixed term `J^T (d r / d args)` comes from one forward derivative of the rows, and the constraints' curvature is left out. Every derivative it takes is first order. It equals the exact rule at a zero-residual solution with linear constraints, and approximates it elsewhere as the Gauss-Newton step does. The other Hessian modes keep the exact rule.
+
 ---
 
 ### Batches of problems
 
+`run(max_steps=, tol=)` takes the step budget and the tolerance as runtime values of the loop, so a traced budget runs without a new compile and the lanes of one `vmap` can stop at different accuracies.
+
 ::: diff_soup.optimization.lanes
+
+---
+
+### Nested fits
+
+::: diff_soup.optimization.NestedLeastSquares
+    options:
+      members:
+        - pose
+        - solve
+
+::: diff_soup.optimization.InnerSteps
+    options:
+      members: false
 
 ---
 
