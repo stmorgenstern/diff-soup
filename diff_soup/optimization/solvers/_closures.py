@@ -46,6 +46,8 @@ class Closures(NamedTuple):
         residual_and_jacobian: `(x, args) -> (r, J_r)` of the same rows, or `None`.
         gauss_newton_rule: Whether the implicit derivative takes the Gauss-Newton form.
         keep_jacobian: Whether a Gauss-Newton evaluation keeps `J_r` (`Evaluation.jacobian`).
+        fixed: Where equal bounds fix a coordinate, whose derivatives the closures zero and
+            whose curvature is 1; `None` for a problem without bounds.
     """
 
     evaluate: Callable
@@ -62,6 +64,7 @@ class Closures(NamedTuple):
     residual_and_jacobian: Callable | None = None
     gauss_newton_rule: bool = False
     keep_jacobian: bool = False
+    fixed: Bool[Array, " n"] | None = None
 
 
 def _optional(problem: OptimizationProblem, name: str) -> Callable | None:
@@ -348,6 +351,7 @@ def scaled_closures(closures: Closures) -> Closures:
         residual_and_jacobian=residual_and_jacobian if rows else None,
         gauss_newton_rule=closures.gauss_newton_rule,
         keep_jacobian=closures.keep_jacobian,
+        fixed=closures.fixed,
     )
 
 
@@ -358,19 +362,26 @@ def evaluate(
 
     With `gauss_newton`, the objective, gradient and Gauss-Newton matrix come from the
     problem's `gauss_newton` closure, and a reported failure makes the value NaN. Closures that
-    keep the Jacobian take them from the residual rows instead, and the evaluation holds `J_r`.
+    keep the Jacobian take them from the residual rows instead, and the evaluation holds `J_r`;
+    on closures that fix coordinates, `J_r` keeps their columns and the gradient and matrix
+    do not.
     """
     if gauss_newton and closures.keep_jacobian:
         rows, jacobian = closures.residual_and_jacobian(x, args)
         equality, inequality, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, args)
+        gradient, matrix = jacobian.T @ rows, jacobian.T @ jacobian
+        if closures.fixed is not None:
+            free = (~closures.fixed).astype(matrix.dtype)
+            gradient = gradient * free
+            matrix = free[:, None] * matrix * free[None, :] + jnp.diag(1.0 - free)
         return Evaluation(
             0.5 * jnp.sum(rows * rows),
-            jacobian.T @ rows,
+            gradient,
             equality,
             inequality,
             jac_eq,
             jac_ineq,
-            jacobian.T @ jacobian,
+            matrix,
             jacobian,
         )
     if gauss_newton:

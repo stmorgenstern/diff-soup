@@ -23,7 +23,7 @@ Usage::
 from __future__ import annotations
 
 import time
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import equinox as eqx
 import jax
@@ -36,6 +36,9 @@ from diff_soup.optimization.inference.fitting.bounds import projected_gradient_n
 from diff_soup.optimization.inference.fitting.regularization import NoReg
 from diff_soup.optimization.inference.fitting.result import OptResult, StepInfo, TerminationStatus
 from diff_soup.optimization.solvers._termination import gradient_tolerance
+
+if TYPE_CHECKING:
+    import optax
 
 
 class Optax(OptSolver):
@@ -65,7 +68,7 @@ class Optax(OptSolver):
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient"})
 
-    optimizer: Any = eqx.field(static=True, default=None)
+    optimizer: optax.GradientTransformation | None = eqx.field(static=True, default=None)
     max_steps: int = eqx.field(static=True, default=5000)
     grad_tol: float | None = eqx.field(static=True, default=None)
     log_every: int = eqx.field(static=True, default=50)

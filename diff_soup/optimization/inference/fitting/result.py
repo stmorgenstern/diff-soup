@@ -654,6 +654,7 @@ class OptResult(eqx.Module):
         message: How the run ended, as text.
         n_steps: The number of steps the optimizer took.
         diagnostics: The [OptDiagnostics][diff_soup.optimization.inference.OptDiagnostics] of the fit, or `None` with `diagnostics=False`.
+        objective: The `MLE` or `MAP` objective of a statistical fit, else `None`.
         log_likelihood: The log-likelihood at the solution, or `None` when no measurement declares a likelihood.
         log_prior: The log-prior at the solution under a `MAP` objective, or `None`.
         opt_params: The fitted parameter values in the form `ds.pdesolve` takes through `theta=`.
@@ -700,6 +701,8 @@ class OptResult(eqx.Module):
 
     experiments: Mapping = eqx.field(static=True, default_factory=dict, converter=_read_only)
     parameter_schema: Optional[ParameterSchema] = eqx.field(static=True, default=None)
+    # `MLE | MAP | None`, left `Any`: the fitting layer never imports the statistics layer
+    # (tests/contracts/test_architecture.py).
     objective: Any = eqx.field(static=True, default=None)
     log_likelihood: Optional[float] = eqx.field(static=True, default=None)
     log_prior: Optional[float] = eqx.field(static=True, default=None)

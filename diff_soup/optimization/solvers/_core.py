@@ -23,7 +23,7 @@ from diff_soup._adjoints import AbstractAdjoint
 from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.kkt import DenseKKT, KKTSolve
-from diff_soup.optimization.solvers import _hessian
+from diff_soup.optimization.solvers import _fixed, _hessian
 from diff_soup.optimization.solvers._barrier import Bounds, bounds_from
 from diff_soup.optimization.solvers._closures import (
     Closures,
@@ -282,10 +282,15 @@ class ConstrainedSolver(CompiledSolver):
     def _prepare(
         self, problem: OptimizationProblem, like: Float[ArrayLike, "n"]
     ) -> tuple[Closures, Closures, Bounds]:
-        """The raw closures, the scaled closures and the bounds of `problem`."""
+        """The raw closures, the scaled closures and the bounds of `problem`.
+
+        A coordinate whose bounds are equal is fixed at its value (`_fixed.fix`): the closures
+        read it as a parameter and the bounds no longer hold it.
+        """
         raw = closures_of(problem)
         self._check(raw)
-        return raw, scaled_closures(raw), bounds_from(*bounds_of(problem, like))
+        raw, bounds = _fixed.fix(raw, bounds_from(*bounds_of(problem, like)))
+        return raw, scaled_closures(raw), bounds
 
     def _init(
         self,
@@ -302,7 +307,7 @@ class ConstrainedSolver(CompiledSolver):
 
         `limits` is `(max_steps, tol)` of this run, each `None` for the solver's own field.
         """
-        x = self._place(jnp.asarray(x0), bounds, warm_start is not None)
+        x = _fixed.start(raw, bounds, self._place(jnp.asarray(x0), bounds, warm_start is not None))
         unscaled = evaluate(raw, x, args, _hessian.uses_gauss_newton(self.hessian, raw))
         scales = self._scales(problem, raw, unscaled)
         warm = None if warm_start is None else warm_multipliers(warm_start, scales, x.dtype)
@@ -414,7 +419,8 @@ class ConstrainedSolver(CompiledSolver):
             return self._advance(closures, bounds, current, (args, current.scales))
 
         state = lax.while_loop(lambda current: ~current.done, body, state)
-        return state.x, self._record(state, bounds)
+        record = self._record(state, bounds)
+        return _fixed.restore(closures_of(problem), raw.fixed, bounds, state.x, record, args)
 
     def _record(self, state: CoreState, bounds: Bounds) -> SolveRecord:
         """The `SolveRecord` of a finished state, unscaled."""

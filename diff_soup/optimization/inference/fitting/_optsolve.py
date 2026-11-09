@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 from jaxtyping import PyTree
@@ -39,6 +39,10 @@ from diff_soup.optimization.inference.fitting._protocols import StatisticalInfer
 from diff_soup.optimization.inference.fitting.result import OptResult, TerminationStatus
 from diff_soup.optimization.problem import AbstractOptimizationProblem
 from diff_soup.optimization.solvers._protocol import CompiledSolver
+
+if TYPE_CHECKING:
+    from diff_soup.optimization.inference.fitting import inference_problem
+    from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
 
 #: The built-in solvers and the structure each requires, in the order a refusal lists them.
 _BUILT_IN = (
@@ -506,7 +510,10 @@ def _resolved_optimizer(problem: Any, optimizer: Optional[OptSolver]) -> OptSolv
 
 
 def optsolve(
-    problem: Any,
+    problem: AbstractOptimizationProblem
+    | OptimizationProblem
+    | inference_problem.InferenceProblem
+    | JointInferenceProblem,
     optimizer: Optional[OptSolver] = None,
     *,
     callbacks: tuple = (),

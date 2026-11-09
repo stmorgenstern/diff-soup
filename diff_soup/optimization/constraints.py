@@ -11,7 +11,7 @@ of the constraint terms alone).
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -66,7 +66,9 @@ class Constraints(eqx.Module):
     n_equality: int = eqx.field(static=True, default=0)
     n_inequality: int = eqx.field(static=True, default=0)
     jacobian: str = eqx.field(static=True, default="auto")
-    scales: tuple[Float[Array, " n_eq"], Float[Array, " n_ineq"]] | None = None
+    scales: tuple[Float[ArrayLike, " n_eq"] | None, Float[ArrayLike, " n_ineq"] | None] | None = (
+        None
+    )
 
     def __post_init__(self) -> None:
         """Give each side of `scales` one scale per row: `None` is ones."""
@@ -140,7 +142,7 @@ class Constraints(eqx.Module):
         }
 
 
-def _side_scales(scales: Any, count: int, name: str) -> Array:
+def _side_scales(scales: ArrayLike | None, count: int, name: str) -> Array:
     """One side's scales as a `(count,)` array; ones for `None`."""
     dtype = jnp.result_type(float)
     if scales is None:
