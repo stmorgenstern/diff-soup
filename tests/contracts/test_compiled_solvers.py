@@ -482,3 +482,25 @@ def test_a_runtime_budget_and_tolerance_run_without_a_new_compile():
     assert len(traces) == 1 and [int(r.steps) for r in budgets[:2]] == [2, 5]
     assert int(loose.status) == int(tight.status) == TerminationStatus.KKT_TOL
     assert 1e-12 < float(loose.kkt_error) <= 1e-3 and int(loose.steps) < int(tight.steps)
+
+
+# A runtime tolerance below the default, the solver fields that set it statically, and the toy;
+# measured: each ends KKT_TOL in the same steps either way (8, 1, 11), workstation CPU 2026-11-09
+_TIGHT = {
+    "interior_point": ({"tol": 1e-12}, "inequality"),
+    "sqp": ({"tol": 1e-12, "qp_tol": 1e-14}, "inequality"),
+    "augmented_lagrangian": ({"tol": 1e-11}, "bound"),
+}
+
+
+@pytest.mark.parametrize("solver", _TIGHT)
+def test_a_runtime_tolerance_below_the_default_ends_as_the_solver_field_does(solver):
+    """`run(tol=t)` on the default solver ends `KKT_TOL` in as many steps as the solver built with
+    `tol=t`: the barrier, inner-tolerance and QP floors follow the run's tolerance."""
+    fields, toy = _TIGHT[solver]
+    problem, a = TOYS[toy].problem, TOYS[toy].args_batch[0]
+    default = type(SOLVERS[solver])(hessian="exact")
+    _, runtime = default.run(problem, problem.x0, a, tol=fields["tol"])
+    _, static = dataclasses.replace(default, **fields).run(problem, problem.x0, a)
+    assert int(runtime.status) == int(static.status) == TerminationStatus.KKT_TOL
+    assert int(runtime.steps) == int(static.steps)

@@ -93,7 +93,7 @@ class SQP(ConstrainedSolver):
         tol: The scaled optimality error at which the run ends, by default `max(1e-8, 100 * eps)` for the iterate's dtype: `1e-8` in float64 and `1.2e-5` in float32.
         max_steps: The step budget, `100` by default.
         hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`, as for `InteriorPoint`.
-        qp_tol: The scaled optimality error at which each QP solve ends, by default `max(1e-10, 100 * eps)`: `1e-10` in float64 and `1.2e-5` in float32.
+        qp_tol: The scaled optimality error at which each QP solve ends, by default `max(1e-10, 100 * eps)`: `1e-10` in float64 and `1.2e-5` in float32. A run's `tol` below `tol` lowers it by the same factor.
         qp_max_steps: The step budget of each QP solve, `50` by default.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
         kkt: The [KKTSolve][diff_soup.optimization.solvers.KKTSolve] backend, `DenseKKT()` by default.
@@ -205,6 +205,7 @@ class SQP(ConstrainedSolver):
             qp_bounds,
             d0,
             qp_args,
+            self.qp_tol * jnp.minimum(1.0, state.tol / self.tol),
             z_lower=jnp.where(qp_bounds.has_lower, 1.0, 0.0).astype(dtype),
             z_upper=jnp.where(qp_bounds.has_upper, 1.0, 0.0).astype(dtype),
         )

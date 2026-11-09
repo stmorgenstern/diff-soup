@@ -90,10 +90,9 @@ class InteriorPoint(ConstrainedSolver):
         """The backend of the implicit derivative's KKT system: `kkt`."""
         return self.kkt
 
-    @property
-    def _mu_floor(self) -> float:
-        """The least barrier parameter: `mu_min`, or below `tol` when `tol` is tighter."""
-        return min(self.mu_min, self.tol / (KAPPA_EPS + 1.0))
+    def _mu_floor(self, tol: Float[Array, ""]) -> Float[Array, ""]:
+        """The least barrier parameter: `mu_min`, or below the run's `tol` when it is tighter."""
+        return jnp.minimum(self.mu_min, tol / (KAPPA_EPS + 1.0))
 
     def _restores(self, closures: Closures) -> bool:
         """Whether a failed line search can start the restoration phase."""
@@ -199,7 +198,8 @@ class InteriorPoint(ConstrainedSolver):
                 ]
             )
             count = jnp.sum(bounds.has_lower) + jnp.sum(bounds.has_upper) + s.shape[0]
-            mu = jnp.clip(jnp.sum(products) / jnp.maximum(count, 1), self._mu_floor, mu)
+            floor = self._mu_floor(jnp.asarray(start.limits[1], dtype))
+            mu = jnp.clip(jnp.sum(products) / jnp.maximum(count, 1), floor, mu)
         mu = jnp.asarray(mu, dtype)
         theta, _ = violation(evaluation.equality, evaluation.inequality, s)
         scale = jnp.maximum(1.0, theta)
@@ -241,12 +241,10 @@ class InteriorPoint(ConstrainedSolver):
         )
         return dataclasses.replace(state, kkt_error=regular_error(state, 0.0, bounds))
 
-    def _start(self, closures, bounds, x, args, **multipliers) -> InteriorPointState:
-        """The state at `x` on closures used as given (a QP), unscaled."""
+    def _start(self, closures, bounds, x, args, tol, **multipliers) -> InteriorPointState:
+        """The state at `x` on closures used as given (a QP), unscaled, ending at `tol`."""
         evaluation = evaluate(closures, x, args, _hessian.uses_gauss_newton(self.hessian, closures))
-        start = Start(
-            x, evaluation, unit_scales(closures, x.dtype), None, (self.max_steps, self.tol)
-        )
+        start = Start(x, evaluation, unit_scales(closures, x.dtype), None, (self.max_steps, tol))
         return self._with_termination(self._at(closures, bounds, start, **multipliers))
 
     def _slacks(self, state: InteriorPointState) -> Float[Array, "n_ineq"]:
@@ -265,7 +263,7 @@ class InteriorPoint(ConstrainedSolver):
         self, state: InteriorPointState, bounds: Bounds, restores: bool
     ) -> InteriorPointState:
         """Ipopt's monotone update: reduce `mu` while the barrier problem is solved to `kappa_eps mu`."""
-        floor = self._mu_floor
+        floor = self._mu_floor(state.tol)
 
         def cond(carry):
             mu, _ = carry

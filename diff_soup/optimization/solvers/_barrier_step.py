@@ -289,7 +289,7 @@ def barrier_step(
         failed = ~searched | evaluations_failed
         final, infeasible, error = stepped, jnp.asarray(False), regular_error(stepped, 0.0, bounds)
     else:
-        tol = solver.tol
+        tol = state.tol
         accepted, theta_original = _restoration.accepts(
             stepped.saved,
             stepped.restoration,
