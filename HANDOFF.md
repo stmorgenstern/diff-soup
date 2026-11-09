@@ -217,6 +217,61 @@ the integration file with `-p long_timeout` (1800 s per test, as RP6 ran it). Lo
 | `tests/contracts/test_linear_cudss.py --run-integration` | 0 | 39 passed, 2 skipped (two processes, two devices); the new duplicate-site row passes on the Orin |
 | `tests/integration/test_native_backends.py --run-integration -p long_timeout` | 1 | 11 passed, 3 failed: the three `diffrax` rows (`ModuleNotFoundError: No module named 'diffrax'`, not in the Jetson venv, as in RP6's R18 run); every solver row passes. 949 s, cgroup peak 2.2 GB |
 
-## Next
+## Milestone 6: the native tests, the GPU files, the changelog, ruff
 
-Milestone 6 (GPU files on the workstation, suite rows, ruff).
+At 73676b1 and later (the m4 modules installed; f7b8af7 and after change only docs and this note):
+
+| command | exit | reading |
+|---|---:|---|
+| `.ports/gpu.sh -m pytest -q -p no:cacheprovider --run-integration tests/contracts/test_linear_cudss.py` | 0 | 39 passed, 2 skipped (two processes, two devices) |
+| the same, `tests/contracts/test_linear_complex.py` | 0 | 57 passed |
+| the same, `tests/integration/test_native_backends.py` | 0 | 14 passed, 183 s |
+| the same, `tests/contracts/test_linear_ad.py` | 0 | 13 passed |
+| `.ports/gpu.sh .ports/m4_cudss_stats.py` | 0 | the solve exact; `contract_stats` has 41 keys, no `perturbed_pivot_factorizations` |
+| CPU native files (milestone 4's row) | 0 | 114 passed, 57 skipped |
+| `$SLOT env PYTHONPATH=$PWD JAX_PLATFORMS=cpu rel-docs/bin/python -m mkdocs build --strict -d .ports/m6/site` | 0 | built (the installation page, the two SuperLU notes, the changed docstrings) |
+| `tests/suite_policy.py`; `ruff check diff_soup tests`; `ruff format --check diff_soup tests` | 0, 0, 0 | passed; clean; 549 files formatted |
+
+Changelog (1.2.0): Breaking, the thread rule; Bugfixes, cuDSS's shared slot, the sites, SuperLU's kind
+check; Features, SuperLU's `singular`; Other, the removed cuDSS key, the default architectures and the
+ARM line. The full CPU suite (`--run-integration --run-validation`) was not run in this session: it is
+batch C's gate.
+
+## Ready to merge
+
+**Ready to merge at `bd1ced0`'s successor (this note's commit) for milestones 3 to 6**, on top of
+milestones 1-2 (`c93b21e`, batch B). Native sources changed again in milestone 4 (`contract_handlers.inc`,
+`superlu_solver.cpp`, the cuDSS `CMakeLists.txt`), so the modules to install by rename are those of
+`/drive2/research2/diff_soup_wave2/rf-store/fx-native/m4/` (`SHA256SUMS`): KLU `4473e5ae` (unchanged
+since m2), **SuperLU `b6ce5203`**, **cuDSS cu12 `d22bfda9`**. Milestone 3 changed no native source (the
+shipped SuperLU_MT patch stays). The aarch64 modules for the release are in
+`rf-store/fx-native/jetson/` (they must survive the cleanup, as RP6's did).
+
+## Not verified
+
+- The x86 cuDSS CUDA 13 module (`cudss_ffi/cu13/`) was not rebuilt (the Docker script builds the CUDA 12
+  line only), so it predates milestones 1 and 4; the workstation's envs load cu12. The same sources
+  build and pass as a CUDA 13 module on the Jetson.
+- Two GPUs: the two-device rows skip on one GPU; the run-local words' buffer check is argued for a
+  multi-device program (each device's buffers are its own) but not run on two GPUs.
+- Whether XLA ever copies a handle between its producing call and a consumer in an engine's loop body
+  (that would turn a static dispatch into a host read; correct, slower): the straight-line row
+  (`host_reads == 0`) and the suite's counts hold, the engines' read counts were not re-measured.
+- SuperLU_MT's measurements are one machine's (host gcc 13.3, not the release image's gcc 14), 20
+  rounds a cell, 32 threads on a 32-thread host; the lighter fix's zero wrong solves are four runs, not a
+  proof; the per-pool cost is a C driver's rotation, not XLA's own thread use.
+- The r1 gate as written: the review's script unchanged still shows sites growing with the analyses,
+  because the analyses themselves are never collected in that loop (JAX's abstract-evaluation cache and
+  `analyze`'s memo); flat only with both caches dropped (milestone 1).
+- The full CPU suite and the Engaging rows.
+
+## Asks
+
+1. Coordinator: merge milestones 3-6 as a later batch with the m4 modules (above).
+2. Owner (recorded in `HANDOFF-nested.md`): `DEFAULT_CONTEXT`'s exemption from the one-thread rule.
+3. Owner: the shipped SuperLU_MT patch costs 3.3x at 5 threads on the random pattern (no parallel
+   speed-up left) and wins on the LFP cell; acquire-release spin locks with pipelining are correct in
+   every round run but not bit-identical to one thread. R17 keeps the patch; a relaxed R17 (zero wrong
+   without bit-identity) would favour the fenced locks on random patterns.
+4. Owner, optional: keeping the `Analysis` out of cached primitive params, so that a dropped
+   `Analysis` is collected (and its native analysis and sites freed) without `jax.clear_caches()`.
