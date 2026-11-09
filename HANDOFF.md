@@ -92,6 +92,23 @@ one bugfix line.
 | `.ports/m2/r5c_superlu_status.py` (the review's r5c), milestone 1 module (`r5c_before.log`) | 0 | SuperLU status 0, residual nan, not finite (as the review) |
 | the same, milestone 2 module `f3f08ca5` (`r5c_after.log`) | 0 | **SuperLU status 0, reported residual 2.2e-16, finite, true relative residual 1.2e-16**; KLU 2.1e-16 unchanged |
 
+## Regression rows at a2ce8a0 (milestones 1 and 2, the modules of `rf-store/fx-native/m2/`)
+
+| command | exit | reading |
+|---|---:|---|
+| `SLOT_MEM=8G $SLOT env PYTHONPATH=$PWD JAX_PLATFORMS=cpu $PY -m pytest -q -p no:cacheprovider --run-integration tests/contracts/test_linear_{host,complex,dense,primitive,ad}.py` (slot's 5 threads: SuperLU on 5) | 0 | 95 passed, 21 skipped (cuDSS rows on the CPU), 41 s |
+| `.ports/gpu.sh -m pytest -q -p no:cacheprovider --run-integration tests/contracts/test_linear_cudss.py` | 0 | 39 passed, 2 skipped (two processes, two devices) |
+| the same, `tests/contracts/test_linear_complex.py` | 0 | 57 passed |
+| the same, `tests/integration/test_native_backends.py` | 0 | 14 passed, 182 s |
+| the same, `tests/contracts/test_linear_ad.py` | 0 | 13 passed |
+| `tests/suite_policy.py`; `ruff check` and `ruff format --check` on `diff_soup/linear` and the two test files | 0 | passed; clean |
+
+**Ready to merge at `a2ce8a0` (milestones 1-2)**, with the three modules of
+`/drive2/research2/diff_soup_wave2/rf-store/fx-native/m2/` (`SHA256SUMS` there) installed by rename into
+`diff_soup/_internal/` outside a running suite. The module sources changed in `slot_registry.h`, so all
+three must travel: KLU `4473e5ae`, SuperLU `f3f08ca5`, cuDSS cu12 `fe5009d4`. The cu13 module and the
+aarch64 modules are not rebuilt yet (milestone 5 rebuilds the Jetson ones).
+
 ## Next
 
 Milestone 3 (SuperLU_MT measurements and the fenced locks), 4 (rows
