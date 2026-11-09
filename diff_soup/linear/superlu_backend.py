@@ -567,7 +567,8 @@ class SuperLU(LinearSolver):
             runs), ``refactorizations`` (runs reusing a slot's structure),
             ``rebuilds`` (factorizations a solve started because its slot held
             other values), ``solves`` (``dgstrs`` or ``zgstrs`` calls), ``nonfinite``
-            (factor requests with non-finite values),
+            and ``singular`` (factor requests with non-finite values or a
+            singular result),
             ``released_context_errors`` (calls refused because their
             context was released), ``live_slots``, ``live_sites`` and
             ``live_analyses``.
