@@ -71,6 +71,11 @@ For CUDA 12, use the `cu12` extra, leave out `nvidia-cuda-nvcc`, and point the
 last command at a CUDA 12 toolkit's compiler with
 `-C cmake.define.DIFF_SOUP_NVCC=/usr/local/cuda-12/bin/nvcc`.
 
+The KLU solver links the SuiteSparse libraries vendored in the repository, which
+are built for x86-64. On ARM (aarch64), pass
+`-C cmake.define.KLU_VENDOR_DIR=<tree>` naming a SuiteSparse 7.10 tree built for
+the host, with `include/suitesparse/klu.h` and the shared libraries in `lib/`.
+
 `pip install -e` in the last command installs in development mode, and the
 `dev` extra adds the test and lint tools. The SuperLU_MT solver is built when
 a SuperLU_MT installation is found; `diff_soup/_internal/superlu_ffi/build_superlu_mt.sh`

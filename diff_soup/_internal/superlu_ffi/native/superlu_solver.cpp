@@ -154,6 +154,7 @@ struct Stats {
     int64_t rebuilds = 0;          // factorizations started by a solve
     int64_t solves = 0;            // dgstrs or zgstrs calls
     int64_t nonfinite = 0;         // factor requests refused for non-finite values
+    int64_t singular = 0;          // factor requests that ended singular (info in 1 .. n)
     int64_t released_context_errors = 0;  // calls refused because their context was released
 };
 
@@ -401,6 +402,7 @@ int32_t FactorSlot(Slot& slot, const double* values) {
         ++reg.stats.factorizations;
     }
     slot.status = (info == 0) ? kSuccess : kSingular;
+    if (info != 0) ++reg.stats.singular;
     return slot.status;
 }
 
@@ -807,6 +809,7 @@ NB_MODULE(_native_superlu, m) {
             d["rebuilds"] = s.rebuilds;
             d["solves"] = s.solves;
             d["nonfinite"] = s.nonfinite;
+            d["singular"] = s.singular;
             d["released_context_errors"] = s.released_context_errors;
             d["live_slots"] = live_slots;
             d["live_analyses"] = live_analyses;
@@ -815,7 +818,7 @@ NB_MODULE(_native_superlu, m) {
         },
         "Process-wide counters of factorizations (refact = NO), refactorizations "
         "(refact = YES), rebuilds started by a solve, solves, refused non-finite requests, "
-        "calls refused for a released context, and live objects.");
+        "singular requests, calls refused for a released context, and live objects.");
     m.def(
         "reset_stats",
         []() {

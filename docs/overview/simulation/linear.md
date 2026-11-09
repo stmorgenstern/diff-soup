@@ -48,11 +48,11 @@ The direct backends factor the iteration matrix and come in both forms.
   the resolved sparse backend is unavailable the solve raises with a
   build hint, and `linear="dense"` opts into the dense cost.
 
-!!! warning "SuperLU_MT on more than one thread"
-    SuperLU_MT's threaded factorization can return a wrong solution and
-    report success, an upstream defect. A source build uses every core
-    the process may run on unless `OMP_NUM_THREADS` caps it. Set
-    `OMP_NUM_THREADS=1`, or use `"klu"`.
+!!! note "SuperLU_MT on more than one thread"
+    A source build uses every core the process may run on unless
+    `OMP_NUM_THREADS` caps it. Its factors on any number of threads equal
+    one thread's, bit for bit, but on many patterns more threads do not
+    factor faster: set `OMP_NUM_THREADS` to the count that does.
 
 The composed backends take arguments, so they are objects only.
 

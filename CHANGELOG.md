@@ -24,6 +24,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - Under `jax.default_device`, `linear="auto"` and consistent initialization choose their backend by that device's platform, and native factors are kept per device, so one process can run lanes on a GPU and on CPUs. `checkpointed_map(device_groups=)` accepts groups of another platform than the default backend's.
 - `KLU.native_stats` reports `live_lu_entries`.
+- `SuperLU.native_stats` reports `singular`, the factor requests that ended singular, as `KLU.native_stats` does.
 - Added `ds.jacobian_pattern(fn, y, *args, within=None)`, the entries of a Jacobian that can be nonzero, read from the function's tangent map without evaluating it. Rules cover loops, branches, gathers, scatters at known indices, cumulative sums, convolutions, linear solves, `jax.checkpoint`, and `jax.custom_vjp` functions, read through their `bwd`; an operation without one falls back to every entry with a warning, bounded by `within`. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
 - `ds.topology_report` adds `pullback_count`, and its `color_count` is now the solver's own: the colors of the rows the solver colors, with the rows it holds out recovered by pullback. Previously it colored the whole pattern.
 - `TerminationStatus` members are now also their integer codes, so a compiled solver's `SolveRecord.status` compares with them under `jit` and `TerminationStatus(code)` reads a code back. Their string values are unchanged.
@@ -64,6 +65,8 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 - Three undocumented module paths moved: `diff_soup.timestepping.consistent_ic` and `diff_soup.problem.consistent_init` are now `diff_soup.problem.implicit.consistent_init`, and `diff_soup.timestepping.vsvo.common.weights` is now `diff_soup.utils.weights`.
 - `ds.optimization.inference.approx.FluxNet` raises `AttributeError` like any other missing name. It raised a `TypeError` naming `eqx.nn.MLP` since its removal.
+- `CuDSS`'s `contract_stats` no longer reports `perturbed_pivot_factorizations`, which was always 0: every cuDSS factor runs with pivot perturbation off.
+- The cuDSS extension's default CUDA architectures add `87-real` (Jetson Orin), and the installation page says how to build the KLU extension on ARM (`KLU_VENDOR_DIR`).
 - A diff-soup environment variable set to an empty string now counts as unset and takes its default; the variables and the changes `import diff_soup` makes are listed on the installation page. Previously an empty `DIFFSOUP_PROCESSES` or `DIFFSOUP_NODES` raised `ValueError`.
 - `diff_soup.inference` is now `diff_soup.optimization.inference`, and `optsolve`, `OptResult`, the optimization problems and the solvers are also at the top of `ds.optimization`. `ds.inference` and every `diff_soup.inference` import path still work for this release, return the same objects and warn once with a `DeprecationWarning`; they will be removed in 1.3.
 
