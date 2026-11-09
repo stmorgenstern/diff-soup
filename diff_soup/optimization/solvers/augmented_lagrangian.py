@@ -107,8 +107,8 @@ class AugmentedLagrangian(ConstrainedSolver):
     degenerate constraints.
 
     Args:
-        tol: The scaled optimality error at which the run ends, `1e-8` by default.
-        feasibility_tol: The constraint violation at which the run ends, `1e-8` by default.
+        tol: The scaled optimality error at which the run ends, by default `max(1e-8, 100 * eps)` for the iterate's dtype: `1e-8` in float64 and `1.2e-5` in float32.
+        feasibility_tol: The constraint violation at which the run ends, by default `max(1e-8, 100 * eps)`: `1e-8` in float64 and `1.2e-5` in float32.
         max_steps: The outer step budget, `50` by default.
         rho_init: The first penalty, `10.0` by default.
         rho_factor: The factor the penalty grows by when the violation did not fall enough, `10.0` by default.
@@ -119,9 +119,10 @@ class AugmentedLagrangian(ConstrainedSolver):
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
+    _default_tolerances: ClassVar[dict[str, float]] = {"tol": 1e-8, "feasibility_tol": 1e-8}
 
-    tol: float = eqx.field(static=True, default=1e-8)
-    feasibility_tol: float = eqx.field(static=True, default=1e-8)
+    tol: float | None = eqx.field(static=True, default=None)
+    feasibility_tol: float | None = eqx.field(static=True, default=None)
     max_steps: int = eqx.field(static=True, default=50)
     rho_init: float = eqx.field(static=True, default=10.0)
     rho_factor: float = eqx.field(static=True, default=10.0)

@@ -47,6 +47,26 @@ from diff_soup.optimization.solvers._protocol import (
 
 #: Ipopt's `diverging_iterates_tol`: an iterate entry beyond it ends the run with `DIVERGED`.
 DIVERGED_X = 1e20
+#: Ours: a tolerance left unset is at least this many machine epsilons of the iterate's dtype.
+#: Measured: the least decade at which every float32 run of the three solvers, in both Hessian
+#: modes, ends `KKT_TOL` on HS35, a bound-active toy and a least-squares toy, workstation CPU
+#: 2026-11-08 (10 eps fails SQP's QPs and the augmented Lagrangian on HS35).
+EPS_FACTOR = 100.0
+
+
+def default_tolerance(default: float, dtype: jnp.dtype) -> float:
+    """The float64 `default` raised to `EPS_FACTOR * eps` of `dtype`.
+
+    In float64 `EPS_FACTOR * eps` is `2.2e-14`, below every default, so `default` is returned
+    unchanged. In float32 it is `1.2e-5`.
+    """
+    return max(default, EPS_FACTOR * float(jnp.finfo(dtype).eps))
+
+
+def iterate_dtype(x: ArrayLike) -> jnp.dtype:
+    """The floating dtype of an iterate: that of `x`, or the default float when `x` is not floating."""
+    dtype = jnp.asarray(x).dtype
+    return dtype if jnp.issubdtype(dtype, jnp.inexact) else jnp.result_type(float)
 
 
 class CoreState(SolverState):
@@ -189,10 +209,21 @@ class ConstrainedSolver(CompiledSolver):
     """A compiled constrained solver: the shared start, termination, record and loop."""
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
-    tol: eqx.AbstractVar[float]
+    #: Each tolerance field and its float64 default, which `None` resolves to.
+    _default_tolerances: ClassVar[dict[str, float]] = {"tol": 1e-8}
+    tol: eqx.AbstractVar[float | None]
     max_steps: eqx.AbstractVar[int]
     hessian: eqx.AbstractVar[str]
     adjoint: eqx.AbstractVar[AbstractAdjoint]
+
+    def _for_dtype(self, dtype: jnp.dtype):
+        """This solver with each tolerance left `None` resolved for an iterate of `dtype`."""
+        unset = {
+            name: default_tolerance(default, dtype)
+            for name, default in self._default_tolerances.items()
+            if getattr(self, name) is None
+        }
+        return dataclasses.replace(self, **unset) if unset else self
 
     @abc.abstractmethod
     def _place(self, x0: Float[Array, "n"], bounds: Bounds, warm: bool) -> Float[Array, "n"]:
@@ -273,19 +304,21 @@ class ConstrainedSolver(CompiledSolver):
         warm_start: SolveRecord | None = None,
     ) -> CoreState:
         """The state at `x0` moved into its bounds, or from a `warm_start` record's multipliers."""
-        raw, closures, bounds = self._prepare(problem, x0)
-        return self._init(problem, raw, closures, bounds, x0, args, warm_start)
+        solver = self._for_dtype(iterate_dtype(x0))
+        raw, closures, bounds = solver._prepare(problem, x0)
+        return solver._init(problem, raw, closures, bounds, x0, args, warm_start)
 
     def step(self, problem: OptimizationProblem, state: CoreState, args: PyTree) -> CoreState:
         """One step, without the termination test."""
-        _, closures, bounds = self._prepare(problem, state.x)
-        return self._iterate(closures, bounds, state, (args, state.scales))
+        solver = self._for_dtype(state.x.dtype)
+        _, closures, bounds = solver._prepare(problem, state.x)
+        return solver._iterate(closures, bounds, state, (args, state.scales))
 
     def terminate(
         self, problem: OptimizationProblem | None, state: CoreState, args: PyTree
     ) -> tuple[Bool[Array, ""], Int[Array, ""]]:
         """End on the scaled optimality error, the budget, divergence, or an earlier failure."""
-        converged = self._converged(state)
+        converged = self._for_dtype(state.x.dtype)._converged(state)
         finite = (
             jnp.all(jnp.isfinite(state.x))
             & jnp.all(jnp.isfinite(state.lam_e))
@@ -326,7 +359,9 @@ class ConstrainedSolver(CompiledSolver):
         warm_start: SolveRecord | None = None,
     ) -> tuple[Float[Array, "n"], SolveRecord]:
         """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
-        solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
+        solver = self._for_dtype(iterate_dtype(x0))
+        if max_steps is not None:
+            solver = dataclasses.replace(solver, max_steps=max_steps)
         return implicit_run(
             solver._run_primal, _raw, self._kkt, problem, x0, args, warm_start, self.adjoint
         )
