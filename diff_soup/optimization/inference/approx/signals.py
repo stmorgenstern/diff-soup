@@ -50,6 +50,14 @@ segment *to its left*. Concretely, a numerical solver that has just
 integrated a step ending precisely at knot ``t_k`` and then evaluates the
 signal at ``t == t_k`` sees the value the step was actually integrated
 against — the left segment — not the one that is about to start.
+
+Each of them is a polynomial on every segment, and ``polynomials()`` returns
+its exact power-basis coefficients in the time since the segment's start,
+shape ``(K, degree + 1)`` with the constant term first. This is the form a
+schedule segment's target takes, so a control lowers a signal onto a schedule
+without sampling it.
+[Fourier][diff_soup.optimization.inference.approx.signals.Fourier] is not
+piecewise polynomial and has none.
 """
 
 from __future__ import annotations
@@ -169,6 +177,14 @@ class PiecewiseConstant(eqx.Module):
         )
         return self.values[idx]
 
+    def polynomials(self) -> jax.Array:
+        """Return each segment's coefficients in the time since its start: its value.
+
+        Returns:
+            Shape ``(K, 1)``, or ``(K, 1, m)`` for an ``m``-component signal.
+        """
+        return self.values[:, None]
+
     def learnable_paths(self) -> tuple[str, ...]:
         """Return the learnable-leaf path of this signal (``"values"``).
 
@@ -216,6 +232,22 @@ class PiecewiseLinear(eqx.Module):
         if self.values.ndim > 1:
             frac = frac[..., None]
         return v0 + frac * (v1 - v0)
+
+    def polynomials(self) -> jax.Array:
+        """Return each segment's power-basis coefficients in ``tau``, the time since its start.
+
+        Segment ``k`` is ``values[k] + slope * tau``, the slope the change in value over
+        the segment's length.
+
+        Returns:
+            Shape ``(K, 2)``, or ``(K, 2, m)`` for an ``m``-component signal, constant term
+            first.
+        """
+        width = jnp.diff(self.knots)
+        start, end = self.values[:-1], self.values[1:]
+        if self.values.ndim > 1:
+            width = width[:, None]
+        return jnp.stack([start, (end - start) / width], axis=1)
 
     def learnable_paths(self) -> tuple[str, ...]:
         """Return the learnable-leaf path of this signal (``"values"``).
@@ -291,6 +323,26 @@ class CubicHermite(eqx.Module):
         h11 = s3 - s2
 
         return h00 * v0 + h10 * dt_b * m0 + h01 * v1 + h11 * dt_b * m1
+
+    def polynomials(self) -> jax.Array:
+        """Return each segment's power-basis coefficients in ``tau``, the time since its start.
+
+        Segment ``k`` is the cubic in ``tau`` with the value and slope of each of its two
+        knots.
+
+        Returns:
+            Shape ``(K, 4)``, or ``(K, 4, m)`` for an ``m``-component signal, constant term
+            first.
+        """
+        width = jnp.diff(self.knots)
+        v0, v1 = self.values[:-1], self.values[1:]
+        m0, m1 = self.slopes[:-1], self.slopes[1:]
+        if self.values.ndim > 1:
+            width = width[:, None]
+        secant = (v1 - v0) / width
+        quadratic = (3.0 * secant - 2.0 * m0 - m1) / width
+        cubic = (m0 + m1 - 2.0 * secant) / (width * width)
+        return jnp.stack([v0, m0, quadratic, cubic], axis=1)
 
     def learnable_paths(self) -> tuple[str, ...]:
         """Return the learnable-leaf paths (``"values"``, ``"slopes"``).
@@ -370,8 +422,19 @@ class BSpline(eqx.Module):
             n_segments - 1,
         )
         tau = jnp.clip(t, self.knots[0], self.knots[-1]) - self.knots[idx]
-        coefficients = jnp.tensordot(self._matrix()[idx], self.control_points, axes=1)
+        coefficients = self.polynomials()[idx]
         return _horner(jnp.moveaxis(coefficients, jnp.ndim(tau), 0), tau)
+
+    def polynomials(self) -> jax.Array:
+        """Return each segment's power-basis coefficients in ``tau``, the time since its start.
+
+        The static basis matrix applied to the control points, one matrix product.
+
+        Returns:
+            Shape ``(K, 4)``, or ``(K, 4, m)`` for an ``m``-component signal, constant term
+            first.
+        """
+        return jnp.tensordot(self._matrix(), self.control_points, axes=1)
 
     def learnable_paths(self) -> tuple[str, ...]:
         """Return the learnable-leaf path of this signal (``"control_points"``).
