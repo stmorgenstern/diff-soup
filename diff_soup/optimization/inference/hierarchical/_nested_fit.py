@@ -122,9 +122,10 @@ def _spliced(
     other: elimination.LevelSystem,
     cut: int,
     members: np.ndarray,
+    point: np.ndarray,
     cost: float,
 ) -> elimination.LevelSystem:
-    """``system`` with the subtrees of ``members`` of level ``cut`` taken from ``other``, at its point.
+    """``system`` with the subtrees of ``members`` of level ``cut`` taken from ``other``, at ``point``.
 
     Every node of level ``cut`` and below whose member (one flag per member)
     is set takes its diagonal block, its couplings and its gradient from
@@ -151,7 +152,7 @@ def _spliced(
         diagonal=tuple(diagonal),
         cross=(None,) + tuple(tuple(row) for row in cross[1:]),
         gradient=tuple(gradient),
-        point=other.point,
+        point=jax.numpy.asarray(point, dtype=system.root.dtype),
         cost=jax.numpy.asarray(cost, dtype=system.root.dtype),
     )
 
@@ -178,6 +179,10 @@ class _NestedFit(_JointFit):
     one polish to the next. With no polish iterations the fit makes the joint
     mode's attempts.
     """
+
+    # The mode of the polish's request at its trial: "value", whose moved members a blocks
+    # request then reads, or "frozen", whose gradients on the kept Jacobians they take.
+    polish_pass = "value"
 
     def __init__(self, solver: TrustRegion, route: _LaneRoute, callbacks: tuple):
         super().__init__(solver, route, callbacks)
@@ -238,6 +243,9 @@ class _NestedFit(_JointFit):
             self.polish_off = bool(_saved_count(state, "polish_off"))
             self.small_gains = _saved_count(state, "polish_small_gains")
             self.resumed_scale = np.array(state["scale"], dtype=dtype)
+        if self.polish_pass == "frozen":
+            # Every blocks request keeps its lanes' Jacobians, which the frozen pass reads.
+            self.route.problem.prepare(modes=("value", "blocks", "frozen"))
         return super().run(state)
 
     def nested_entries(self) -> dict:
@@ -746,7 +754,8 @@ class _NestedFit(_JointFit):
             lane_costs = np.array(results.cost, dtype=np.float64)[0]
         else:
             lane_costs = self.lane_costs_of(results, base.lane_costs)
-            system = _spliced(base.system, system, self.cut, moved, self.cost_at(lane_costs, point))
+            cost = self.cost_at(lane_costs, point)
+            system = _spliced(base.system, system, self.cut, moved, point, cost)
         failures, ignored = route.weigh(self.nonfinite_block_failures(results, system))
         work.record(attempt, ignored, inner=True)
         if failures:
@@ -839,8 +848,13 @@ class _NestedFit(_JointFit):
                 pending = self.failed_members(failures) if failures else pending[:0]
 
     def polish_request(self, point: np.ndarray, members: np.ndarray) -> Any:
-        """The polish's request at its trial ``point``: the lanes of ``members``, in ``value`` mode."""
-        return self.evaluate("value", point, self.member_lanes(members))
+        """The polish's request at its trial ``point`` over the lanes of ``members``.
+
+        In ``polish_pass`` mode: ``value``, or ``frozen``, which also gives
+        each lane's ``J^T r`` there on the Jacobian of its last ``blocks``
+        request, the moved members' gradient at their new point.
+        """
+        return self.evaluate(self.polish_pass, point, self.member_lanes(members))
 
     def lockstep(
         self,
@@ -1144,6 +1158,17 @@ class _NestedFit(_JointFit):
             finish(floor, _RADIUS)
             k += 1
             if not taken.any():
+                continue
+            if self.polish_pass == "frozen" and not trial_failures:
+                # The frozen pass gave the moved members' gradient at their new point on
+                # the matrix their last blocks request kept: their nodes take it, and the
+                # exit's request of every lane gives the system where the polish ends.
+                at_trial = self.lane_costs_of(trial_results, lane_costs)
+                lane_costs = np.where(accepted[self.lane_member], at_trial, lane_costs)
+                frozen = route.frozen_system(system, trial_results, combined)
+                cost = self.cost_at(lane_costs, x)
+                system = _spliced(system, frozen, self.cut, accepted, x, cost)
+                spliced = True
                 continue
             # (1) of the next iteration: the system at the members' new point. The last
             # iteration requests every lane there, and so does one whose moved members

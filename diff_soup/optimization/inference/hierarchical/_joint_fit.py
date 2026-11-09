@@ -98,12 +98,15 @@ class _JointFit:
 
         A lane the evaluation solved at a higher rung holds that rung from then on.
         A request of the matrix's mode (``blocks``, or ``hessian`` under
-        ``hessian="true"``) counts in the work's ``blocks``, any other in ``value``.
+        ``hessian="true"``) counts in the work's ``blocks``, a ``frozen`` one in
+        ``frozen``, any other in ``value``.
         """
         results = self.route.evaluate(mode, point, **self.work.request(lanes))
         self.work.hold(results)
         if mode == self.matrix:
             self.work.blocks += 1
+        elif mode == "frozen":
+            self.work.frozen += 1
         else:
             self.work.value += 1
         return results
