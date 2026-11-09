@@ -186,6 +186,19 @@ nested problem at one inner step. A first exact-route attempt that took the exac
   files (`test_fits`, `test_structural_fitting`, `test_optimizer_stops`, `test_lowered_study`, `test_architecture`,
   `test_hierarchy`): 157 passed.
 
+## Merging `opt/rf-tol` (batch B), checked
+
+A scratch merge of `opt/rf-tol` (7c72fee) into this branch, in `/drive2/research2/diff_soup_wave2/nf-mergecheck`
+(working tree left resolved and uncommitted; delete it when batch B is in), conflicts in three files only:
+- `diff_soup/optimization/solvers/_core.py`, `ConstrainedSolver.run`: keep rf-tol's
+  `solver = self._for_dtype(iterate_dtype(x0))`, drop its `dataclasses.replace(solver, max_steps=...)`, keep this
+  branch's `limits = ...`, and call `implicit_run(solver._run_primal, self._rule, ...)`.
+- `tests/suite_manifest.json` and `tests/README.md`: both increments, so whole suite 52 files, 465 functions, 792
+  collected and 16,978 lines; `contracts` 22, 201, 392, 6,763 (`public_api` as this branch).
+The resolution diff against this branch's head is `.ports/rf-tol-merge-resolution.diff`. On the merged tree:
+`suite_policy.py` passes, `ruff check` is clean, and `test_compiled_solvers.py`, `test_nested_fit.py` and
+`test_optimization_solvers.py` give 58 passed (exit 0), rf-tol's float32 rows included.
+
 ## Not verified
 
 - **Reverse mode over a `"data"` mesh crashes XLA's CPU compiler** (segfault in `backend_compile_and_load`) for
@@ -197,6 +210,3 @@ nested problem at one inner step. A first exact-route attempt that took the exac
 - No GPU run (cuDSS rows owed as before); the nested problem never ran on a GPU.
 - The noise-floor stop (`InnerSteps.noise_floor > 0`) and the per-member floor have no test or gate.
 - The cost table's walls include compiling; per-step walls on a cheap model would need a longer run.
-- `opt/rf-tol` merge (batch B): textual conflicts expected in `ConstrainedSolver.run` (resolution above), in
-  `tests/suite_manifest.json` and `tests/README.md` ceilings (resolution: add both increments, rf-tol's +2 collected
-  and +8 lines in `contracts` and the whole suite), checked by a scratch merge below if listed.
