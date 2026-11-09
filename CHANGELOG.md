@@ -44,6 +44,8 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - A `KLU`, `SuperLU` or `CuDSS` factor lowered into a program over several devices of one process now raises `FactorContractError`. Previously XLA failed with an internal error, or, in a `shard_map` body, the devices shared one native factor.
 - Complex values on an analysis declared `spd=True`, and on a `CuDSS` analysis with `downcast_factors` or `emulation_mantissa_bits`, now raise `FactorContractError`. Previously cuDSS factored them as a real symmetric positive definite matrix, or ignored the option.
 - Fixed `SuperLU` on more than one thread, which returned a wrong solution for a few factors in a hundred with a success status. Its factors on any number of threads now equal one thread's, bit for bit; the build patches SuperLU_MT 4.0.2 (`diff_soup/_internal/superlu_ffi/patches/`).
+- Fixed the derivative of an `InteriorPoint`, `SQP` or `AugmentedLagrangian` solution in the problem's bounds, which was silently zero: an active bound now moves the coordinate it holds, in both implicit rules, and the bound's multiplier is the objective's rate in it. A tangent on the start point, the warm start or the problem's scales now raises `ConfigurationError`; previously it was dropped.
+- Fixed `InteriorPoint` and `SQP` on a variable whose lower and upper bounds are equal, which ended with `SOLVER_FAILED` at the first step. The variable is now fixed at its value before the solve, as Ipopt's `fixed_variable_treatment="make_parameter"` does, under all three compiled solvers, and its bound multipliers are the gradient of the Lagrangian there.
 
 ### Performance
 
