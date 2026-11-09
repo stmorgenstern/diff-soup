@@ -28,7 +28,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `hessian_composition=` to `OptimizationProblem.from_value` and `LeastSquaresProblem.from_residual`. Under `"forward-over-forward"` the gradient, the Hessians and the Lagrangian Hessians `with_constraints` adds are all forward mode, so `InteriorPoint`, `SQP`, `AugmentedLagrangian` and their implicit derivative take an objective whose inner solve supports forward mode only, such as a DAE solve under `ForwardAdjoint`. The default, `"forward-over-reverse"`, is unchanged.
 - Added `CheckpointAdjoint(reverse_over_reverse=True)`, under which a gradient through a solve can itself be differentiated in reverse mode, as in `jax.grad` of `jax.grad`, and the solve also takes `jax.jvp`. Forward mode over the gradient then costs about twice as much, so the default, `False`, keeps the previous rule.
 - Added `adjoint=` to `InteriorPoint`, `SQP` and `AugmentedLagrangian`. `ds.nonlinear.ImplicitAdjoint()` differentiates the solution in `args` by one reverse rule, a transposed KKT solve, so `jax.grad` costs one solve however large `args` is and runs through closures that differentiate in reverse mode only. The default, `ds.ForwardAdjoint()`, keeps the forward rule.
-- `InteriorPoint`, `SQP` and `AugmentedLagrangian` run in float32 and return float32 records. Their default tolerances are set for float64, so pass ones float32 can reach, such as `tol=1e-5` (and `qp_tol=1e-5` for `SQP`).
+- `InteriorPoint`, `SQP` and `AugmentedLagrangian` run in float32 and return float32 records. A tolerance left unset follows the iterate's dtype: `max(default, 100 * eps)`, which is the float64 default unchanged and `1.2e-5` in float32.
 
 ### Bugfixes
 
