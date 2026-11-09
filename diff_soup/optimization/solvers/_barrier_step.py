@@ -288,8 +288,9 @@ def barrier_step(
     if not restores:
         failed = ~searched | evaluations_failed
         final, infeasible, error = stepped, jnp.asarray(False), regular_error(stepped, 0.0, bounds)
+        restored = jnp.asarray(False)
     else:
-        tol = solver.tol
+        tol = state.tol
         accepted, theta_original = _restoration.accepts(
             stepped.saved,
             stepped.restoration,
@@ -309,10 +310,14 @@ def barrier_step(
         converged_at_entry = enter & (error <= tol)
         infeasible = (converged & (theta_original > tol)) | (converged_at_entry & (theta > tol))
         failed = (~searched & ~enter) | converged | over | converged_at_entry | evaluations_failed
+        restored = on | enter
+    unrecovered = jnp.where(
+        restored, TerminationStatus.RESTORATION_FAILED, TerminationStatus.LINE_SEARCH_FAILED
+    )
     status = jnp.where(
         evaluations_failed,
         TerminationStatus.SOLVER_FAILED,
-        jnp.where(infeasible, TerminationStatus.INFEASIBLE, TerminationStatus.RESTORATION_FAILED),
+        jnp.where(infeasible, TerminationStatus.INFEASIBLE, unrecovered),
     )
     return dataclasses.replace(
         final,

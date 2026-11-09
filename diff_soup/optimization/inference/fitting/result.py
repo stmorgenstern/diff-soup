@@ -41,8 +41,9 @@ class TerminationStatus(int, enum.Enum):
         INFEASIBLE: A constrained solver's restoration phase converged, or the augmented
             Lagrangian's penalty reached its cap, at a point that still violates the
             constraints.
-        RESTORATION_FAILED: A constrained solver's line search failed, and its restoration
-            phase, where there is one, did not recover.
+        RESTORATION_FAILED: The interior point's restoration phase ran and did not recover.
+        LINE_SEARCH_FAILED: A constrained solver's line search found no acceptable step and the
+            solver has no restoration phase to start.
         SOLVER_FAILED: A time-stepping solve at the solution did not reach the end of its
             span, or a constrained solver met consecutive failed trial evaluations (a NaN or
             an unfinished DAE solve).
@@ -80,6 +81,7 @@ class TerminationStatus(int, enum.Enum):
     UNKNOWN = 12, "unknown"
     STALLED = 13, "stalled"
     DERIVATIVE_ACCURACY = 14, "derivative_accuracy"
+    LINE_SEARCH_FAILED = 15, "line_search_failed"
 
     @classmethod
     def _missing_(cls, value: object) -> Optional[TerminationStatus]:

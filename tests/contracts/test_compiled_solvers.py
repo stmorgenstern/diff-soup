@@ -315,6 +315,26 @@ def _unbounded():
     return constrained(objective([0.0, 0.0], lambda x: -x[0] - x[1]), 1.0)
 
 
+def _narrow_bound():
+    """`min (x0 / w - 2)^2 + (x1 - 2)^2` with `0 <= x0 <= w` for `w = 1e-9`, narrower than SQP's
+    absolute QP push."""
+    w = 1e-9
+    bounds = (jnp.array([0.0, 0.0]), jnp.array([w, 5.0]))
+    return objective([0.5 * w, 0.5], lambda x: (x[0] / w - 2.0) ** 2 + (x[1] - 2.0) ** 2, bounds)
+
+
+def _wrong_jacobian():
+    """`min x^2` with `c(x) = -x - a = 0` whose Jacobian reads `+1`: every step along the
+    linearization raises the violation, so the line search fails at an infeasible point."""
+    row = lambda x, a: x[0] - jax.lax.stop_gradient(2.0 * x[0]) - a  # noqa: E731
+    return constrained(
+        objective([1.0], lambda x: x[0] ** 2),
+        1.0,
+        equality=lambda x, a: jnp.stack([row(x, a)]),
+        n_eq=1,
+    )
+
+
 _STATUS = TerminationStatus
 # How a run ends: the solver and its options, the problem, the value of `args`, the status.
 ENDS = {
@@ -334,6 +354,15 @@ ENDS = {
         lambda: hs35().problem,
         3.0,
         _STATUS.SOLVER_FAILED,
+    ),
+    "narrow_bound": ("sqp", {}, _narrow_bound, None, _STATUS.KKT_TOL),
+    "line_search-sqp": ("sqp", {}, _wrong_jacobian, 1.0, _STATUS.LINE_SEARCH_FAILED),
+    "line_search-interior_point": (
+        "interior_point",
+        {"restoration": False},
+        _wrong_jacobian,
+        1.0,
+        _STATUS.LINE_SEARCH_FAILED,
     ),
     **{
         f"max_steps-{name}": (name, {"max_steps": 1}, lambda: hs7().problem, 4.0, _STATUS.MAX_STEPS)
@@ -361,8 +390,8 @@ ENDS = {
 
 @pytest.mark.parametrize("end", ENDS)
 def test_each_way_a_run_ends_sets_its_status(end):
-    """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, a run
-    allowed one step and each solver in float32 on its default tolerances each end with their own
+    """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, SQP on a
+    bound narrower than its QP push, a line search with no acceptable step, a run allowed one step and each solver in float32 on its default tolerances each end with their own
     status, with every floating record in the iterate's dtype."""
     name, options, make, a, status = ENDS[end]
     problem = make()
@@ -482,3 +511,25 @@ def test_a_runtime_budget_and_tolerance_run_without_a_new_compile():
     assert len(traces) == 1 and [int(r.steps) for r in budgets[:2]] == [2, 5]
     assert int(loose.status) == int(tight.status) == TerminationStatus.KKT_TOL
     assert 1e-12 < float(loose.kkt_error) <= 1e-3 and int(loose.steps) < int(tight.steps)
+
+
+# A runtime tolerance below the default, the solver fields that set it statically, and the toy;
+# measured: each ends KKT_TOL in the same steps either way (8, 1, 11), workstation CPU 2026-11-09
+_TIGHT = {
+    "interior_point": ({"tol": 1e-12}, "inequality"),
+    "sqp": ({"tol": 1e-12, "qp_tol": 1e-14}, "inequality"),
+    "augmented_lagrangian": ({"tol": 1e-11}, "bound"),
+}
+
+
+@pytest.mark.parametrize("solver", _TIGHT)
+def test_a_runtime_tolerance_below_the_default_ends_as_the_solver_field_does(solver):
+    """`run(tol=t)` on the default solver ends `KKT_TOL` in as many steps as the solver built with
+    `tol=t`: the barrier, inner-tolerance and QP floors follow the run's tolerance."""
+    fields, toy = _TIGHT[solver]
+    problem, a = TOYS[toy].problem, TOYS[toy].args_batch[0]
+    default = type(SOLVERS[solver])(hessian="exact")
+    _, runtime = default.run(problem, problem.x0, a, tol=fields["tol"])
+    _, static = dataclasses.replace(default, **fields).run(problem, problem.x0, a)
+    assert int(runtime.status) == int(static.status) == TerminationStatus.KKT_TOL
+    assert int(runtime.steps) == int(static.steps)

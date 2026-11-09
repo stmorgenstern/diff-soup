@@ -137,10 +137,10 @@ class AugmentedLagrangian(ConstrainedSolver):
         if not (self.rho_init > 0.0 and self.rho_factor > 1.0):
             raise ConfigurationError("rho_init must be positive and rho_factor above 1.")
 
-    @property
-    def _omega_floor(self) -> float:
-        """The least inner tolerance: a tenth of `tol`, so the outer test can pass."""
-        return 0.1 * self.tol
+    @staticmethod
+    def _omega_floor(tol: Float[Array, ""]) -> Float[Array, ""]:
+        """The least inner tolerance: a tenth of the run's `tol`, so the outer test can pass."""
+        return 0.1 * tol
 
     def _place(self, x0: Float[Array, "n"], bounds: Bounds, warm: bool) -> Float[Array, "n"]:
         """`x0` projected into its bounds."""
@@ -157,7 +157,7 @@ class AugmentedLagrangian(ConstrainedSolver):
             shift_e=fields["lam_e"],
             shift_i=fields["lam_i"],
             rho=rho,
-            omega=1.0 / rho if constrained else jnp.asarray(self._omega_floor, dtype),
+            omega=1.0 / rho if constrained else self._omega_floor(fields["tol"]),
             eta=rho**-ETA_RESET,
             radius=jnp.asarray(RADIUS_INIT, dtype),
         )
@@ -253,7 +253,7 @@ class AugmentedLagrangian(ConstrainedSolver):
             derivatives,
             start,
             bounds,
-            tol=jnp.maximum(state.omega, self._omega_floor),
+            tol=jnp.maximum(state.omega, self._omega_floor(state.tol)),
             max_steps=self.inner_max_steps,
             max_failed=self.max_failed_evaluations,
         )
@@ -293,10 +293,13 @@ class AugmentedLagrangian(ConstrainedSolver):
                 jnp.where(update, state.lam_e, lam_e),
                 jnp.where(update, state.lam_i, lam_i),
                 jnp.where(update, rho, raised),
-                jnp.maximum(jnp.where(update, state.omega / rho, 1.0 / raised), self._omega_floor),
+                jnp.maximum(
+                    jnp.where(update, state.omega / rho, 1.0 / raised),
+                    self._omega_floor(state.tol),
+                ),
                 jnp.maximum(
                     jnp.where(update, state.eta / rho**ETA_POWER, raised**-ETA_RESET),
-                    0.1 * min(self.tol, self.feasibility_tol),
+                    0.1 * jnp.minimum(state.tol, self.feasibility_tol),
                 ),
                 _int(state.step + 1),
                 state.done | ended,

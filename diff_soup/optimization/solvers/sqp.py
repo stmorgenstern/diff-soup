@@ -29,6 +29,8 @@ from diff_soup.optimization.solvers.interior_point import InteriorPoint
 
 #: Ours: how far inside the shifted bounds each QP starts.
 QP_PUSH = 1e-8
+#: Ipopt's `bound_frac`: inside a two-sided bound the push is at most this fraction of its width.
+QP_FRAC = 0.01
 
 
 class SQPState(CoreState):
@@ -86,14 +88,15 @@ class SQP(ConstrainedSolver):
 
     Each step solves the QP of the model Hessian and the linearized constraints by the interior
     point. A QP that does not solve ends the run with `SOLVER_FAILED`, and the record's
-    `subproblem_status` says how it ended. A warm start takes an earlier record's multipliers,
+    `subproblem_status` says how it ended; a line search that finds no acceptable step ends it
+    with `LINE_SEARCH_FAILED`. A warm start takes an earlier record's multipliers,
     so it suits a sequence of nearby problems.
 
     Args:
         tol: The scaled optimality error at which the run ends, by default `max(1e-8, 100 * eps)` for the iterate's dtype: `1e-8` in float64 and `1.2e-5` in float32.
         max_steps: The step budget, `100` by default.
         hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`, as for `InteriorPoint`.
-        qp_tol: The scaled optimality error at which each QP solve ends, by default `max(1e-10, 100 * eps)`: `1e-10` in float64 and `1.2e-5` in float32.
+        qp_tol: The scaled optimality error at which each QP solve ends, by default `max(1e-10, 100 * eps)`: `1e-10` in float64 and `1.2e-5` in float32. A run's `tol` below `tol` lowers it by the same factor.
         qp_max_steps: The step budget of each QP solve, `50` by default.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
         kkt: The [KKTSolve][diff_soup.optimization.solvers.KKTSolve] backend, `DenseKKT()` by default.
@@ -195,16 +198,21 @@ class SQP(ConstrainedSolver):
             ev.jacobian_inequality,
         )
         inner = self._qp_solver()
+        both = qp_bounds.has_lower & qp_bounds.has_upper
+        push = jnp.where(
+            both, jnp.minimum(QP_PUSH, QP_FRAC * (qp_bounds.upper - qp_bounds.lower)), QP_PUSH
+        )
         d0 = jnp.clip(
             jnp.zeros((n,), dtype),
-            jnp.where(qp_bounds.has_lower, qp_bounds.lower + QP_PUSH, -jnp.inf),
-            jnp.where(qp_bounds.has_upper, qp_bounds.upper - QP_PUSH, jnp.inf),
+            jnp.where(qp_bounds.has_lower, qp_bounds.lower + push, -jnp.inf),
+            jnp.where(qp_bounds.has_upper, qp_bounds.upper - push, jnp.inf),
         )
         start = inner._start(
             qp,
             qp_bounds,
             d0,
             qp_args,
+            self.qp_tol * jnp.minimum(1.0, state.tol / self.tol),
             z_lower=jnp.where(qp_bounds.has_lower, 1.0, 0.0).astype(dtype),
             z_upper=jnp.where(qp_bounds.has_upper, 1.0, 0.0).astype(dtype),
         )
@@ -300,7 +308,7 @@ class SQP(ConstrainedSolver):
         failure = jnp.where(
             ~qp_ok | exhausted,
             TerminationStatus.SOLVER_FAILED,
-            TerminationStatus.RESTORATION_FAILED,
+            TerminationStatus.LINE_SEARCH_FAILED,
         )
         return eqx.tree_at(
             lambda t: (
