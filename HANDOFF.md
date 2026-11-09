@@ -80,7 +80,19 @@ caches dropped each round the analyses are collected, and the sites now go with 
 the shipped modules keep one per round (30). Whether diff-soup should keep the `Analysis` out of
 cached primitive params is a separate question, not taken up here.
 
+## Milestone 2: SuperLU's kind check (review row 2)
+
+`superlu_solver.cpp`, the solve: `trusted = storage != 0 && slot->trusted_run == run.run_id &&
+slot->complex == complex`, KLU's check (`klu_ffi.cpp:504`). A slot of the other kind is then compared
+by value (`SameValues` refuses another kind) and factored afresh from the solve's values. Changelog:
+one bugfix line.
+
+| check | exit | reading |
+|---|---:|---|
+| `.ports/m2/r5c_superlu_status.py` (the review's r5c), milestone 1 module (`r5c_before.log`) | 0 | SuperLU status 0, residual nan, not finite (as the review) |
+| the same, milestone 2 module `f3f08ca5` (`r5c_after.log`) | 0 | **SuperLU status 0, reported residual 2.2e-16, finite, true relative residual 1.2e-16**; KLU 2.1e-16 unchanged |
+
 ## Next
 
-Milestone 2 (SuperLU's kind check), then 3 (SuperLU_MT measurements and the fenced locks), 4 (rows
+Milestone 3 (SuperLU_MT measurements and the fenced locks), 4 (rows
 14, 15), 5 (Jetson), 6 (GPU files, suite rows, ruff).
