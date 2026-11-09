@@ -16,7 +16,9 @@ with `slot.sh` = `/drive2/research2/RemainingThesisWork/batjax-wt/slot.sh`.
 |---|---|---|---|
 | 1 | Gauss-Newton form of the implicit rule (N1) | 925c9ff | `.ports/m1_rule.py` |
 | 2 | runtime step budget and KKT tolerance | d1a257e | `.ports/m2_limits.py` |
-| 3 | `NestedLeastSquares`, `InnerSteps`, the trust region's carried args | see below | `.ports/m3_toy.py` |
+| 3 | `NestedLeastSquares`, `InnerSteps`, the trust region's carried args | 84299ee, dcf251a | `.ports/m3_toy.py` |
+| 4 | the synthetic 39x201 cost table (recorded) | see below | `.ports/m4_synth.py <route>` |
+| 5 | tests, reference page, changelog, ruff; custom rules moved inside the member map | see below | the suite files below |
 
 ### 1. The Gauss-Newton form (N1)
 
@@ -128,3 +130,73 @@ tol 1e-13 (KKT 2.1e-14).
   one step per evaluation.
 Affected suite files (compiled solvers, optimization solvers, lanes, fits, structural fitting, optimizer stops,
 lowered study, architecture, hierarchy): 157 passed, exit 0.
+
+### 4. The synthetic 39 x 201 problem (recorded, not gated)
+
+`.ports/m4_synth.py <route> [max_outer]`, one route per process on the slot queue (`SLOT_MEM=10G`/`12G`); rows in
+`.ports/m4_table.jsonl`. 39 members, 201 own values each (a map on a grid of 201 points: a sine background plus a
+Gaussian ridge whose place and height vary by member, read by linear interpolation at 2000 observation points),
+8 shared values in every row through `w0 + z s + w1 tanh(w2 s + w3 z) + w4 s^2 + w7 sin(w5 u + w6 z)`, whitened by
+0.01, plus 199 second-difference rows: 2199 rows per member, no DAE. Start: own values 0, shared values off by
+5-20 %. Outer `NewtonTrustRegion(hessian="gauss-newton")`, inner `InteriorPoint(hessian="gauss-newton")` (tol 1e-8).
+Model passes per member per evaluation are counted from the code (q = 201, p = 8, k = inner steps): an inner fit
+evaluates its start and every step's end with `1 + q` passes, and the projection adds `1 + p`.
+
+| route | outer steps (accepted) | evaluations | inner steps per member per evaluation, mean (max) | model passes per member per evaluation | wall incl. compile | peak RSS | cost at the end |
+|---|---|---|---|---|---|---|---|
+| nested, `J_z` kept (default `InnerSteps`) | 12 (12) | 13 | 1.23 (2) | (k+1)(1+q) + 1 + p, about 460 | 6.6 s | 1.74 GB | 35222.703023 |
+| nested, `J_z` recomputed (`keep_jacobian=False`) | 12 (12) | 13 | 1.23 (2) | that plus 1 + q, about 660 | 6.1 s | 1.27 GB | 35222.703023 |
+| joint: one inner step per outer step (`InnerSteps(max_steps=1)`) | 12 (12) | 13 | 1.00 (1) | 2(1+q) + 1 + p = 413 | 6.3 s | 1.74 GB | 35222.703023 |
+| exact-Hessian route: full inner fits from the start each evaluation (`InteriorPoint()`, `"auto"`), `jacfwd` through the exact rule, as `population_fit` did | 12 (12) | 13 | 6.33 (10) | (k+1)(1+q) + q forward-over-reverse Hessian passes + p(1+q) second-order mixed passes, about 3700 | 13.8 s | 2.47 GB | 35222.703023 |
+
+All four end at the same cost (to 1e-11 relative) and the same shared values to 3e-8 (COST_TOL). The whole table
+runs in about 33 s of wall plus process starts, well under the 15-minute budget. Headline: the nested problem costs
+one joint attempt per outer step (1.2 inner steps per member), takes as many outer steps as the exact route, and
+costs about 8 times fewer model passes per outer step. The kept `J_z` saves `1 + q` passes per member and
+evaluation, and costs 0.47 GB of resident memory here. On this cheap model the wall clock is dominated by compiling,
+so the walls do not show the per-step ratio.
+Not run: a dense joint fit (85,761 x 7,847 Jacobian, 5.4 GB). The joint row is the design's equivalence: the
+nested problem at one inner step. A first exact-route attempt that took the exact Hessian forward over forward
+(`hessian=False` inner problem) was killed at the 10 GB cap (exit 137).
+
+### 5. Tests, reference page, changelog
+
+- `tests/contracts/test_compiled_solvers.py`: `test_the_gauss_newton_form_equals_the_exact_form_at_a_zero_residual_solution`
+  (jit and lanes, tangents and cotangents, bound 1e-10, measured 8.4e-13) and
+  `test_a_runtime_budget_and_tolerance_run_without_a_new_compile` (one trace across budgets 2, 5, 200; tol 1e-3
+  stops sooner, within it and above 1e-12).
+- `tests/public_api/test_nested_fit.py` (new verb group, its own manifest row): `test_a_nested_fit_finds_the_joint_fits_shared_values`
+  (bound 1e-8, measured 2.8e-9 after 20 outer steps with the cost and step tests off) and
+  `test_the_outer_gradient_matches_central_differences[forward|reverse]` (bound 1e-6, measured 9.0e-10).
+- Ceilings set to the suite's actual size: files 51 -> 52, functions 461 -> 465, collected 785 -> 790, lines
+  16,773 -> 16,970; `public_api` 21/202/323/6,569 -> 22/204/326/6,673; `contracts` 22/199/388/6,662 ->
+  22/201/390/6,755. `tests/suite_policy.py` passes.
+- `docs/reference/optimization/solvers.md`: the Gauss-Newton form under "Derivatives", the runtime budget and tolerance
+  under "Batches of problems", a "Nested fits" section (`NestedLeastSquares` with `pose` and `solve`, `InnerSteps`).
+  `mkdocs build --strict` (rel-docs env) clean.
+- `CHANGELOG.md`: one breaking-change line (the Gauss-Newton form under `hessian="gauss-newton"`), two feature lines
+  (`NestedLeastSquares`/`InnerSteps` with the trust region's carried args; runtime `max_steps`/`tol` in `run` and
+  `lanes`).
+- The custom derivative of the rows now sits per member inside the member map (as `lanes` holds `run`'s), and `w`,
+  the tolerance and tangents reach the mapped function as arguments.
+- `ruff check` and `ruff format --check` clean on `diff_soup` and `tests`.
+- Suite files run on the slot queue (CPU): `test_nested_fit.py` 3 passed; `test_compiled_solvers.py`,
+  `test_optimization_solvers.py`, `test_optimization_lanes.py`, `test_surface.py` with it: 79 passed and the nested
+  file's first version failed once on a cost stop (fixed above, then 3 passed); earlier in this branch the trust-region
+  files (`test_fits`, `test_structural_fitting`, `test_optimizer_stops`, `test_lowered_study`, `test_architecture`,
+  `test_hierarchy`): 157 passed.
+
+## Not verified
+
+- **Reverse mode over a `"data"` mesh crashes XLA's CPU compiler** (segfault in `backend_compile_and_load`) for
+  `jax.grad` of `nested.problem.value` under a `Layout`, in both rules, on two forced host devices. On the same mesh
+  the statistics (`gauss_newton`) and `jacfwd(residual)` run and equal one device's; on one device every route works.
+  Repro: `XLA_FLAGS=--xla_force_host_platform_device_count=2 ... .ports/m3_layout.py mesh` (`none` passes). The trust
+  region's path (statistics only) is unaffected. Not chased further.
+- The full CPU suite (`--run-integration --run-validation`) was not run from this clone; only the affected files.
+- No GPU run (cuDSS rows owed as before); the nested problem never ran on a GPU.
+- The noise-floor stop (`InnerSteps.noise_floor > 0`) and the per-member floor have no test or gate.
+- The cost table's walls include compiling; per-step walls on a cheap model would need a longer run.
+- `opt/rf-tol` merge (batch B): textual conflicts expected in `ConstrainedSolver.run` (resolution above), in
+  `tests/suite_manifest.json` and `tests/README.md` ceilings (resolution: add both increments, rf-tol's +2 collected
+  and +8 lines in `contracts` and the whole suite), checked by a scratch merge below if listed.

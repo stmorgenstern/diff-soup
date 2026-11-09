@@ -177,14 +177,24 @@ def _fitted_rows(spec, problem, w, member, x0, warm, tol, floor):
     return x, record, kept, _poison(_usable(record, rows), rows)
 
 
-def _members(spec: _Spec, w: Array, args: dict, tol: Array, fn: Callable) -> PyTree:
-    """`fn(spec, problem, w, member, x0, warm, tol, floor)` over every member, through the layout."""
+def _members(spec: _Spec, w: Array, args: dict, tol: Array, fn: Callable, *extra: Array) -> PyTree:
+    """`fn(spec, problem, w, member, x0, warm, tol, floor, *extra)` over every member, through the layout.
+
+    `w`, `tol` and `extra` reach every member as arguments of the mapped function, never as
+    values it closes over (a closed-over tangent inside `shard_map` does not transpose).
+    """
     problem = eqx.combine(args["inner"], spec.inner)
 
-    def one(member, x0, warm, floor):
-        return fn(spec, problem, w, member, x0, warm, tol, floor)
+    def one(member, x0, warm, floor, w, tol, *extra):
+        return fn(spec, problem, w, member, x0, warm, tol, floor, *extra)
 
-    return _over(spec, one, (args["members"], args["x"], args["record"], args["floor"]))
+    shared = tuple(_broadcast(v, spec.count) for v in (w, jnp.asarray(tol, w.dtype), *extra))
+    return _over(spec, one, (args["members"], args["x"], args["record"], args["floor"], *shared))
+
+
+def _broadcast(value: Array, count: int) -> Array:
+    """`value` repeated for every member on a new leading axis."""
+    return jnp.broadcast_to(value, (count, *jnp.shape(value)))
 
 
 def _over(spec: _Spec, fn: Callable, batch: tuple) -> PyTree:
@@ -232,83 +242,85 @@ def _residual_and_jacobian(spec, w, args):
     return rows.reshape(-1), jacobian.reshape(-1, w.shape[0])
 
 
-def _rows_only(spec, w, args):
-    """Every member's rows at its fit to `tol_min`, `(count, m)`."""
-    return _members(spec, w, args, jnp.asarray(spec.tol_min, w.dtype), _fitted_rows)[3]
-
-
 @functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
-def _forward_rows(spec, w, args):
-    """The rows, differentiated in `w` by the forward Gauss-Newton rule."""
-    return _rows_only(spec, w, args)
+def _member_forward(spec, dynamic, w, member, x0, warm, tol, floor):
+    """One member's rows at its fit, differentiated in `w` by the forward Gauss-Newton rule."""
+    problem = eqx.combine(dynamic, spec.inner)
+    return _fitted_rows(spec, problem, w, member, x0, warm, tol, floor)[3]
 
 
-@_forward_rows.defjvp
-def _forward_rows_jvp(spec, primals, tangents):
-    """One KKT solve per member and tangent; `args` is gradient-dead."""
-    w, args = primals
-    dw, _ = tangents
-    tol = jnp.asarray(spec.tol_min, w.dtype)
-
-    def one(spec, problem, w, member, x0, warm, tol, floor):
-        member_args = _member_args(w, member)
-        x, record, kept = _fit(spec, problem, x0, member_args, warm, tol, floor)
-        closures, bounds = _raw_gauss_newton(problem, x)
-        rows, d_rows, solved = rows_tangent(
-            closures,
-            bounds,
-            spec.solver._kkt,
-            x,
-            record,
-            member_args,
-            _shared_tangent(member, dw),
-            kept,
-        )
-        ok = _usable(record, rows) & solved
-        return _poison(ok, rows), _poison(ok, d_rows)
-
-    return _members(spec, w, args, tol, one)
+@_member_forward.defjvp
+def _member_forward_jvp(spec, primals, tangents):
+    """One KKT solve per tangent; everything but `w` is gradient-dead."""
+    dynamic, w, member, x0, warm, tol, floor = primals
+    dw = tangents[1]
+    problem = eqx.combine(dynamic, spec.inner)
+    member_args = _member_args(w, member)
+    x, record, kept = _fit(spec, problem, x0, member_args, warm, tol, floor)
+    closures, bounds = _raw_gauss_newton(problem, x)
+    rows, d_rows, solved = rows_tangent(
+        closures,
+        bounds,
+        spec.solver._kkt,
+        x,
+        record,
+        member_args,
+        _shared_tangent(member, dw),
+        kept,
+    )
+    ok = _usable(record, rows) & solved
+    return _poison(ok, rows), _poison(ok, d_rows)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
-def _reverse_rows(spec, w, args):
-    """The rows, differentiated in `w` by the reverse Gauss-Newton rule."""
-    return _rows_only(spec, w, args)
+def _member_reverse(spec, dynamic, w, member, x0, warm, tol, floor):
+    """One member's rows at its fit, differentiated in `w` by the reverse Gauss-Newton rule."""
+    problem = eqx.combine(dynamic, spec.inner)
+    return _fitted_rows(spec, problem, w, member, x0, warm, tol, floor)[3]
 
 
-def _reverse_rows_fwd(spec, w, args):
-    """The fits, keeping each member's point, record and Jacobian for the backward pass."""
-    tol = jnp.asarray(spec.tol_min, w.dtype)
-    x, record, kept, rows = _members(spec, w, args, tol, _fitted_rows)
-    return rows, (w, args, x, record, kept)
+def _member_reverse_fwd(spec, dynamic, w, member, x0, warm, tol, floor):
+    """The fit, keeping its point, record and Jacobian for the backward pass."""
+    problem = eqx.combine(dynamic, spec.inner)
+    x, record, kept, rows = _fitted_rows(spec, problem, w, member, x0, warm, tol, floor)
+    return rows, ((dynamic, w, member, x0, warm, tol, floor), x, record, kept)
 
 
-def _reverse_rows_bwd(spec, residuals, rows_bar):
-    """One transposed KKT solve per member, whatever the number of shared values."""
-    w, args, x, record, kept = residuals
-    problem = eqx.combine(args["inner"], spec.inner)
-
-    def one(member, x, record, kept, bar):
-        member_args = _member_args(w, member)
-        closures, bounds = _raw_gauss_newton(problem, x)
-        args_bar, solved = rows_cotangent(
-            closures, bounds, spec.solver._kkt, x, record, member_args, bar, kept
-        )
-        ok = _usable(record, args_bar["shared"]) & solved
-        used = jnp.any(bar != 0.0)
-        return jnp.where(ok, args_bar["shared"], jnp.where(used, jnp.nan, 0.0))
-
-    shared_bar = _over(spec, one, (args["members"], x, record, kept, rows_bar))
-    return jnp.sum(shared_bar, axis=0), jax.tree.map(_zero, args)
+def _member_reverse_bwd(spec, residuals, rows_bar):
+    """One transposed KKT solve, whatever the number of shared values; NaN for a failed member."""
+    inputs, x, record, kept = residuals
+    dynamic, w, member = inputs[:3]
+    problem = eqx.combine(dynamic, spec.inner)
+    member_args = _member_args(w, member)
+    closures, bounds = _raw_gauss_newton(problem, x)
+    args_bar, solved = rows_cotangent(
+        closures, bounds, spec.solver._kkt, x, record, member_args, rows_bar, kept
+    )
+    ok = _usable(record, args_bar["shared"]) & solved
+    unsupported = jnp.where(jnp.any(rows_bar != 0.0), jnp.nan, 0.0)
+    w_bar = jnp.where(ok, args_bar["shared"], unsupported)
+    dead = jax.tree.map(_zero, inputs)
+    return (dead[0], w_bar, *dead[2:])
 
 
-_reverse_rows.defvjp(_reverse_rows_fwd, _reverse_rows_bwd)
-_RULES = {"jvp": _forward_rows, "vjp": _reverse_rows}
+_member_reverse.defvjp(_member_reverse_fwd, _member_reverse_bwd)
+_RULES = {"jvp": _member_forward, "vjp": _member_reverse}
+
+
+def _rows(spec, rule, w, args):
+    """Every member's rows at its fit to `tol_min`, `(count, m)`, with the rule `rule` names in `w`."""
+    member_rule = _RULES[rule]
+
+    def one(spec, problem, w, member, x0, warm, tol, floor):
+        dynamic = eqx.filter(problem, eqx.is_array)
+        return member_rule(spec, dynamic, w, member, x0, warm, tol, floor)
+
+    return _members(spec, w, args, jnp.asarray(spec.tol_min, w.dtype), one)
 
 
 def _residual(spec, rule, w, args):
     """Every member's rows, stacked, with the implicit derivative in `w` that `rule` names."""
-    return _RULES[rule](spec, w, args).reshape(-1)
+    return _rows(spec, rule, w, args).reshape(-1)
 
 
 def _value(spec, rule, w, args):
