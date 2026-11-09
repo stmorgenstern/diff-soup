@@ -182,9 +182,9 @@ class AugmentedLagrangian(ConstrainedSolver):
         )
 
     def _converged(self, state: AugmentedLagrangianState) -> Bool[Array, ""]:
-        """The optimality error below `tol` and the unscaled violation below `feasibility_tol`."""
+        """The optimality error below the run's `tol`, the unscaled violation below `feasibility_tol`."""
         violation = constraint_violation(state.evaluation, state.scales)
-        return (state.kkt_error <= self.tol) & (violation <= self.feasibility_tol)
+        return (state.kkt_error <= state.tol) & (violation <= self.feasibility_tol)
 
     def _model(self, closures, x, evaluation, lam_e, lam_i, rho, args, matrix):
         """The augmented Lagrangian's value, gradient and model Hessian at `x`."""

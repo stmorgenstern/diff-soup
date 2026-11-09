@@ -14,7 +14,8 @@ with `slot.sh` = `/drive2/research2/RemainingThesisWork/batjax-wt/slot.sh`.
 
 | # | what | commit | check |
 |---|---|---|---|
-| 1 | Gauss-Newton form of the implicit rule (N1) | see below | `.ports/m1_rule.py` |
+| 1 | Gauss-Newton form of the implicit rule (N1) | 925c9ff | `.ports/m1_rule.py` |
+| 2 | runtime step budget and KKT tolerance | see below | `.ports/m2_limits.py` |
 
 ### 1. The Gauss-Newton form (N1)
 
@@ -42,3 +43,32 @@ plus two linear rows that hold `z0` on its lower bound (multiplier 0.3) and `z1`
 `ImplicitAdjoint`, jitted and in `ds.optimization.lanes` (three lanes):
 jit tangent 8.1e-13, jit cotangent 5.5e-13, lanes tangent 8.4e-13, lanes cotangent 4.6e-13; exit 0.
 At a nonzero residual the forms differ (5.0e-2 relative, `.ports/m1_live.py`), so the switch is live.
+
+Affected suite files at 925c9ff (`test_compiled_solvers`, `test_optimization_solvers`, `test_optimization_lanes`,
+`test_compile_cache`, `test_hierarchy`, `test_control`): 84 passed, 2 skipped (cuDSS owed), exit 0.
+
+### 2. A runtime step budget and tolerance
+
+- `CoreState` gains `budget` and `tol`, runtime leaves of the loop; `terminate` reads `state.budget`, and the three
+  solvers' `_converged` read `state.tol` (the augmented Lagrangian's `feasibility_tol` and the barrier floor stay
+  static). `Start` carries `limits`; `_init(..., limits=(max_steps, tol))` defaults each `None` from the static field
+  (so a dtype-resolved `tol`, `opt/rf-tol`, feeds it unchanged). The QPs of SQP start from their own static fields.
+- `run(..., max_steps=None, warm_start=None, tol=None)`: both are runtime values (arrays) handed through
+  `implicit_run(..., limits)` to `_run_primal`; the implicit entries take `limits` as a gradient-dead argument. A
+  traced or batched budget or tolerance needs no new compile. Previously `max_steps` replaced the static field.
+- `lanes(..., max_steps=, tol=, warm_start=)`: one per member or one for all, runtime lanes of the program; the
+  mapping is `map_lanes(fn, batch, mesh)` (shared with the nested problem), `placement(layout)`, `per_lane`.
+
+Gate (`.ports/m2_limits.py`, exit 0): `jit(run)` with the budget and tolerance as arguments, budgets 2, 5, 200:
+one trace, cache size 1, steps 2, 5, 9 (status MAX_STEPS, MAX_STEPS, KKT_TOL at 6.8e-14). At `tol=1e-3` the run stops
+after 4 steps with KKT error 3.4e-4 (status KKT_TOL), against 9 steps and 6.8e-14 at 1e-12; `|x_loose - x_tight|`
+4.9e-5. `lanes` with per-member budgets `[2, 5, 200]` and tolerances `[1e-12, 1e-12, 1e-3]` in one program:
+steps `[2, 5, 4]`, the third member's KKT error 1.7e-4.
+Affected suite files (the six above plus `test_implicit_layer`): 91 passed, 2 skipped, exit 0.
+
+Merge note for batch B (`opt/rf-tol` 9bd0d2b): it rewrites `ConstrainedSolver.run`'s first line
+(`solver = self._for_dtype(...)`), as this branch rewrites `run`'s body. The resolution keeps both:
+`solver = self._for_dtype(iterate_dtype(x0))`, then this branch's `limits = ...` and
+`return implicit_run(solver._run_primal, self._rule, self._kkt, problem, x0, args, warm_start, self.adjoint, limits)`
+(no `dataclasses.replace` for `max_steps`: it is a runtime limit now). `_init` defaults `tol` from `self.tol`, which
+is the resolved solver there.

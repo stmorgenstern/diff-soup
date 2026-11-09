@@ -243,7 +243,9 @@ class InteriorPoint(ConstrainedSolver):
     def _start(self, closures, bounds, x, args, **multipliers) -> InteriorPointState:
         """The state at `x` on closures used as given (a QP), unscaled."""
         evaluation = evaluate(closures, x, args, _hessian.uses_gauss_newton(self.hessian, closures))
-        start = Start(x, evaluation, unit_scales(closures, x.dtype), None)
+        start = Start(
+            x, evaluation, unit_scales(closures, x.dtype), None, (self.max_steps, self.tol)
+        )
         return self._with_termination(self._at(closures, bounds, start, **multipliers))
 
     def _slacks(self, state: InteriorPointState) -> Float[Array, "n_ineq"]:
@@ -255,8 +257,8 @@ class InteriorPoint(ConstrainedSolver):
         return state.mu
 
     def _converged(self, state: InteriorPointState) -> Bool[Array, ""]:
-        """Whether the original problem's scaled optimality error is below `tol`."""
-        return (state.kkt_error <= self.tol) & ~state.restoration.on
+        """Whether the original problem's scaled optimality error is below the run's `tol`."""
+        return (state.kkt_error <= state.tol) & ~state.restoration.on
 
     def _update_barrier(
         self, state: InteriorPointState, bounds: Bounds, restores: bool
