@@ -22,11 +22,11 @@ Each one is a name on `linear=` and a class here.
     options:
       members: false
 
-!!! warning "SuperLU_MT on more than one thread"
-    SuperLU_MT's threaded factorization can return a wrong solution and
-    report `SolveStatus.SUCCESS`, an upstream defect. A source build uses
-    every core the process may run on unless `OMP_NUM_THREADS` caps it.
-    Set `OMP_NUM_THREADS=1`, or use `KLU`.
+!!! note "SuperLU_MT on more than one thread"
+    A source build uses every core the process may run on unless
+    `OMP_NUM_THREADS` caps it. Its factors on any number of threads equal
+    one thread's, bit for bit, but on many patterns more threads do not
+    factor faster: set `OMP_NUM_THREADS` to the count that does.
 
 ::: diff_soup.linear.SuperLU
     options:
