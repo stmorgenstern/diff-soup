@@ -43,6 +43,7 @@ from diff_soup.optimization.solvers._protocol import (
     SolverState,
     _int,
     _raw,
+    _raw_gauss_newton,
 )
 
 #: Ipopt's `diverging_iterates_tol`: an iterate entry beyond it ends the run with `DIVERGED`.
@@ -66,6 +67,8 @@ class CoreState(SolverState):
         failed_evaluations: The failed trial evaluations in all.
         inner_steps: The steps of the inner solves so far.
         subproblem_status: The status of the subproblem whose failure ended the run, else `UNKNOWN`.
+        budget: The step budget of this run, a runtime value.
+        tol: The scaled optimality error at which this run ends, a runtime value.
     """
 
     lam_e: Float[Array, "n_eq"]
@@ -81,6 +84,8 @@ class CoreState(SolverState):
     failed_evaluations: Int[Array, ""]
     inner_steps: Int[Array, ""]
     subproblem_status: Int[Array, ""]
+    budget: Int[Array, ""]
+    tol: Float[Array, ""]
 
 
 class Start(NamedTuple):
@@ -91,12 +96,14 @@ class Start(NamedTuple):
         evaluation: The scaled evaluation at `x`.
         scales: The scales.
         warm: `(lam_e, lam_i, z_lower, z_upper)` of a warm start in the scaled problem, or `None`.
+        limits: `(budget, tol)`, the run's step budget and tolerance, numbers or arrays.
     """
 
     x: Float[Array, "n"]
     evaluation: Evaluation
     scales: Scales
     warm: tuple | None
+    limits: tuple
 
 
 def core_fields(start: Start, closures: Closures, hessian: str) -> dict:
@@ -116,6 +123,7 @@ def core_fields(start: Start, closures: Closures, hessian: str) -> dict:
         multipliers = start.warm
     valid = start.evaluation.finite
     lam_e, lam_i, z_lower, z_upper = multipliers
+    budget, tol = start.limits
     return dict(
         x=x,
         step=_int(0),
@@ -134,6 +142,8 @@ def core_fields(start: Start, closures: Closures, hessian: str) -> dict:
         failed_evaluations=_int(0),
         inner_steps=_int(0),
         subproblem_status=_int(TerminationStatus.UNKNOWN),
+        budget=_int(budget),
+        tol=jnp.asarray(tol, dtype),
     )
 
 
@@ -235,8 +245,8 @@ class ConstrainedSolver(CompiledSolver):
         return jnp.zeros((), state.x.dtype)
 
     def _converged(self, state: CoreState) -> Bool[Array, ""]:
-        """Whether the scaled optimality error is below `tol`."""
-        return state.kkt_error <= self.tol
+        """Whether the scaled optimality error is below the run's `tol`."""
+        return state.kkt_error <= state.tol
 
     def _prepare(
         self, problem: OptimizationProblem, like: Float[ArrayLike, "n"]
@@ -255,14 +265,23 @@ class ConstrainedSolver(CompiledSolver):
         x0: Float[ArrayLike, "n"],
         args: PyTree,
         warm_start: SolveRecord | None,
+        limits: tuple = (None, None),
     ) -> CoreState:
-        """The state at the first point, from one evaluation of the problem as given."""
+        """The state at the first point, from one evaluation of the problem as given.
+
+        `limits` is `(max_steps, tol)` of this run, each `None` for the solver's own field.
+        """
         x = self._place(jnp.asarray(x0), bounds, warm_start is not None)
         unscaled = evaluate(raw, x, args, _hessian.uses_gauss_newton(self.hessian, raw))
         scales = self._scales(problem, raw, unscaled)
         warm = None if warm_start is None else warm_multipliers(warm_start, scales, x.dtype)
-        state = self._begin(closures, bounds, Start(x, unscaled.scaled(scales), scales, warm))
-        return self._with_termination(state)
+        max_steps, tol = limits
+        limits = (
+            self.max_steps if max_steps is None else max_steps,
+            self.tol if tol is None else tol,
+        )
+        start = Start(x, unscaled.scaled(scales), scales, warm, limits)
+        return self._with_termination(self._begin(closures, bounds, start))
 
     def init(
         self,
@@ -293,7 +312,7 @@ class ConstrainedSolver(CompiledSolver):
             & jnp.isfinite(state.kkt_error)
         )
         diverged = ~finite | (jnp.max(jnp.abs(state.x), initial=0.0) > DIVERGED_X)
-        over = state.step >= self.max_steps
+        over = state.step >= state.budget
         status = jnp.where(
             state.done,
             state.status,
@@ -308,7 +327,7 @@ class ConstrainedSolver(CompiledSolver):
     def _with_termination(self, state: CoreState) -> CoreState:
         """`state` with `done` and `status` from `terminate`."""
         done, status = self.terminate(None, state, None)
-        return eqx.tree_at(lambda s: (s.done, s.status), state, (done, status))
+        return dataclasses.replace(state, done=done, status=status)
 
     def _advance(
         self, closures: Closures, bounds: Bounds, state: CoreState, args: PyTree
@@ -322,14 +341,28 @@ class ConstrainedSolver(CompiledSolver):
         x0: Float[ArrayLike, "n"],
         args: PyTree,
         *,
-        max_steps: int | None = None,
+        max_steps: Int[ArrayLike, ""] | None = None,
         warm_start: SolveRecord | None = None,
+        tol: Float[ArrayLike, ""] | None = None,
     ) -> tuple[Float[Array, "n"], SolveRecord]:
         """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
-        solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
+        limits = tuple(None if v is None else jnp.asarray(v) for v in (max_steps, tol))
         return implicit_run(
-            solver._run_primal, _raw, self._kkt, problem, x0, args, warm_start, self.adjoint
+            self._run_primal,
+            self._rule,
+            self._kkt,
+            problem,
+            x0,
+            args,
+            warm_start,
+            self.adjoint,
+            limits,
         )
+
+    @property
+    def _rule(self):
+        """`prepare` of the implicit derivative: the Gauss-Newton form under Gauss-Newton steps."""
+        return _raw_gauss_newton if self.hessian == "gauss-newton" else _raw
 
     def _run_primal(
         self,
@@ -337,10 +370,11 @@ class ConstrainedSolver(CompiledSolver):
         x0: Float[ArrayLike, "n"],
         args: PyTree,
         warm_start: SolveRecord | None,
+        limits: tuple = (None, None),
     ) -> tuple[Float[Array, "n"], SolveRecord]:
-        """The loop itself, never differentiated."""
+        """The loop itself, never differentiated; `limits` is `(max_steps, tol)` of the run."""
         raw, closures, bounds = self._prepare(problem, x0)
-        state = self._init(problem, raw, closures, bounds, x0, args, warm_start)
+        state = self._init(problem, raw, closures, bounds, x0, args, warm_start, limits)
 
         def body(current):
             return self._advance(closures, bounds, current, (args, current.scales))
