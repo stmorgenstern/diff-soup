@@ -252,6 +252,8 @@ class _LaneRoute:
     kept_regularizer: tuple[tuple[str, bytes, tuple[float, ...] | None], tuple] | None = None
     # The index tables of every level system of the fit, built and placed once.
     layout: elimination.LevelLayout | None = None
+    # The level tables of subsets of the planned lanes, by their ids in canonical order.
+    subset_tables: dict | None = None
 
     def __init__(self, solver: Any, problem: Any):
         lowered = _lowered(solver, problem)
@@ -480,9 +482,12 @@ class _LaneRoute:
         reduced; a fit's own requests hold the one member 0. Results of lanes
         evaluated in several processes carry the sums of the levels already
         (``Results.levels``, every lane weighing one); the route's weights are
-        then applied to those sums.
+        then applied to those sums. Results of a subset of the planned lanes
+        give the system of those lanes alone (``subset_blocks``).
         """
-        if getattr(results, "levels", None) is not None:
+        if tuple(results.lane_ids) != self.ids:
+            blocks = self.subset_blocks(results, member)
+        elif getattr(results, "levels", None) is not None:
             blocks = self._summed_levels(results, member)
         else:
             # Without a device, the one-argument call that results defining their own
@@ -509,6 +514,25 @@ class _LaneRoute:
             layout=self.levels(),
             regularizer_blocks=self.regularizer_at(point, dtype),
         )
+
+    def tables_of(self, ids: tuple) -> Any:
+        """The level tables of the planned lanes ``ids``, in canonical order; built once per subset.
+
+        The tables keep every node of the study, so the sums of a subset fit
+        the route's levels.
+        """
+        ids = tuple(ids)
+        if ids == self.ids:
+            return self.tables
+        if self.subset_tables is None:
+            self.subset_tables = {}
+        tables = self.subset_tables.get(ids)
+        if tables is None:
+            tables, _ = _route_tables(
+                self.problem, self.view, ids, self.problem.plan(), self.device
+            )
+            self.subset_tables[ids] = tables
+        return tables
 
     def levels(self) -> elimination.LevelLayout:
         """The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_system.LevelLayout] of the tables, built once."""
@@ -662,6 +686,43 @@ class _LaneRoute:
         # when the trial is accepted: the regularizer is evaluated once per point.
         blocks = self.regularizer_at(point)
         return lanes + (0.0 if blocks is None else float(blocks[1]))
+
+    def subset_blocks(self, results: Any, member: int = 0) -> LevelBlocks:
+        """The weighted level blocks of a ``blocks`` evaluation of a subset of the planned lanes.
+
+        A node with none of the lanes below it sums to zero. The lanes are
+        weighed by the route's weights, and a failed lane or a unit left out
+        of nonzero weight is refused, as ``system`` refuses them. Results of
+        lanes evaluated in several processes carry the sums of the levels
+        already (``Results.levels``); the weights are then applied to those
+        sums.
+        """
+        ids = tuple(results.lane_ids)
+        if getattr(results, "levels", None) is None:
+            lanes = (
+                results.lane_result(member)
+                if self.device is None
+                else results.lane_result(member, self.device)
+            )
+            return reduce_levels(self.tables_of(ids), lanes, ids, self.weights)
+        rows = np.flatnonzero(np.asarray(results.members) == int(member))
+        if rows.shape[0] != 1:
+            raise ValueError(
+                f"member {int(member)} is not among the members of these results "
+                f"{np.asarray(results.members).tolist()}; ask for one of them."
+            )
+        row = int(rows[0])
+        status = LaneStatus(
+            kind=np.asarray(results.status.kind)[row],
+            t_reached=np.asarray(results.status.t_reached)[row],
+            rung=np.asarray(results.status.rung)[row],
+        )
+        omega = None
+        if self.weights is not None:
+            omega = self.omega[[self.position[lane] for lane in ids]]
+        refuse_failed(status, ids, omega)
+        sums = weigh_levels(self.tables, member_row(results.levels, row), self.weights)
+        return jax.device_put(sums, self.device)
 
     def owners(self, failures: tuple) -> tuple:
         """The level-1 members of the failed lanes, each once, in lane order."""

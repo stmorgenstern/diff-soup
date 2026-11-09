@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Iterable, Mapping
 from numbers import Real
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -116,6 +117,45 @@ class _Polish(NamedTuple):
     first_cost: float
 
 
+def _spliced(
+    system: elimination.LevelSystem,
+    other: elimination.LevelSystem,
+    cut: int,
+    members: np.ndarray,
+    cost: float,
+) -> elimination.LevelSystem:
+    """``system`` with the subtrees of ``members`` of level ``cut`` taken from ``other``, at its point.
+
+    Every node of level ``cut`` and below whose member (one flag per member)
+    is set takes its diagonal block, its couplings and its gradient from
+    ``other``; the levels above ``cut``, the held and fixed coordinates are
+    ``system``'s, and the cost is ``cost``.
+    """
+    take = np.asarray(members, dtype=bool)
+    diagonal, gradient = list(system.diagonal), list(system.gradient)
+    cross = [None] + [list(row) for row in system.cross[1:]]
+    for at in range(cut, system.depth + 1):
+        if not system.widths[at]:
+            continue
+        own = take if at == cut else take[np.asarray(system.ancestors[at][cut])]
+        pick = jax.numpy.asarray(own)
+        diagonal[at] = jax.numpy.where(pick[:, None, None], other.diagonal[at], system.diagonal[at])
+        gradient[at] = jax.numpy.where(pick[:, None], other.gradient[at], system.gradient[at])
+        for above in range(at):
+            if cross[at][above] is not None:
+                cross[at][above] = jax.numpy.where(
+                    pick[:, None, None], other.cross[at][above], system.cross[at][above]
+                )
+    return dataclasses.replace(
+        system,
+        diagonal=tuple(diagonal),
+        cross=(None,) + tuple(tuple(row) for row in cross[1:]),
+        gradient=tuple(gradient),
+        point=other.point,
+        cost=jax.numpy.asarray(cost, dtype=system.root.dtype),
+    )
+
+
 def _member_numbers(decreases: np.ndarray, scales: np.ndarray) -> np.ndarray:
     """Every member's predicted decrease over its cost scale ``scales``; ``nan`` stays ``nan``."""
     with np.errstate(all="ignore"):
@@ -129,11 +169,12 @@ class _NestedFit(_JointFit):
     request, gain ratio, radius, stop rules and verdict. After an accepted
     trial and its ``blocks`` request, every member of the cut level iterates
     on its own subtree with the outer coordinates held, all members in
-    lockstep (one ``value`` and one ``blocks`` request per iteration), each
-    with its own radius, growth lock and acceptance, for at most the polish's
-    number of iterations. The point, cost and system where the polish ended
-    are the next attempt's. A member whose lanes fail at its polished point
-    retreats along its polish step. The members' radii and locks carry from
+    lockstep, each with its own radius, growth lock and acceptance, for at
+    most the polish's number of iterations. A member done leaves the polish:
+    an iteration's requests cover the lanes of the members still in it, and
+    the polish ends with a ``blocks`` request of every lane where it ended,
+    whose point, cost and system are the next attempt's. A member whose lanes
+    fail at its polished point retreats along its polish step. The members' radii and locks carry from
     one polish to the next. With no polish iterations the fit makes the joint
     mode's attempts.
     """
@@ -628,13 +669,14 @@ class _NestedFit(_JointFit):
         """The lanes of every member whose Gauss-Newton blocks or gradient are not finite at a finite cost.
 
         Each of the member's lanes is a failure of kind ``NONFINITE_BLOCKS``: its solve reached
-        the end at a finite cost and its sensitivities are not finite there.
+        the end at a finite cost and its sensitivities are not finite there. A member none of
+        whose lanes ``results`` holds is not named.
         """
         broken = nonfinite_members(system, self.cut)
         if not broken.any():
             return ()
         route = self.route
-        costs = np.asarray(results.cost, dtype=np.float64)[0]
+        costs = self.lane_costs_of(results, np.full((len(route.ids),), np.nan))
         records = []
         for member in np.flatnonzero(broken):
             positions = np.flatnonzero(self.lane_member == member)
@@ -660,19 +702,84 @@ class _NestedFit(_JointFit):
             )
         )
 
+    def member_lanes(self, members: np.ndarray) -> tuple:
+        """The ids of the lanes of ``members`` (one flag per member of the cut level), in lane order."""
+        chosen = np.asarray(members, dtype=bool)[self.lane_member]
+        return tuple(self.route.ids[position] for position in np.flatnonzero(chosen))
+
+    def lane_costs_of(self, results: Any, costs: np.ndarray) -> np.ndarray:
+        """``costs``, one per planned lane, with those of the lanes ``results`` holds replaced."""
+        replaced = np.array(costs, dtype=np.float64, copy=True)
+        positions = [self.route.position[str(lane)] for lane in results.lane_ids]
+        replaced[positions] = np.asarray(results.cost, dtype=np.float64)[0]
+        return replaced
+
+    def request_blocks(
+        self,
+        point: np.ndarray,
+        attempt: int,
+        base: _Point | None = None,
+        moved: np.ndarray | None = None,
+    ) -> tuple:
+        """One ``blocks`` request at ``point``: every lane, or the lanes of the members ``moved``.
+
+        With ``moved`` the system is ``base.system`` with the subtrees of
+        those members taken from the request (``_spliced``), and the lane
+        costs ``base.lane_costs`` with theirs replaced; the outer coordinates
+        are held, so every other member's nodes are those at ``point``. A
+        member whose lanes solved at a finite cost but whose Gauss-Newton
+        blocks are not finite fails like a member whose lanes did not solve.
+        A failed lane of weight zero is logged as ignored.
+
+        Returns ``(lane_costs, system, failures)``: ``failures`` (not logged)
+        and ``None`` for the others when a lane failed.
+        """
+        route, work = self.route, self.work
+        lanes = None if moved is None else self.member_lanes(moved)
+        results = self.evaluate("blocks", point, lanes)
+        failures, ignored = route.weigh(route.failures(results))
+        work.record(attempt, ignored, inner=True)
+        if failures:
+            return None, None, failures
+        system = route.system(results, point)
+        if moved is None:
+            lane_costs = np.array(results.cost, dtype=np.float64)[0]
+        else:
+            lane_costs = self.lane_costs_of(results, base.lane_costs)
+            system = _spliced(base.system, system, self.cut, moved, self.cost_at(lane_costs, point))
+        failures, ignored = route.weigh(self.nonfinite_block_failures(results, system))
+        work.record(attempt, ignored, inner=True)
+        if failures:
+            return None, None, failures
+        if moved is None:
+            # The lanes' terms of the gradient floor's bound at this point.
+            self.floor.record(results)
+        return lane_costs, system, ()
+
+    def cost_at(self, lane_costs: np.ndarray, point: np.ndarray) -> float:
+        """The cost at ``point`` from every lane's cost there: the weighted lanes and the regularizer."""
+        blocks = self.route.regularizer_at(point)
+        regularizer = 0.0 if blocks is None else float(blocks[1])
+        return (
+            float(np.sum(self.route.omega * np.asarray(lane_costs, dtype=np.float64))) + regularizer
+        )
+
     def retreating_blocks(
         self,
         point: np.ndarray,
-        anchor: np.ndarray,
+        base: _Point,
+        moved: np.ndarray | None,
         radii: np.ndarray,
         retreats: np.ndarray,
         attempt: int,
     ) -> tuple:
         """The ``blocks`` request at a polished point, the members retreating.
 
-        ``anchor`` holds every member's coordinates at its last point where
-        its lanes solved: the point before the polish's last iteration. A
-        member with a lane that no rung solves at ``point`` retreats along its
+        ``base`` is the point before the polish's last iteration, where every
+        lane solved; ``moved`` the members whose step that iteration accepted,
+        whose lanes the request covers (``request_blocks``), or ``None`` for
+        every lane. A member with a lane that no rung solves at ``point``
+        retreats along its
         move from ``anchor``: at its ``j``-th retreat its subtree's coordinates
         are ``anchor + (point - anchor) / 2**j``, its radius is quartered, and
         only its lanes are solved again there, in one ``value`` request at
@@ -687,9 +794,9 @@ class _NestedFit(_JointFit):
         as the member's. A failed lane of weight zero is logged as ignored and
         makes no member retreat.
 
-        Returns ``(point, results, system, failures)``: the point where every
-        lane solved, the results and system there, and ``()``; or, when a
-        member cannot be solved at any retreat, the last point tried,
+        Returns ``(point, lane_costs, system, failures)``: the point where
+        every lane solved, the lane costs and system there, and ``()``; or,
+        when a member cannot be solved at any retreat, the last point tried,
         ``None``, ``None`` and the failures of the last request, logged.
         """
         route, work = self.route, self.work
@@ -697,24 +804,14 @@ class _NestedFit(_JointFit):
         owners = self.owners
         below = owners >= 0
         member_of = np.maximum(owners, 0)
-        anchor = np.asarray(anchor)
+        anchor = np.asarray(base.point)
         failing = np.array(point, copy=True)
         point = np.array(point, copy=True)
         tried = np.zeros((len(self.members),), dtype=np.int64)
         while True:
-            results = self.evaluate("blocks", point)
-            failures, ignored = route.weigh(route.failures(results))
-            work.record(attempt, ignored, inner=True)
+            lane_costs, system, failures = self.request_blocks(point, attempt, base, moved)
             if not failures:
-                system = route.system(results, point)
-                # A member whose lanes solved at a finite cost but whose Gauss-Newton blocks
-                # are not finite fails like a member whose lanes did not solve.
-                failures, ignored = route.weigh(self.nonfinite_block_failures(results, system))
-                work.record(attempt, ignored, inner=True)
-            if not failures:
-                # The lanes' terms of the gradient floor's bound at this point.
-                self.floor.record(results)
-                return point, results, system, ()
+                return point, lane_costs, system, ()
             pending = self.failed_members(failures)
             unlogged = failures
             while pending.size:
@@ -731,10 +828,7 @@ class _NestedFit(_JointFit):
                 moving = below & np.isin(member_of, pending)
                 halving = 0.5 ** tried[member_of[moving]]
                 point[moving] = anchor[moving] + (failing[moving] - anchor[moving]) * halving
-                lanes = tuple(
-                    route.ids[position]
-                    for position in np.flatnonzero(np.isin(self.lane_member, pending))
-                )
+                lanes = self.member_lanes(np.isin(np.arange(len(self.members)), pending))
                 if not self.valid(point):
                     work.predicate_rejections += 1
                     continue
@@ -743,6 +837,10 @@ class _NestedFit(_JointFit):
                 work.record(attempt, ignored, inner=True)
                 unlogged = failures
                 pending = self.failed_members(failures) if failures else pending[:0]
+
+    def polish_request(self, point: np.ndarray, members: np.ndarray) -> Any:
+        """The polish's request at its trial ``point``: the lanes of ``members``, in ``value`` mode."""
+        return self.evaluate("value", point, self.member_lanes(members))
 
     def lockstep(
         self,
@@ -762,13 +860,18 @@ class _NestedFit(_JointFit):
 
         ``system`` and ``lane_costs`` are those at ``point``. The members start
         with the radii, locks and gradient thresholds the fit carries and make
-        at most ``limit`` lockstep iterations, each one ``value`` request at
-        the members' combined trial and one ``blocks`` request at their new
-        point; ``limit=0`` reads ``point`` alone. ``start`` marks the start's
-        polish, whose iterations count apart. A member whose lane fails at the
-        ``blocks`` request after an iteration retreats along its last step
-        (``retreating_blocks``); when one cannot be solved at any retreat, the
-        polish ends at the point before that iteration. A member is done when
+        at most ``limit`` lockstep iterations; ``limit=0`` reads ``point``
+        alone. An iteration makes one request at the members' combined trial
+        over the lanes of the members it moves (``polish_request``), and one
+        ``blocks`` request at their new point over the lanes of the members
+        that moved, whose nodes of the system it updates (``request_blocks``):
+        of every lane when they hold every lane or it is the last iteration. A
+        polish that ends on a system of some lanes' requests makes the
+        ``blocks`` request of every lane where it ended. ``start`` marks the
+        start's polish, whose iterations count apart. A member whose lane fails
+        at a ``blocks`` request after an iteration retreats along its last
+        step (``retreating_blocks``); one that no retreat solves goes back to
+        its point before that iteration and leaves the polish. A member is done when
         its stationarity number is at most the inner ``stationarity_tol``,
         when its gradient is within the inner ``grad_tol`` (when that is set),
         when the decrease its model predicts for its full step is at most
@@ -805,6 +908,10 @@ class _NestedFit(_JointFit):
             None if outer_predicted is None else solver.inner_fraction * float(outer_predicted)
         )
         first_cost = float(system.cost)
+        # Where the polish started, and whether the system holds nodes of a request of
+        # some lanes only.
+        start = _Point(np.array(point, copy=True), system, lane_costs)
+        spliced = False
         owners = self.owners
         below = owners >= 0
         member_of = np.maximum(owners, 0)
@@ -915,14 +1022,15 @@ class _NestedFit(_JointFit):
             if passing.any() and not self.valid(combined):
                 work.predicate_rejections += int(passing.sum())
                 passing[:] = False
-            # (7) one value request at the combined trial; a failed lane rejects its member
+            # (7) one request at the combined trial over the lanes of the members it
+            # moves; a failed lane rejects its member
             rho = np.full((count,), -np.inf)
             failed = np.zeros((count,), dtype=bool)
             trial_costs = np.full((count,), np.inf)
             evaluated = bool(passing.any())
             if evaluated:
                 before = work.lane_rungs.copy()
-                trial_results = self.evaluate("value", combined)
+                trial_results = self.polish_request(combined, passing)
                 # A failed lane of weight zero rejects no member's step: logged, ignored.
                 trial_failures, ignored = route.weigh(route.failures(trial_results))
                 work.record(attempt, ignored, inner=True)
@@ -937,7 +1045,7 @@ class _NestedFit(_JointFit):
                     failed[self.lane_member[route.position[failure.lane]]] = True
                 work.record(attempt, trial_failures, inner=True)
                 trial_costs = self.member_costs(
-                    np.asarray(trial_results.cost, dtype=np.float64)[0], combined
+                    self.lane_costs_of(trial_results, lane_costs), combined
                 )
                 gains = passing & ~failed & (predicted > 0.0)
                 # Every member's gain ratio; relaxed by the noise the outer trials
@@ -1037,21 +1145,43 @@ class _NestedFit(_JointFit):
             k += 1
             if not taken.any():
                 continue
-            # (1) of the next iteration: the members' new point, every lane solved
-            # there; a member whose lane fails there retreats along its last step.
-            moved, results, solved, failures = self.retreating_blocks(
-                x, previous, radii, retreats, attempt
-            )
-            if failures:
-                # A member that no retreat solves ends the polish at the point before
-                # this iteration, where every lane solved.
+            # (1) of the next iteration: the system at the members' new point. The last
+            # iteration requests every lane there, and so does one whose moved members
+            # hold every lane; an earlier one the lanes of the members that moved. A
+            # member whose lane fails retreats along its last step, and one that no
+            # retreat solves goes back to its point before it.
+            moved = accepted.copy()
+            final = k == int(limit) or not active.any() or bool(np.all(moved[self.lane_member]))
+            base = _Point(previous, system, lane_costs)
+            while True:
+                reached, solved_costs, solved, failures = self.retreating_blocks(
+                    x, base, None if final else moved, radii, retreats, attempt
+                )
+                if not failures:
+                    x, system, lane_costs = reached, solved, solved_costs
+                    spliced = not final
+                    break
                 unsolved = self.failed_members(failures)
                 codes[unsolved] = _UNSOLVED
                 active[unsolved] = False
-                x = previous
-                break
-            x, system = moved, solved
-            lane_costs = np.array(results.cost, dtype=np.float64)[0]
+                progress = bool(moved[unsolved].any())
+                moved[unsolved] = False
+                if not progress or not (moved.any() or final):
+                    x, system, lane_costs = base
+                    break
+                x = reached
+                back = below & np.isin(member_of, unsolved)
+                x[back] = previous[back]
+        if spliced:
+            # The exit's request of every lane at the polished point, whose root block and
+            # levels above the cut the next attempt reads; should it fail, the polish
+            # ends where it started.
+            solved_costs, solved, failures = self.request_blocks(x, attempt)
+            if failures:
+                work.record(attempt, failures, inner=True)
+                x, system, lane_costs = start
+            else:
+                system, lane_costs = solved, solved_costs
         if int(limit) == 0:
             codes[~held] = _SKIPPED
         else:

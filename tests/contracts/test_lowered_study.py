@@ -439,9 +439,9 @@ def test_a_member_whose_step_cannot_be_bracketed_is_held_when_asked(attempt):
 
 def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_in_the_polish():
     """A member whose lanes solve at a finite cost but give non-finite Gauss-Newton blocks at its
-    polished point has its lanes recorded as failed: it retreats along its polish step and the
-    polish ends where its lanes solved, at a finite cost; at an accepted step such blocks end the
-    fit with an error naming the member."""
+    polished point has its lanes recorded as failed: it retreats along its polish step and goes
+    back to where its lanes solved, at a finite cost; at an accepted step such blocks end the fit
+    with an error naming the member."""
     from tests.support.inference import (
         NOISE,
         TIMES,
