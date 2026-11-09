@@ -10,6 +10,10 @@ A `ControlProblem` poses optimal control of a model's operational inputs over a 
 
 ---
 
+### Controls
+
+`PiecewiseConstant` holds one target per interval of a grid. `SignalControls` holds signals of `diff_soup.optimization.inference.approx`, with free durations if asked ([controls](../../../overview/modeling/controls.md#control-signals)).
+
 ::: diff_soup.optimization.control.PiecewiseConstant
     options:
       members:
@@ -17,3 +21,27 @@ A `ControlProblem` poses optimal control of a model's operational inputs over a 
         - horizon
         - interval
         - segments
+
+::: diff_soup.optimization.control.SignalControls
+    options:
+      members:
+        - durations
+        - horizon
+        - segments
+
+---
+
+??? abstract "Abstract base class"
+
+    The details matter only when writing controls of your own.
+
+    ::: diff_soup.optimization.control.AbstractControls
+        options:
+          members:
+            - size
+            - free_durations
+            - durations
+            - horizon
+            - interval
+            - interval_controls
+            - segments

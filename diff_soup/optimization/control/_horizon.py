@@ -9,6 +9,7 @@ compiled solver reuses its compile, with no cache of closures.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -25,7 +26,7 @@ from diff_soup.optimization._derived import identity
 if TYPE_CHECKING:
     from diff_soup._adjoints import AbstractAdjoint
     from diff_soup.optimization.constraints import Constraints
-    from diff_soup.optimization.control.problem import PiecewiseConstant
+    from diff_soup.optimization.control.problem import AbstractControls
     from diff_soup.timestepping.vsvo.classes import JBDF, JIDA, JNDF
 
 
@@ -33,14 +34,15 @@ class Configuration(NamedTuple):
     """What a horizon's closures read besides `(u, args)`; hashable, and free of arrays."""
 
     model: Held
-    controls: PiecewiseConstant
+    controls: AbstractControls
     cost: Callable
     path: Callable | None
     terminal: Callable | None
     n_path: int
     n_terminal: int
     constraints: Constraints | None
-    save_times: tuple[float, ...]
+    save_times: tuple[float, ...] | None
+    save_fractions: tuple[float, ...] | None
     solver: JIDA | JBDF | JNDF
     adjoint: AbstractAdjoint | None
 
@@ -74,11 +76,15 @@ class Horizon:
         return self.configuration.n_terminal + (0 if extra is None else extra.n_equality)
 
     @property
+    def n_samples(self) -> int:
+        """The saved times: the save times, or the save fractions in every segment."""
+        return _sample_count(self.configuration)
+
+    @property
     def n_inequality(self) -> int:
-        """The path rows at every save time, then the inequality rows of the `Constraints` on `u`."""
-        configuration = self.configuration
-        extra = configuration.constraints
-        path = configuration.n_path * len(configuration.save_times)
+        """The path rows at every saved time, then the inequality rows of the `Constraints` on `u`."""
+        extra = self.configuration.constraints
+        path = self.configuration.n_path * self.n_samples
         return path + (0 if extra is None else extra.n_inequality)
 
     def closure(self, name: str) -> Callable:
@@ -101,11 +107,12 @@ def _build(configuration: Configuration) -> Lowered:
     """The closures of a horizon configuration."""
     model, controls = configuration.model.value, configuration.controls
     n_terminal = configuration.n_terminal
-    times = np.asarray(configuration.save_times, dtype=np.float64)
-    n_path = configuration.n_path * times.size
+    fractions = configuration.save_fractions
+    times = None if fractions is not None else np.asarray(configuration.save_times, np.float64)
+    n_path = configuration.n_path * _sample_count(configuration)
     extra = configuration.constraints
     lowered = None if extra is None else extra.lower(None, identity)
-    n = controls.intervals
+    n = controls.size
     modes = tuple(model.operational_modes())
     reverse = configuration.adjoint is not None
     # Reverse mode needs an adjoint that supports it, and pays when columns exceed rows.
@@ -115,14 +122,24 @@ def _build(configuration: Configuration) -> Lowered:
 
     def horizon(u, args):
         state, theta, _ = args
+        schedule = controls.segments(u, modes)
+        if fractions is None:
+            t_end, sampled = controls.horizon, jnp.asarray(times)
+        else:
+            # The schedule and its sample times read one stored copy of the durations: a
+            # product fused into their sums (an FMA) would put a segment's end and the sample
+            # at its end an ulp apart, and the horizon's end short of the last segment's.
+            durations = jax.lax.optimization_barrier(jnp.asarray(schedule.duration))
+            schedule = dataclasses.replace(schedule, duration=durations)
+            t_end, sampled = sample_times(durations, fractions)
         solution, _ = solve_schedule(
             model,
             configuration.solver,
-            controls.segments(u, modes),
+            schedule,
             state,
             t0=0.0,
-            t_end=controls.horizon,
-            times=jnp.asarray(times),
+            t_end=t_end,
+            times=sampled,
             theta=theta,
             adjoint=configuration.adjoint,
         )
@@ -248,6 +265,36 @@ def _build(configuration: Configuration) -> Lowered:
     }
 
 
+def _sample_count(configuration: Configuration) -> int:
+    """The saved times of a configuration: its save times, or its fractions in every segment."""
+    if configuration.save_times is not None:
+        return len(configuration.save_times)
+    return len(configuration.save_fractions) * len(configuration.controls.durations)
+
+
+def sample_times(durations, fractions: tuple[float, ...], xp=jnp):
+    """The end of a horizon and its times at `fractions` of every segment, segment after segment.
+
+    The segments' starts are the durations added in order, as `solve_schedule` adds them, so
+    a fraction of one is a segment's own end and the last such time is the horizon's end.
+
+    Args:
+        durations: The length of each segment, traced or not.
+        fractions: The positions within a segment, increasing within `(0, 1]`.
+        xp: `jax.numpy` in a trace, `numpy` for static durations.
+
+    Returns:
+        `(end, times)`, the times of shape `(segments * fractions,)`.
+    """
+    starts, end = [], durations[0] * 0
+    for index in range(durations.shape[0]):
+        starts.append(end)
+        end = end + durations[index]
+    starts = xp.stack(starts)
+    within = xp.asarray(fractions, dtype=durations.dtype)
+    return end, xp.reshape(starts[:, None] + within[None, :] * durations[:, None], (-1,))
+
+
 def _sized(
     function: Callable | None, solution: PyTree, u: ArrayLike, args: PyTree, count: int, name: str
 ):
@@ -262,4 +309,4 @@ def _sized(
     return values
 
 
-__all__ = ["Configuration", "Horizon"]
+__all__ = ["Configuration", "Horizon", "sample_times"]

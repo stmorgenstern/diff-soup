@@ -1,6 +1,6 @@
 """Control: a control problem over a schedule solve, its numeric problem and its derivative in
-the initial state and limits, the receding horizon under scan and from the host, the
-estimators."""
+the initial state and limits, signal controls lowered exactly with free durations, the receding
+horizon under scan and from the host, the estimators."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
+from diff_soup.optimization.inference import approx
 from tests.support.problems import operational_cell
 
 control = ds.optimization.control
@@ -27,6 +28,10 @@ SOLVER = ds.JIDA(linear="dense", rtol=1e-11, atol=1e-13)  # measured: see above
 IP = ds.optimization.InteriorPoint(tol=1e-10)  # measured: see above
 STARTS_AT = 2.0
 CHARGE = 2.5
+# Signal controls: a clamped cubic B-spline current of six control points on three segments
+# of a third, sampled at fractions of every segment.
+MODES = ("current", "voltage", "power")
+FRACTIONS = (0.25, 0.5, 1.0)
 
 
 def _state(level):
@@ -42,6 +47,33 @@ def _terminal(solution, u, args):
 
 def _voltage(state, theta):
     return jnp.mean(state[:4]) - 2.0 * state[4]
+
+
+def _duration(solution, u, args):
+    return u[-1]
+
+
+def _spline_current(free_durations=False):
+    """A B-spline current over [0, 1], or over a free duration."""
+    spline = approx.BSpline(np.linspace(0.0, 1.0, 4), np.zeros(6))
+    return control.SignalControls([(spline, "current", 1.0)], free_durations=free_durations)
+
+
+def _hold():
+    """One constant segment of a half, a block of held current or voltage."""
+    return approx.PiecewiseConstant([0.0, 0.5], [0.0])
+
+
+def _signal(kind, knots):
+    """A piecewise signal of `kind` on `knots` with random coefficients."""
+    rng, n = np.random.default_rng(0), len(knots)
+    if kind == "PiecewiseConstant":
+        return approx.PiecewiseConstant(knots, rng.normal(size=n - 1))
+    if kind == "PiecewiseLinear":
+        return approx.PiecewiseLinear(knots, rng.normal(size=n))
+    if kind == "CubicHermite":
+        return approx.CubicHermite(knots, rng.normal(size=n), rng.normal(size=n))
+    return approx.BSpline(knots, rng.normal(size=n + 2))
 
 
 def _closed_form(level, charge):
@@ -204,3 +236,129 @@ def test_an_estimator_corrects_a_wrong_belief_from_voltage_measurements(toy, kin
     # measured -6.5e-6 (Kalman) and -2.0e-11 (moving horizon, every fit at status 0) from
     # 0.4, workstation CPU 2026-11-06, pytest tests/public_api/test_control.py
     assert abs(error) < 1e-4
+
+
+@pytest.mark.parametrize(
+    "kind", ["PiecewiseConstant", "PiecewiseLinear", "CubicHermite", "BSpline"]
+)
+def test_signal_controls_lower_each_segment_of_a_signal_exactly(kind):
+    """A signal's segments lower to schedule segments whose targets, evaluated as the schedule
+    evaluates them, are the signal at every time."""
+    knots = np.array([0.0, 0.7, 1.1, 2.0, 3.6, 4.0])
+    signal = _signal(kind, knots)
+    u = jnp.concatenate([jnp.ravel(getattr(signal, path)) for path in signal.learnable_paths()])
+    arrays = control.SignalControls([(signal, "current", 1.0)]).segments(u, MODES)
+    starts = jnp.asarray(np.concatenate([[0.0], np.cumsum(arrays.duration)[:-1]]))
+    times = jnp.asarray(np.concatenate([np.linspace(0.0, 4.0, 401), knots]))
+    segment = jnp.clip(jnp.searchsorted(knots, times, side="left") - 1, 0, len(knots) - 2)
+
+    def target(k, t):
+        terms = {}
+        if arrays.terms is not None:
+            terms = {"target_terms": arrays.terms[k], "target_origin": starts[k]}
+        return ds.ControlState.operating(mode=0, target=arrays.target[k], **terms).target_at(t)
+
+    # measured 5.6e-16 (CubicHermite; 1.1e-16 PiecewiseLinear, 0.0 the others), workstation
+    # CPU 2026-11-09, pytest tests/public_api/test_control.py
+    np.testing.assert_allclose(
+        jax.vmap(target)(segment, times), jax.vmap(signal)(times), rtol=0, atol=1e-14
+    )
+
+
+def test_the_horizon_differentiates_in_spline_coefficients_and_a_free_duration(toy):
+    """The cost, terminal and path rows of a horizon with a B-spline current over a free
+    duration, sampled at fractions of every segment, differentiate as central differences do."""
+    problem = control.ControlProblem(
+        problem=toy.model,
+        controls=_spline_current(free_durations=True),
+        cost=lambda solution, u, args: jnp.mean(solution.ys**2),
+        terminal=_terminal,
+        n_terminal=1,
+        path=lambda solution, u, args: jnp.mean(solution.ys, axis=1) - 2.0 * solution.lambdas[:, 0],
+        n_path=1,
+        save_fractions=FRACTIONS,
+        initial_state=_state(STARTS_AT),
+        limits={"charge": jnp.asarray(CHARGE, jnp.float64)},
+        solver=SOLVER,
+    )
+    numeric = problem.numeric_problem(IP)
+    u = jnp.asarray([1.0, 3.0, 2.0, 4.0, 2.5, 1.5, 0.8])
+    _, gradient, _, _, terminal, path = jax.jit(numeric.evaluate_with_derivatives)(u)
+    jacobian = np.concatenate([gradient[None], terminal, path])
+    evaluate = jax.jit(numeric.evaluate)
+
+    def rows(x):
+        cost, equality, inequality = evaluate(x)
+        return np.concatenate([[cost], equality, inequality])
+
+    step = 1e-3
+    differences = np.stack(
+        [(rows(u.at[j].add(step)) - rows(u.at[j].add(-step))) / (2 * step) for j in range(u.size)],
+        axis=1,
+    )
+    # measured 9.5e-8 of the largest entry (the duration column 3.1e-8), workstation CPU
+    # 2026-11-09, pytest tests/public_api/test_control.py
+    scale = np.max(np.abs(jacobian))
+    np.testing.assert_allclose(differences, jacobian, rtol=0, atol=1e-6 * scale)
+
+
+def test_a_current_then_voltage_problem_reaches_its_closed_form(toy):
+    """A held current then a held voltage, a half each, the mean square of the two targets
+    minimized to the charge: the voltage phase relaxes the mean towards minus the voltage, so the
+    charge is linear in the targets and the optimum lies along its coefficients."""
+    problem = control.ControlProblem(
+        problem=toy.model,
+        controls=control.SignalControls([(_hold(), "current", 1.0), (_hold(), "voltage", 1.0)]),
+        cost=toy.cost,
+        terminal=_terminal,
+        n_terminal=1,
+        bounds=(-10.0, 10.0),
+        save_times=TIMES,
+        initial_state=_state(STARTS_AT),
+        limits={"charge": jnp.asarray(CHARGE, jnp.float64)},
+        solver=SOLVER,
+    )
+    result = ds.optimization.optsolve(problem, IP)
+    # The charge after m' = I - m, then m' = -(m + V) / 2: a I + b V + c.
+    a, b = (1 - np.exp(-0.5)) * np.exp(-0.25), np.exp(-0.25) - 1
+    expected = (CHARGE - STARTS_AT * np.exp(-0.75)) * np.array([a, b]) / (a * a + b * b)
+    # measured 2.3e-9 off the closed form, workstation CPU 2026-11-09,
+    # pytest tests/public_api/test_control.py
+    np.testing.assert_allclose(result.params, expected, rtol=0, atol=1e-8)
+
+
+def test_a_free_duration_reaches_the_minimum_charging_time(toy):
+    """With the duration free and the spline's control points under a ceiling, the shortest
+    charge holds the ceiling throughout: T = log((ceiling - level) / (ceiling - charge))."""
+    ceiling = 5.0
+    problem = control.ControlProblem(
+        problem=toy.model,
+        controls=_spline_current(free_durations=True),
+        cost=_duration,
+        terminal=_terminal,
+        n_terminal=1,
+        bounds=(np.r_[np.zeros(6), 0.05], np.r_[np.full(6, ceiling), 2.0]),
+        save_fractions=(1.0,),
+        initial_state=_state(STARTS_AT),
+        limits={"charge": jnp.asarray(CHARGE, jnp.float64)},
+        solver=SOLVER,
+    )
+    result = ds.optimization.optsolve(problem, IP)
+    expected = np.log((ceiling - STARTS_AT) / (ceiling - CHARGE))
+    # measured 7.0e-11 off the closed form, workstation CPU 2026-11-09,
+    # pytest tests/public_api/test_control.py
+    np.testing.assert_allclose(result.params[-1], expected, rtol=0, atol=1e-8)
+
+
+def test_the_receding_horizon_refuses_free_durations(toy):
+    """The receding horizon steps a grid of fixed intervals, so it refuses free durations."""
+    problem = control.ControlProblem(
+        problem=toy.model,
+        controls=_spline_current(free_durations=True),
+        cost=_duration,
+        save_fractions=(1.0,),
+        initial_state=_state(STARTS_AT),
+        solver=SOLVER,
+    )
+    with pytest.raises(ds.ConfigurationError, match="free durations"):
+        control.receding_horizon(problem, toy.plant, control.FullState(), 2, solver=IP)

@@ -17,8 +17,8 @@ supplies the degree-graded Tikhonov weights that pair with ``LegendreExpansion``
   parameterisations via 2-D cosine Fourier modes (differentiable) and RBF
   covariance eigenmodes (sampling utility).
 * [PiecewiseConstant][], [PiecewiseLinear][], [CubicHermite][],
-  [Fourier][] — learnable time-signal bases for boundary conditions,
-  forcing terms, and control inputs.
+  [BSpline][], [Fourier][] — learnable time-signal bases for boundary
+  conditions, forcing terms, and control inputs.
 
 Usage example::
 
@@ -50,6 +50,7 @@ from diff_soup.optimization.inference.approx.networks import ICNN, MonotoneMLP, 
 from diff_soup.optimization.inference.approx.operators import DeepONet, FNO1d, FNO2d
 from diff_soup.optimization.inference.approx.polynomial import MonomialExpansion
 from diff_soup.optimization.inference.approx.signals import (
+    BSpline,
     CubicHermite,
     Fourier,
     PiecewiseConstant,
@@ -92,5 +93,6 @@ __all__ = [
     "PiecewiseConstant",
     "PiecewiseLinear",
     "CubicHermite",
+    "BSpline",
     "Fourier",
 ]

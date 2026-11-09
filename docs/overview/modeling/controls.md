@@ -94,3 +94,54 @@ protocol = ds.Schedule([
 - An experiment follows a protocol through `ds.optimization.inference.Experiment(...,
   schedule=protocol)` ([fitting
   parameters](../inference/fitting.md#declare-the-experiment)).
+
+## Control signals
+
+An optimal control problem
+([`ds.optimization.control.ControlProblem`](../../reference/optimization/control/problem.md))
+designs the targets of a schedule. `SignalControls` takes them from the
+time signals of [function approximation](../inference/function-approximation.md#time-varying-signals),
+one block after another:
+
+```python
+from diff_soup.optimization.inference.approx import BSpline, PiecewiseConstant
+
+current = BSpline(jnp.linspace(0.0, 1200.0, 10), jnp.zeros(12))
+controls = ds.optimization.control.SignalControls([(current, "current", -1.0)])
+```
+
+- A block is `(signal, mode, scale)`. It holds the row `mode` at
+  `scale * signal(t)` over the signal's knots, starting where the block
+  before it ends.
+- Each segment of the signal becomes one schedule segment whose target is
+  the segment's polynomial, so the schedule integrates the signal
+  exactly. The integrator continues across the knots of a block.
+- The decision vector is the coefficients of every block in order, the
+  control points of a `BSpline`. A `BSpline` stays inside the range of its
+  control points, so bounds on them bound the whole current.
+- Two blocks give a mixed protocol, a current block then a voltage
+  block.
+
+`free_durations=True` adds each block's duration to the end of the
+decision vector, so a switch time or a total time becomes a decision
+variable:
+
+```python
+hold = lambda: PiecewiseConstant(jnp.array([0.0, 1.0]), jnp.zeros(1))
+cccv = ds.optimization.control.SignalControls(
+    [(hold(), "current", -1.0), (hold(), "voltage", 1.0)], free_durations=True
+)
+problem = ds.optimization.control.ControlProblem(
+    problem=model, controls=cccv, cost=lambda sol, u, args: u[-2] + u[-1],
+    save_fractions=(0.5, 1.0), ...
+)
+```
+
+- A block of duration `D` stretches its signal's knots to span `D`.
+  Bound each duration above zero.
+- The sample times then move with the durations, so the problem takes
+  `save_fractions`, positions within every segment, in place of
+  `save_times`. A fraction of `1` is the segment's end.
+- A minimum-time problem is one solve with the durations in its cost.
+  The receding horizon steps a fixed grid and refuses free durations.
+

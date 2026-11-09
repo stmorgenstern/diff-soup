@@ -375,6 +375,10 @@ basis is an equinox module evaluated inside an equation as
 - `CubicHermite(knots, values, slopes)` is a cubic on each segment
   matched to the value and the slope at both of its knots, so the
   signal is smooth.
+- `BSpline(knots, control_points)` is the clamped cubic B-spline
+  \(s(t) = \sum_i p_i B_i(t)\), with two more control points than knots.
+  It starts at the first control point, ends at the last, has a continuous
+  second derivative, and never leaves the range of its control points.
 - `Fourier(period, cos_coeffs, sin_coeffs, mean)` is the truncated
   series \(s(t) = \bar s + \sum_{k=1}^{n} c_k \cos(2\pi k t / T) + s_k
   \sin(2\pi k t / T)\), periodic with period \(T\).
@@ -384,6 +388,12 @@ outside the knots takes the value at the nearest end, and a time
 exactly on an interior knot takes the segment to its left, the segment
 a solver step ending there was integrated against. A multi-component
 signal carries a trailing axis of size \(m\) on its values.
+
+The four piecewise signals are polynomials on every segment.
+`polynomials()` returns their coefficients in the time since each
+segment's start, shape `(K, degree + 1)` with the constant term first.
+This is how a signal drives a schedule exactly as a control
+([control signals](../modeling/controls.md#control-signals)).
 
 For example, to fit a forcing term that steps once at \(t = 0.05\):
 

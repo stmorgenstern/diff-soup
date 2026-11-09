@@ -15,9 +15,15 @@ from diff_soup.optimization.control.horizon import (
     mpc_step,
     receding_horizon,
 )
-from diff_soup.optimization.control.problem import ControlProblem, PiecewiseConstant
+from diff_soup.optimization.control.problem import (
+    AbstractControls,
+    ControlProblem,
+    PiecewiseConstant,
+    SignalControls,
+)
 
 __all__ = [
+    "AbstractControls",
     "ClosedLoop",
     "ControlProblem",
     "Estimator",
@@ -29,6 +35,7 @@ __all__ = [
     "MovingHorizonEstimator",
     "PiecewiseConstant",
     "PlantEstimate",
+    "SignalControls",
     "mpc_step",
     "receding_horizon",
 ]

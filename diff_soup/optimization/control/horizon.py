@@ -14,6 +14,7 @@ import numpy as np
 from jaxtyping import Array, ArrayLike, Float, Int, PyTree
 
 from diff_soup._errors import ConfigurationError
+from diff_soup.optimization.control._horizon import sample_times
 from diff_soup.optimization.solvers import SolveRecord
 from diff_soup.optimization.solvers.sqp import SQP
 
@@ -127,6 +128,12 @@ def receding_horizon(
         )
     if int(n_intervals) < 1:
         raise ConfigurationError(f"receding_horizon needs n_intervals >= 1; got {n_intervals}.")
+    if control_problem.controls.free_durations:
+        raise ConfigurationError(
+            "receding_horizon moves a horizon of fixed intervals one interval at a time, and these "
+            "controls have free durations. Solve the problem with optsolve, or give the receding "
+            "horizon PiecewiseConstant controls."
+        )
     durations = control_problem.controls.durations
     if warm_start == "shift" and any(d != durations[0] for d in durations):
         raise ConfigurationError(
@@ -199,7 +206,7 @@ def _next_start(control_problem, numeric, solution, record, warm_start):
         return numeric.x0, record
     if warm_start == "previous":
         return solution, record
-    moves = _shift_map(control_problem.controls.intervals)
+    moves = _shift_map(control_problem.controls.size)
     rows = _row_shift_map(control_problem)
     lower, upper = record.bound_multipliers
     shifted = dataclasses.replace(
@@ -229,8 +236,12 @@ def _row_shift_map(control_problem: ControlProblem) -> np.ndarray:
     A path row at saved time `t` takes the row at `t + duration` where that time is saved, and
     keeps its own otherwise; rows of `Constraints` on `u` keep theirs.
     """
-    times = np.asarray(control_problem.save_times, dtype=np.float64)
     duration = control_problem.controls.interval
+    if control_problem.save_times is None:
+        durations = np.asarray(control_problem.controls.durations, dtype=np.float64)
+        times = sample_times(durations, control_problem.save_fractions, xp=np)[1]
+    else:
+        times = np.asarray(control_problem.save_times, dtype=np.float64)
     later = np.searchsorted(times, times + duration)
     found = (later < times.size) & np.isclose(
         times[np.minimum(later, times.size - 1)], times + duration, rtol=0.0, atol=1e-9 * duration
