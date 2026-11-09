@@ -49,14 +49,20 @@ class AbstractControls(eqx.Module):
 
     A [ControlProblem][diff_soup.optimization.control.ControlProblem] reads `size` and lowers
     each decision vector through `segments` onto the schedule it solves, which runs to
-    `horizon`. [receding_horizon][diff_soup.optimization.control.receding_horizon] and the
-    estimators step the controls by `interval`, through `durations` and `interval_controls()`.
+    `horizon`, or to the end of its traced durations when `free_durations`.
+    [receding_horizon][diff_soup.optimization.control.receding_horizon] and the estimators step
+    the controls by `interval`, through `durations` and `interval_controls()`.
     """
 
     @property
     @abc.abstractmethod
     def size(self) -> int:
         """The length of the decision vector."""
+
+    @property
+    @abc.abstractmethod
+    def free_durations(self) -> bool:
+        """Whether the segment durations are entries of the decision vector, traced in `segments`."""
 
     @property
     @abc.abstractmethod
@@ -110,6 +116,11 @@ class PiecewiseConstant(AbstractControls):
     def size(self) -> int:
         """The length of the decision vector, one target per interval."""
         return self.intervals
+
+    @property
+    def free_durations(self) -> bool:
+        """`False`: the grid's durations are static."""
+        return False
 
     def __check_init__(self) -> None:
         """Refuse a grid whose lengths do not match `intervals` or are not positive."""
@@ -329,17 +340,26 @@ class SignalControls(AbstractControls):
     another; the signals' own coefficient values are not read.
 
     One block of a `BSpline` current is a smooth current profile; a current block then a
-    voltage block is a charge at constant current, then at constant voltage.
+    voltage block is a charge at constant current, then at constant voltage. With
+    `free_durations` the switch from one block to the next is a decision variable, and a
+    minimum-time problem is one solve with the durations in its cost.
 
     Args:
         blocks: The blocks in time order, each `(signal, mode, scale)`: a signal of one component, the operational row it drives (`"current"`, `"voltage"`, `"power"` or `"resistance"`), and the factor from the signal to the row's target.
         carry_step: As `ds.Schedule(carry_step=)`: `None` continues the integrator across the knots of a block, where the target is continuous, and starts it afresh where the mode changes; `False` starts every segment afresh.
+        free_durations: Whether each block's duration is an entry of the decision vector, one per block after every coefficient. A block of duration `D` runs its signal with the knots stretched from their span to `D`. Keep each duration positive through `bounds`.
     """
 
     blocks: tuple[_Block, ...] = eqx.field(static=True)
     carry_step: bool | None = eqx.field(static=True, default=None)
+    free_durations: bool = eqx.field(static=True, default=False)
 
-    def __init__(self, blocks: Sequence[tuple], carry_step: bool | None = None):
+    def __init__(
+        self,
+        blocks: Sequence[tuple],
+        carry_step: bool | None = None,
+        free_durations: bool = False,
+    ):
         """Read the blocks; see the class docstring."""
         if isinstance(blocks, tuple) and len(blocks) == 3 and isinstance(blocks[1], str):
             raise ConfigurationError(
@@ -354,20 +374,33 @@ class SignalControls(AbstractControls):
                 f"SignalControls carry_step must be None, True or False; got {carry_step!r}."
             )
         self.carry_step = None if carry_step is None else bool(carry_step)
+        if not isinstance(free_durations, (bool, np.bool_)):
+            raise ConfigurationError(
+                f"SignalControls free_durations must be True or False; got {free_durations!r}."
+            )
+        self.free_durations = bool(free_durations)
 
     @property
     def size(self) -> int:
-        """The length of the decision vector: every block's coefficient leaves."""
-        return sum(block.width for block in self.blocks)
+        """The length of the decision vector: every block's coefficient leaves, then its duration if free."""
+        coefficients = sum(block.width for block in self.blocks)
+        return coefficients + (len(self.blocks) if self.free_durations else 0)
 
     @property
     def durations(self) -> tuple:
-        """The length of each segment: the spacing of each block's knots, block after block."""
+        """The length of each segment: the spacing of each block's knots, block after block.
+
+        With free durations these are the lengths at which every block lasts its knots'
+        span; the decision vector's durations stretch each block from there.
+        """
         return tuple(length for block in self.blocks for length in block.lengths)
 
     @property
     def horizon(self) -> float:
-        """The end of the horizon: the durations added in order, as the schedule adds them."""
+        """The end of the horizon: the durations added in order, as the schedule adds them.
+
+        With free durations, the end at which every block lasts its knots' span.
+        """
         end = 0.0
         for duration in self.durations:
             end += duration
@@ -392,7 +425,9 @@ class SignalControls(AbstractControls):
         Returns:
             The [ScheduleArrays][diff_soup.ScheduleArrays], one segment per segment of each
             block's signal, whose `target` and `terms` leaves are `scale` times the signal's
-            polynomials.
+            polynomials. With free durations the `duration` leaf is traced too, and a block of
+            duration `D` scales the coefficient of `tau**j` by `(span / D)**j`, `span` its
+            knots' span.
         """
         degree = max(block.degree for block in self.blocks)
         template = schedule_arrays(
@@ -413,16 +448,30 @@ class SignalControls(AbstractControls):
                 f"SignalControls of {self.size} coefficients take a decision vector of shape "
                 f"({self.size},); got {u.shape}."
             )
-        rows, start = [], 0
-        for block in self.blocks:
+        rows, lengths, start = [], [], 0
+        coefficients = self.size - (len(self.blocks) if self.free_durations else 0)
+        for index, block in enumerate(self.blocks):
             polynomials = block.signal(u[start : start + block.width]).polynomials()
             start += block.width
-            padding = ((0, 0), (0, degree - block.degree))
-            rows.append(block.scale * jnp.pad(polynomials, padding))
+            polynomials = jnp.pad(polynomials, ((0, 0), (0, degree - block.degree)))
+            if self.free_durations:
+                duration = u[coefficients + index]
+                # The block's time runs span / duration times slower than its signal's.
+                stretch = block.span / duration
+                powers = [jnp.ones_like(stretch)]
+                for _ in range(degree):
+                    powers.append(powers[-1] * stretch)
+                polynomials = polynomials * jnp.stack(powers)
+                shares = np.asarray(block.lengths, dtype=np.float64) / block.span
+                lengths.append(duration * jnp.asarray(shares, dtype=duration.dtype))
+            rows.append(block.scale * polynomials)
         rows = jnp.concatenate(rows)
-        return dataclasses.replace(
+        arrays = dataclasses.replace(
             template, target=rows[:, 0], terms=rows[:, 1:] if degree else None
         )
+        if self.free_durations:
+            arrays = dataclasses.replace(arrays, duration=jnp.concatenate(lengths))
+        return arrays
 
 
 def _static_times(times: Any) -> tuple[float, ...] | None:
@@ -434,6 +483,17 @@ def _static_times(times: Any) -> tuple[float, ...] | None:
             "ControlProblem save_times are static: give concrete times, not traced ones."
         )
     return tuple(float(t) for t in np.asarray(times, dtype=np.float64).ravel())
+
+
+def _static_fractions(fractions: Any) -> tuple[float, ...] | None:
+    """Save fractions as Python floats, static and hashable; a traced value is refused."""
+    if fractions is None:
+        return None
+    if isinstance(fractions, jax.core.Tracer):
+        raise ConfigurationError(
+            "ControlProblem save_fractions are static: give concrete fractions, not traced ones."
+        )
+    return tuple(float(f) for f in np.asarray(fractions, dtype=np.float64).ravel())
 
 
 def _static_start(start: Any) -> tuple[float, ...] | None:
@@ -468,6 +528,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         bounds: `(lower, upper)` on `u`, broadcast, or `None`.
         constraints: [Constraints][diff_soup.optimization.Constraints] on `u` itself, functions of `(u, args)`, or `None`. Their scales are padded with ones over the terminal and path rows, and their `jacobian` mode differentiates their own rows.
         save_times: The times the solution is sampled at for the functionals, after the horizon's start at 0. A last time at the horizon's end, within the rounding of its sum, is the schedule's own end.
+        save_fractions: In place of `save_times`, the positions within every segment the solution is sampled at, increasing within `(0, 1]`, `1` the segment's end: the times follow the durations in the trace. Controls with free durations need them.
         initial_state: The state the horizon starts from; an `args` leaf.
         theta: The model parameters; an `args` leaf.
         limits: What the functionals read as limits, such as a voltage ceiling; an `args` leaf.
@@ -489,6 +550,9 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
     save_times: tuple[float, ...] | None = eqx.field(
         static=True, default=None, converter=_static_times
     )
+    save_fractions: tuple[float, ...] | None = eqx.field(
+        static=True, default=None, converter=_static_fractions
+    )
     initial_state: Float[ArrayLike, "*batch n_states"] | None = None
     theta: PyTree = None
     limits: PyTree = None
@@ -500,7 +564,11 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
     def __post_init__(self) -> None:
         """Take a last save time within the rounding of the horizon's sum as its end."""
         times = _static_times(self.save_times)
-        if times and self.controls is not None:
+        if (
+            times
+            and isinstance(self.controls, AbstractControls)
+            and not self.controls.free_durations
+        ):
             end = self.controls.horizon
             rounding = len(self.controls.durations) * _END_ROUNDING * end
             if end < times[-1] <= end + rounding:
@@ -573,6 +641,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
                 n_terminal=self.n_terminal,
                 constraints=constraints,
                 save_times=self.save_times,
+                save_fractions=self.save_fractions,
                 solver=self.solver,
                 adjoint=self.adjoint,
             )
@@ -583,7 +652,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         scales = None if self.constraints is None else self.constraints.row_scales()
         if scales is None:
             return None
-        path = self.n_path * len(self.save_times)
+        path = self.n_path * self._closures().n_samples
         equality, inequality = scales
         return (
             jnp.concatenate([jnp.ones((self.n_terminal,), equality.dtype), equality]),
@@ -597,6 +666,12 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
             for name in ("controls", "cost", "save_times", "initial_state", "solver")
             if getattr(self, name) is None
         ]
+        if "save_times" in missing:
+            at = missing.index("save_times")
+            if self.save_fractions is None:
+                missing[at] = "save_times or save_fractions"
+            else:
+                del missing[at]
         if self.model is None:
             missing.insert(0, "problem")
         if missing:
@@ -612,6 +687,28 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
             raise ConfigurationError(
                 "ControlProblem: give path with n_path and terminal with n_terminal, or "
                 "neither of each pair."
+            )
+        if self.save_times is not None and self.save_fractions is not None:
+            raise ConfigurationError(
+                "ControlProblem samples at save_times or at save_fractions of every segment; "
+                "give one of them."
+            )
+        if self.save_fractions is not None:
+            fractions = np.asarray(self.save_fractions, dtype=np.float64)
+            if (
+                fractions.size == 0
+                or np.any(np.diff(fractions) <= 0)
+                or not (0 < fractions[0] and fractions[-1] <= 1)
+            ):
+                raise ConfigurationError(
+                    "ControlProblem save_fractions must increase strictly within (0, 1]."
+                )
+            return
+        if self.controls.free_durations:
+            raise ConfigurationError(
+                "ControlProblem: the controls' durations are decision variables, so a sample "
+                "time moves with them; give save_fractions, the positions within every segment, "
+                "in place of save_times."
             )
         times = np.asarray(self.save_times, dtype=np.float64)
         horizon = self.controls.horizon
