@@ -309,9 +309,10 @@ def _chunks(units: int, modes: tuple, forced: int | None, devices: int = 1) -> M
 def _modes(child: Any) -> tuple:
     """The modes the program of ``child`` runs in.
 
-    A solver with a reverse adjoint has no ``blocks`` mode. The ``hessian`` mode
-    needs an experiment whose adjoints differentiate its gradient forward over
-    reverse.
+    A solver with a reverse adjoint has no ``blocks`` mode, and so no
+    ``frozen`` mode, which steps on the Jacobian a ``blocks`` evaluation keeps.
+    The ``hessian`` mode needs an experiment whose adjoints differentiate its
+    gradient forward over reverse.
     """
     adjoint = getattr(child.solver, "adjoint", None)
     reverse = not bool(getattr(adjoint, "is_forward_only", True))
@@ -319,7 +320,7 @@ def _modes(child: Any) -> tuple:
     return tuple(
         mode
         for mode in MODES
-        if not (reverse and mode == "blocks") and (second or mode != "hessian")
+        if not (reverse and mode in ("blocks", "frozen")) and (second or mode != "hessian")
     )
 
 

@@ -29,10 +29,20 @@ mode            returns
 ``hessian``     the cost, its exact Hessian and its gradient in narrow
                 coordinates, the gradient by reverse mode and the Hessian by
                 forward mode over it
+``frozen``      the cost and ``J^T r`` in narrow coordinates, ``r`` from a
+                solve without derivatives and ``J`` the Jacobian of the lane's
+                last ``blocks`` evaluation, frozen
 ==============  ==============================================================
 
 with the row count, the status and the work counters of the solve in every
 mode. A lane that fails returns zeros and says so in its status.
+
+The ``frozen`` mode takes a third argument per lane: the Jacobian ``J`` of its
+rows in narrow coordinates, of shape (rows, narrow width). The ``blocks``
+program of a study that prepared the ``frozen`` mode (``KEEPING_BLOCKS``)
+returns that Jacobian with its blocks, and the batched backend keeps it on the
+device for the frozen requests that follow; a ``blocks`` program of any other
+study returns none.
 
 A lane starts its solve from the first step it carries, ``dt0``, a number of
 the lane like every other: ``0`` lets the integrator estimate it. The work
@@ -67,7 +77,13 @@ from diff_soup.timestepping.vsvo.solution import Solution
 
 Array = jax.Array
 
-MODES: tuple[str, ...] = ("value", "blocks", "gradient", "observe", "hessian")
+MODES: tuple[str, ...] = ("value", "blocks", "gradient", "observe", "hessian", "frozen")
+KEEPING_BLOCKS: str = "blocks, keeping J"
+"""The program of the ``blocks`` mode that also returns each lane's Jacobian.
+
+A study that prepared the ``frozen`` mode runs its ``blocks`` requests
+through it. It is not a mode of a request; its records say ``blocks``.
+"""
 _COUNTERS: tuple[str, ...] = (
     "accepts",
     "rejects",
@@ -216,7 +232,7 @@ class LaneResult(eqx.Module):
         normal: ``J^T J`` (``blocks``), or the exact Hessian of the cost
             (``hessian``), in narrow coordinates.
         gradient: ``J^T r`` in narrow coordinates (``blocks``, ``gradient``,
-            ``hessian``).
+            ``hessian``, ``frozen``).
         observables: Per stream, the predicted observables at the stream's
             frames; padded frames hold zeros (``observe``).
         work: The work counters of the solve, added up over the segments that
@@ -230,7 +246,11 @@ class LaneResult(eqx.Module):
             each entry of ``ends`` with respect to the narrow coordinates, one
             row per segment. A segment ends when its duration has elapsed, at a
             time no parameter moves, so every entry is zero (``blocks``,
-            ``gradient``). ``None`` for a lane without a schedule.
+            ``gradient``, ``frozen``). ``None`` for a lane without a schedule.
+        jacobian: The Jacobian of the lane's rows in narrow coordinates, of
+            shape (rows, narrow width), zero for a failed lane
+            (``KEEPING_BLOCKS`` only). It stays on the device: the batched
+            backend keeps it and never returns it.
     """
 
     status: LaneStatus
@@ -242,6 +262,12 @@ class LaneResult(eqx.Module):
     work: LaneWork
     ends: Optional[Array] = None
     end_sensitivity: Optional[Array] = None
+    jacobian: Optional[Array] = None
+
+
+def public_mode(mode: str) -> str:
+    """The mode of a request a program serves: ``blocks`` for ``KEEPING_BLOCKS``."""
+    return "blocks" if mode == KEEPING_BLOCKS else mode
 
 
 def _work(solution: Solution, dtype: DTypeLike) -> LaneWork:
@@ -407,12 +433,8 @@ def lane_value(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneResu
     )
 
 
-def lane_blocks(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneResult:
-    """The cost and the normal blocks of one lane, by forward mode.
-
-    The residual rides the forward pass of its Jacobian, so the lane is solved
-    once.
-    """
+def _blocks(program: LaneProgram, point: Array, lane: LaneInputs, *, keep: bool) -> LaneResult:
+    """The cost and the normal blocks of one lane, by forward mode; with ``keep``, its Jacobian."""
     if program.reverse:
         raise ValueError(
             "the blocks of a lane are computed in forward mode, and this solver carries a "
@@ -433,7 +455,22 @@ def lane_blocks(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneRes
         work=work,
         ends=ends,
         end_sensitivity=_end_sensitivity(ends, point),
+        jacobian=_zero_where_failed(status, jacobian) if keep else None,
     )
+
+
+def lane_blocks(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneResult:
+    """The cost and the normal blocks of one lane, by forward mode.
+
+    The residual rides the forward pass of its Jacobian, so the lane is solved
+    once.
+    """
+    return _blocks(program, point, lane, keep=False)
+
+
+def lane_keeping_blocks(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneResult:
+    """``lane_blocks``, and the Jacobian of the lane's rows in ``jacobian``."""
+    return _blocks(program, point, lane, keep=True)
 
 
 def lane_gradient(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneResult:
@@ -534,12 +571,37 @@ def lane_observe(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneRe
     )
 
 
+def lane_frozen(
+    program: LaneProgram, point: Array, lane: LaneInputs, jacobian: Array
+) -> LaneResult:
+    """The cost of one lane from a solve without derivatives, and ``J^T r`` on a given ``J``.
+
+    ``jacobian`` is the Jacobian of the lane's rows in narrow coordinates at
+    another point, of shape (rows, narrow width): the one its last ``blocks``
+    evaluation returned. At that point the gradient is the ``blocks`` mode's.
+    """
+    rows, (count, status, work, _predictions, ends) = _solve(program, point, lane)
+    return LaneResult(
+        status=status,
+        cost=0.5 * rows @ rows,
+        rows=count,
+        normal=None,
+        gradient=_zero_where_failed(status, jacobian.T @ rows),
+        observables=None,
+        work=work,
+        ends=ends,
+        end_sensitivity=_end_sensitivity(ends, point),
+    )
+
+
 _LANE_FUNCTIONS = {
     "value": lane_value,
     "blocks": lane_blocks,
+    KEEPING_BLOCKS: lane_keeping_blocks,
     "gradient": lane_gradient,
     "observe": lane_observe,
     "hessian": lane_hessian,
+    "frozen": lane_frozen,
 }
 
 
@@ -548,21 +610,24 @@ def batched_kernel(program: LaneProgram, mode: str) -> Callable[[Array, LaneInpu
 
     Args:
         program: What the lanes share.
-        mode: One of [MODES][diff_soup.optimization.inference.engine._kernel.MODES].
+        mode: One of [MODES][diff_soup.optimization.inference.engine._kernel.MODES],
+            or ``KEEPING_BLOCKS``.
 
     Returns:
         ``kernel(points, lanes)``: ``points`` holds one narrow point per lane,
         ``lanes`` one [LaneInputs][diff_soup.optimization.inference.engine._kernel.LaneInputs]
         whose leaves lead with the lane axis. The result leads with the lane
-        axis too. The program is compiled once per batch width.
+        axis too. The ``frozen`` kernel is ``kernel(points, lanes, jacobians)``,
+        one Jacobian per lane. The program is compiled once per batch width.
     """
-    if mode not in MODES:
+    if mode not in _LANE_FUNCTIONS:
         raise ValueError(f"a lane kernel runs in one of the modes {MODES}; got {mode!r}.")
     function = _LANE_FUNCTIONS[mode]
-    return jax.jit(jax.vmap(lambda point, lane: function(program, point, lane)))
+    return jax.jit(jax.vmap(lambda point, lane, *kept: function(program, point, lane, *kept)))
 
 
 __all__ = [
+    "KEEPING_BLOCKS",
     "MODES",
     "LaneInputs",
     "LaneProgram",
@@ -571,8 +636,11 @@ __all__ = [
     "StreamInputs",
     "batched_kernel",
     "lane_blocks",
+    "lane_frozen",
     "lane_gradient",
     "lane_hessian",
+    "lane_keeping_blocks",
     "lane_observe",
     "lane_value",
+    "public_mode",
 ]

@@ -37,6 +37,14 @@ qualifies. The evaluation keeps nothing of it for the next request: a request
 names the rung of each unit, and ``Results`` reports the rung that produced each
 result and the record of every unit solved again.
 
+A study that prepared the ``frozen`` mode runs its ``blocks`` requests through
+the program that also returns each lane's Jacobian, and keeps those Jacobians
+on the device, call by call ([KeptJacobians][diff_soup.optimization.inference.engine._kept.KeptJacobians]):
+each unit's from its last ``blocks`` result. A ``frozen`` request runs the
+kept calls that hold its units, in their own layout, each with its kept
+Jacobians; a unit without one is refused. A study that did not prepare the
+``frozen`` mode keeps nothing.
+
 ``Results.batches`` records, per bucket, the units of the first pass, the width
 of the program and the calls made. A call of a program that raises (a device
 out of memory, the sparse direct solver failing inside the program) raises a
@@ -65,7 +73,13 @@ from diff_soup.optimization.inference.engine._balance import device_order
 from diff_soup.optimization.inference.engine._capacity import lane_frames
 from diff_soup.optimization.inference.engine._identity import LaneIdentity
 from diff_soup.optimization.inference.engine._inputs import _lane_group
-from diff_soup.optimization.inference.engine._kernel import MODES, LaneProgram, LaneResult
+from diff_soup.optimization.inference.engine._kept import KeptCall, KeptJacobians
+from diff_soup.optimization.inference.engine._kernel import (
+    KEEPING_BLOCKS,
+    MODES,
+    LaneProgram,
+    LaneResult,
+)
 from diff_soup.optimization.inference.engine._layout import lane_layout, lane_problems
 from diff_soup.optimization.inference.engine._levels import LevelTables
 from diff_soup.optimization.inference.engine._order import (
@@ -220,11 +234,15 @@ class BatchedLanes:
             which order the units of the next evaluation.
         resident: Per bucket index, the device inputs of the calls of its last
             evaluation, keyed by their lanes.
+        kept: Per bucket index, the
+            [KeptJacobians][diff_soup.optimization.inference.engine._kept.KeptJacobians]
+            of its units' last ``blocks`` results, once the ``frozen`` mode is
+            prepared.
 
-    ``memory`` and ``resident`` are what one series of evaluations learns;
-    [with_own_state][diff_soup.optimization.inference.engine._batched.with_own_state] gives
-    lanes that share everything else and start both afresh, as every fit of a
-    lowered study does.
+    ``memory``, ``resident`` and ``kept`` are what one series of evaluations
+    learns; [with_own_state][diff_soup.optimization.inference.engine._batched.with_own_state]
+    gives lanes that share everything else and start them afresh, as every fit
+    of a lowered study does.
     """
 
     plan: Plan
@@ -238,6 +256,7 @@ class BatchedLanes:
     programs: dict = dataclasses.field(default_factory=dict, repr=False)
     memory: StepMemory = dataclasses.field(default_factory=StepMemory, repr=False)
     resident: dict = dataclasses.field(default_factory=dict, repr=False)
+    kept: dict = dataclasses.field(default_factory=dict, repr=False)
 
 
 def batched_lanes(plan: Plan, joint: Any) -> BatchedLanes:
@@ -319,8 +338,8 @@ def replanned_lanes(lanes: BatchedLanes, plan: Plan) -> BatchedLanes:
     same lanes and modes, and cuts their units into calls of other widths, as
     [population_plan][diff_soup.optimization.inference.engine._plan.population_plan] does.
     The host numbers of the lanes are shared, not built again; the programs,
-    the step memory and the inputs kept on the device start empty, so
-    nothing of ``lanes`` changes.
+    the step memory and the inputs and Jacobians kept on the device start
+    empty, so nothing of ``lanes`` changes.
 
     Args:
         lanes: The lanes of the study.
@@ -354,6 +373,7 @@ def replanned_lanes(lanes: BatchedLanes, plan: Plan) -> BatchedLanes:
         programs={},
         memory=StepMemory(),
         resident={},
+        kept={},
     )
 
 
@@ -363,9 +383,9 @@ def with_own_state(lanes: BatchedLanes) -> BatchedLanes:
     The plan, the host numbers of the lanes and the programs are those of
     ``lanes``, shared: a program ``prepare`` compiles through either is held
     by both. The step memory starts empty, so the first evaluation runs its
-    units in canonical order, and no input is kept on the device yet; what
-    evaluations through the returned lanes learn never reaches ``lanes``, and
-    the other way round.
+    units in canonical order, and no input or Jacobian is kept on the device
+    yet; what evaluations through the returned lanes learn never reaches
+    ``lanes``, and the other way round.
 
     Args:
         lanes: The lanes of the study.
@@ -374,7 +394,7 @@ def with_own_state(lanes: BatchedLanes) -> BatchedLanes:
         The [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes]
         sharing the programs of ``lanes``.
     """
-    return dataclasses.replace(lanes, memory=StepMemory(), resident={})
+    return dataclasses.replace(lanes, memory=StepMemory(), resident={}, kept={})
 
 
 def lane_metadata(plan: Plan, joint: Any) -> BatchedLanes:
@@ -495,10 +515,18 @@ def _without(mode: str) -> str:
 
 
 def _check_modes(lanes: BatchedLanes, modes: Any) -> tuple:
-    """``modes`` as a tuple, each a mode every bucket's program can run in."""
+    """``modes`` as a tuple, each a mode every bucket's program can run in.
+
+    The ``frozen`` mode steps on the Jacobians ``blocks`` evaluations keep, so
+    it brings the ``blocks`` mode, before it.
+    """
     if isinstance(modes, str):
         modes = (modes,)
     modes = tuple(modes)
+    if "frozen" in modes:
+        modes = tuple(mode for mode in modes if mode != "blocks")
+        at = modes.index("frozen")
+        modes = modes[:at] + ("blocks",) + modes[at:]
     for mode in modes:
         if mode not in MODES:
             raise ValueError(f"prepare compiles the modes {MODES}; got {mode!r}.")
@@ -545,12 +573,19 @@ def prepare(
     modes: Any,
     compile_program: Callable,
     buckets: Iterable[Integral] | None = None,
+    keeping: bool = False,
 ) -> tuple:
     """Compile the program of every bucket (or of the buckets ``buckets``) in every mode of ``modes``.
 
     A program the study holds already is not looked up again; one the
     registry holds for an equal key is reused; any other is compiled by
     ``compile_program`` and registered. Nothing is solved.
+
+    The ``blocks`` program of a bucket that has, or is given, the ``frozen``
+    mode is the one that keeps its lanes' Jacobians
+    ([KEEPING_BLOCKS][diff_soup.optimization.inference.engine._kernel.KEEPING_BLOCKS]);
+    it replaces a ``blocks`` program held before, and the ``frozen`` mode
+    brings the ``blocks`` mode.
 
     Args:
         lanes: The lanes of the study.
@@ -561,6 +596,9 @@ def prepare(
             not registered.
         buckets: The indices of the buckets to prepare; ``None`` prepares
             every bucket.
+        keeping: Whether the ``blocks`` program keeps the Jacobians although
+            ``modes`` holds no ``frozen``: a process that prepares one mode at
+            a time of a request that holds it.
 
     Returns:
         One [PreparedProgram][diff_soup.optimization.inference.engine._batched.PreparedProgram]
@@ -571,19 +609,22 @@ def prepare(
             cannot run it.
     """
     modes = _check_modes(lanes, modes)
+    keeping = keeping or "frozen" in modes
     prepared = []
     chosen = None if buckets is None else {int(index) for index in buckets}
     for entry in lanes.buckets:
         bucket = entry.bucket
         if chosen is not None and int(bucket.index) not in chosen:
             continue
+        keep = keeping or (bucket.index, "frozen") in lanes.programs
         for mode in modes:
+            program_mode = KEEPING_BLOCKS if keep and mode == "blocks" else mode
             held = lanes.programs.get((bucket.index, mode))
-            if held is not None:
+            if held is not None and held.key.mode == program_mode:
                 prepared.append(PreparedProgram(bucket.index, mode, held, True))
                 continue
             key = ProgramKey(
-                bucket.full_identity, mode, int(bucket.chunk[mode].width), lanes.plan.mesh
+                bucket.full_identity, program_mode, int(bucket.chunk[mode].width), lanes.plan.mesh
             )
             program = _PROGRAMS.get(key)
             reused = program is not None
@@ -738,7 +779,7 @@ def _check_programs(lanes: BatchedLanes, mode: str, touched: list) -> None:
                 f"compiled, and an evaluation compiles nothing; call prepare(modes=({mode!r},)) "
                 "before evaluating it."
             )
-    if mode in ("blocks", "gradient", "hessian"):
+    if mode in ("blocks", "gradient", "hessian", "frozen"):
         widths = {lanes.buckets[index].bucket.width for index in touched}
         if len(widths) > 1:
             raise ValueError(
@@ -760,6 +801,7 @@ def _run_bucket(
     *,
     keep_inputs: bool = True,
     keep: np.ndarray | None = None,
+    keys: np.ndarray | None = None,
 ) -> tuple:
     """Evaluate the units of one bucket; its call outputs, its wall seconds and its batch.
 
@@ -776,7 +818,15 @@ def _run_bucket(
     (members, lanes of the bucket), names the units to run when not every
     unit of that rectangle is evaluated; ``None`` runs every one. The
     [Batch][diff_soup.optimization.inference.engine._result.Batch] counts the units, the
-    width and the calls this pass made.
+    width and the calls this pass made. Through the program that keeps the
+    Jacobians, each call is also returned as a
+    [KeptCall][diff_soup.optimization.inference.engine._kept.KeptCall] with its count of
+    own units, its Jacobians left on the device, its units named by ``keys``
+    (one per entry of ``members``; ``None`` takes ``members``).
+
+    Returns:
+        ``(outputs, seconds, batch, kept)``: ``kept`` holds ``(call, own)`` per
+        call, empty for any other program.
 
     Raises:
         BackendError: If a call of the program, or the transfer of its
@@ -785,6 +835,7 @@ def _run_bucket(
     """
     entry = lanes.buckets[index]
     program = lanes.programs[(index, mode)]
+    keeping = program.key.mode == KEEPING_BLOCKS
     device = placement(lanes.plan)
     width = int(program.key.chunk)
     # Canonical units: members ascending, then lanes by experiment index.
@@ -804,7 +855,7 @@ def _run_bucket(
     first = np.asarray(starts).astype(configured.dtype)[row, lane]
 
     previous = lanes.resident.get(index, {})
-    resident, pending = {}, []
+    resident, pending, kept = {}, [], []
     start = time.perf_counter()
     calls = cut(count, width)
     try:
@@ -826,6 +877,22 @@ def _run_bucket(
                 jax.device_put(narrow[call], device),
                 jax.tree_util.tree_unflatten(program.lanes_tree, inputs),
             )
+            if keeping:
+                # The Jacobians stay on the device, with what solves the call again.
+                kept.append(
+                    (
+                        KeptCall(
+                            jacobian=output.jacobian,
+                            members=(members if keys is None else keys)[row[call]],
+                            positions=chosen,
+                            narrow=narrow[call],
+                            first=call_first,
+                            inputs=list(inputs),
+                        ),
+                        own,
+                    )
+                )
+                output = dataclasses.replace(output, jacobian=None)
             pending.append((call[:own], output))
         fetched = jax.device_get([output for _, output in pending])
     except (jax.errors.JaxRuntimeError, ValueError) as error:
@@ -854,7 +921,126 @@ def _run_bucket(
             positions[lane[units]],
             np.asarray(output.work.trial_steps)[:own],
         )
+    return tuple(outputs), seconds, Batch(units=count, width=width, calls=len(pending)), kept
+
+
+def _run_frozen(
+    lanes: BatchedLanes,
+    index: int,
+    points: np.ndarray,
+    columns: np.ndarray,
+    positions: np.ndarray,
+    members: np.ndarray,
+    starts: np.ndarray,
+    *,
+    keep: np.ndarray | None = None,
+    keys: np.ndarray | None = None,
+) -> tuple:
+    """Evaluate the units of one bucket in the ``frozen`` mode, each on its kept Jacobian.
+
+    The arguments are those of ``_run_bucket``; a unit's Jacobian is found by
+    its member's entry of ``keys`` (``None`` takes ``members``). Every kept
+    call that holds a requested unit runs once, in its own layout and with its
+    own Jacobians:
+    each requested unit at its point and first step, every other slot at the
+    point and first step it was kept with, its result dropped. The order of
+    the units and the step memory play no part, and the inputs kept for other
+    modes are left as they are.
+
+    Raises:
+        ValueError: If a requested unit has no kept Jacobian.
+        BackendError: As ``_run_bucket``.
+    """
+    entry = lanes.buckets[index]
+    program = lanes.programs[(index, "frozen")]
+    device = placement(lanes.plan)
+    width = int(program.key.chunk)
+    unit_row = np.repeat(np.arange(members.shape[0], dtype=np.int64), positions.shape[0])
+    unit_lane = np.tile(np.arange(positions.shape[0], dtype=np.int64), members.shape[0])
+    if keep is not None:
+        kept_units = np.asarray(keep, dtype=bool)[unit_row, unit_lane]
+        unit_row, unit_lane = unit_row[kept_units], unit_lane[kept_units]
+    count = int(unit_row.shape[0])
+    kept = lanes.kept.get(index, KeptJacobians())
+    keys = members if keys is None else keys
+    groups: dict = {}
+    for unit, (row, lane) in enumerate(zip(unit_row, unit_lane)):
+        place = kept.where.get((int(keys[row]), int(positions[lane])))
+        if place is None:
+            raise ValueError(
+                f"lane {entry.bucket.lanes[int(positions[lane])]!r} of member {int(members[row])} "
+                "has no kept Jacobian: the frozen mode steps on the Jacobian of a unit's last "
+                "blocks evaluation after prepare(modes=(..., 'frozen')); evaluate the blocks "
+                "mode for it first."
+            )
+        groups.setdefault(place[0], []).append((unit, place[1]))
+    narrow = points.astype(entry.dtype)[unit_row[:, None], entry.gather[positions[unit_lane]]]
+    first = np.asarray(starts).astype(entry.leaves[entry.dt0_leaf].dtype)[unit_row, unit_lane]
+
+    pending = []
+    start = time.perf_counter()
+    try:
+        for number in sorted(groups):
+            call = kept.calls[number]
+            units = np.asarray([unit for unit, _ in groups[number]], dtype=np.int64)
+            slots = np.asarray([slot for _, slot in groups[number]], dtype=np.int64)
+            call_narrow = call.narrow.copy()
+            call_narrow[slots] = narrow[units]
+            call_first = call.first.copy()
+            call_first[slots] = first[units]
+            inputs = call.inputs
+            if call_first.tobytes() != call.first.tobytes():
+                inputs = list(inputs)
+                inputs[entry.dt0_leaf] = jax.device_put(call_first, device)
+            output = program.compiled(
+                jax.device_put(call_narrow, device),
+                jax.tree_util.tree_unflatten(program.lanes_tree, inputs),
+                call.jacobian,
+            )
+            pending.append((units, slots, output))
+        fetched = jax.device_get([output for _, _, output in pending])
+    except (jax.errors.JaxRuntimeError, ValueError) as error:
+        raise _call_failed(entry.bucket, "frozen", count, width, len(pending), error) from error
+    seconds = time.perf_counter() - start
+
+    outputs = []
+    for (units, slots, _), output in zip(pending, fetched):
+        own = jax.tree_util.tree_map(lambda leaf, slots=slots: np.asarray(leaf)[slots], output)
+        lane = unit_lane[units]
+        outputs.append(
+            CallOutput(
+                rows=unit_row[units],
+                columns=columns[lane],
+                output=own,
+                frames=tuple(entry.frames[p].streams for p in positions[lane]),
+            )
+        )
+        lanes.memory.record(
+            index,
+            len(entry.bucket.lanes),
+            members[unit_row[units]],
+            positions[lane],
+            np.asarray(own.work.trial_steps),
+        )
     return tuple(outputs), seconds, Batch(units=count, width=width, calls=len(pending))
+
+
+def _keep(lanes: BatchedLanes, kept: list, replaced: set | None) -> None:
+    """Keep the Jacobians of ``kept``, ``(bucket index, (call, own))`` per call.
+
+    Each call's own units point at it; with ``replaced``, a set of
+    ``(member, bucket index, position)``, only those of its own units do: a
+    pass that solved some units again replaces those units' results only.
+    """
+    for index, (call, own) in kept:
+        slots = range(own)
+        if replaced is not None:
+            slots = [
+                slot
+                for slot in slots
+                if (int(call.members[slot]), index, int(call.positions[slot])) in replaced
+            ]
+        lanes.kept.setdefault(index, KeptJacobians()).keep(call, slots)
 
 
 def _call_failed(
@@ -908,12 +1094,17 @@ def evaluate(
     *,
     retry_kinds: Iterable[str] = (),
     retry_first_step_factors: Iterable[Real] = (),
+    member_keys: Any = None,
 ) -> Results:
     """Evaluate a request through the compiled programs of a study.
 
     Every requested unit returns exactly one result, ``ok`` or failed; a lane
     that fails does not raise. The results come back in canonical order,
     whatever the calls, their order, ``order`` or the selection.
+
+    A ``blocks`` request of a study that prepared the ``frozen`` mode keeps
+    the Jacobian of every unit's result on the device, replacing the one kept
+    before; a ``frozen`` request runs each unit on its kept Jacobian.
 
     Every unit first runs at the rung the request names (0 when it names
     none). Then, while a unit has failed with a kind of ``retry_kinds``, is
@@ -934,6 +1125,10 @@ def evaluate(
             empty solves nothing again.
         retry_first_step_factors: The factors of the rungs, in the order
             they are tried; empty solves nothing again.
+        member_keys: Per member that takes part, the number its kept
+            Jacobians are known by; ``None`` takes the members' own. A process
+            that evaluates one group of a request's members gives their
+            numbers in the request.
 
     Returns:
         The [Results][diff_soup.optimization.inference.engine._result.Results], with the
@@ -946,9 +1141,10 @@ def evaluate(
             experiment of the study or has no lane, ``order`` names a lane the
             request does not ask for, the request selects no unit, a bucket's
             program for the mode is not compiled, the lanes of a derivative
-            mode differ in narrow width, or ``rungs`` or ``first_steps`` do not
+            mode differ in narrow width, ``rungs`` or ``first_steps`` do not
             have one entry per requested unit or ask for a rung above the
-            number of ``retry_first_step_factors``.
+            number of ``retry_first_step_factors``, or a unit of a ``frozen``
+            request has no kept Jacobian.
         BackendError: If a call of a bucket's program raises; the error
             names the bucket, the mode and the width and is raised from the
             original error.
@@ -988,6 +1184,12 @@ def evaluate(
     touched.sort(key=lambda index: (int(priority[bucket_of == index].min()), index))
 
     shape = (int(members.shape[0]), len(chosen))
+    keys = members if member_keys is None else np.asarray(member_keys, dtype=np.int64)
+    if keys.shape != members.shape:
+        raise ValueError(
+            f"member_keys= gives {keys.shape[0]} numbers for {members.shape[0]} member(s); give "
+            "one per member that takes part."
+        )
     factors = np.asarray(tuple(float(f) for f in retry_first_step_factors), dtype=np.float64)
     codes = np.asarray([KINDS.index(kind) for kind in retry_kinds], dtype=np.int64)
     rung, base = _requested_rungs(request, shape, factors)
@@ -1008,9 +1210,9 @@ def evaluate(
         return first
 
     def run(rows: np.ndarray, columns_of: np.ndarray, at: np.ndarray, again: bool) -> tuple:
-        """The calls, walls and batches of the units ``rows`` x ``columns_of``, rows in members order."""
+        """The calls, walls, batches and kept calls of the units ``rows`` x ``columns_of``."""
         first = starts(at)
-        outputs, walls, batches = [], {}, {}
+        outputs, walls, batches, kept = [], {}, {}, []
         for index in touched:
             columns = columns_of[bucket_of[columns_of] == index]
             if not columns.size:
@@ -1018,24 +1220,40 @@ def evaluate(
             keep = None if present is None else present[np.ix_(rows, columns)]
             if keep is not None and not np.any(keep):
                 continue
-            out, walls[index], batches[index] = _run_bucket(
-                lanes,
-                index,
-                request.mode,
-                points[rows],
-                columns,
-                position_of[columns],
-                priority[columns],
-                members[rows],
-                first[np.ix_(rows, columns)],
-                keep_inputs=not again,
-                keep=keep,
-            )
+            if request.mode == "frozen":
+                out, walls[index], batches[index] = _run_frozen(
+                    lanes,
+                    index,
+                    points[rows],
+                    columns,
+                    position_of[columns],
+                    members[rows],
+                    first[np.ix_(rows, columns)],
+                    keep=keep,
+                    keys=keys[rows],
+                )
+            else:
+                out, walls[index], batches[index], held = _run_bucket(
+                    lanes,
+                    index,
+                    request.mode,
+                    points[rows],
+                    columns,
+                    position_of[columns],
+                    priority[columns],
+                    members[rows],
+                    first[np.ix_(rows, columns)],
+                    keep_inputs=not again,
+                    keep=keep,
+                    keys=keys[rows],
+                )
+                kept.extend((index, call) for call in held)
             outputs.extend(call._replace(rows=rows[call.rows]) for call in out)
-        return outputs, walls, batches
+        return outputs, walls, batches, kept
 
     every_row = np.arange(shape[0], dtype=np.int64)
-    calls, walls, batches = run(every_row, np.arange(shape[1], dtype=np.int64), rung, False)
+    calls, walls, batches, kept = run(every_row, np.arange(shape[1], dtype=np.int64), rung, False)
+    _keep(lanes, kept, None)
     seconds = dict(walls)
     kind = unit_values(calls, shape, lambda output: output.status.kind)
     made = unit_values(calls, shape, lambda output: output.work.first_step)
@@ -1053,8 +1271,16 @@ def evaluate(
             if unit not in tried:
                 tried[unit] = ([int(rung[unit])], [KINDS[int(kind[unit])]], [])
         rung = np.where(due, rung + 1, rung)
-        again, walls, _ = run(
+        again, walls, _, kept = run(
             np.flatnonzero(due.any(axis=1)), np.flatnonzero(due.any(axis=0)), rung, True
+        )
+        _keep(
+            lanes,
+            kept,
+            {
+                (int(keys[row]), int(bucket_of[column]), int(position_of[column]))
+                for row, column in np.argwhere(due)
+            },
         )
         for index, wall in walls.items():
             seconds[index] += wall
