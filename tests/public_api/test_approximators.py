@@ -205,6 +205,27 @@ def test_a_learnable_signal_drives_a_dirichlet_boundary_through_theta():
     np.testing.assert_allclose(boundary(jnp.asarray([0.0, 2.0, 1.0])), [1.0, 2.0, 1.0], atol=3e-5)
 
 
+def test_a_bspline_stays_within_its_control_points_and_is_twice_continuously_differentiable():
+    """A clamped cubic B-spline on uneven knots never leaves its control points' range, and its
+    value, slope and curvature agree from both sides of every interior knot."""
+    knots = np.array([0.0, 0.3, 0.35, 1.0, 2.5])
+    points = np.random.default_rng(3).normal(size=knots.size + 2)
+    spline = approx.BSpline(knots, points)
+    values = jax.vmap(spline)(jnp.linspace(-0.5, 3.0, 2001))
+    # measured 0.0 past the range (the last control point is the largest), workstation CPU
+    # 2026-11-09, pytest tests/public_api/test_approximators.py
+    assert points.min() - 1e-14 <= values.min() and values.max() <= points.max() + 1e-14
+    orders = (spline, jax.grad(spline), jax.grad(jax.grad(spline)))
+    interior = jnp.asarray(knots[1:-1])
+    after = jnp.nextafter(interior, jnp.inf)
+    # A query on a knot takes the segment on its left; one ulp later, the segment on its right.
+    left = np.stack([jax.vmap(order)(interior) for order in orders])
+    right = np.stack([jax.vmap(order)(after) for order in orders])
+    # measured 1.7e-14 relative (3.1e-13 on curvatures of 163), workstation CPU 2026-11-09,
+    # pytest tests/public_api/test_approximators.py
+    np.testing.assert_allclose(right, left, rtol=1e-12, atol=1e-12)
+
+
 class _DeclaredMLP(eqx.Module):
     mlp: eqx.nn.MLP
 

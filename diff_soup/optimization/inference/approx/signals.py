@@ -369,9 +369,9 @@ class BSpline(eqx.Module):
         control_points: The coefficients, shape ``(K + 3,)`` for a scalar signal or
             ``(K + 3, m)`` for an ``m``-component signal.
 
-    The knots fix the basis when the spline is built: each segment's polynomial is one
-    matrix, built once with NumPy, applied to the control points. Build a new spline for
-    new knots. A query time outside ``[knots[0], knots[-1]]`` clamps to the end value, and a
+    The knots fix the basis when the spline is built. Each segment's polynomial is one
+    matrix, built once with NumPy, applied to the control points, so new knots need a new
+    spline. A query time outside ``[knots[0], knots[-1]]`` clamps to the end value, and a
     query on an interior knot is evaluated as the end of the left segment, as for
     [PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant].
     """

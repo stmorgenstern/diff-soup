@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 475,
-    "collected_tests": 807,
-    "source_lines": 17237
+    "test_functions": 481,
+    "collected_tests": 816,
+    "source_lines": 17416
   },
   "tier_budgets": {
     "public_api": {
       "files": 21,
-      "functions": 203,
-      "collected": 324,
-      "lines": 6614
+      "functions": 209,
+      "collected": 333,
+      "lines": 6793
     },
     "contracts": {
       "files": 22,
@@ -387,7 +387,7 @@
     },
     {
       "file": "tests/public_api/test_control.py",
-      "feature": "Control: control problems over a schedule solve, their numeric problems and their derivative in the initial state and limits, the receding horizon under scan and from the host, the estimators"
+      "feature": "Control: control problems over a schedule solve, their numeric problems and their derivative in the initial state and limits, signal controls lowered exactly with free durations and their derivatives, the receding horizon under scan and from the host, the estimators"
     },
     {
       "file": "tests/contracts/test_jacobian_pattern.py",

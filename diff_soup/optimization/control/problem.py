@@ -337,16 +337,16 @@ class SignalControls(AbstractControls):
     `CubicHermite` or `BSpline`, and each of its segments lowers exactly to one schedule
     segment, whose target is the segment's polynomial from `signal.polynomials()`. The decision
     vector holds each block's coefficient leaves, its `learnable_paths()`, one block after
-    another; the signals' own coefficient values are not read.
+    another. The signals' own coefficient values are not read.
 
-    One block of a `BSpline` current is a smooth current profile; a current block then a
+    One block of a `BSpline` current is a smooth current profile. A current block then a
     voltage block is a charge at constant current, then at constant voltage. With
     `free_durations` the switch from one block to the next is a decision variable, and a
     minimum-time problem is one solve with the durations in its cost.
 
     Args:
         blocks: The blocks in time order, each `(signal, mode, scale)`: a signal of one component, the operational row it drives (`"current"`, `"voltage"`, `"power"` or `"resistance"`), and the factor from the signal to the row's target.
-        carry_step: As `ds.Schedule(carry_step=)`: `None` continues the integrator across the knots of a block, where the target is continuous, and starts it afresh where the mode changes; `False` starts every segment afresh.
+        carry_step: As `ds.Schedule(carry_step=)`: `None` continues the integrator across the knots of a block, where the target is continuous, and starts it afresh where the mode changes. `False` starts every segment afresh.
         free_durations: Whether each block's duration is an entry of the decision vector, one per block after every coefficient. A block of duration `D` runs its signal with the knots stretched from their span to `D`. Keep each duration positive through `bounds`.
     """
 
@@ -391,7 +391,7 @@ class SignalControls(AbstractControls):
         """The length of each segment: the spacing of each block's knots, block after block.
 
         With free durations these are the lengths at which every block lasts its knots'
-        span; the decision vector's durations stretch each block from there.
+        span, and the decision vector's durations stretch each block from there.
         """
         return tuple(length for block in self.blocks for length in block.lengths)
 

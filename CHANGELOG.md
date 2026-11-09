@@ -20,6 +20,8 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 - `ds.linear.{KLU,SuperLU,CuDSS}` now factor and solve complex matrices (`complex128`, and `complex64` on `CuDSS`) on the real symbolic analysis, solve a complex right-hand side on a real factor, and differentiate both ways.
 - Added `ds.solve_schedule` and `ds.schedule_arrays`, which run a `Schedule` against a model's operating table, with `max_steps` per segment and first and second derivatives with respect to segment durations. See [Events and protocols](https://stmorgenstern.github.io/diff-soup/reference/simulation/events/).
+- Added `ds.optimization.control.SignalControls`, which lowers the time signals of `ds.optimization.inference.approx` onto a `ControlProblem`'s schedule exactly, one block per signal, such as a spline current or a current then a voltage. With `free_durations=True` each block's duration is a decision variable, and `ControlProblem(save_fractions=)` samples within every segment. `AbstractControls` is the interface both controls implement. See [Controls](https://stmorgenstern.github.io/diff-soup/overview/modeling/controls/#control-signals).
+- Added `ds.optimization.inference.approx.BSpline`, a clamped cubic B-spline that stays inside the range of its control points, and `polynomials()` on the four piecewise signals, their exact coefficients on every segment.
 - Added a `"resistance"` row to `spec.control.operational` and `Segment(resistance=)`, which hold `voltage = target * current`.
 - Added `spec.build(exact_sparsity=True)`, which declares only the Jacobian entries a tangent can reach.
 - Added `ds.solver_view(problem)`, the cached view the solvers take of a problem (`ds.SolverView`), and `ds.jacobian_nnz(problem)`, the entry count of its iteration matrix. See [Problem interface](https://stmorgenstern.github.io/diff-soup/reference/modeling/problem-interface/).
@@ -72,6 +74,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - `CuDSS`'s `contract_stats` no longer reports `perturbed_pivot_factorizations`, which was always 0: every cuDSS factor runs with pivot perturbation off.
 - The cuDSS extension's default CUDA architectures add `87-real` (Jetson Orin), and the installation page says how to build the KLU extension on ARM (`KLU_VENDOR_DIR`).
 - A diff-soup environment variable set to an empty string now counts as unset and takes its default; the variables and the changes `import diff_soup` makes are listed on the installation page. Previously an empty `DIFFSOUP_PROCESSES` or `DIFFSOUP_NODES` raised `ValueError`.
+- `ds.optimization.inference.approx.PiecewiseConstant`, a signal, and `ds.optimization.control.PiecewiseConstant`, a grid of control targets, share a name in this release. In 1.3 `SignalControls` over the signal replaces the control class.
 - `diff_soup.inference` is now `diff_soup.optimization.inference`, and `optsolve`, `OptResult`, the optimization problems and the solvers are also at the top of `ds.optimization`. `ds.inference` and every `diff_soup.inference` import path still work for this release, return the same objects and warn once with a `DeprecationWarning`; they will be removed in 1.3.
 
 **Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.2.0
