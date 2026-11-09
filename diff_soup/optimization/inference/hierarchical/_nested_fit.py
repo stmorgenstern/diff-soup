@@ -1,10 +1,8 @@
-"""The nested trust-region fit: an outer step on the shared parameters, each member's own parameters polished inside it."""
+"""The nested trust-region fit: the joint step, then each member's own parameters polished with the outer ones held."""
 
 from __future__ import annotations
 
-import dataclasses
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from numbers import Real
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -12,11 +10,7 @@ import jax
 import numpy as np
 from jaxtyping import ArrayLike
 
-from diff_soup._distributed import assert_decision
-from diff_soup.optimization.inference.fitting._trial import trial_is_valid
-from diff_soup.optimization.inference.fitting.result import (
-    OptResult,
-)
+from diff_soup.optimization.inference.fitting.result import OptResult, StepInfo
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._joint_fit import _JointFit
@@ -24,31 +18,25 @@ from diff_soup.optimization.inference.hierarchical._lane_route import (
     _LABEL,
     _Failure,
     _LaneRoute,
-    _listed,
 )
 from diff_soup.optimization.inference.hierarchical._level_inner import model_split
 from diff_soup.optimization.inference.hierarchical._level_system import nonfinite_members
 from diff_soup.optimization.inference.hierarchical._trust_step import (
     _bounded_gradient,
-    _full_step,
     _noise_trial_limit,
-    _radius_floor,
     _scale_candidate,
     _subproblem,
-    _trial_point,
     _trial_valid,
 )
 from diff_soup.optimization.inference.hierarchical._verdicts import (
     NONFINITE_BLOCKS,
+    _failures_text,
     _stationarity_limit,
 )
-from diff_soup.optimization.inference.hierarchical._work import _record
 from diff_soup.optimization.solvers._loop import (
     _NOISE_RUN,
     LoopState,
-    _after_attempt,
     _saved_count,
-    _stop_after,
     cost_small,
     cost_threshold,
     loop_tolerances,
@@ -56,10 +44,7 @@ from diff_soup.optimization.solvers._loop import (
 )
 from diff_soup.optimization.solvers._loop_judge import (
     _TINY,
-    _floor_level,
-    _floor_sigma,
     _gain_ratio,
-    _judge,
     _median,
     _next_radius,
     _noise_dominated,
@@ -71,12 +56,12 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# The nested attempt
+# The polish
 # ---------------------------------------------------------------------------
 
 
 # Why a member's polish ended at an attempt: the codes of the record's ``inner_stop``.
-_NOT_POLISHED = 0  # no polish: the outer trial was not evaluated, or the member holds no data
+_NOT_POLISHED = 0  # no polish: the outer trial was not accepted, or the member holds no data
 _ACCURACY = 1  # its predicted decrease fell to inner_fraction of the outer step's
 _AT_MAX_STEPS = 2  # it made the polish's largest number of iterations
 _STEP_TOLERANCE = 3  # its step test
@@ -87,6 +72,7 @@ _EVALUATION_NOISE = 7  # three noise-dominated rejected trials in a row
 _RADIUS = 8  # its radius fell to the smallest positive float
 _SKIPPED = 9  # the polish was switched off at this attempt
 _NO_FINITE_STEP = 10  # no finite step inside its radius: its subtree's model is not finite
+_UNSOLVED = 11  # its lanes failed at its polished point after every retreat
 
 # The polish's iterations per member when the nested solver is given no inner solver.
 _DEFAULT_POLISH = 2
@@ -96,39 +82,38 @@ _POLISH_GAIN = 1e-3
 _SMALL_GAINS = 2
 
 
-class _InnerResult(NamedTuple):
-    """An inner solve at one outer point: where it ended, its system, and the inner state.
+class _Point(NamedTuple):
+    """A point of the fit where every lane solved: the point, its system and its lane costs."""
 
-    ``failures`` holds the failed lanes of a member that no retreat solved at
-    an outer trial, whose member cannot be solved there; ``system`` is then
-    ``None`` and ``point`` the last point tried. ``stationarity`` holds every
-    member's stationarity number at ``point``, ``decreases`` the decrease its
-    model predicts for its full step there, ``lane_costs`` the lane costs
-    there, ``codes`` why every member's iterations ended (the codes of
-    ``inner_stop``) and ``first_cost`` the cost at the first request (all
-    ``None`` when the solve ended at a failure). ``retreats`` holds every
-    member's retreats in the solve. ``full_steps`` holds every member's
-    full-step norm over its cost at ``point`` (``member_full_steps``) and
-    ``floor_terms`` the lanes' terms of the gradient floor's bound there
-    (both ``None`` when the solve ended at a failure).
+    point: np.ndarray
+    system: elimination.LevelSystem
+    lane_costs: np.ndarray
+
+
+class _Polish(NamedTuple):
+    """A polish from one point: where it ended, the members' state there, and its record.
+
+    ``point``, ``system`` and ``lane_costs`` are where it ended, a point
+    where every lane solved; ``scale`` the scale it read; ``radii``,
+    ``locks`` and ``thresholds`` every member's radius, growth lock and
+    gradient threshold after it; ``iterations``, ``codes`` and ``retreats``
+    every member's iterations, why they ended (the codes of ``inner_stop``)
+    and its retreats; ``numbers`` every member's stationarity number at
+    ``point``; ``first_cost`` the cost where it started.
     """
 
     point: np.ndarray
-    system: elimination.LevelSystem | None
-    scale: np.ndarray | None
+    system: elimination.LevelSystem
+    lane_costs: np.ndarray
+    scale: np.ndarray
     radii: np.ndarray
     locks: np.ndarray
     thresholds: np.ndarray
     iterations: np.ndarray
-    failures: tuple
-    stationarity: np.ndarray | None = None
-    lane_costs: np.ndarray | None = None
-    decreases: np.ndarray | None = None
-    codes: np.ndarray | None = None
-    first_cost: float | None = None
-    retreats: np.ndarray | None = None
-    full_steps: np.ndarray | None = None
-    floor_terms: tuple[np.ndarray, np.ndarray] | None = None
+    codes: np.ndarray
+    retreats: np.ndarray
+    numbers: np.ndarray
+    first_cost: float
 
 
 def _member_numbers(decreases: np.ndarray, scales: np.ndarray) -> np.ndarray:
@@ -137,33 +122,21 @@ def _member_numbers(decreases: np.ndarray, scales: np.ndarray) -> np.ndarray:
         return np.asarray(decreases, dtype=np.float64) / np.asarray(scales, dtype=np.float64)
 
 
-def _finite_blocks(system: elimination.LevelSystem) -> bool:
-    """Whether every block of a system's matrix and its gradient are finite."""
-    arrays = [system.root] + list(system.diagonal[1:])
-    arrays += [entry for row in system.cross[1:] for entry in row]
-    arrays += [system.root_gradient] + list(system.gradient[1:])
-    return all(bool(np.all(np.isfinite(np.asarray(entry)))) for entry in arrays)
-
-
 class _NestedFit(_JointFit):
-    """Two loops cut at one level: the levels above it, and every member's subtree below.
+    """The joint fit, its members polished at one level after every accepted step.
 
-    The outer trust region steps on the Schur complement of the inner blocks
-    into the outer blocks, with the outer gradient corrected for the gradient
-    the members leave, the inner gradients folded through the inner factors;
-    its gradient test (with ``grad_tol`` set) reads that corrected gradient.
-    At an outer trial the members move by their response to the outer step,
-    each bounded by its radius, then polish: every member of the cut level
-    iterates on its own subtree with the outer coordinates held, all members
-    in lockstep (one ``blocks`` and one ``value`` request over every lane per
-    iteration), each with its own radius, growth lock and acceptance, for at
-    most the polish's number of iterations. A member whose lane fails at its
-    responded or polished point retreats toward its last point where its
-    lanes solved. The trial cost is the cost after the polish. The members'
-    radii and locks carry from one attempt to the next.
+    Every attempt is the joint mode's: its scale, subproblem, trial, ``value``
+    request, gain ratio, radius, stop rules and verdict. After an accepted
+    trial and its ``blocks`` request, every member of the cut level iterates
+    on its own subtree with the outer coordinates held, all members in
+    lockstep (one ``value`` and one ``blocks`` request per iteration), each
+    with its own radius, growth lock and acceptance, for at most the polish's
+    number of iterations. The point, cost and system where the polish ended
+    are the next attempt's. A member whose lanes fail at its polished point
+    retreats along its polish step. The members' radii and locks carry from
+    one polish to the next. With no polish iterations the fit makes the joint
+    mode's attempts.
     """
-
-    subproblem = "level-nested"
 
     def __init__(self, solver: TrustRegion, route: _LaneRoute, callbacks: tuple):
         super().__init__(solver, route, callbacks)
@@ -171,10 +144,6 @@ class _NestedFit(_JointFit):
         # The polish's largest number of iterations per member and attempt.
         self.polish_steps = _DEFAULT_POLISH if solver.inner is None else int(solver.inner.max_steps)
         self.cut = route.names.index(solver.nested_at) + 1
-        counts, widths = route.tables.counts, route.tables.widths
-        self.prefix = int(widths[0]) + sum(
-            int(counts[level - 1]) * int(widths[level]) for level in range(1, self.cut)
-        )
         self.members = tuple(route.members[self.cut - 1])
         self.lane_member = np.asarray(route.nodes[:, self.cut - 1], dtype=np.int64)
         # The member of the cut level of every joint column; set by the fit's first ``blocks``.
@@ -183,8 +152,54 @@ class _NestedFit(_JointFit):
         rows = regularizer.residual(jax.device_put(route.problem.x0, route.device))
         self.regularized = int(np.shape(rows)[0]) > 0
         self.work.nest(self.members)
+        # The point the attempt steps from and the one before it, the attempt's polish,
+        # the outer step's predicted decrease, the lane costs of the latest value request
+        # of every lane, and the members' stationarity numbers at the current point and
+        # at the point the attempt stepped from.
+        self.current: _Point | None = None
+        self.previous: _Point | None = None
+        self.polished: _Polish | None = None
+        self.outer_predicted = float("nan")
+        self.trial_lanes: tuple | None = None
+        self.member_numbers: np.ndarray | None = None
+        self.stepped_from: np.ndarray | None = None
 
-    def nested_entries(self, values: dict) -> dict:
+    def run(self, state: Mapping | None = None) -> OptResult:
+        """Fit from the start point, or continue the fit whose ``state`` is given.
+
+        The members' radii, locks and gradient thresholds and the polish's
+        switch start afresh, or are those the saved state carries.
+        """
+        inner = self.inner
+        dtype = np.asarray(self.route.problem.x0).dtype
+        count = len(self.members)
+        # The polish's tolerances: the outer ones when no inner solver is given.
+        self.inner_tolerances = loop_tolerances(
+            dtype,
+            grad_tol=inner.grad_tol,
+            step_tol=inner.step_tol,
+            cost_tol=inner.cost_tol,
+            cost_atol=inner.cost_atol,
+            stationarity_tol=inner.stationarity_tol,
+            label=_LABEL,
+        )
+        if state is None:
+            self.radii = np.full((count,), float(inner.radius_init), dtype=np.float64)
+            self.locks = np.zeros((count,), dtype=np.int64)
+            self.thresholds = np.full((count,), np.nan)
+            self.polish_off, self.small_gains = False, 0
+            self.resumed_scale = None
+        else:
+            self.radii = np.array(state["inner_radius"], dtype=np.float64)
+            self.locks = np.array(state["inner_lock"], dtype=np.int64)
+            self.thresholds = np.array(state["inner_grad_threshold"], dtype=np.float64)
+            # A state saved without the switch resumes with the polish on.
+            self.polish_off = bool(_saved_count(state, "polish_off"))
+            self.small_gains = _saved_count(state, "polish_small_gains")
+            self.resumed_scale = np.array(state["scale"], dtype=dtype)
+        return super().run(state)
+
+    def nested_entries(self) -> dict:
         """The mode, the cut level, every member's inner radius, lock and threshold, the switch.
 
         ``polish_off`` is 1 while the polish is switched off, and
@@ -194,104 +209,196 @@ class _NestedFit(_JointFit):
         return {
             "mode": np.asarray("nested"),
             "nested_at": np.asarray(str(self.solver.nested_at)),
-            "inner_radius": np.array(values["inner_radius"], dtype=np.float64),
-            "inner_lock": np.array(values["inner_lock"], dtype=np.int64),
-            "inner_grad_threshold": np.array(values["inner_grad_threshold"], dtype=np.float64),
-            "polish_off": np.asarray(int(values["polish_off"]), dtype=np.int64),
-            "polish_small_gains": np.asarray(values["polish_small_gains"], dtype=np.int64),
+            "inner_radius": np.array(self.radii, dtype=np.float64),
+            "inner_lock": np.array(self.locks, dtype=np.int64),
+            "inner_grad_threshold": np.array(self.thresholds, dtype=np.float64),
+            "polish_off": np.asarray(int(self.polish_off), dtype=np.int64),
+            "polish_small_gains": np.asarray(self.small_gains, dtype=np.int64),
         }
 
-    def member_above(
-        self,
-        members: ArrayLike | None,
-        noise: float,
-        tolerance: Real | None = None,
-        floors: ArrayLike | None = None,
-    ) -> tuple | None:
-        """The member whose model predicts the most beyond the members' limit, or ``None``.
+    # -- the joint loop's hooks ------------------------------------------------
 
-        The limit is ``tolerance``, or for ``None`` the members' yardstick
-        ``max(inner cost_tol, 3 * noise)``, ``noise`` the evaluation noise the
-        outer trials measured; ``floors``, every member's gradient floor in
-        its stationarity number's units, raises each member's limit to its
-        floor (``None`` raises none). A member whose number is not finite is
-        beyond it. Returns ``(level, label, number, limit)``.
+    def evaluate(self, mode: str, point: np.ndarray, lanes: Iterable[str] | None = None) -> Any:
+        """The joint fit's request; a ``value`` request of every lane keeps its lane costs.
+
+        The record of a rejected trial reads them (``owner_split``).
         """
-        if members is None:
-            return None
-        numbers = np.asarray(members, dtype=np.float64)
-        limit = _stationarity_limit(tolerance, self.inner_tolerances.cost_tol, noise)
-        limits = limit if floors is None else np.fmax(limit, np.asarray(floors, dtype=np.float64))
-        beyond = np.flatnonzero(~(numbers <= limits))
-        if not beyond.size:
-            return None
-        worst = beyond[np.argmax(np.where(np.isfinite(numbers[beyond]), numbers[beyond], np.inf))]
-        if floors is not None:
-            limit = float(limits[worst])
-        return (self.solver.nested_at, self.members[int(worst)], float(numbers[worst]), limit)
+        results = super().evaluate(mode, point, lanes)
+        if mode == "value" and lanes is None:
+            self.trial_lanes = (
+                np.array(point, copy=True),
+                np.array(results.cost, dtype=np.float64)[0],
+            )
+        return results
 
-    def members_stationary(
-        self, members: ArrayLike | None, noise: float, floors: ArrayLike | None = None
-    ) -> bool:
-        """Whether every member's stationarity number is within the inner stationarity limit.
+    def resolve(
+        self, point: np.ndarray, raised: np.ndarray, before: np.ndarray, lane_costs: np.ndarray
+    ) -> tuple:
+        """The joint fit's consistency re-solve; at the current point its lane costs are kept."""
+        replaced, change = super().resolve(point, raised, before, lane_costs)
+        current = self.current
+        if current is not None and np.array_equal(point, current.point):
+            self.current = current._replace(lane_costs=replaced)
+        return replaced, change
 
-        The limit is the inner ``stationarity_tol``, or for ``None`` the
-        members' yardstick ``max(inner cost_tol, 3 * noise)``: the limit each
-        member's own stationarity test reads in the polish; ``floors`` raises
-        each member's limit to its gradient floor, as ``member_above``.
+    def blocks(self, point: np.ndarray, *, start: bool) -> tuple:
+        """The joint fit's ``blocks``; the first one also sets ``owners``, once.
+
+        ``owners`` is the member of the cut level whose subtree holds each
+        joint column (``-1`` above it). The fit's first request is this one,
+        at the start or the restored point, before every method that reads it.
+        A member whose blocks or gradient are not finite there, its lanes at a
+        finite cost, fails as a lane that does not solve there.
         """
-        return (
-            self.member_above(members, noise, self.inner_tolerances.stationarity_tol, floors)
-            is None
+        system, lane_costs = super().blocks(point, start=start)
+        if self.owners is None:
+            self.owners = elimination.node_of_columns(system, self.cut)
+        broken = nonfinite_members(system, self.cut)
+        if broken.any():
+            failures = tuple(
+                _Failure(
+                    str(self.route.ids[position]),
+                    NONFINITE_BLOCKS,
+                    float("nan"),
+                    (),
+                    (int(self.work.lane_rungs[position]),),
+                )
+                for position in np.flatnonzero(np.isin(self.lane_member, np.flatnonzero(broken)))
+            )
+            where = "the start point" if start else "an accepted point"
+            raise ValueError(
+                f"lane(s) {_failures_text(failures)} of {self.solver.nested_at} member(s) "
+                f"{[self.members[int(member)] for member in np.flatnonzero(broken)]} failed at "
+                f"{where} in the blocks mode; every lane has to solve at {where}."
+            )
+        return system, lane_costs
+
+    def at_start(
+        self, point: np.ndarray, system: elimination.LevelSystem, lane_costs: np.ndarray, *, fresh
+    ) -> tuple:
+        """The polish at a ``fresh`` start, at most ``inner_start_iterations``; the inner programs.
+
+        A resumed fit's members' numbers are read at its point in its saved scale.
+        """
+        elimination.inner_programs(system, self.cut)
+        self.logged = len(self.work.log)
+        limit = int(self.solver.inner_start_iterations) if fresh else 0
+        polished = self.lockstep(
+            point,
+            system,
+            lane_costs,
+            scale=self.resumed_scale,
+            limit=limit,
+            attempt=-1,
+            start=True,
         )
+        if limit == 0:
+            polished = polished._replace(codes=np.full_like(polished.codes, _NOT_POLISHED))
+        self.keep(polished)
+        self.polished = polished if fresh else None
+        return polished.point, polished.system, polished.lane_costs
 
-    def record(
+    def polish(
         self,
-        rho,
-        lam,
-        accepted,
-        trial,
-        failures,
-        iterations,
-        codes,
+        loop: LoopState,
+        system: elimination.LevelSystem,
+        lane_costs: np.ndarray,
         *,
-        retreats=None,
-        capped=None,
-        norms=None,
-        owners=None,
-        **attempt,
-    ) -> dict:
-        """The attempt just made, with every member's polish, retreats and response in it.
+        attempt: int,
+        predicted: float,
+        level: Real | None,
+    ) -> tuple:
+        """The members' polish at the accepted point, the outer values held.
 
-        Per member: its polish iterations, the code of why its polish ended,
-        its retreats (``retreats``), whether its response was bounded by its
-        radius (``capped``) and its response's scaled norm before the bound
-        (``norms``); the last three are 0, ``False`` and ``nan`` when not
-        given (the start's record). ``owners`` adds the split of the cost by
-        member (``owner_split``) when given.
+        At most the polish's number of iterations, none while the polish is
+        switched off; every member done at ``inner_fraction`` of the outer
+        step's predicted decrease ``predicted``, by its stationarity number
+        (raised to its gradient floor, ``level`` times its full step, once the
+        floor is measured) and by its own tests (``lockstep``). ``loop.point``,
+        ``loop.cost`` and ``loop.scale`` move to where it ended.
         """
+        self.stepped_from = self.member_numbers
+        limit = self.polish_steps
+        if self.polish_off:
+            self.work.polish_skipped += 1
+            limit = 0
+        before = self.current
+        polished = self.lockstep(
+            loop.point,
+            system,
+            lane_costs,
+            scale=loop.scale,
+            limit=limit,
+            attempt=attempt,
+            start=False,
+            outer_predicted=predicted,
+            noise=_median(loop.noise_dominated_cost_change),
+            level=level,
+        )
+        self.keep(polished)
+        self.previous, self.polished, self.outer_predicted = before, polished, float(predicted)
+        if np.any(polished.iterations):
+            loop.point, loop.scale = polished.point, polished.scale
+            loop.cost = float(polished.system.cost)
+        return polished.system, polished.lane_costs
+
+    def keep(self, polished: _Polish) -> None:
+        """Make the point where ``polished`` ended the current one, with the members' state there."""
+        self.radii, self.locks = polished.radii, polished.locks
+        self.thresholds = polished.thresholds
+        self.member_numbers = polished.numbers
+        self.current = _Point(polished.point, polished.system, polished.lane_costs)
+        self.work.held = polished.system.held
+        # The lanes' terms of the gradient floor's bound move with the point.
+        self.floor.current = self.floor.latest
+
+    def record(self, rho: float, lam: float, accepted: bool, trial: np.ndarray, failures: tuple):
+        """The attempt just made (or the start), with every member's polish and the cost split.
+
+        Per member: its polish iterations (``inner_iterations``), the code of
+        why its polish ended (``inner_stop``) and its retreats
+        (``inner_retreats``), all zero for an attempt without a polish; and
+        the split of the cost by member (``owner_split``). It also moves the
+        polish's switch: an accepted attempt whose polish made an iteration
+        and gained less than ``_POLISH_GAIN`` of the outer step's predicted
+        decrease counts toward switching it off (``_SMALL_GAINS`` in a row),
+        one that gained more resets the count, and an outer rejection or a
+        failed lane turns it on.
+        """
+        entries = super().record(rho, lam, accepted, trial, failures)
         count = len(self.members)
-        entries = _record(rho, lam, accepted, trial, failures, self.route.depth, **attempt)
-        if owners is not None:
-            entries.update(owners)
-        entries["inner_iterations"] = np.array(iterations, dtype=np.int64)
-        entries["inner_stop"] = np.array(codes, dtype=np.int64)
-        entries["inner_retreats"] = (
-            np.zeros((count,), dtype=np.int64)
-            if retreats is None
-            else np.array(retreats, dtype=np.int64)
-        )
-        entries["response_capped"] = (
-            np.zeros((count,), dtype=bool) if capped is None else np.array(capped, dtype=bool)
-        )
-        entries["response_norms"] = (
-            np.full((count,), np.nan) if norms is None else np.array(norms, dtype=np.float64)
-        )
+        polished = self.polished
+        if polished is None:
+            entries["inner_iterations"] = np.zeros((count,), dtype=np.int64)
+            entries["inner_stop"] = np.full((count,), _NOT_POLISHED, dtype=np.int64)
+            entries["inner_retreats"] = np.zeros((count,), dtype=np.int64)
+        else:
+            entries["inner_iterations"] = np.array(polished.iterations, dtype=np.int64)
+            entries["inner_stop"] = np.array(polished.codes, dtype=np.int64)
+            entries["inner_retreats"] = np.array(polished.retreats, dtype=np.int64)
+        entries.update(self.owner_split(accepted, trial, failures))
+        if not accepted or len(self.work.log) > self.logged:
+            self.polish_off, self.small_gains = False, 0
+        elif polished is not None and int(np.max(polished.iterations, initial=0)) > 0:
+            gain = polished.first_cost - float(polished.system.cost)
+            small = gain < _POLISH_GAIN * self.outer_predicted
+            self.small_gains = self.small_gains + 1 if small else 0
+            if self.small_gains >= _SMALL_GAINS:
+                self.polish_off, self.small_gains = True, 0
+        self.logged = len(self.work.log)
+        self.polished = None
         return entries
 
-    def valid(self, point: np.ndarray) -> bool:
-        """The trial predicate at ``point``; a predicate that raises rejects it."""
-        return _trial_valid(self.route.view, point)
+    def step_info(self, loop: LoopState, attempt: int, **fields: Any) -> StepInfo:
+        """The joint fit's ``StepInfo``, every member's number at the point the attempt stepped from."""
+        numbers = self.stepped_from if fields.get("accepted") else self.member_numbers
+        return super().step_info(loop, attempt, member_stationarity=numbers, **fields)
+
+    def outcome(self, loop: LoopState, stop: str, **values: Any) -> OptResult:
+        """The joint fit's result, every member's number at the end point reported beside it."""
+        return super().outcome(loop, stop, members=self.member_numbers, **values)
+
+    # -- the cost by member ------------------------------------------------------
 
     def member_costs(self, lane_costs: np.ndarray, point: np.ndarray) -> np.ndarray:
         """Each member's cost: its lanes' weighted costs and the regularizer rows of its subtree.
@@ -342,49 +449,51 @@ class _NestedFit(_JointFit):
             total += weight * (0.5 * float(residual @ residual))
         return total
 
-    def owner_split(
-        self,
-        system: elimination.LevelSystem,
-        point: np.ndarray,
-        lane_costs: np.ndarray,
-        solved: _InnerResult | None,
-    ) -> dict:
+    def owner_split(self, accepted: bool, trial: np.ndarray, failures: tuple) -> dict:
         """The attempt's cost split by member of the cut level, read off without changing the fit.
 
-        ``owner_costs`` holds every member's cost at the current ``point``
-        (``member_costs``) and ``owner_shared_cost`` the rest of the cost there
-        (``shared_cost``); ``owner_trial_costs`` and
-        ``owner_trial_shared_cost`` the same at the trial after its polish
-        (``nan`` when the trial was not evaluated or a member's lanes did not
-        solve there); ``owner_predicted`` every member's part of the decrease
-        the Gauss-Newton model at ``point`` predicts for the whole move to the
-        trial (its subtree's terms and their coupling to the outer step,
-        ``model_split``) and ``owner_shared_predicted`` the outer coordinates'
-        own terms; together they sum to the model's decrease for that move.
+        ``owner_costs`` holds every member's cost at the point the attempt
+        stepped from (``member_costs``) and ``owner_shared_cost`` the rest of
+        the cost there (``shared_cost``); ``owner_trial_costs`` and
+        ``owner_trial_shared_cost`` the same where the attempt ended: after
+        the polish for an accepted trial, at the trial for a rejected one
+        (``nan`` when the trial was not evaluated, and for a member whose
+        lanes failed there); ``owner_predicted`` every member's part of the
+        decrease the Gauss-Newton model there predicts for the whole move
+        (its subtree's terms and their coupling to the outer step,
+        ``model_split``) and ``owner_shared_predicted`` the outer
+        coordinates' own terms; together they sum to the model's decrease for
+        that move.
         """
         count = len(self.members)
+        point, system, lane_costs = self.previous if accepted else self.current
         entries = {
             "owner_costs": np.asarray(self.member_costs(lane_costs, point), dtype=np.float64),
             "owner_shared_cost": np.asarray(self.shared_cost(point), dtype=np.float64),
             "owner_trial_costs": np.full((count,), np.nan),
             "owner_trial_shared_cost": np.asarray(np.nan),
-            "owner_predicted": np.full((count,), np.nan),
-            "owner_shared_predicted": np.asarray(np.nan),
         }
-        if solved is None:
-            return entries
-        delta = np.asarray(solved.point, dtype=np.float64) - np.asarray(point, dtype=np.float64)
+        if accepted:
+            reached, costs = self.current.point, self.current.lane_costs
+        else:
+            reached, costs = np.asarray(trial), None
+            kept = self.trial_lanes
+            if kept is not None and np.array_equal(kept[0], reached):
+                costs = kept[1]
+        delta = np.asarray(reached, dtype=np.float64) - np.asarray(point, dtype=np.float64)
         members, rest = model_split(system, delta, self.cut)
         entries["owner_predicted"] = np.asarray(members, dtype=np.float64)
         entries["owner_shared_predicted"] = np.asarray(rest, dtype=np.float64)
-        if not solved.failures and solved.lane_costs is not None:
-            entries["owner_trial_costs"] = np.asarray(
-                self.member_costs(solved.lane_costs, solved.point), dtype=np.float64
-            )
+        if costs is not None:
+            split = np.asarray(self.member_costs(costs, reached), dtype=np.float64)
+            split[self.failed_members(failures)] = np.nan
+            entries["owner_trial_costs"] = split
             entries["owner_trial_shared_cost"] = np.asarray(
-                self.shared_cost(solved.point), dtype=np.float64
+                self.shared_cost(reached), dtype=np.float64
             )
         return entries
+
+    # -- the members' models -----------------------------------------------------
 
     def member_decrease(
         self,
@@ -417,19 +526,6 @@ class _NestedFit(_JointFit):
         predicted[(broken > 0) | ~np.isfinite(q_squared)] = np.nan
         return predicted
 
-    def member_stationarity(
-        self,
-        system: elimination.LevelSystem,
-        scale: ArrayLike,
-        zero: tuple,
-        costs: np.ndarray,
-        addition: ArrayLike | None = None,
-    ) -> np.ndarray:
-        """Every member's stationarity number: ``member_decrease`` over its cost scale."""
-        return _member_numbers(
-            self.member_decrease(system, scale, zero, addition), self.member_scales(costs)
-        )
-
     def member_scales(self, costs: ArrayLike) -> float | np.ndarray:
         """Every member's cost scale ``max(|cost_n|, cost_atol / cost_tol)``, inner tolerances."""
         tolerances = self.inner_tolerances
@@ -452,95 +548,6 @@ class _NestedFit(_JointFit):
                 np.bincount(owners[below], weights=z[below] ** 2, minlength=len(self.members))
             )
         return norms / self.member_scales(costs)
-
-    def members_at(
-        self,
-        system: elimination.LevelSystem,
-        scale: ArrayLike,
-        point: np.ndarray,
-        lane_costs: np.ndarray,
-    ) -> tuple:
-        """Every member's predicted decrease, stationarity number and full step at ``point``.
-
-        From one solve at zero damping of every subtree, in the subproblem's
-        coordinates at ``point`` with ``scale``. Returns ``(decreases,
-        numbers, full_steps)``, ``full_steps`` as ``member_full_steps`` gives
-        them.
-        """
-        gradient, _ = self.route.vectors(system)
-        coordinates = _subproblem(point, gradient, scale, self.route.bounds)
-        zero = elimination.inner_solve_scaled(
-            system, coordinates.scale, self.cut, addition=coordinates.addition
-        )
-        decreases = self.member_decrease(system, coordinates.scale, zero, coordinates.addition)
-        costs = self.member_costs(lane_costs, point)
-        numbers = _member_numbers(decreases, self.member_scales(costs))
-        return decreases, numbers, self.member_full_steps(zero, costs)
-
-    def full_stationarity(
-        self,
-        system: elimination.LevelSystem,
-        reduced: elimination.LevelSystem,
-        point: np.ndarray,
-        scale: np.ndarray,
-        relative_to: float,
-        decreases: np.ndarray,
-        *,
-        outer: box.Scaling | None = None,
-        zero: tuple | None = None,
-    ) -> tuple:
-        """The stationarity number of the full system at ``point``, the solves, the outer step.
-
-        The decrease the full Gauss-Newton model predicts for its full step is
-        the reduced model's for its full step plus every member's for its own
-        (``decreases``, the outer coordinates held), since the reduced system
-        is the Schur complement of the members' blocks; the number is that sum
-        over ``relative_to``, the cost scale at the point (``cost_scale``), the
-        joint mode's number at the same point.
-        Under bounds the outer coordinates take the Coleman-Li coordinates of
-        the outer part of the full gradient, as the joint mode's do. ``outer``
-        and ``zero`` are the outer subproblem's coordinates and its solve at
-        zero damping, already made: they are used when the coordinates agree.
-        Returns ``(number, solves, step)``, ``step`` the reduced model's full
-        step (``_FullStep``), which the gradient floor reads.
-        """
-        prefix = self.prefix
-        bounds = self.route.bounds
-        outer_gradient, _ = elimination.level_vectors(reduced)
-        if bounds is None:
-            coordinates = (
-                _subproblem(point[:prefix], outer_gradient, scale[:prefix], None)
-                if outer is None
-                else outer
-            )
-        else:
-            gradient, _ = elimination.level_vectors(system)
-            coordinates = _subproblem(
-                point[:prefix],
-                gradient[:prefix],
-                scale[:prefix],
-                (bounds[0][:prefix], bounds[1][:prefix]),
-            )
-        solves = 0
-        agree = (
-            outer is not None
-            and zero is not None
-            and np.array_equal(coordinates.scale, outer.scale)
-            and (
-                (coordinates.addition is None and outer.addition is None)
-                or (
-                    coordinates.addition is not None
-                    and outer.addition is not None
-                    and np.array_equal(coordinates.addition, outer.addition)
-                )
-            )
-        )
-        if not agree:
-            zero = elimination.solve_scaled(reduced, coordinates.scale, 0.0, coordinates.addition)
-            solves = 1
-        step = _full_step(reduced, outer_gradient, coordinates.scale, zero, coordinates.addition)
-        total = step.decrease + float(np.sum(np.asarray(decreases, dtype=np.float64)))
-        return total / relative_to, solves, step
 
     def member_quadratic(
         self, system: elimination.LevelSystem, coordinates: box.Scaling, member: int
@@ -611,119 +618,11 @@ class _NestedFit(_JointFit):
             predicted[member] = float(value)
         return chosen, chosen_scaled, predicted
 
-    def respond(
-        self,
-        system: elimination.LevelSystem,
-        x: np.ndarray,
-        scale: np.ndarray,
-        multiplier: float,
-        outer_step: np.ndarray,
-        radii: np.ndarray,
-    ) -> tuple:
-        """The trial of an outer step: the inner coordinates moved by their response to it.
+    # -- the polish's requests ---------------------------------------------------
 
-        The response is the inner part of the minimizer of the damped model
-        with the outer step held, at the outer step's multiplier, bounded per
-        member by its radius in ``radii``: a member whose response's scaled
-        length exceeds its radius takes its own trust-region step of that
-        radius on its subtree's model at the gradient the response answers
-        (``_level_elimination.inner_bounded_response``). Under bounds it is
-        solved in the Coleman-Li coordinates of the inner coordinates at
-        ``x``, with their diagonal addition; every member whose bounded
-        response leaves the box takes ``_bounds.select_step``'s choice on its
-        scaled subtree model with the outer step held (its gradient the inner
-        gradient that the response answers, its reach the bounded response's
-        scaled length), and the trial is kept strictly inside the box.
-
-        Returns ``(trial, norms, capped, solves)``: the trial point, every
-        member's response norm before the bound, whether it was bounded, and
-        the damped solves the bound made.
-        """
-        bounds = self.route.bounds
-        if bounds is None:
-            step, _, _, norms, capped, solves = elimination.inner_bounded_response(
-                system, scale, multiplier, outer_step, radii
-            )
-            return x + step, norms, capped, solves
-        lower, upper = bounds
-        prefix = self.prefix
-        gradient, _ = elimination.level_vectors(system)
-        coordinates = box.coleman_li_scaling(x, gradient, lower, upper, scale)
-        inner_scale = np.array(coordinates.scale, copy=True)
-        inner_scale[:prefix] = scale[:prefix]
-        addition = np.array(coordinates.addition, copy=True)
-        addition[:prefix] = 0.0
-        coordinates = coordinates._replace(scale=inner_scale, addition=addition)
-        response, z, shifted, norms, capped, solves = elimination.inner_bounded_response(
-            system, inner_scale, multiplier, outer_step, radii, addition=addition
-        )
-        with np.errstate(all="ignore"):
-            d = 1.0 / inner_scale
-        trial = x + response
-        for member in range(len(self.members)):
-            columns = np.flatnonzero(self.owners == member)
-            if box.in_bounds(trial[columns], lower[columns], upper[columns]):
-                continue
-            member_step, _, _ = box.select_step(
-                x[columns],
-                self.member_quadratic(system, coordinates, member),
-                shifted[columns],
-                response[columns],
-                z[columns],
-                d[columns],
-                float(np.linalg.norm(z[columns])),
-                lower[columns],
-                upper[columns],
-                box.step_back_ratio(gradient[columns], coordinates.v[columns]),
-            )
-            trial[columns] = x[columns] + member_step
-        return box.make_strictly_feasible(trial, lower, upper, rstep=0), norms, capped, solves
-
-    def reduce(self, system: elimination.LevelSystem) -> elimination.LevelSystem:
-        """The outer system: the inner blocks eliminated; a singular inner problem is refused.
-
-        Under bounds the inner blocks carry the diagonal ``|g_i| / v_i`` of the
-        Coleman-Li model wherever the gradient points at a finite side, so the
-        outer model sees an inner coordinate held at its side as held.
-        """
-        bounds = self.route.bounds
-        source = system
-        if bounds is not None:
-            gradient, _ = elimination.level_vectors(system)
-            point = np.asarray(system.point)
-            v, dv = box.CL_scaling_vector(point, gradient, bounds[0], bounds[1])
-            inner = np.arange(point.shape[0]) >= self.prefix
-            with np.errstate(all="ignore"):
-                term = np.where(inner & (dv != 0), gradient * dv / v, 0.0)
-            source = elimination.scaled_system(system, np.ones_like(point), term)
-        reduced = elimination.reduce_to(source, self.cut)
-        if _finite_blocks(reduced):
-            return reduced
-        singular = np.flatnonzero(elimination.inner_singular(system, self.cut))
-        level = self.solver.nested_at
-        if singular.size:
-            member = self.members[int(singular[0])]
-            raise ValueError(
-                "the nested mode needs the Gauss-Newton matrix of every inner problem to be "
-                f"nonsingular, and member {member!r} of level {level!r} has a singular one at "
-                "this point; use nested_at=None."
-            )
-        raise ValueError(
-            f"the Gauss-Newton matrix of the levels above {level!r}, with the inner problems "
-            "eliminated, is not finite at this point; use nested_at=None."
-        )
-
-    def blocks(self, point: np.ndarray, *, start: bool) -> tuple:
-        """The joint fit's ``blocks``; the first one also sets ``owners``, once.
-
-        ``owners`` is the member of the cut level whose subtree holds each
-        joint column (``-1`` above it). The fit's first request is this one,
-        at the start or the restored point, before every method that reads it.
-        """
-        system, lane_costs = super().blocks(point, start=start)
-        if self.owners is None:
-            self.owners = elimination.node_of_columns(system, self.cut)
-        return system, lane_costs
+    def valid(self, point: np.ndarray) -> bool:
+        """The trial predicate at ``point``; a predicate that raises rejects it."""
+        return _trial_valid(self.route.view, point)
 
     def nonfinite_block_failures(self, results: Any, system: elimination.LevelSystem) -> tuple:
         """The lanes of every member whose Gauss-Newton blocks or gradient are not finite at a finite cost.
@@ -769,15 +668,13 @@ class _NestedFit(_JointFit):
         retreats: np.ndarray,
         attempt: int,
     ) -> tuple:
-        """The ``blocks`` request at an inner point of an outer trial, the members retreating.
+        """The ``blocks`` request at a polished point, the members retreating.
 
-        ``point`` is the responded point or a point the polish reached, and
         ``anchor`` holds every member's coordinates at its last point where
-        its lanes solved: the current point for the responded point, the
-        point before the polish's last iteration otherwise. A member with a
-        lane that no rung solves at ``point`` retreats along its move from
-        ``anchor``: at its ``j``-th retreat its subtree's coordinates are
-        ``anchor + (point - anchor) / 2**j``, its radius is quartered, and
+        its lanes solved: the point before the polish's last iteration. A
+        member with a lane that no rung solves at ``point`` retreats along its
+        move from ``anchor``: at its ``j``-th retreat its subtree's coordinates
+        are ``anchor + (point - anchor) / 2**j``, its radius is quartered, and
         only its lanes are solved again there, in one ``value`` request at
         the rungs they hold with every other coordinate as it was, up to the
         solver's ``inner_retreats`` times. When the lanes of every member that
@@ -793,7 +690,7 @@ class _NestedFit(_JointFit):
         Returns ``(point, results, system, failures)``: the point where every
         lane solved, the results and system there, and ``()``; or, when a
         member cannot be solved at any retreat, the last point tried,
-        ``None``, ``None`` and the failures of the last request.
+        ``None``, ``None`` and the failures of the last request, logged.
         """
         route, work = self.route, self.work
         allowed = int(self.solver.inner_retreats)
@@ -815,7 +712,6 @@ class _NestedFit(_JointFit):
                 failures, ignored = route.weigh(self.nonfinite_block_failures(results, system))
                 work.record(attempt, ignored, inner=True)
             if not failures:
-                work.held = system.held
                 # The lanes' terms of the gradient floor's bound at this point.
                 self.floor.record(results)
                 return point, results, system, ()
@@ -823,6 +719,7 @@ class _NestedFit(_JointFit):
             unlogged = failures
             while pending.size:
                 if np.any(tried[pending] >= allowed):
+                    work.record(attempt, unlogged, inner=True)
                     return point, None, None, failures
                 if unlogged:
                     work.record(attempt, unlogged, inner=True)
@@ -847,60 +744,58 @@ class _NestedFit(_JointFit):
                 unlogged = failures
                 pending = self.failed_members(failures) if failures else pending[:0]
 
-    def inner_solve(
+    def lockstep(
         self,
         point: np.ndarray,
+        system: elimination.LevelSystem,
+        lane_costs: np.ndarray,
         *,
-        origin: np.ndarray | None = None,
         scale: ArrayLike | None,
-        radii: np.ndarray,
-        locks: np.ndarray,
-        thresholds: np.ndarray,
+        limit: int,
         attempt: int,
         start: bool,
-        limit: int,
         outer_predicted: Real | None = None,
         noise: float = 0.0,
         level: Real | None = None,
-    ) -> _InnerResult:
-        """Every member of the cut level iterates on its subtree at the outer point of ``point``.
+    ) -> _Polish:
+        """Every member of the cut level iterates on its subtree from ``point``, the outer values held.
 
-        The members start from their coordinates in ``point`` with the radii
-        ``radii`` and the growth locks ``locks`` they carry, and make at most
-        ``limit`` lockstep iterations; ``limit=0`` evaluates ``point`` alone.
-        ``start`` marks the start point of a fresh fit, where a lane that fails
-        at any ``blocks`` request is an error. At an outer trial a member whose
-        lane fails at the first request retreats along its response toward its
-        coordinates in ``origin`` (the current point; ``None`` takes
-        ``point``), and one whose lane fails at the ``blocks`` request after
-        an iteration retreats along its last step (``retreating_blocks``); a
-        member that no retreat solves ends the solve with its failures. A
-        member is done when its
-        stationarity number is at most the inner ``stationarity_tol``, when its
-        gradient is within the inner ``grad_tol`` (when that is set), when the
-        decrease its model predicts for its full step is at most
+        ``system`` and ``lane_costs`` are those at ``point``. The members start
+        with the radii, locks and gradient thresholds the fit carries and make
+        at most ``limit`` lockstep iterations, each one ``value`` request at
+        the members' combined trial and one ``blocks`` request at their new
+        point; ``limit=0`` reads ``point`` alone. ``start`` marks the start's
+        polish, whose iterations count apart. A member whose lane fails at the
+        ``blocks`` request after an iteration retreats along its last step
+        (``retreating_blocks``); when one cannot be solved at any retreat, the
+        polish ends at the point before that iteration. A member is done when
+        its stationarity number is at most the inner ``stationarity_tol``,
+        when its gradient is within the inner ``grad_tol`` (when that is set),
+        when the decrease its model predicts for its full step is at most
         ``inner_fraction`` times ``outer_predicted`` (the decrease the outer
         model predicted for the outer step; ``None`` tests nothing), by its
-        step and cost tests, when three of its rejected trials in a row within
-        these iterations are dominated by the noise of the cost's evaluation,
-        or when its radius falls to the smallest positive float. The
-        tolerance's default reads ``noise``, the evaluation noise the outer
-        trials measured, and so do the members' gain ratios under the inner
-        ``noise_relaxed_ratio``. With ``level``, the gradient floor the outer
-        trials measured (``None`` before the first sample), a member is also
-        done when its stationarity number is at most its own floor, ``level``
-        times its full step's scaled norm over its cost scale
+        step and cost tests, when three of its rejected trials in a row
+        within these iterations are dominated by the noise of the cost's
+        evaluation, or when its radius falls to the smallest positive float.
+        The tolerance's default reads ``noise``, the evaluation noise the
+        outer trials measured, and so do the members' gain ratios under the
+        inner ``noise_relaxed_ratio``. With ``level``, the gradient floor the
+        outer trials measured (``None`` before the first sample), a member is
+        also done when its stationarity number is at most its own floor,
+        ``level`` times its full step's scaled norm over its cost scale
         ``max(|cost_n|, cost_atol / cost_tol)`` under the inner tolerances.
         """
         solver, inner, route, work = self.solver, self.inner, self.route, self.work
         tolerances = self.inner_tolerances
         count = len(self.members)
         x = np.array(point, copy=True)
+        lane_costs = np.array(lane_costs, dtype=np.float64, copy=True)
         scale = None if scale is None else np.array(scale, copy=True)
-        radii = np.array(radii, dtype=np.float64, copy=True)
-        locks = np.array(locks, dtype=np.int64, copy=True)
-        thresholds = np.array(thresholds, dtype=np.float64, copy=True)
+        radii = np.array(self.radii, dtype=np.float64, copy=True)
+        locks = np.array(self.locks, dtype=np.int64, copy=True)
+        thresholds = np.array(self.thresholds, dtype=np.float64, copy=True)
         iterations = np.zeros((count,), dtype=np.int64)
+        retreats = np.zeros((count,), dtype=np.int64)
         bounds = route.bounds
         fixed = np.asarray(route.fixed, dtype=np.int64)
         tiny = float(np.finfo(float).tiny)
@@ -909,31 +804,6 @@ class _NestedFit(_JointFit):
         accuracy = (
             None if outer_predicted is None else solver.inner_fraction * float(outer_predicted)
         )
-
-        # Every member's retreats in this solve.
-        retreats = np.zeros((count,), dtype=np.int64)
-        # The lane costs at the current inner point, with those of a consistency re-solve.
-        if start:
-            system, lane_costs = self.blocks(x, start=True)
-        else:
-            # The responded point: a member whose lane fails there retreats along its
-            # response toward its coordinates at the current point.
-            x, results, system, failures = self.retreating_blocks(
-                x, x if origin is None else origin, radii, retreats, attempt
-            )
-            if failures:
-                return _InnerResult(
-                    x,
-                    None,
-                    scale,
-                    radii,
-                    locks,
-                    thresholds,
-                    iterations,
-                    failures,
-                    retreats=retreats,
-                )
-            lane_costs = np.array(results.cost, dtype=np.float64)[0]
         first_cost = float(system.cost)
         owners = self.owners
         below = owners >= 0
@@ -1165,544 +1035,39 @@ class _NestedFit(_JointFit):
             floored |= floor
             finish(floor, _RADIUS)
             k += 1
-            if evaluated:
-                # (1) of the next iteration: the members' new point, every lane solved
-                # there. At an outer trial a member whose lane fails there retreats along
-                # its last step; at the start point the failure is an error.
-                if start:
-                    system, lane_costs = self.blocks(x, start=False)
-                else:
-                    x, results, system, failures = self.retreating_blocks(
-                        x, previous, radii, retreats, attempt
-                    )
-                    if failures:
-                        return _InnerResult(
-                            x,
-                            None,
-                            scale,
-                            radii,
-                            locks,
-                            thresholds,
-                            iterations,
-                            failures,
-                            retreats=retreats,
-                        )
-                    lane_costs = np.array(results.cost, dtype=np.float64)[0]
+            if not taken.any():
+                continue
+            # (1) of the next iteration: the members' new point, every lane solved
+            # there; a member whose lane fails there retreats along its last step.
+            moved, results, solved, failures = self.retreating_blocks(
+                x, previous, radii, retreats, attempt
+            )
+            if failures:
+                # A member that no retreat solves ends the polish at the point before
+                # this iteration, where every lane solved.
+                unsolved = self.failed_members(failures)
+                codes[unsolved] = _UNSOLVED
+                active[unsolved] = False
+                x = previous
+                break
+            x, system = moved, solved
+            lane_costs = np.array(results.cost, dtype=np.float64)[0]
         if int(limit) == 0:
             codes[~held] = _SKIPPED
         else:
             codes[active] = _AT_MAX_STEPS
             work.inner_unconverged[active | floored] += 1
-        return _InnerResult(
+        return _Polish(
             x,
             system,
+            lane_costs,
             scale,
             radii,
             locks,
             thresholds,
             iterations,
-            (),
-            stationarity,
-            lane_costs,
-            decreases,
             codes,
-            first_cost,
             retreats,
-            full_steps,
-            self.floor.latest,
-        )
-
-    def run(self, state: Mapping | None = None) -> OptResult:
-        """Fit from the start point, or continue the fit whose ``state`` is given."""
-        solver, inner, route, work = self.solver, self.inner, self.route, self.work
-        dtype = np.asarray(route.problem.x0).dtype
-        x0 = np.array(route.problem.x0, dtype=dtype)
-        bounds = route.bounds
-        count = len(self.members)
-        prefix = self.prefix
-        # grad_tol=None tests no gradient, in the outer loop and in the inner fits it sets.
-        tolerances = loop_tolerances(
-            dtype,
-            grad_tol=solver.grad_tol,
-            step_tol=solver.step_tol,
-            cost_tol=solver.cost_tol,
-            cost_atol=solver.cost_atol,
-            stationarity_tol=solver.stationarity_tol,
-            label=_LABEL,
-        )
-        grad_tolerance, step_tol, cost_tol, cost_atol, _ = tolerances
-        # The inner fits' tolerances, read by the polish and the members' tests: the
-        # outer ones when no inner solver is given.
-        self.inner_tolerances = (
-            tolerances
-            if solver.inner is None
-            else loop_tolerances(
-                dtype,
-                grad_tol=inner.grad_tol,
-                step_tol=inner.step_tol,
-                cost_tol=inner.cost_tol,
-                cost_atol=inner.cost_atol,
-                stationarity_tol=inner.stationarity_tol,
-                label=_LABEL,
-            )
-        )
-        outer_fixed = np.asarray([index for index in route.fixed if index < prefix], dtype=np.int64)
-        outer_bounds = None if bounds is None else (bounds[0][:prefix], bounds[1][:prefix])
-        n_constraints = int(route.constraint_matrix.shape[0])
-        route.problem.prepare(modes=("value", "blocks"))
-        start_iterations = np.zeros((count,), dtype=np.int64)
-        start_codes = np.full((count,), _NOT_POLISHED, dtype=np.int64)
-        # The polish's switch: off after two accepted attempts in a row whose polish
-        # gained too little, on again after an outer rejection or a failed lane.
-        polish_off, small_gains = False, 0
-        if state is None:
-            x = x0.copy()
-            if bounds is not None:
-                # Iterates stay strictly inside the box: a start on or beyond a side
-                # moves to the next float inside it.
-                x = box.make_strictly_feasible(x, bounds[0], bounds[1], rstep=0)
-            if not trial_is_valid(route.view, x):
-                raise ValueError("TrustRegion initial point failed the trial predicate.")
-            radii = np.full((count,), float(inner.radius_init), dtype=np.float64)
-            locks = np.zeros((count,), dtype=np.int64)
-            thresholds = np.full((count,), np.nan)
-            if solver.inner_start_iterations > 0:
-                # At most inner_start_iterations lockstep iterations at the start point,
-                # within the members' radii, before the first outer attempt.
-                solved = self.inner_solve(
-                    x,
-                    scale=None,
-                    radii=radii,
-                    locks=locks,
-                    thresholds=thresholds,
-                    attempt=-1,
-                    start=True,
-                    limit=solver.inner_start_iterations,
-                )
-                x, system, scale = solved.point, solved.system, solved.scale
-                radii, locks, thresholds = solved.radii, solved.locks, solved.thresholds
-                start_iterations, start_codes = solved.iterations, solved.codes
-                member_numbers, member_decreases = solved.stationarity, solved.decreases
-                member_steps = solved.full_steps
-                lane_costs = solved.lane_costs
-            else:
-                # No inner fit at the start point: the first outer attempt reads the
-                # full system there.
-                system, lane_costs = self.blocks(x, start=True)
-                scale = _scale_candidate(
-                    system, solver.x_scale, elimination.level_vectors(system)[1]
-                )
-                member_decreases, member_numbers, member_steps = self.members_at(
-                    system, scale, x, lane_costs
-                )
-                work.solves += 1
-        else:
-            # The saved point is the start or an accepted point, after its polish; its
-            # blocks are evaluated again. The members' radii and locks, and the
-            # polish's switch, are those the saved state carries.
-            x = np.array(state["point"], dtype=dtype)
-            work.restore(state)
-            work.resume_blocks += 1
-            system, lane_costs = self.blocks(x, start=False)
-            scale = np.array(state["scale"], dtype=dtype)
-            radii = np.array(state["inner_radius"], dtype=np.float64)
-            locks = np.array(state["inner_lock"], dtype=np.int64)
-            thresholds = np.array(state["inner_grad_threshold"], dtype=np.float64)
-            # A state saved without the switch resumes with the polish on.
-            polish_off = bool(_saved_count(state, "polish_off"))
-            small_gains = _saved_count(state, "polish_small_gains")
-        cost = float(system.cost)
-        reduced = self.reduce(system)
-        # Every program an attempt runs is compiled here, before the loop: the outer
-        # solve, quadratic and vectors of the reduced system, the inner response to
-        # an outer step, and the inner solves.
-        elimination.level_vectors(reduced)
-        elimination.solve_scaled(reduced, np.ones((prefix,), dtype=dtype), 0.0)
-        elimination.level_quadratic(reduced, np.zeros((prefix,), dtype=dtype))
-        elimination.inner_response(
-            system, scale, 0.0, np.zeros((prefix,), dtype=dtype), addition=np.zeros_like(scale)
-        )
-        elimination.inner_programs(system, self.cut)
-        if state is not None:
-            # The members' predicted decreases and stationarity numbers at the
-            # restored point, from the restored scale, as its polish ended there.
-            member_decreases, member_numbers, member_steps = self.members_at(
-                system, scale, x, lane_costs
-            )
-
-        for callback in self.callbacks:
-            callback.on_start(route.n, route.view.n_residuals, solver.max_steps)
-        self.started = time.perf_counter()
-        if state is None:
-            # A fresh fit's first record holds the retries of the start's requests.
-            record = self.record(
-                float("nan"),
-                float("nan"),
-                False,
-                x,
-                (),
-                start_iterations,
-                start_codes,
-                **work.attempt_records(),
-            )
-            loop = LoopState.start(
-                point=x, cost=cost, scale=scale, radius=float(solver.radius_init), record=record
-            )
-        else:
-            # A resumed fit's first record holds the retries of its first attempt.
-            loop = LoopState.restore(state, point=x, cost=cost, scale=scale)
-        # The largest relative predicted decrease of a trial counted as noise-dominated;
-        # None bounds none.
-        noise_limit = _noise_trial_limit(solver, route)
-        start_attempt = loop.attempt
-        attempt = start_attempt
-        for attempt in range(start_attempt, int(solver.max_steps)):
-            # The outer gradient with the inner gradients folded in: the gradient of
-            # the model the outer step minimizes, and to first order the gradient of
-            # the cost after the inner fits.
-            outer_gradient, _ = elimination.level_vectors(reduced)
-            x_outer = loop.point[:prefix]
-            grad_norm = float(np.linalg.norm(outer_gradient))
-            # The outer subproblem's coordinates, in the outer part of the scale.
-            outer = _subproblem(x_outer, outer_gradient, loop.scale[:prefix], outer_bounds)
-            stop_gradient = float(
-                np.linalg.norm(_bounded_gradient(outer_gradient, outer, outer_bounds))
-            )
-            loop.cost_history.append(loop.cost)
-            loop.grad_history.append(grad_norm)
-            if grad_tolerance is not None:
-                if loop.grad_threshold is None:
-                    loop.grad_threshold = grad_tolerance.threshold(stop_gradient)
-                if not n_constraints and stop_gradient <= loop.grad_threshold:
-                    stop = "gradient_tolerance"
-                    break
-
-            # The outer step on the reduced system, in the outer part of the scale. Its
-            # solve at lambda = 0 is the first solve of the step's multiplier search;
-            # with every member's decrease at zero damping it gives the stationarity
-            # number of the full system at the current point.
-            zero = elimination.solve_scaled(reduced, outer.scale, 0.0, outer.addition)
-            # Every relative number of the attempt is relative to the cost scale here.
-            relative_to = cost_scale(loop.cost, cost_tol, cost_atol)
-            stationarity, solves, full_step = self.full_stationarity(
-                system,
-                reduced,
-                loop.point,
-                loop.scale,
-                relative_to,
-                member_decreases,
-                outer=outer,
-                zero=zero,
-            )
-            work.solves += solves
-            # The gradient's accuracy floor here, as in the joint mode; the bound reads
-            # every coordinate, the outer ones in the outer step's coordinates. Every
-            # member's floor is the fit's floor along the member's own full step.
-            bound = self.floor.bound(np.concatenate((full_step.scale, loop.scale[prefix:])))
-            level = _floor_level(loop.gradient_floor_samples, bound)
-            floors = None if level is None else level * member_steps
-            # The full model predicts no further decrease the evaluation can show here,
-            # and neither does any member's model, against the members' yardstick.
-            if stationarity <= _stationarity_limit(
-                solver.stationarity_tol, cost_tol, _median(loop.noise_dominated_cost_change)
-            ) and self.members_stationary(
-                member_numbers, _median(loop.noise_dominated_cost_change), floors
-            ):
-                work.solves += 1
-                stop = "stationarity"
-                break
-            # The full model predicts no further decrease its derivatives resolve here,
-            # and neither does any member's model, against its floor.
-            if (
-                level is not None
-                and stationarity <= _floor_sigma(level, full_step.norm, relative_to)
-                and self.member_above(
-                    member_numbers, _median(loop.noise_dominated_cost_change), floors=floors
-                )
-                is None
-            ):
-                work.solves += 1
-                stop = "derivative_accuracy"
-                break
-            radius_floor = _radius_floor(level, full_step.norm, outer_gradient, outer.scale)
-            current_members = np.array(member_numbers, dtype=np.float64)
-            step_radius = loop.radius
-            trial_outer, scaled_step_norm, predicted, multiplier, solves = _trial_point(
-                reduced,
-                x_outer,
-                outer_gradient,
-                outer,
-                loop.radius,
-                first=zero,
-                fixed=outer_fixed,
-                bounds=outer_bounds,
-                equality=n_constraints > 0,
-            )
-            work.solves += solves
-            step = trial_outer - x_outer
-            # The trial's inner coordinates are the current ones moved by their
-            # response to the outer step: the inner part of the minimizer of the
-            # damped model with the outer step held, at the outer step's multiplier,
-            # each member's bounded by its carried radius. The polish at the trial
-            # starts there.
-            trial, response_norms, response_capped, solves = self.respond(
-                system, loop.point, loop.scale, multiplier, step, radii
-            )
-            work.solves += solves
-            trial[:prefix] = trial_outer
-            predicted_value = float(predicted)
-            # The step test reads the trial's whole move, the outer step and the
-            # members' response together, as the joint mode's reads its whole step.
-            step_norm = float(np.linalg.norm(trial - loop.point))
-
-            failures: tuple = ()
-            failed_owners = None
-            rejection_reason = None
-            invalid = False
-            solved = None
-            iterations = np.zeros((count,), dtype=np.int64)
-            codes = np.full((count,), _NOT_POLISHED, dtype=np.int64)
-            retreats = np.zeros((count,), dtype=np.int64)
-            logged = len(work.log)
-            trial_ok = self.valid(trial)
-            # A trial move within the step tolerance ends the fit at the current point
-            # before the trial is evaluated.
-            step_stop = step_small(step_norm, loop.point, step_tol, tested=trial_ok)
-            if not trial_ok:
-                work.predicate_rejections += 1
-                trial_cost = float("inf")
-                rejection_reason = "the trial predicate rejected the point"
-            elif step_stop:
-                trial_cost = float("inf")
-                rejection_reason = "the step is within the step tolerance"
-            else:
-                # The polish at the trial, from the responded inner coordinates, with
-                # the members' carried radii and locks; switched off, the responded
-                # point alone is evaluated.
-                before = work.lane_rungs.copy()
-                if polish_off:
-                    work.polish_skipped += 1
-                solved = self.inner_solve(
-                    trial,
-                    origin=loop.point,
-                    scale=loop.scale,
-                    radii=radii,
-                    locks=locks,
-                    thresholds=thresholds,
-                    attempt=attempt,
-                    start=False,
-                    limit=0 if polish_off else self.polish_steps,
-                    outer_predicted=predicted_value,
-                    noise=_median(loop.noise_dominated_cost_change),
-                    level=level,
-                )
-                raised = np.flatnonzero(work.lane_rungs > before)
-                if raised.size:
-                    # A lane that moved to a higher rung in the polish at the trial is
-                    # solved again at the current point at its new rung, so that the outer
-                    # gain ratio compares costs of the same rung; the outer model there
-                    # stays the earlier rung's.
-                    lane_costs, change = self.resolve(loop.point, raised, before, lane_costs)
-                    loop.cost += change
-                iterations = solved.iterations
-                trial = solved.point
-                retreats = solved.retreats
-                if solved.codes is not None:
-                    codes = solved.codes
-                if solved.failures:
-                    invalid = True
-                    failures = solved.failures
-                    work.invalid_trials += 1
-                    work.record(attempt, failures, inner=False)
-                    trial_cost = float("inf")
-                    failed_owners = route.owners(failures)
-                    unsolvable = []
-                    for failure in failures:
-                        member = self.members[self.lane_member[route.position[failure.lane]]]
-                        if member not in unsolvable:
-                            unsolvable.append(member)
-                    rejection_reason = (
-                        f"the inner problem of {solver.nested_at} member(s) "
-                        f"{_listed(unsolvable)} has no point where its lanes solve at the trial"
-                    )
-                    if solver.inner_retreats:
-                        rejection_reason += (
-                            f", after {solver.inner_retreats} retreat(s) toward the last point "
-                            "where its lanes solved"
-                        )
-                else:
-                    trial_cost = float(solved.system.cost)
-
-            # The cost split by member at the current point and at the trial: read
-            # off the current system and the polish's result, nothing of the fit changes.
-            owners = self.owner_split(system, loop.point, lane_costs, solved)
-            # A step within the step tolerance leaves the radius as it is.
-            rho, accepted, loop.radius, reason = _judge(
-                cost=loop.cost,
-                trial_cost=trial_cost,
-                predicted=predicted_value,
-                valid=trial_ok,
-                invalid=invalid,
-                scaled_norm=scaled_step_norm,
-                radius=loop.radius,
-                lock=loop.growth_lock,
-                noise_window=loop.noise_dominated_cost_change,
-                eta=float(solver.eta),
-                radius_max=solver.radius_max,
-                relaxed=solver.noise_relaxed_ratio,
-                relative_to=cost_scale(loop.cost, cost_tol, cost_atol),
-                hold=step_stop,
-                radius_floor=radius_floor,
-            )
-            assert_decision(accepted)
-            rejection_reason = rejection_reason or reason
-
-            previous_cost = loop.cost
-            if accepted:
-                # The point, its system and the members' state become the trial's; a
-                # rejected trial leaves the members' radii and locks as they were
-                # before its polish.
-                loop.point, system = solved.point, solved.system
-                loop.scale, radii, locks, thresholds = (
-                    solved.scale,
-                    solved.radii,
-                    solved.locks,
-                    solved.thresholds,
-                )
-                loop.cost = float(system.cost)
-                lane_costs = solved.lane_costs
-                reduced = self.reduce(system)
-                member_numbers, member_decreases = solved.stationarity, solved.decreases
-                member_steps = solved.full_steps
-                # The lanes' terms of the gradient floor's bound move with the point.
-                self.floor.current = solved.floor_terms
-                loop.accepted += 1
-            # The polish's switch: an accepted attempt whose polish made an iteration and
-            # gained less than _POLISH_GAIN of the outer step's predicted decrease (the
-            # cost at the responded point minus the cost after the polish) counts toward
-            # switching it off, one that gained more resets the count, and one whose
-            # polish made no iteration does neither; an outer rejection or a lane that
-            # no rung solves turns it on.
-            if not accepted or len(work.log) > logged:
-                polish_off, small_gains = False, 0
-            elif not polish_off and int(np.max(solved.iterations, initial=0)) > 0:
-                gain = float(solved.first_cost) - float(solved.system.cost)
-                small_gains = small_gains + 1 if gain < _POLISH_GAIN * predicted_value else 0
-                if small_gains >= _SMALL_GAINS:
-                    polish_off, small_gains = True, 0
-            work.attempted(accepted)
-            loop.radius_history.append(loop.radius)
-            # An outer trial is evaluated when its cost was computed after its polish (a
-            # step within the step tolerance is not); the outer trials alone measure the
-            # evaluation noise and make the runs, the polish's trials do not enter.
-            after = _after_attempt(
-                loop,
-                accepted=accepted,
-                valid=trial_ok,
-                invalid=invalid,
-                cost=previous_cost,
-                trial_cost=trial_cost,
-                predicted=predicted_value,
-                step_radius=step_radius,
-                cost_tol=cost_tol,
-                cost_atol=cost_atol,
-                noise_limit=noise_limit,
-                scaled_norm=scaled_step_norm,
-                floor_bound=bound,
-            )
-            loop = dataclasses.replace(loop, **after.trials._asdict())
-            loop.record = self.record(
-                rho,
-                float(multiplier),
-                accepted,
-                trial,
-                failures,
-                iterations,
-                codes,
-                retreats=retreats,
-                capped=response_capped,
-                norms=response_norms,
-                owners=owners,
-                **work.attempt_records(),
-            )
-            loop.attempt = attempt + 1
-            info = self.step_info(
-                loop,
-                attempt,
-                grad_norm=grad_norm,
-                accepted=accepted,
-                delta_norm=step_norm,
-                rho=rho,
-                lam=float(multiplier),
-                rejection_reason=rejection_reason,
-                failed_owners=failed_owners,
-                state=self.state(
-                    loop,
-                    inner_radius=radii,
-                    inner_lock=locks,
-                    inner_grad_threshold=thresholds,
-                    polish_off=polish_off,
-                    polish_small_gains=small_gains,
-                ),
-                stationarity=stationarity,
-                member_stationarity=current_members,
-            )
-            stop = _stop_after(
-                after,
-                requested=self.notify(info),
-                max_invalid=int(solver.max_consecutive_invalid_trials),
-                # The step test read the current point before the trial was evaluated.
-                step_small=step_stop,
-                accepted_count=loop.accepted,
-                target_steps=solver.target_accepted_steps,
-                # The budget counts the consistency re-solves and the inner fits' too.
-                evaluations=work.blocks + work.value,
-                max_evaluations=solver.max_evaluations,
-            )
-            if stop is not None:
-                break
-        else:
-            attempt = max(int(solver.max_steps), start_attempt) - 1
-            stop = "max_steps"
-
-        gradient, _ = elimination.level_vectors(system)
-        grad_norm = float(np.linalg.norm(gradient))
-        projected_grad_norm = float(
-            np.linalg.norm(
-                _bounded_gradient(
-                    gradient, _subproblem(loop.point, gradient, loop.scale, bounds), bounds
-                )
-            )
-        )
-        # The full system's stationarity number at the end point, from the members'
-        # decreases there (those of the polish that ended there) and the outer part.
-        end_relative_to = cost_scale(loop.cost, cost_tol, cost_atol)
-        end_stationarity, _, end_step = self.full_stationarity(
-            system, reduced, loop.point, loop.scale, end_relative_to, member_decreases
-        )
-        end_floor = self.floor_end(
-            loop,
-            end_step,
-            np.concatenate((end_step.scale, loop.scale[prefix:])),
-            cost_tol,
-            end_relative_to,
-            member_steps,
-            system=system,
-        )
-        return self.outcome(
-            loop,
-            stop,
-            attempt=attempt,
-            x0=x0,
-            cost_tol=cost_tol,
-            grad_norm=grad_norm,
-            projected_grad_norm=projected_grad_norm,
-            stationarity=end_stationarity,
-            members=member_numbers,
-            floor=end_floor,
-            inner_radius=radii,
-            inner_lock=locks,
-            inner_grad_threshold=thresholds,
-            polish_off=polish_off,
-            polish_small_gains=small_gains,
+            stationarity,
+            first_cost,
         )

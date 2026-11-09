@@ -231,9 +231,10 @@ The options, with their defaults:
 - `max_steps=30` bounds the number of steps.
   `target_accepted_steps=None`, when set, ends the run after that many
   accepted steps with the status `ACCEPTED_STEPS`.
-- `nested_at=None` names a level at which the fit splits into two loops.
-  The levels above it take the outer step, and each member of that level
-  then refits its own parameters.
+- `nested_at=None` names a level whose members polish their own
+  parameters after every accepted step, the other parameters held.
+  `inner=TrustRegion(max_steps=k)` allows `k` polish iterations per
+  step; with `k=0` the fit makes the steps of `nested_at=None`.
 - `radius_init=`, `radius_max=`, `eta=`, `grad_tol=`, `step_tol=`,
   `cost_tol=`, and `x_scale=` are the trust-region options of
   `ds.optimization.NewtonTrustRegion` ([Newton trust

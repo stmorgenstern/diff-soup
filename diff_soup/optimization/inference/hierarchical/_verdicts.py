@@ -110,30 +110,25 @@ def _verdict(
     sigma: float,
     yardstick: float,
     lock: int,
-    members: bool = True,
     floor_sigma: float = 0.0,
     floor_known: bool = False,
     jump_yardstick: Real | None = None,
-    jump_members: bool = True,
 ) -> tuple:
     """The status and the stall reason of a loop that the event ``stop`` ended.
 
     A step test, a cost test or a run of noise-dominated trials ends the fit
     converged only at a point where the model predicts no more than the
-    evaluation can show (``sigma <= yardstick``, and ``members``: in the
-    nested mode every member's model too, against the members' yardstick) and
-    no invalid trial shrank the radius (the growth lock is 0). Failing that,
-    when the gradient floor is known (``floor_known``: a small rejected trial
-    measured it), the growth lock is 0 and the model predicts no more than
-    the gradient's error along its full step could take back
-    (``sigma <= floor_sigma``, and ``members``, every member within its own
-    floor), the fit converged to the accuracy of its derivatives. Failing
-    that, a step test or a cost test ends the fit converged, with its own
-    status, when every rejected trial in the window met a jump of the
-    computed cost (``jump_yardstick``, ``max(cost_tol, 3 * the median
-    jump)``, is a number), the growth lock is 0 and the model predicts no
-    more than that yardstick (and ``jump_members``, every member within it
-    too): the decrease left is below what any trial can show. Otherwise
+    evaluation can show (``sigma <= yardstick``) and no invalid trial shrank
+    the radius (the growth lock is 0). Failing that, when the gradient floor
+    is known (``floor_known``: a small rejected trial measured it), the
+    growth lock is 0 and the model predicts no more than the gradient's error
+    along its full step could take back (``sigma <= floor_sigma``), the fit
+    converged to the accuracy of its derivatives. Failing that, a step test
+    or a cost test ends the fit converged, with its own status, when every
+    rejected trial in the window met a jump of the computed cost
+    (``jump_yardstick``, ``max(cost_tol, 3 * the median jump)``, is a
+    number), the growth lock is 0 and the model predicts no more than that
+    yardstick: the decrease left is below what any trial can show. Otherwise
     the fit is stalled, for invalid trials when the lock is set, else for the
     evaluation noise when the noise-dominated trials ended it, else because
     the radius collapsed. A run of invalid trials ends the fit stalled for
@@ -142,18 +137,17 @@ def _verdict(
     if stop not in ("step_tolerance", "cost_tolerance", "evaluation_noise"):
         status = _STOP_STATUS[stop]
         return status, ("invalid_trials" if status is TerminationStatus.STALLED else None)
-    if lock == 0 and sigma <= yardstick and members:
+    if lock == 0 and sigma <= yardstick:
         if stop == "step_tolerance":
             return TerminationStatus.STEP_TOL, None
         return TerminationStatus.COST_TOL, None
-    if lock == 0 and floor_known and sigma <= floor_sigma and members:
+    if lock == 0 and floor_known and sigma <= floor_sigma:
         return TerminationStatus.DERIVATIVE_ACCURACY, None
     if (
         stop != "evaluation_noise"
         and lock == 0
         and jump_yardstick is not None
         and sigma <= jump_yardstick
-        and jump_members
     ):
         if stop == "step_tolerance":
             return TerminationStatus.STEP_TOL, None
@@ -193,37 +187,8 @@ def _stalled_message(
     sigma: float,
     noise: float,
     ceiling: float | None,
-    member: tuple | None = None,
 ) -> str:
-    """What ended a stalled fit and its numbers, to two significant digits.
-
-    ``member``, in the nested mode, is ``(level, label, number, yardstick)`` of
-    the member whose model predicts the most beyond the members' yardstick, or
-    ``None``; its clause ends the message.
-    """
-    clause = ""
-    if member is not None:
-        level, label, number, limit = member
-        clause = (
-            f"; member {label!r} of level {level!r} predicts a further relative decrease of "
-            f"{number:.2g} of its own cost, above {limit:.2g}"
-        )
-    return (
-        _stalled_text(reason, stop, consecutive, failures, radius, sigma, noise, ceiling) + clause
-    )
-
-
-def _stalled_text(
-    reason: str,
-    stop: str,
-    consecutive: int,
-    failures: tuple,
-    radius: float,
-    sigma: float,
-    noise: float,
-    ceiling: float | None,
-) -> str:
-    """``_stalled_message`` without the member's clause."""
+    """What ended a stalled fit and its numbers, to two significant digits."""
     if reason == "evaluation_noise":
         tolerance = (
             "" if ceiling is None else f" (lane solvers at a relative tolerance of {ceiling:.2g})"

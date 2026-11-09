@@ -762,9 +762,6 @@ def nonfinite_members(system: LevelSystem, level: int) -> np.ndarray:
 def level_dense(system: LevelSystem) -> tuple:
     """The dense matrix and gradient of a system, for small checks and reports.
 
-    Of a system that ``reduce_to`` returned, these are the Schur complement and
-    the outer gradient with the inner gradients folded in.
-
     Returns:
         ``(H, g)`` as host arrays over the system's joint columns.
     """
