@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 468,
-    "collected_tests": 800,
-    "source_lines": 16989
+    "test_functions": 469,
+    "collected_tests": 801,
+    "source_lines": 17068
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 22,
-      "functions": 206,
-      "collected": 403,
-      "lines": 6878
+      "functions": 207,
+      "collected": 404,
+      "lines": 6957
     },
     "performance_contracts": {
       "files": 2,
@@ -331,7 +331,7 @@
     },
     {
       "file": "tests/contracts/test_lowered_study.py",
-      "feature": "Lowered studies: TrustRegion defaults and refusals, joint and nested fits to one optimum, resume equality, prepare reports, StopFit with checkpoints, bootstrap and sample on a lowered study"
+      "feature": "Lowered studies: TrustRegion defaults and refusals, joint and nested fits to one optimum, inequality rows against the interior point, resume equality, prepare reports, StopFit with checkpoints, bootstrap and sample on a lowered study"
     },
     {
       "file": "tests/contracts/test_structural_fitting.py",

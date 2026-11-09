@@ -106,6 +106,85 @@ def test_joint_and_nested_fits_reach_the_same_optimum(lowered, joint_fit):
     np.testing.assert_allclose(nested.params, joint_fit.params, atol=1e-5)
 
 
+def test_inequality_rows_end_the_joint_fit_at_the_interior_point_solution():
+    """InequalityRows on a member's own value, active with a bound: the joint trust region ends at
+    the interior point's solution of the same objective, where its own gradient meets the KKT
+    conditions."""
+    import jax.numpy as jnp
+
+    from diff_soup.domains import cartesian_grid_1d
+    from tests.support.inference import NOISE, TIMES, decay_values, solver
+
+    # The lanes observe the exact mean, read from the parameters, so the fit's cost is the
+    # closed form below. The rate's lower bound and cell-b's row hold at the solution.
+    spec = ds.problem("inequality_rows_decay")
+    spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+    rate = spec.param("rate", value=0.9, learnable=True, bounds=(0.65, 1.2))
+    source = spec.param("source", value=0.0, learnable=True, bounds=(-0.25, 0.25))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    spec.equation(writes="u", reads=("u",))(lambda q: -q.p.rate * q.u + q.p.source)
+    mean = lambda r, s, t: s / r + (1.0 - s / r) * jnp.exp(-r * t)  # noqa: E731
+    spec.observe.scalar(name="exact", fn=lambda q: mean(q.p.rate, q.p.source, q.t))
+    model = spec.build()
+    data = [decay_values(TIMES, 0.6, s) + (i + 1) * NOISE for i, (_, s) in enumerate(CELLS[:2])]
+    experiments = tuple(
+        inf.Experiment(
+            model=model,
+            solver=solver(),
+            t_span=(0.0, 1.0),
+            initial_state=spec.assemble_state({}),
+            measurements=(
+                inf.Measurement(
+                    "exact",
+                    times=jnp.asarray(TIMES),
+                    values=data[i],
+                    observe="exact",
+                    likelihood=inf.Gaussian(scale=0.02),
+                ),
+            ),
+            id=owner,
+        )
+        for i, (owner, _) in enumerate(CELLS[:2])
+    )
+    study = inf.Study(
+        experiments,
+        parameters=ds.ParameterSet(shared=(rate,), varying={"cell": (source,)}),
+        clusters={"cell": ("cell-a", "cell-b")},
+        independent=True,
+    )
+    lowered = ds.lower(study).with_start(np.array([0.9, 0.0, -0.1]))
+    limits = {"cell-a": jnp.asarray(1.0), "cell-b": jnp.asarray(-0.02)}
+    rows = inf.InequalityRows(lambda own, w, d: own[0] + 0.01 * w[0] - d, level="cell", data=limits)
+    optimizer = inf.TrustRegion(max_steps=40, cost_tol=1e-14, step_tol=1e-14, inequalities=(rows,))
+    x = np.asarray(small_fit(lowered, optimizer).params)
+
+    def residual(z, args=None):
+        return jnp.concatenate(
+            [(data[i] - mean(z[0], z[1 + i], jnp.asarray(TIMES))) / 0.02 for i in range(2)]
+        )
+
+    c = lambda z, args=None: z[1:] + 0.01 * z[0] - jnp.asarray([1.0, -0.02])  # noqa: E731
+    reference = ds.optimization.LeastSquaresProblem.from_residual(
+        jnp.asarray([0.9, 0.0, -0.1]),
+        residual,
+        bounds=(jnp.asarray([0.65, -0.25, -0.25]), jnp.asarray([1.2, 0.25, 0.25])),
+    ).with_constraints(ds.optimization.Constraints(inequality=c, n_inequality=2))
+    # measured: the reference meets tol=1e-12 with status 0, workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k inequality
+    expected, _ = ds.optimization.InteriorPoint(tol=1e-12).run(reference, reference.x0, None)
+    # measured 4.2e-13 relative, workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k inequality
+    np.testing.assert_allclose(x, np.asarray(expected), rtol=1e-8)
+    # The gradient against the active bound's and row's normals: g = nu e_rate - mu C_b.
+    lowered.prepare(modes=("gradient",))
+    g = np.asarray(lowered.value_and_gradient(x).gradients).reshape(-1)
+    normals = np.array([[1.0, 0.0, 0.0], [-0.01, 0.0, -1.0]]).T
+    weights, *_ = np.linalg.lstsq(normals, g, rcond=None)
+    # measured 4.1e-15 relative KKT residual, weights 138.5 and 179.1, as above
+    assert np.linalg.norm(g - normals @ weights) <= 1e-8 * np.linalg.norm(g)
+    assert np.all(weights > 0.0)
+
+
 class _StopAtSecondAttempt(inf.Callback):
     def __init__(self):
         self.attempts = 0

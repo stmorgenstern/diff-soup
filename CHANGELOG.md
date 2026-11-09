@@ -33,6 +33,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - `run(max_steps=, tol=)` of the compiled solvers and `ds.optimization.lanes(max_steps=, tol=, warm_start=)` take the budget and the tolerance as runtime values, one per lane or one for all, so a new value no longer compiles the loop again.
 - Added `adjoint=` to `InteriorPoint`, `SQP` and `AugmentedLagrangian`. `ds.nonlinear.ImplicitAdjoint()` differentiates the solution in `args` by one reverse rule, a transposed KKT solve, so `jax.grad` costs one solve however large `args` is and runs through closures that differentiate in reverse mode only. The default, `ds.ForwardAdjoint()`, keeps the forward rule.
 - `InteriorPoint`, `SQP` and `AugmentedLagrangian` run in float32 and return float32 records. A tolerance left unset follows the iterate's dtype: `max(default, 100 * eps)`, which is the float64 default unchanged and `1.2e-5` in float32.
+- Added `ds.optimization.inference.InequalityRows`, rows `c(own, shared, data) <= 0` on the fitted values of a lowered study, per member of a level or on the shared values, which `TrustRegion(inequalities=...)` keeps. Each step holds the rows it would cross at their boundary, through the projection that keeps the equality rows, and a trial that crosses a row is moved back to it. See [Optimization solvers](https://stmorgenstern.github.io/diff-soup/reference/inference/solvers/).
 
 ### Bugfixes
 
