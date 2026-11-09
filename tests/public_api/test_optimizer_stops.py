@@ -50,6 +50,7 @@ def test_termination_statuses_name_their_reason_and_whether_they_converged():
         "KKT_TOL": ("kkt_tolerance", True),
         "INFEASIBLE": ("infeasible", False),
         "RESTORATION_FAILED": ("restoration_failed", False),
+        "LINE_SEARCH_FAILED": ("line_search_failed", False),
         "ACCEPTED_STEPS": ("accepted_steps_reached", False),
         "MAX_STEPS": ("max_steps_reached", False),
         "SOLVER_FAILED": ("pde_solver_failed", False),

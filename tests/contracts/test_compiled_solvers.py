@@ -323,6 +323,18 @@ def _narrow_bound():
     return objective([0.5 * w, 0.5], lambda x: (x[0] / w - 2.0) ** 2 + (x[1] - 2.0) ** 2, bounds)
 
 
+def _wrong_jacobian():
+    """`min x^2` with `c(x) = -x - a = 0` whose Jacobian reads `+1`: every step along the
+    linearization raises the violation, so the line search fails at an infeasible point."""
+    row = lambda x, a: x[0] - jax.lax.stop_gradient(2.0 * x[0]) - a  # noqa: E731
+    return constrained(
+        objective([1.0], lambda x: x[0] ** 2),
+        1.0,
+        equality=lambda x, a: jnp.stack([row(x, a)]),
+        n_eq=1,
+    )
+
+
 _STATUS = TerminationStatus
 # How a run ends: the solver and its options, the problem, the value of `args`, the status.
 ENDS = {
@@ -344,6 +356,14 @@ ENDS = {
         _STATUS.SOLVER_FAILED,
     ),
     "narrow_bound": ("sqp", {}, _narrow_bound, None, _STATUS.KKT_TOL),
+    "line_search-sqp": ("sqp", {}, _wrong_jacobian, 1.0, _STATUS.LINE_SEARCH_FAILED),
+    "line_search-interior_point": (
+        "interior_point",
+        {"restoration": False},
+        _wrong_jacobian,
+        1.0,
+        _STATUS.LINE_SEARCH_FAILED,
+    ),
     **{
         f"max_steps-{name}": (name, {"max_steps": 1}, lambda: hs7().problem, 4.0, _STATUS.MAX_STEPS)
         for name in SOLVERS
@@ -371,7 +391,7 @@ ENDS = {
 @pytest.mark.parametrize("end", ENDS)
 def test_each_way_a_run_ends_sets_its_status(end):
     """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, SQP on a
-    bound narrower than its QP push, a run allowed one step and each solver in float32 on its default tolerances each end with their own
+    bound narrower than its QP push, a line search with no acceptable step, a run allowed one step and each solver in float32 on its default tolerances each end with their own
     status, with every floating record in the iterate's dtype."""
     name, options, make, a, status = ENDS[end]
     problem = make()

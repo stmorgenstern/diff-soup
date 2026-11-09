@@ -88,7 +88,8 @@ class SQP(ConstrainedSolver):
 
     Each step solves the QP of the model Hessian and the linearized constraints by the interior
     point. A QP that does not solve ends the run with `SOLVER_FAILED`, and the record's
-    `subproblem_status` says how it ended. A warm start takes an earlier record's multipliers,
+    `subproblem_status` says how it ended; a line search that finds no acceptable step ends it
+    with `LINE_SEARCH_FAILED`. A warm start takes an earlier record's multipliers,
     so it suits a sequence of nearby problems.
 
     Args:
@@ -307,7 +308,7 @@ class SQP(ConstrainedSolver):
         failure = jnp.where(
             ~qp_ok | exhausted,
             TerminationStatus.SOLVER_FAILED,
-            TerminationStatus.RESTORATION_FAILED,
+            TerminationStatus.LINE_SEARCH_FAILED,
         )
         return eqx.tree_at(
             lambda t: (

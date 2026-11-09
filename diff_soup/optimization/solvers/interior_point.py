@@ -60,7 +60,7 @@ class InteriorPoint(ConstrainedSolver):
         bound_frac: How far inside its bounds the start point moves, relative to their width, `0.01` by default.
         hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`.
         scaling: `"gradient"` (default) uses the problem's own scales or else Ipopt's gradient-based ones, and `"none"` solves unscaled.
-        restoration: Whether a failed line search starts the restoration phase, `True` by default.
+        restoration: Whether a failed line search starts the restoration phase, `True` by default. Without it, without constraint rows, or at a point that already satisfies them, a failed line search ends the run with `LINE_SEARCH_FAILED`.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
         kkt: The [KKTSolve][diff_soup.optimization.solvers.KKTSolve] backend, `DenseKKT()` by default.
         adjoint: How the solution is differentiated in `args`. [ForwardAdjoint][diff_soup.ForwardAdjoint] (default) is one forward rule: `jax.jvp` and `jax.jacfwd` cost one KKT solve per tangent, and `jax.grad` transposes it. [ImplicitAdjoint][diff_soup.nonlinear.ImplicitAdjoint] is one reverse rule: `jax.grad` and `jax.vjp` cost one transposed KKT solve whatever the size of `args`, and forward mode raises. Choose it for a large `args`, or for closures that run a solve under `CheckpointAdjoint(reverse_over_reverse=True)`, with `hessian="exact"` or `"bfgs"` there, since Gauss-Newton takes the residual's Jacobian in forward mode.
