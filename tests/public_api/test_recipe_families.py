@@ -1,6 +1,6 @@
-"""Recipe API: family recipes, per-member parameters, member boundary flux and its clock,
-surface projection, declared stencil radius, scalar member fields, member rows as wide as their
-member, and family graphs."""
+"""Recipe API: family recipes, per-member parameters, declared parameters in member equations,
+member boundary flux and its clock, surface projection, declared stencil radius, scalar member
+fields, member rows as wide as their member, and family graphs."""
 
 from __future__ import annotations
 
@@ -63,6 +63,51 @@ def test_member_parameters_batch_into_the_member_rows_and_the_member_pattern():
     np.testing.assert_allclose(_residual(problem, state), [-1.0] * 5 + [-2.0] * 2, atol=_EXACT)
     *_, topology = problem.physics_jacobian_blocks(state, jnp.zeros((0,)), jnp.asarray(0.0))
     assert topology.rows.size == 7 + 2 * 2 * 2
+
+
+def _scaled_members(name, rates, read_scale):
+    """Two diffusing, decaying members of rate ``q.p.scale * k``, or of rate ``k`` alone."""
+    spec = _cell(name)
+    scale = spec.param("scale", value=1.5, learnable=True)
+    spec.equation(writes="m", reads=("m",))(lambda q: -q.m)
+    members = spec.family(
+        "particles",
+        count=2,
+        domain=_GRID(3, 0.0, 1.0, method="fvm"),
+        params={"k": rates},
+        scale={"c": 1.0},
+        residual_scale={"c": 1.0},
+    )
+    members.field_decl("c", mass="differential")
+    factor = (lambda q: q.p.scale) if read_scale else (lambda q: 1.0)
+    members.equation(writes="c", reads=("c",))(
+        lambda q, member: 0.1 * q.ops.laplacian(q.c) - factor(q) * member.k * q.c
+    )
+    return spec.build(), scale
+
+
+def test_a_member_equation_reads_a_declared_parameter_and_its_tangent():
+    """A member rate ``q.p.scale * m.k`` solves to the state of the leaf ``k`` pre-multiplied
+    by ``scale``, with the same Jacobian entry count, and ``jax.jvp`` of the end state in
+    ``scale`` matches central differences."""
+    problem, scale = _scaled_members("member_reads_scale", [1.0, 2.0], True)
+    reference, _ = _scaled_members("member_premultiplied", [1.5, 3.0], False)
+    initial = problem.assemble_state({"m": jnp.ones(2), "particles.c": jnp.ones((2, 3))})
+    solver = ds.JNDF.stock(linear="dense", **{"rtol": 1e-10, "atol": 1e-12})
+
+    def end(value):
+        theta = ds.default_theta(problem, {scale: value})
+        return ds.pdesolve(problem, solver, (0.0, 0.5), initial, theta=theta).ys[-1]
+
+    expected = ds.pdesolve(reference, solver, (0.0, 0.5), initial).ys[-1]
+    # measured 0.0, workstation CPU 2026-11-09, pytest tests/public_api/test_recipe_families.py::
+    # test_a_member_equation_reads_a_declared_parameter_and_its_tangent
+    np.testing.assert_allclose(end(1.5), expected, rtol=0.0, atol=_EXACT)
+    assert ds.jacobian_nnz(problem) == ds.jacobian_nnz(reference)
+    tangent = jax.jvp(end, (1.5,), (1.0,))[1]
+    central = (end(1.5 + 1e-5) - end(1.5 - 1e-5)) / 2e-5
+    # measured 9.3e-10 at step 1e-5 against tangents up to 0.45, the same run
+    np.testing.assert_allclose(tangent, central, rtol=0.0, atol=1e-8)
 
 
 @pytest.mark.parametrize("clock", ["argument", "accessor"])
