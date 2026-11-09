@@ -102,9 +102,32 @@ def test_joint_and_nested_fits_reach_the_same_optimum(lowered, joint_fit):
     _, study, _ = lowered
     nested = small_fit(study, inf.TrustRegion(max_steps=30, nested_at="cell"))
     assert joint_fit.converged and nested.converged
-    # measured 2.1e-7 absolute difference, CPU VM 2026-10-22,
+    # measured 3.0e-8 absolute difference, CPU workstation 2026-11-09,
     # pytest tests/contracts/test_lowered_study.py
     np.testing.assert_allclose(nested.params, joint_fit.params, atol=1e-5)
+
+
+def test_the_nested_mode_without_polish_makes_the_joint_attempts():
+    """With no polish iterations the nested mode's attempts are the joint mode's: at every attempt
+    the same acceptance, cost, point and radius, and the fits end with the same stop and status."""
+    study = ds.lower(_two_owners("zero_polish_decay"), objective=inf.MAP())
+    fits = []
+    for solver in (
+        inf.TrustRegion(max_steps=8),
+        inf.TrustRegion(max_steps=8, nested_at="cell", inner=inf.TrustRegion(max_steps=0)),
+    ):
+        records = _Records()
+        fits.append((small_fit(study, solver, callbacks=(records,)), records.steps))
+    (joint, joint_steps), (nested, nested_steps) = fits
+    assert (nested.status, nested.trust_region.stop) == (joint.status, joint.trust_region.stop)
+    assert [info.accepted for info, _ in nested_steps] == [info.accepted for info, _ in joint_steps]
+    rows = [
+        [(info.cost, info.radius, *info.params) for info, _ in steps]
+        for steps in (joint_steps, nested_steps)
+    ]
+    # measured 0.0 relative difference over every attempt and field, CPU workstation 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k without_polish
+    np.testing.assert_allclose(rows[1], rows[0], rtol=1e-10, atol=0.0)
 
 
 def test_inequality_rows_end_the_joint_fit_at_the_interior_point_solution():
@@ -548,10 +571,12 @@ def test_a_frozen_system_of_some_lanes_replaces_the_gradient_of_their_members_on
     assert np.isnan(float(some.cost)) and np.isfinite(float(every.cost))
 
 
-def test_blocks_keep_no_jacobian_unless_the_frozen_mode_is_prepared(lowered, frozen):
+def test_blocks_keep_no_jacobian_unless_the_frozen_mode_is_prepared(frozen):
     """Without the frozen mode prepared a blocks request keeps nothing and a frozen request is
     refused; with it, a lane that has no blocks result yet is refused by name."""
-    _, study, _ = lowered
+    # A study of its own: a nested fit with a polish prepares the frozen mode on its study.
+    study = ds.lower(_two_owners("unkept_decay"), objective=inf.MAP())
+    study.prepare()
     route = _LaneRoute(inf.TrustRegion(), study)
     point = np.asarray(study.x0, dtype=np.float64)
     route.evaluate("blocks", point)
@@ -591,10 +616,11 @@ def test_a_member_whose_step_cannot_be_bracketed_is_held_when_asked(attempt):
     np.testing.assert_array_equal(multipliers[[0, 2]], clean_multipliers[[0, 2]])
 
 
-def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_and_fails(tmp_path):
-    """A member whose lanes solve at a finite cost but give non-finite Gauss-Newton blocks has its
-    lanes recorded as failed: it retreats, an outer trial it cannot solve names it in
-    failed_owners, and the fit ends at a finite cost instead of raising."""
+def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_in_the_polish():
+    """A member whose lanes solve at a finite cost but give non-finite Gauss-Newton blocks at its
+    polished point has its lanes recorded as failed: it retreats along its polish step and goes
+    back to where its lanes solved, at a finite cost; at an accepted step such blocks end the fit
+    with an error naming the member."""
     from tests.support.inference import (
         NOISE,
         TIMES,
@@ -640,18 +666,15 @@ def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_and_fa
         clusters={"cell": tuple(owner for owner, _ in CELLS)},
         independent=True,
     )
-    records = _Records()
+    lowered = ds.lower(study, objective=inf.MAP())
     fit = small_fit(
-        ds.lower(study, objective=inf.MAP()),
-        inf.TrustRegion(max_steps=6, nested_at="cell"),
-        callbacks=(records,),
+        lowered, inf.TrustRegion(max_steps=0, nested_at="cell", inner_start_iterations=2)
     )
-    assert np.isfinite(fit.cost)
-    named = [info for info, _ in records.steps if info.failed_owners]
-    assert named and all("cell-b" in str(info.failed_owners) for info in named)
-    assert any(int(np.asarray(state["record.inner_retreats"])[1]) > 0 for _, state in records.steps)
-    kinds = {str(k) for _, state in records.steps for k in np.ravel(state["record.failed_kinds"])}
-    assert "nonfinite_blocks_at_finite_cost" in kinds
+    assert np.isfinite(fit.cost) and int(fit.work["inner_retreats"][1]) > 0
+    assert {str(kind) for kind in fit.work["failure_kind"]} == {"nonfinite_blocks_at_finite_cost"}
+    assert all(fit.work["failure_inner"])
+    with pytest.raises(ValueError, match="cell-b"):
+        small_fit(lowered, inf.TrustRegion(max_steps=6, nested_at="cell"))
 
 
 @pytest.mark.parametrize(

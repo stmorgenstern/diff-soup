@@ -1,12 +1,11 @@
-"""The inner solves of a nested fit on a level system: each member's own step, model and response."""
+"""The inner solves of a nested fit on a level system: each member's own step and model."""
 
 from __future__ import annotations
 
-import dataclasses
 import functools
 from collections.abc import Sequence
 from numbers import Real
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -15,10 +14,8 @@ from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.hierarchical._level_solve import (
     _ancestor_values,
-    _fold,
     _lower_solve,
     _node_sum,
-    _scaled,
     _secular_search,
     _split,
     _upper_solve,
@@ -26,7 +23,6 @@ from diff_soup.optimization.inference.hierarchical._level_solve import (
 )
 from diff_soup.optimization.inference.hierarchical._level_system import (
     LevelSystem,
-    _addition,
     _dtype,
     _offsets,
     node_of_columns,
@@ -205,64 +201,6 @@ def _node_model(system, delta, *, level):
             linear = linear + _node_sum(system, slope, at, level)
             quadratic = quadratic + _node_sum(system, curvature, at, level)
     return linear, quadratic
-
-
-@functools.partial(jax.jit, static_argnames=("level",))
-def _response(system, scale, damping, outer_step, addition, *, level):
-    # In the coordinates z = scale * s, with ``addition`` on the scaled diagonal: the
-    # levels level .. D are eliminated at the damping with the gradient as right-hand
-    # side, then solved from ``level`` down with the outer steps in place of the
-    # ancestors' solved steps (no root solve). Also the inner gradient of the scaled
-    # model with the outer step held, g_z,i + W_z^T z_o, in joint columns and per
-    # inner level.
-    scaled = _scaled(system, scale, addition)
-    counts, widths = scaled.counts, scaled.widths
-    depth = scaled.depth
-    dtype = scaled.root.dtype
-    offsets = _offsets(counts, widths)
-    prefix = offsets[level]
-    rhs = [-scaled.root_gradient[:, None]] + [-entry[..., None] for entry in scaled.gradient[1:]]
-    _, _, _, _, _, factors, couplings, solved = _fold(scaled, damping, rhs, level)
-    outer_z = scale[:prefix] * outer_step
-    parts = _split(scaled, jnp.concatenate([outer_z, jnp.zeros((offsets[-1] - prefix,), dtype)]))
-    steps: list = [part[..., None] for part in parts[:level]] + [None] * (depth + 1 - level)
-    for at in range(level, depth + 1):
-        count, width = counts[at - 1], widths[at]
-        if width == 0:
-            steps[at] = jnp.zeros((count, 0, 1), dtype=dtype)
-            continue
-        right = solved[at]
-        for above in range(at):
-            if not widths[above]:
-                continue
-            if above == 0:
-                right = right - jnp.einsum("nia,ak->nik", couplings[at][0], steps[0])
-            else:
-                above_steps = _ancestor_values(scaled, steps[above], at, above)
-                right = right - jnp.einsum("nia,nak->nik", couplings[at][above], above_steps)
-        steps[at] = _upper_solve(factors[at], right)
-    inner = jnp.concatenate([steps[at].reshape(-1) for at in range(level, depth + 1)])
-    shifted = []
-    levels = []
-    for at in range(level, depth + 1):
-        right = scaled.gradient[at]
-        for above in range(level):
-            if not widths[above] or not widths[at]:
-                continue
-            if above == 0:
-                right = right + jnp.einsum("nia,a->ni", scaled.cross[at][0], parts[0])
-            else:
-                above_parts = _ancestor_values(scaled, parts[above], at, above)
-                right = right + jnp.einsum("nia,na->ni", scaled.cross[at][above], above_parts)
-        shifted.append(right.reshape(-1))
-        levels.append(right)
-    outer_zeros = jnp.zeros((prefix,), dtype)
-    return (
-        jnp.concatenate([outer_step, inner / scale[prefix:]]),
-        jnp.concatenate([outer_zeros, inner]),
-        jnp.concatenate([outer_zeros] + shifted),
-        tuple(levels),
-    )
 
 
 def _scaled_rows(
@@ -558,265 +496,26 @@ def inner_added(
     return np.bincount(owners[below], weights=terms[below], minlength=system.counts[level - 1])
 
 
-def inner_singular(system: LevelSystem, level: int) -> np.ndarray:
-    """``(N_level,)``: the members whose subtree's Gauss-Newton matrix has no finite factor."""
-    level = int(level)
-    count = system.counts[level - 1]
-    step, q_squared = _inner_solve(system, np.zeros((count,), dtype=_dtype(system)), level=level)
-    owners = node_of_columns(system, level)
-    step = np.asarray(step)
-    singular = ~np.isfinite(np.asarray(q_squared))
-    for member in range(count):
-        if not np.all(np.isfinite(step[owners == member])):
-            singular[member] = True
-    return singular
-
-
 def inner_programs(system: LevelSystem, level: int) -> None:
     """Compile the programs of the inner problems of ``level`` before a fit's loop.
 
-    These are the members' damped solves, their models, and the solve of the
-    members' bounded response (``inner_bounded_response``).
+    These are the members' damped solves and their models.
     """
     level = int(level)
     count = system.counts[level - 1]
     dtype = _dtype(system)
-    ones = np.ones((system.size,), dtype=dtype)
-    scaled = scaled_system(system, ones)
+    scaled = scaled_system(system, np.ones((system.size,), dtype=dtype))
     _inner_solve(scaled, np.ones((count,), dtype=dtype), level=level)
     _node_model(system, np.zeros((system.size,), dtype=dtype), level=level)
-    prefix = _offsets(system.counts, system.widths)[level]
-    _, _, _, shifted = _response(
-        system,
-        ones,
-        np.asarray(0.0, dtype=dtype),
-        np.zeros((prefix,), dtype=dtype),
-        np.zeros((system.size,), dtype=dtype),
-        level=level,
-    )
-    _inner_solve(
-        _shifted_system(scaled, shifted, level), np.ones((count,), dtype=dtype), level=level
-    )
-
-
-def _response_level(system: LevelSystem, outer_step: np.ndarray) -> int:
-    """The cut whose outer columns ``outer_step`` covers; refused otherwise."""
-    offsets = _offsets(system.counts, system.widths)
-    levels = [
-        level
-        for level in range(1, system.depth + 1)
-        if outer_step.ndim == 1 and offsets[level] == outer_step.shape[0]
-    ]
-    if not levels:
-        raise ValueError(
-            "inner_response takes an outer step over the columns above a level of the system, "
-            f"of length {', '.join(str(offsets[level]) for level in range(1, system.depth + 1))}; "
-            f"got shape {outer_step.shape}."
-        )
-    return levels[0]
-
-
-def inner_response_parts(
-    system: LevelSystem,
-    scale: ArrayLike | Sequence[Real],
-    damping: Real | ArrayLike,
-    outer_step: Any,
-    *,
-    addition: ArrayLike | Sequence | None = None,
-) -> tuple:
-    """``inner_response`` with the scaled inner step and the inner gradient it answers.
-
-    Args:
-        system: The system at the current point, every level.
-        scale: ``(n,)``, positive.
-        damping: The nonnegative damping of the outer step.
-        outer_step: ``(p,)``, the outer step in joint columns.
-        addition: Optional ``(n,)``, nonnegative, added to the diagonal of the
-            scaled matrix (``scaled_system``).
-
-    Returns:
-        ``(step, z, shifted)`` as host arrays ``(n,)``: the step of
-        ``inner_response``; its inner part in the coordinates
-        ``z = scale * s`` (zero on the outer columns); and the inner gradient
-        of the scaled model with the outer step held, ``g_{z,i} + W_z^T z_o``
-        (zero on the outer columns).
-
-    Raises:
-        ValueError: If the length of ``outer_step`` is not the number of columns
-            above a level of the system.
-    """
-    dtype = _dtype(system)
-    outer_step = np.asarray(outer_step, dtype=dtype)
-    step, z, shifted, _ = _response(
-        system,
-        np.asarray(scale, dtype=dtype),
-        np.asarray(damping, dtype=dtype),
-        outer_step,
-        _addition(system, addition),
-        level=_response_level(system, outer_step),
-    )
-    return np.asarray(step), np.asarray(z), np.asarray(shifted)
-
-
-def _shifted_system(scaled: LevelSystem, shifted: tuple, level: int) -> LevelSystem:
-    """``scaled`` with the gradients of the levels ``level .. D`` replaced by ``shifted``."""
-    return dataclasses.replace(scaled, gradient=tuple(scaled.gradient[:level]) + tuple(shifted))
-
-
-def inner_bounded_response(
-    system: LevelSystem,
-    scale: ArrayLike | Sequence[Real],
-    damping: Real | ArrayLike,
-    outer_step: Any,
-    radii: Any,
-    *,
-    addition: ArrayLike | Sequence | None = None,
-) -> tuple:
-    """``inner_response_parts`` with every member's response bounded by its radius.
-
-    The members are the nodes of the level whose columns follow those of
-    ``outer_step``. A member whose response has a scaled norm ``||z_n||``
-    above its radius ``r_n`` responds instead with its own trust-region step
-    of radius ``r_n`` at the gradient the response answers: ``z_n`` solves
-    ``(V_{z,n} + A_n + lambda_n I) z_n = -(g_{z,n} + W_{z,n}^T z_o)`` over the
-    member's subtree, with the multiplier ``lambda_n`` at least ``damping``,
-    found by the multiplier search of ``inner_secular_step`` so that
-    ``||z_n||`` is ``r_n`` to within ``sqrt(eps) max(1, r_n)`` below it. A
-    member within its radius responds as without radii, and a member of
-    radius 0 with a nonzero response responds with zero. Fixed inner
-    coordinates and held nodes respond with zero, the outer part is
-    ``outer_step``.
-
-    Args:
-        system: The system at the current point, every level.
-        scale: ``(n,)``, positive.
-        damping: The nonnegative damping of the outer step.
-        outer_step: ``(p,)``, the outer step in joint columns, ``p`` the number
-            of columns above a level.
-        radii: ``(N_level,)``, every member's radius in the scaled norm, at
-            least 0.
-        addition: Optional ``(n,)``, nonnegative, added to the diagonal of the
-            scaled matrix (``scaled_system``).
-
-    Returns:
-        ``(step, z, shifted, norms, capped, solves)``: ``step``, ``z`` and
-        ``shifted`` as ``inner_response_parts`` returns them, with the parts of
-        the bounded members recomputed; ``norms`` ``(N_level,)``, every
-        member's scaled response norm before the bound; ``capped``
-        ``(N_level,)`` bool, the members whose response was above its radius
-        (a response that is not finite counts as above); and the number of
-        damped solves the recomputation made.
-
-    Raises:
-        ValueError: If the length of ``outer_step`` is not the number of columns
-            above a level of the system, if ``radii`` does not hold one finite
-            radius of at least 0 per member of that level, or if no finite step
-            within its radius is found for a member.
-    """
-    dtype = _dtype(system)
-    outer_step = np.asarray(outer_step, dtype=dtype)
-    level = _response_level(system, outer_step)
-    count = system.counts[level - 1]
-    radii = np.asarray(radii, dtype=np.float64)
-    if radii.shape != (count,) or not np.all(np.isfinite(radii) & (radii >= 0.0)):
-        raise ValueError(
-            "inner_bounded_response takes one finite radius of at least 0 per member of level "
-            f"{level}, {count} in all; got {radii!r}."
-        )
-    scale = np.asarray(scale, dtype=dtype)
-    added = _addition(system, addition)
-    multiplier = np.asarray(damping, dtype=dtype)
-    step, z, shifted, levels = _response(system, scale, multiplier, outer_step, added, level=level)
-    step, z, shifted = np.array(step), np.array(z), np.asarray(shifted)
-    owners = node_of_columns(system, level)
-    below = owners >= 0
-    with np.errstate(all="ignore"):
-        norms = np.sqrt(np.bincount(owners[below], weights=z[below] ** 2, minlength=count))
-    capped = ~(norms <= radii)
-    solves = 0
-    if capped.any():
-        # The bounded members' searches on their subtrees, the outer step's damping on
-        # the inner diagonal and the gradient the response answers in place of theirs.
-        prefix = _offsets(system.counts, system.widths)[level]
-        inner_added = np.array(added, copy=True)
-        inner_added[prefix:] += multiplier
-        scaled = _shifted_system(_scaled(system, scale, inner_added), levels, level)
-        searched = capped & (radii > 0.0)
-        scaled_step = np.zeros_like(z)
-        if searched.any():
-            _, scaled_step, solves = _lockstep_search(scaled, level, radii, searched, None)
-        columns = below & capped[np.maximum(owners, 0)]
-        z[columns] = scaled_step[columns]
-        with np.errstate(all="ignore"):
-            step[columns] = scaled_step[columns] / scale[columns]
-    return step, z, shifted, norms, capped, solves
-
-
-def inner_response(
-    system: LevelSystem,
-    scale: ArrayLike | Sequence[Real],
-    damping: Real | ArrayLike,
-    outer_step: Any,
-    *,
-    addition: ArrayLike | Sequence | None = None,
-    radii: Any = None,
-) -> np.ndarray:
-    """The step whose outer part is ``outer_step`` and whose inner part responds to it.
-
-    The outer step covers the columns above a level of the system; that level
-    and the levels below it are the inner ones. In the coordinates
-    ``z = scale * s`` the inner part minimizes the damped quadratic model with
-    the outer part held:
-    ``z_i = -(V_z + A + damping I)^-1 (g_{z,i} + W_z^T z_o)``, with ``V_z`` the
-    inner blocks, ``A`` the diagonal ``addition`` (zero without one), ``W_z``
-    their couplings to the outer blocks and ``g_{z,i}`` the inner gradient of
-    the scaled system. It is computed along the tree: the inner levels are
-    eliminated from the experiments up at that damping, then solved from the
-    cut down with the outer step in place of the solved ancestors. Without an
-    addition and at ``damping = 0`` it is the inner part of the joint model's
-    minimizer at the fixed outer step, ``-V^-1 (g_i + W^T s_o)``, whatever the
-    scale. Fixed inner coordinates and held nodes respond with zero.
-
-    Args:
-        system: The system at the current point, every level.
-        scale: ``(n,)``, positive.
-        damping: The nonnegative damping of the outer step.
-        outer_step: ``(p,)``, the outer step in joint columns, ``p`` the number
-            of columns above a level.
-        addition: Optional ``(n,)``, nonnegative, added to the diagonal of the
-            scaled matrix (``scaled_system``).
-        radii: Optional ``(N_level,)``, one radius per member of the inner
-            level, each at least 0: a member whose response has a scaled norm
-            above its radius responds with its own step of that radius
-            instead (``inner_bounded_response``). ``None`` bounds no member.
-
-    Returns:
-        ``(n,)`` as a host array: ``outer_step`` followed by the inner response.
-
-    Raises:
-        ValueError: If the length of ``outer_step`` is not the number of columns
-            above a level of the system, or ``radii`` does not hold one finite
-            radius of at least 0 per member of the inner level.
-    """
-    if radii is not None:
-        bounded = inner_bounded_response(
-            system, scale, damping, outer_step, radii, addition=addition
-        )
-        return bounded[0]
-    step, _, _ = inner_response_parts(system, scale, damping, outer_step, addition=addition)
-    return step
 
 
 __all__ = [
     "MemberRows",
     "inner_added",
-    "inner_bounded_response",
     "inner_predicted",
     "inner_programs",
     "inner_quadratic",
-    "inner_response",
-    "inner_response_parts",
     "inner_secular_step",
-    "inner_singular",
     "inner_solve_scaled",
+    "model_split",
 ]

@@ -499,9 +499,12 @@ class _LaneRoute:
         reduced; a fit's own requests hold the one member 0. Results of lanes
         evaluated in several processes carry the sums of the levels already
         (``Results.levels``, every lane weighing one); the route's weights are
-        then applied to those sums.
+        then applied to those sums. Results of a subset of the planned lanes
+        give the system of those lanes alone (``subset_blocks``).
         """
-        if getattr(results, "levels", None) is not None:
+        if tuple(results.lane_ids) != self.ids:
+            blocks = self.subset_blocks(results, member)
+        elif getattr(results, "levels", None) is not None:
             blocks = self._summed_levels(results, member)
         else:
             # Without a device, the one-argument call that results defining their own
@@ -790,6 +793,37 @@ class _LaneRoute:
         # when the trial is accepted: the regularizer is evaluated once per point.
         blocks = self.regularizer_at(point)
         return lanes + (0.0 if blocks is None else float(blocks[1]))
+
+    def subset_blocks(self, results: Any, member: int = 0) -> LevelBlocks:
+        """The weighted level blocks of a ``blocks`` evaluation of a subset of the planned lanes.
+
+        A node with none of the lanes below it sums to zero. The lanes are
+        weighed by the route's weights, and a failed lane or a unit left out
+        of nonzero weight is refused, as ``system`` refuses them. Results of
+        lanes evaluated in several processes carry the sums of the levels
+        already (``Results.levels``); the weights are then applied to those
+        sums.
+        """
+        ids = tuple(results.lane_ids)
+        if getattr(results, "levels", None) is None:
+            lanes = (
+                results.lane_result(member)
+                if self.device is None
+                else results.lane_result(member, self.device)
+            )
+            return reduce_levels(self.tables_of(ids), lanes, ids, self.weights)
+        row = _member_row(results, member)
+        status = LaneStatus(
+            kind=np.asarray(results.status.kind)[row],
+            t_reached=np.asarray(results.status.t_reached)[row],
+            rung=np.asarray(results.status.rung)[row],
+        )
+        omega = None
+        if self.weights is not None:
+            omega = self.omega[[self.position[lane] for lane in ids]]
+        refuse_failed(status, ids, omega)
+        sums = weigh_levels(self.tables, member_row(results.levels, row), self.weights)
+        return jax.device_put(sums, self.device)
 
     def owners(self, failures: tuple) -> tuple:
         """The level-1 members of the failed lanes, each once, in lane order."""

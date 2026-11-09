@@ -496,38 +496,6 @@ def _attempt(system, scale, addition, radius, *, eps, tiny):
     )
 
 
-@functools.partial(jax.jit, static_argnames=("level",))
-def _reduce(system, *, level):
-    # The gradient is folded as a right-hand side column with the matrix, so the
-    # reduced gradient is the outer gradient minus the inner gradients carried up
-    # through the inner factors. The equality rows are not folded; the nested fit
-    # refuses a row that addresses the eliminated coordinates.
-    rhs = [-system.root_gradient[:, None]] + [-entry[..., None] for entry in system.gradient[1:]]
-    root, root_rhs, diagonal, cross, level_rhs, _, _, _ = _fold(
-        system, jnp.zeros((), dtype=system.root.dtype), rhs, level
-    )
-    prefix = _offsets(system.counts, system.widths)[level]
-    return LevelSystem(
-        root=root,
-        root_gradient=-root_rhs[:, 0],
-        diagonal=tuple(diagonal[:level]),
-        cross=(None,) + tuple(tuple(row) for row in cross[1:level]),
-        gradient=(None,) + tuple(-entry[..., 0] for entry in level_rhs[1:level]),
-        point=system.point[:prefix],
-        constraint_matrix=system.constraint_matrix[:, :prefix],
-        constraint_rhs=system.constraint_rhs,
-        cost=system.cost,
-        ancestors=tuple(system.ancestors[:level]),
-        descendants=tuple(system.descendants[:level]),
-        present=tuple(system.present[:level]),
-        fixed_mask=system.fixed_mask[:prefix],
-        held_mask=tuple(system.held_mask[:level]),
-        counts=tuple(system.counts[: level - 1]),
-        widths=tuple(system.widths[:level]),
-        constraint_active=system.constraint_active,
-    )
-
-
 def _added_quadratic(addition: ArrayLike | Sequence | None, scaled_step: np.ndarray) -> float:
     """``z^T diag(addition) z`` for a scaled step ``z``; 0 without an addition."""
     if addition is None:
@@ -871,43 +839,12 @@ def _secular_search(radius: float, eps: float, tiny: float):
     return multiplier, scaled_step
 
 
-def reduce_to(system: LevelSystem, level: int) -> LevelSystem:
-    """The system over the levels above ``level``, the levels ``level .. D`` eliminated.
-
-    Its blocks are the Schur complement of the levels ``level .. D`` into the
-    blocks above them (no damping). Its gradient is the outer part of the
-    gradient with the inner gradients folded in through the same elimination,
-    ``g_o - W V^-1 g_i`` (``V`` the eliminated blocks, ``W`` their couplings to
-    the outer blocks): the gradient, at a zero outer step, of the quadratic
-    model minimized over the eliminated coordinates. Where the inner gradients
-    are zero it is the outer part of the gradient. It keeps the outer part of
-    the point, the fixed outer coordinates and the outer columns of the equality
-    rows, which is exact when no row addresses the eliminated coordinates.
-
-    Args:
-        system: The system.
-        level: The cut, ``1 .. D``.
-
-    Returns:
-        A [LevelSystem][diff_soup.optimization.inference.hierarchical._level_system.LevelSystem]
-        of depth ``level - 1`` (the root alone for ``level = 1``).
-
-    Raises:
-        ValueError: If ``level`` is not a level of the system.
-    """
-    level = int(level)
-    if not 1 <= level <= system.depth:
-        raise ValueError(f"reduce_to cuts at a level 1 .. {system.depth}; got {level}.")
-    return _reduce(system, level=level)
-
-
 __all__ = [
     "AttemptSolve",
     "attempt_solve",
     "level_quadratic",
     "level_secular_step",
     "level_vectors",
-    "reduce_to",
     "scaled_system",
     "solve_damped",
     "solve_scaled",

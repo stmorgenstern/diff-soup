@@ -90,6 +90,8 @@ class _JointFit:
         # The mode whose matrix the attempts step on: the Gauss-Newton blocks, or the
         # exact Hessian under hessian="true".
         self.matrix = "hessian" if solver.hessian == "true" else "blocks"
+        # The modes the fit evaluates, compiled before its first request.
+        self.modes = ("value", self.matrix)
         # The bound of the gradient's error at the current point, from the lanes'
         # tolerances and blocks.
         self.floor = _GradientFloor(solver, route)
@@ -188,12 +190,15 @@ class _JointFit:
 
         A lane the evaluation solved at a higher rung holds that rung from then on.
         A request of the matrix's mode (``blocks``, or ``hessian`` under
-        ``hessian="true"``) counts in the work's ``blocks``, any other in ``value``.
+        ``hessian="true"``) counts in the work's ``blocks``, a ``frozen`` one in
+        ``frozen``, any other in ``value``.
         """
         results = self.route.evaluate(mode, point, **self.work.request(lanes))
         self.work.hold(results)
         if mode == self.matrix:
             self.work.blocks += 1
+        elif mode == "frozen":
+            self.work.frozen += 1
         else:
             self.work.value += 1
         return results
@@ -256,8 +261,8 @@ class _JointFit:
         self.floor.current = self.floor.record(results)
         return system, np.array(results.cost, dtype=np.float64)[0]
 
-    def state(self, loop: LoopState, **nested: ArrayLike) -> MappingProxyType:
-        """The state after an attempt, read-only host arrays; ``nested``: the nested mode's own."""
+    def state(self, loop: LoopState) -> MappingProxyType:
+        """The state after an attempt, read-only host arrays, the nested mode's own entries in it."""
         route = self.route
         entries = {
             "solver": np.asarray(_LABEL),
@@ -267,7 +272,7 @@ class _JointFit:
             "n": np.asarray(route.n, dtype=np.int64),
             **loop.entries(),
         }
-        entries.update(self.nested_entries(nested))
+        entries.update(self.nested_entries())
         entries.update({f"work.{key}": value for key, value in self.work.mapping().items()})
         # What the lanes cost so far, and the plan they ran under; never where they ran.
         problem = route.problem
@@ -280,19 +285,46 @@ class _JointFit:
             entries["ledger.plan_fingerprint"] = np.asarray(value)
         return MappingProxyType(entries)
 
-    def nested_entries(self, values: dict) -> dict:
+    def nested_entries(self) -> dict:
         """The entries of the state that only the nested mode has (none here)."""
         return {}
 
-    def member_above(
+    def record(self, rho: float, lam: float, accepted: bool, trial: np.ndarray, failures: tuple):
+        """The attempt just made (or the start), as the ``record.*`` entries of the state."""
+        return _record(
+            rho, lam, accepted, trial, failures, self.route.depth, **self.work.attempt_records()
+        )
+
+    def at_start(
+        self, point: np.ndarray, system: elimination.LevelSystem, lane_costs: np.ndarray, *, fresh
+    ) -> tuple:
+        """The nested mode's start (its polish at a ``fresh`` start); here ``point``, ``system`` and ``lane_costs``."""
+        return point, system, lane_costs
+
+    def trial_pass(self) -> str:
+        """The mode of the request at an attempt's trial: ``value``."""
+        return "value"
+
+    def accept(
         self,
-        members: ArrayLike | None,
-        noise: float,
-        tolerance: Real | None = None,
-        floors: ArrayLike | None = None,
-    ) -> None:
-        """The member whose model predicts the most beyond the members' yardstick (none here)."""
-        return None
+        loop: LoopState,
+        system: elimination.LevelSystem,
+        results: Any,
+        *,
+        attempt: int,
+        predicted: float,
+        level: Real | None,
+    ) -> tuple:
+        """The system and lane costs at the accepted trial ``loop.point``; ``loop.cost`` is set there.
+
+        One request of the matrix's mode at the trial. ``system`` is the
+        system the attempt stepped on and ``results`` the trial's request;
+        the nested mode polishes from them and moves ``loop.point``,
+        ``loop.cost`` and ``loop.scale`` to where its polish ended.
+        """
+        system, lane_costs = self.blocks(loop.point, start=False)
+        loop.cost = float(system.cost)
+        return system, lane_costs
 
     def verdict(
         self,
@@ -304,7 +336,6 @@ class _JointFit:
         invalid_run: int,
         radius: float,
         windows: tuple,
-        members: ArrayLike | None = None,
         floor: _FloorEnd | None = None,
     ) -> tuple:
         """The status, the message and the ``info`` entries of the fit's end.
@@ -312,16 +343,13 @@ class _JointFit:
         ``stop`` is the event that ended the loop and ``sigma`` the stationarity
         number at the end point; ``windows`` holds the noise-dominated trials'
         cost changes and the rejected trials' cost changes and predicted
-        decreases; ``members`` the members' stationarity numbers at the end
-        point in the nested mode; ``floor`` the gradient floor there
-        (``_FloorEnd``). A fit that converged to the accuracy of its
-        derivatives says so in its message, with its numbers, and so does a
-        fit that converged at the jumps of its computed cost.
+        decreases; ``floor`` the gradient floor there (``_FloorEnd``). A fit
+        that converged to the accuracy of its derivatives says so in its
+        message, with its numbers, and so does a fit that converged at the
+        jumps of its computed cost.
         """
         noise_changes, rejected_changes, rejected_decreases = windows
         noise = _median(noise_changes)
-        floors = None if floor is None else floor.members
-        above = self.member_above(members, noise, floors=floors)
         floor_sigma = 0.0 if floor is None else floor.sigma
         # With a gradient floor, the jumps of the computed cost that every rejected trial
         # met, when they all did, are what the verdict reads beside the measured noise.
@@ -330,23 +358,20 @@ class _JointFit:
         if self.floor.coefficients is not None:
             jumps = _jump_level(rejected_changes, rejected_decreases, ceiling)
         jump_yardstick = None if jumps is None else max(cost_tol, 3.0 * jumps)
-        jump_above = None if jumps is None else self.member_above(members, jumps, floors=floors)
         yardstick = max(cost_tol, 3.0 * noise)
         status, stall_reason = _verdict(
             stop,
             sigma=sigma,
             yardstick=yardstick,
             lock=lock,
-            members=above is None,
             floor_sigma=floor_sigma,
             floor_known=floor is not None and floor.level is not None,
             jump_yardstick=jump_yardstick,
-            jump_members=jump_above is None,
         )
         at_jumps = (
             jump_yardstick is not None
             and status in (TerminationStatus.STEP_TOL, TerminationStatus.COST_TOL)
-            and not (sigma <= yardstick and above is None)
+            and not sigma <= yardstick
         )
         failures = _last_invalid(self.work.log)
         stalled = None
@@ -360,12 +385,11 @@ class _JointFit:
                 sigma=sigma,
                 noise=noise,
                 ceiling=_noise_ceiling(self.route),
-                member=above,
             )
         budget = None
         if stop == "max_evaluations":
             budget = (
-                f"{self.work.blocks + self.work.value} evaluations reached "
+                f"{self.work.evaluations()} evaluations reached "
                 f"max_evaluations={self.solver.max_evaluations}"
             )
         message, report = _stop_report(
@@ -411,9 +435,9 @@ class _JointFit:
             radius=float(loop.radius),
             accepted_count=loop.accepted,
             attempt_count=attempt + 1,
-            residual_evals=work.blocks + work.value,
+            residual_evals=work.evaluations(),
             jacobian_evals=work.blocks,
-            trial_cost_evals=work.value,
+            trial_cost_evals=work.value + work.frozen,
             statistics_evals=work.blocks,
             trial_predicate_rejections=work.predicate_rejections,
             invalid_pde_trials=work.invalid_trials,
@@ -444,18 +468,16 @@ class _JointFit:
         stationarity: float,
         members: ArrayLike | None = None,
         floor: _FloorEnd | None = None,
-        **nested: ArrayLike,
     ) -> OptResult:
         """The fit's result, ended by ``stop`` after attempt ``attempt``, handed to the callbacks.
 
         ``stationarity`` is the stationarity number at the end point and
         ``members`` the members' numbers there in the nested mode; ``floor``
-        the gradient floor there (``_FloorEnd``); ``nested`` holds the nested
-        mode's own entries of the final state.
+        the gradient floor there (``_FloorEnd``).
         """
         work, route = self.work, self.route
         loop.attempt = work.attempts
-        state = self.state(loop, **nested)
+        state = self.state(loop)
         status, message, report = self.verdict(
             stop,
             sigma=stationarity,
@@ -468,10 +490,9 @@ class _JointFit:
                 loop.rejected_cost_change,
                 loop.rejected_predicted_decrease,
             ),
-            members=members,
             floor=floor,
         )
-        evaluations = work.blocks + work.value
+        evaluations = work.evaluations()
         result = OptResult(
             params=np.array(loop.point),
             initial_params=x0,
@@ -487,7 +508,7 @@ class _JointFit:
                 residual_evals=evaluations,
                 jacobian_evals=work.blocks,
                 pde_solves=evaluations * len(route.ids),
-                trial_cost_evals=work.value,
+                trial_cost_evals=work.value + work.frozen,
                 statistics_evals=work.blocks,
                 trial_predicate_rejections=work.predicate_rejections,
                 invalid_pde_trials=work.invalid_trials,
@@ -534,16 +555,13 @@ class _JointFit:
         scale: ArrayLike,
         cost_tol: float,
         relative_to: float,
-        member_steps: ArrayLike | None = None,
         system: elimination.LevelSystem | None = None,
     ) -> _FloorEnd:
         """The gradient floor at the end point: what the verdict reads, and the ``info`` entries.
 
         ``step`` is the model's full step at the end point and ``scale`` the
         coordinates the bound reads there; ``relative_to`` is the cost scale
-        there (``cost_scale``); ``member_steps`` holds every member's
-        full-step norm over its cost scale in the nested mode; ``system``,
-        when given, is the full system at the end point, whose dense matrix
+        there (``cost_scale``); ``system``, when given, is the full system at the end point, whose dense matrix
         gives the floor's reach along its softest direction. Before the first
         floor sample the bound stands in for the floor in the entries, and no
         verdict reads it.
@@ -580,14 +598,7 @@ class _JointFit:
             "floor_parameter_box": None if box is None else float(box),
             "floor_source": source,
         }
-        members = (
-            None
-            if level is None or member_steps is None
-            else level * np.asarray(member_steps, dtype=np.float64)
-        )
-        return _FloorEnd(
-            level, float(_floor_sigma(level, step.norm, relative_to)), members, entries
-        )
+        return _FloorEnd(level, float(_floor_sigma(level, step.norm, relative_to)), entries)
 
     def run(self, state: Mapping | None = None) -> OptResult:
         """Fit from the start point, or continue the fit whose ``state`` is given."""
@@ -633,8 +644,9 @@ class _JointFit:
         n_constraints = int(route.constraint_matrix.shape[0]) + (
             0 if self.rows is None else self.rows.count
         )
-        route.problem.prepare(modes=("value", self.matrix))
+        route.problem.prepare(modes=self.modes)
         system, lane_costs = self.blocks(x, start=state is None)
+        x, system, lane_costs = self.at_start(x, system, lane_costs, fresh=state is None)
         cost = float(system.cost)
         # Every program the fit runs is compiled here, before the loop: the scale, the
         # attempt's program (the solve at lambda = 0 and the step of the initial radius,
@@ -652,9 +664,7 @@ class _JointFit:
         self.started = time.perf_counter()
         if state is None:
             # A fresh fit's first record holds the retries of the start's request.
-            record = _record(
-                float("nan"), float("nan"), False, x, (), route.depth, **work.attempt_records()
-            )
+            record = self.record(float("nan"), float("nan"), False, x, ())
             loop = LoopState.start(
                 point=x, cost=cost, scale=None, radius=float(solver.radius_init), record=record
             )
@@ -760,7 +770,7 @@ class _JointFit:
                 rejection_reason = "the trial predicate rejected the point"
             else:
                 before = work.lane_rungs.copy()
-                results = self.evaluate("value", trial)
+                results = self.evaluate(self.trial_pass(), trial)
                 # A failed lane of weight zero is outside the objective: logged, ignored.
                 failures, ignored = route.weigh(route.failures(results))
                 work.record(attempt, ignored, inner=False)
@@ -808,9 +818,15 @@ class _JointFit:
             previous_cost = loop.cost
             if accepted:
                 loop.point = trial
-                system, lane_costs = self.blocks(loop.point, start=False)
-                loop.cost = float(system.cost)
                 loop.accepted += 1
+                system, lane_costs = self.accept(
+                    loop,
+                    system,
+                    results,
+                    attempt=attempt,
+                    predicted=predicted_value,
+                    level=level,
+                )
             work.attempted(accepted)
             loop.radius_history.append(loop.radius)
             after = _after_attempt(
@@ -829,15 +845,7 @@ class _JointFit:
                 floor_bound=bound,
             )
             loop = dataclasses.replace(loop, **after.trials._asdict())
-            loop.record = _record(
-                rho,
-                float(multiplier),
-                accepted,
-                trial,
-                failures,
-                route.depth,
-                **work.attempt_records(),
-            )
+            loop.record = self.record(rho, float(multiplier), accepted, trial, failures)
             loop.attempt = attempt + 1
             info = self.step_info(
                 loop,
@@ -861,8 +869,8 @@ class _JointFit:
                 step_small=step_small(step_norm, loop.point, step_tol, tested=after.evaluated),
                 accepted_count=loop.accepted,
                 target_steps=solver.target_accepted_steps,
-                # The budget counts the consistency re-solves too.
-                evaluations=work.blocks + work.value,
+                # The budget counts the consistency re-solves and the frozen passes too.
+                evaluations=work.evaluations(),
                 max_evaluations=solver.max_evaluations,
             )
             if stop is not None:
