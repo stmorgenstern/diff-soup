@@ -37,6 +37,14 @@ def _raw(problem: OptimizationProblem, x: Float[Array, " n"]) -> tuple[Closures,
     return closures_of(problem), bounds_from(*bounds_of(problem, x))
 
 
+def _raw_gauss_newton(
+    problem: OptimizationProblem, x: Float[Array, " n"]
+) -> tuple[Closures, Bounds]:
+    """`_raw`, with the Gauss-Newton rule when `problem` has residual rows."""
+    closures, bounds = _raw(problem, x)
+    return closures._replace(gauss_newton_rule=closures.residual is not None), bounds
+
+
 class SolverState(eqx.Module):
     """The state a compiled solver's loop carries, which each solver extends with its own fields.
 
