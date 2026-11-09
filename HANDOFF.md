@@ -194,6 +194,29 @@ faster.
 | `SLOT_MEM=8G $SLOT ... pytest -q -p no:cacheprovider --run-integration tests/contracts/test_linear_{host,complex,dense,primitive,ad,cudss}.py tests/integration/test_native_backends.py` (CPU) | 0 | 114 passed, 57 skipped (cuDSS rows), 63 s |
 | `ruff check diff_soup tests`, `ruff format --check diff_soup tests` | 0, 0 | clean; 549 files formatted |
 
+## Milestone 5: aarch64 (R18) on the Jetson
+
+The tree at 73676b1 (milestones 1, 2, 4) synced as REFACTOR-COMMON says (no `.git`, `.ports`, `.so`),
+SuperLU_MT 1e4bc160 archived there, and the three extensions built natively by
+`.ports/jetson/jetson_build.sh` (RP6's script with this tree's names, plus `cmake --install` and the
+release's `patchelf` rpaths), under `flock ~/jetson.lock` and a 3.9 GB scope; then
+`.ports/jetson/jetson_tests.sh`, one process per file, GPU default, `XLA_PYTHON_CLIENT_PREALLOCATE=false`,
+the integration file with `-p long_timeout` (1800 s per test, as RP6 ran it). Logs copied to
+`.ports/jetson/`; the synced tree and build directory on the Jetson are deleted.
+
+| step | exit | reading |
+|---|---:|---|
+| SuperLU_MT; configure | 0, 0 | 28 s |
+| `_native_klu`, `_native_superlu`, `_native_solver_cu13` | 0, 0, 0 | 37 s, 20 s, 82 s |
+| install, patchelf, placed | 0 | kept in `/drive2/research2/diff_soup_wave2/rf-store/fx-native/jetson/` (16 MB, `SHA256SUMS`, `BUILD_INFO`): KLU `5bd75f96` (+ `klu_ffi/lib`), SuperLU `7d7ff6c3`, cuDSS cu13 `231949e7` |
+| `jetson_check.py` (each module loads; a 40-unknown system, real and complex, plain and transposed) | 0 | KLU 1.4e-15, SuperLU 7.5e-16, **cuDSS 6.1e-16 on the Orin's GPU** |
+| `tests/contracts/test_linear_complex.py` | 0 | 57 passed, 94 s, cgroup peak 947 MB |
+| `tests/contracts/test_linear_ad.py --run-integration` | 0 | 13 passed, 124 s |
+| `tests/contracts/test_linear_host.py` | 0 | 27 passed (the five-thread SuperLU row on 5 of 6 cores) |
+| `tests/contracts/test_linear_dense.py` (the thread-owner row) | 0 | 13 passed |
+| `tests/contracts/test_linear_cudss.py --run-integration` | 0 | 39 passed, 2 skipped (two processes, two devices); the new duplicate-site row passes on the Orin |
+| `tests/integration/test_native_backends.py --run-integration -p long_timeout` | 1 | 11 passed, 3 failed: the three `diffrax` rows (`ModuleNotFoundError: No module named 'diffrax'`, not in the Jetson venv, as in RP6's R18 run); every solver row passes. 949 s, cgroup peak 2.2 GB |
+
 ## Next
 
-Milestone 5 (Jetson), 6 (GPU files, suite rows, ruff).
+Milestone 6 (GPU files on the workstation, suite rows, ruff).
