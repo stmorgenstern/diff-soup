@@ -55,7 +55,8 @@ Each of them is a polynomial on every segment, and ``polynomials()`` returns
 its exact power-basis coefficients in the time since the segment's start,
 shape ``(K, degree + 1)`` with the constant term first. This is the form a
 schedule segment's target takes, so a control lowers a signal onto a schedule
-without sampling it.
+without sampling it
+([SignalControls][diff_soup.optimization.control.SignalControls]).
 [Fourier][diff_soup.optimization.inference.approx.signals.Fourier] is not
 piecewise polynomial and has none.
 """
