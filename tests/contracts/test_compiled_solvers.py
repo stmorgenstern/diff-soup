@@ -1,7 +1,9 @@
 """Compiled constrained solvers: solutions in vmap lanes, each Hessian mode, the implicit
-derivative in args, its reverse form and the adjoint that selects it, a forward-only residual
-under forward-over-forward, and how a run ends: degenerate, infeasible, out of steps, diverged,
-a failed subproblem, restoration, failed evaluations, float32."""
+derivative in args and in the bounds, its reverse form and the adjoint that selects it, the
+refusal of a tangent on a derivative-free input, a coordinate equal bounds fix, its Gauss-Newton
+form, a forward-only residual under forward-over-forward, a runtime budget and tolerance, and how a run
+ends: degenerate, infeasible, out of steps, diverged, a failed subproblem, restoration, failed
+evaluations, float32."""
 
 from __future__ import annotations
 
@@ -51,6 +53,9 @@ _COMPOSITION = 1e-10
 # measured 4.1e-16 (worst over solvers and lanes), workstation CPU 2026-11-06,
 # pytest tests/contracts/test_compiled_solvers.py::test_the_reverse_form_gradient_equals_the_forward_form_jacobian
 _REVERSE_FORM = 1e-10
+# measured 8.4e-13 (worst of jit and lanes, tangents and cotangents), workstation CPU 2026-11-08,
+# pytest tests/contracts/test_compiled_solvers.py::test_the_gauss_newton_form_equals_the_exact_form_at_a_zero_residual_solution
+_RULE_EQUALITY = 1e-10
 
 
 def _flat(x, record):
@@ -150,6 +155,86 @@ def test_a_solver_refuses_an_adjoint_without_an_implicit_rule():
     solver = dataclasses.replace(SOLVERS["interior_point"], adjoint=ds.CheckpointAdjoint())
     with pytest.raises(ds.ConfigurationError):
         solver.run(toy.problem, toy.problem.x0, toy.args_batch[0])
+
+
+def _in_lower_bound(solver, lower):
+    """The bound toy's point, multipliers and value with `x0 >= lower`, at `a = 1`."""
+    problem = TOYS["bound"].problem
+    bounds = (problem.bounds[0].at[0].set(lower), problem.bounds[1])
+    x, record = solver.run(dataclasses.replace(problem, bounds=bounds), problem.x0, 1.0)
+    return jnp.concatenate([_flat(x, record), record.value[None]])
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_the_solution_differentiates_in_an_active_bound(solver):
+    """`jax.jacfwd` and `jax.grad` under `ImplicitAdjoint()` in the active lower bound `l` give the
+    closed form: `x* = (l, (1 - l)/2, (1 - l)/2)`, `lam = l - 1`, `z0 = 1 + 3l`, and the value's
+    rate `z0`, the multiplier."""
+    forward, reverse = (
+        SOLVERS[solver],
+        dataclasses.replace(SOLVERS[solver], adjoint=ds.nonlinear.ImplicitAdjoint()),
+    )
+    exact = jnp.array([1.0, -0.5, -0.5, 1.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    by_forward = jax.jit(jax.jacfwd(lambda lower: _in_lower_bound(forward, lower)))(0.0)
+    weights = jnp.linspace(0.5, 1.5, exact.shape[0])
+    by_reverse = jax.jit(jax.grad(lambda lower: weights @ _in_lower_bound(reverse, lower)))(0.0)
+    errors = [jnp.max(jnp.abs(by_forward - exact)), jnp.abs(by_reverse - weights @ exact)]
+    # measured 5.6e-13 (worst over solvers and rules), workstation CPU 2026-11-08
+    assert float(max(errors)) <= _TANGENT
+
+
+@pytest.mark.parametrize("leaf", ["x0", "warm_start", "objective_scale"])
+def test_a_tangent_on_a_derivative_free_input_raises(leaf):
+    """The start point, the warm start and the problem's scales carry no derivative: a tangent on
+    one raises `ConfigurationError` naming it, under the forward and the reverse rule."""
+    toy = TOYS["inequality"]
+    a = toy.args_batch[0]
+    _, warm = SOLVERS["interior_point"].run(toy.problem, toy.problem.x0, a)
+
+    def run(solver, t):
+        problem, x0, start = toy.problem, toy.problem.x0, None
+        if leaf == "x0":
+            x0 = x0 + t
+        elif leaf == "warm_start":
+            start = dataclasses.replace(warm, value=warm.value + t)
+        else:
+            problem = dataclasses.replace(problem, objective_scale=1.0 + t)
+        return jnp.sum(solver.run(problem, x0, a, warm_start=start)[0])
+
+    for adjoint, derivative in (
+        (ds.ForwardAdjoint(), jax.jacfwd),
+        (ds.nonlinear.ImplicitAdjoint(), jax.grad),
+    ):
+        solver = dataclasses.replace(SOLVERS["interior_point"], adjoint=adjoint)
+        with pytest.raises(ds.ConfigurationError, match=leaf):
+            derivative(lambda t: run(solver, t))(0.0)
+
+
+def _fixed_at(solver, value):
+    """`min (x0 - 1)^2 + (x1 - 2)^2` with `0 <= x0 <= 5` and `value <= x1 <= value`."""
+    problem = objective(
+        [0.5, 0.5],
+        lambda x: (x[0] - 1.0) ** 2 + (x[1] - 2.0) ** 2,
+        (jnp.array([0.0, value]), jnp.array([5.0, value])),
+    )
+    x, record = solver.run(problem, problem.x0, None)
+    return _flat(x, record), record.status
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_equal_bounds_fix_a_coordinate(solver):
+    """Equal bounds make a coordinate a parameter of the solve, as Ipopt's `make_parameter` does:
+    the run ends `KKT_TOL` at `x* = (1, v)` with the upper multiplier `2 (2 - v)`, the gradient
+    of the Lagrangian there, and the solution moves with `v`."""
+    run = jax.jit(lambda v: _fixed_at(SOLVERS[solver], v))
+    point, status = run(0.3)
+    tangent = jax.jit(jax.jacfwd(lambda v: _fixed_at(SOLVERS[solver], v)[0]))(0.3)
+    errors = [
+        jnp.max(jnp.abs(point - jnp.array([1.0, 0.3, 0.0, 0.0, 0.0, 3.4]))),
+        jnp.max(jnp.abs(tangent - jnp.array([0.0, 1.0, 0.0, 0.0, 0.0, -2.0]))),
+    ]
+    # measured 1.3e-13 (worst over solvers), workstation CPU 2026-11-08
+    assert int(status) == TerminationStatus.KKT_TOL and float(max(errors)) <= _SOLUTION
 
 
 def _residual(x, a):
@@ -254,23 +339,31 @@ ENDS = {
         f"max_steps-{name}": (name, {"max_steps": 1}, lambda: hs7().problem, 4.0, _STATUS.MAX_STEPS)
         for name in SOLVERS
     },
-    # measured: KKT error 2.1e-6, |x - x*| 5.2e-6, multiplier error 4.3e-6 in float32,
-    # workstation CPU 2026-11-07
-    "float32": (
-        "interior_point",
-        {"tol": 1e-5},
-        lambda: hs35(jnp.float32).problem,
-        jnp.float32(3.0),
-        _STATUS.KKT_TOL,
-    ),
+    # Each solver on the tolerances float32 resolves; measured: KKT error 2.1e-6, |x - x*| 5.2e-6,
+    # multiplier error 4.3e-6 (interior point and SQP), 4.8e-7, 9.2e-7, 5.8e-7 (augmented
+    # Lagrangian), workstation CPU 2026-11-08
+    **{
+        f"float32-{name}": (
+            name,
+            dict.fromkeys(tolerances, None),
+            lambda: hs35(jnp.float32).problem,
+            jnp.float32(3.0),
+            _STATUS.KKT_TOL,
+        )
+        for name, tolerances in {
+            "interior_point": ("tol",),
+            "sqp": ("tol", "qp_tol"),
+            "augmented_lagrangian": ("tol", "feasibility_tol"),
+        }.items()
+    },
 }
 
 
 @pytest.mark.parametrize("end", ENDS)
 def test_each_way_a_run_ends_sets_its_status(end):
     """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, a run
-    allowed one step and a float32 run each end with their own status, with every floating
-    record in the iterate's dtype."""
+    allowed one step and each solver in float32 on its default tolerances each end with their own
+    status, with every floating record in the iterate's dtype."""
     name, options, make, a, status = ENDS[end]
     problem = make()
     solver = dataclasses.replace(SOLVERS[name], **options)
@@ -300,3 +393,92 @@ def test_the_interior_point_solves_through_its_restoration_phase():
     problem = _wachter_biegler()
     _, record = jax.jit(lambda a: SOLVERS["interior_point"].run(problem, problem.x0, a))(-1.0)
     assert int(record.inner_steps) > 0 and int(record.status) == TerminationStatus.KKT_TOL
+
+
+def _zero_residual_rows(z, a):
+    """Rows that vanish at `z* = (1/2, 7/10 + w1/10, 2/5)` for the data `a["y"]` made there, and
+    two linear rows that hold `z0` on its lower bound and `z1` on its inequality."""
+    w = a["w"]
+    model = jnp.stack(
+        [
+            jnp.exp(w[0] * z[2]) * z[0] + w[1] * z[1],
+            z[1] * z[2] + w[1] * z[2] ** 2 + w[0] * z[0],
+            jnp.sin(z[2]) * (1.0 + w[0]) + z[0] * z[1],
+        ]
+    )
+    return jnp.concatenate([model - a["y"], jnp.stack([z[0] - 0.2, z[1] - 0.3])])
+
+
+def _zero_residual_args(w):
+    """`args` whose data the model meets exactly at `z*`."""
+    z = jnp.array([0.5, 0.7 + 0.1 * w[1], 0.4])
+    return {"w": w, "y": _zero_residual_rows(z, {"w": w, "y": jnp.zeros(3)})[:3]}
+
+
+def test_the_gauss_newton_form_equals_the_exact_form_at_a_zero_residual_solution():
+    """Under `hessian="gauss-newton"` the implicit derivative takes the Gauss-Newton form, which at
+    a zero-residual solution with an active bound and an active inequality gives the exact form's
+    tangents and cotangents, jitted and in lanes."""
+    problem = LeastSquaresProblem.from_residual(
+        jnp.array([1.0, 1.0, 0.0]),
+        _zero_residual_rows,
+        args=_zero_residual_args(jnp.array([0.3, 0.6])),
+        bounds=(jnp.array([0.5, -jnp.inf, -jnp.inf]), None),
+    ).with_constraints(
+        Constraints(inequality=lambda z, a: 0.7 + 0.1 * a["w"][1:] - z[1:2], n_inequality=1)
+    )
+    ws = jnp.array([[0.3, 0.6], [0.4, 0.4], [0.15, 0.9]])
+    x0 = jnp.broadcast_to(problem.x0, (3, 3))
+
+    def lane(solver, w, data):
+        x, record = solver.run(problem, problem.x0, {"w": w, "y": data})
+        return _flat(x, record), jnp.sum(jnp.sin(x)) + jnp.sum(_flat(x, record)[3:])
+
+    def derivatives(hessian):
+        # measured: both modes end KKT_TOL at 1.3e-13, workstation CPU 2026-11-08
+        solver = InteriorPoint(hessian=hessian, tol=1e-12)
+        reverse = dataclasses.replace(solver, adjoint=ds.nonlinear.ImplicitAdjoint())
+        data = jax.vmap(lambda w: _zero_residual_args(w)["y"])(ws)
+        jitted = jax.jit(jax.jacfwd(lambda w: lane(solver, w, data[0])[0]))(ws[0])
+        grad = jax.jit(jax.grad(lambda w: lane(reverse, w, data[0])[1]))(ws[0])
+
+        def in_lanes(s, w):
+            x, record = ds.optimization.lanes(s, problem, {"w": w, "y": data}, x0)
+            return jax.vmap(_flat)(x, record)
+
+        tangent = jax.jacfwd(lambda w: in_lanes(solver, w))(ws)
+        cotangent = jax.grad(lambda w: jnp.sum(jnp.sin(in_lanes(reverse, w))))(ws)
+        return jitted, grad, tangent, cotangent
+
+    gauss_newton, exact = derivatives("gauss-newton"), derivatives("exact")
+    errors = [
+        float(jnp.max(jnp.abs(g - e)) / jnp.max(jnp.abs(e))) for g, e in zip(gauss_newton, exact)
+    ]
+    assert max(errors) <= _RULE_EQUALITY
+
+
+def _decay_rows(x, a):
+    """A decay fitted to data it does not quite meet: a nonzero residual."""
+    t = jnp.linspace(0.0, 3.0, 40)
+    return x[0] * jnp.exp(-x[1] * t) + x[2] - a * (jnp.exp(-0.7 * t) + 0.05 * jnp.sin(5.0 * t))
+
+
+def test_a_runtime_budget_and_tolerance_run_without_a_new_compile():
+    """`run(max_steps=, tol=)` takes both as runtime values: three budgets trace once, and a loose
+    tolerance stops the run sooner, within that tolerance and above the tight one."""
+    problem = LeastSquaresProblem.from_residual(jnp.array([1.0, 0.5, 0.0]), _decay_rows, args=2.0)
+    # measured: KKT error 6.8e-14 after 9 steps, 3.4e-4 after 4 at 1e-3, workstation CPU 2026-11-08
+    solver = InteriorPoint(hessian="gauss-newton", tol=1e-12, max_steps=200)
+    traces = []
+
+    def run(max_steps, tol):
+        traces.append(max_steps)
+        return solver.run(problem, problem.x0, 2.0, max_steps=max_steps, tol=tol)[1]
+
+    run = jax.jit(run)
+    budgets = [run(jnp.int32(m), 1e-12) for m in (2, 5, 200)]
+    loose = run(jnp.int32(200), 1e-3)
+    tight = budgets[-1]
+    assert len(traces) == 1 and [int(r.steps) for r in budgets[:2]] == [2, 5]
+    assert int(loose.status) == int(tight.status) == TerminationStatus.KKT_TOL
+    assert 1e-12 < float(loose.kkt_error) <= 1e-3 and int(loose.steps) < int(tight.steps)

@@ -155,7 +155,7 @@ class _SuperLUAnalysis:
 
 
 def _release_analysis(native_id: int) -> None:
-    """Drop the native registry's reference to an analysis (its slots keep it alive)."""
+    """Release a native analysis and its call sites (its slots keep it alive)."""
     try:
         _native().analysis_release(native_id)
     except Exception:  # noqa: BLE001 - interpreter shutdown or a missing module
@@ -567,7 +567,8 @@ class SuperLU(LinearSolver):
             runs), ``refactorizations`` (runs reusing a slot's structure),
             ``rebuilds`` (factorizations a solve started because its slot held
             other values), ``solves`` (``dgstrs`` or ``zgstrs`` calls), ``nonfinite``
-            (factor requests with non-finite values),
+            and ``singular`` (factor requests with non-finite values or a
+            singular result),
             ``released_context_errors`` (calls refused because their
             context was released), ``live_slots``, ``live_sites`` and
             ``live_analyses``.

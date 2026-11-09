@@ -1,22 +1,22 @@
 {
   "budgets": {
-    "test_files": 51,
-    "test_functions": 461,
-    "collected_tests": 785,
-    "source_lines": 16773
+    "test_files": 52,
+    "test_functions": 470,
+    "collected_tests": 803,
+    "source_lines": 17093
   },
   "tier_budgets": {
     "public_api": {
-      "files": 21,
-      "functions": 202,
-      "collected": 323,
-      "lines": 6569
+      "files": 22,
+      "functions": 204,
+      "collected": 326,
+      "lines": 6673
     },
     "contracts": {
       "files": 22,
-      "functions": 199,
-      "collected": 388,
-      "lines": 6662
+      "functions": 206,
+      "collected": 403,
+      "lines": 6878
     },
     "performance_contracts": {
       "files": 2,
@@ -133,6 +133,7 @@
     "tests/validation/test_physics.py",
     "tests/contracts/test_compiled_solvers.py",
     "tests/public_api/test_optimization_solvers.py",
+    "tests/public_api/test_nested_fit.py",
     "tests/multi_device/test_optimization_lanes.py",
     "tests/support/optimization.py",
     "tests/public_api/test_control.py",
@@ -187,6 +188,7 @@
     "tests/validation/test_physics.py",
     "tests/contracts/test_compiled_solvers.py",
     "tests/public_api/test_optimization_solvers.py",
+    "tests/public_api/test_nested_fit.py",
     "tests/multi_device/test_optimization_lanes.py",
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
@@ -375,11 +377,15 @@
     },
     {
       "file": "tests/contracts/test_compiled_solvers.py",
-      "feature": "Compiled constrained solvers: InteriorPoint, SQP and AugmentedLagrangian in vmap lanes, each Hessian mode, the implicit derivative in args under jvp and grad, its reverse form under grad in vmap lanes against the forward form's jacfwd, the adjoint that selects it, a forward-only residual under forward-over-forward, degenerate and infeasible problems, the step budget, divergence, a failed subproblem, the restoration phase, failed evaluations"
+      "feature": "Compiled constrained solvers: InteriorPoint, SQP and AugmentedLagrangian in vmap lanes, each Hessian mode, the implicit derivative in args under jvp and grad, its reverse form under grad in vmap lanes against the forward form's jacfwd, the adjoint that selects it, its Gauss-Newton form against the exact form at a zero-residual solution, a forward-only residual under forward-over-forward, a runtime step budget and tolerance without a new compile, degenerate and infeasible problems, the step budget, divergence, a failed subproblem, the restoration phase, failed evaluations"
     },
     {
       "file": "tests/public_api/test_optimization_solvers.py",
       "feature": "Optimization solvers through ds.optimization: each compiled solver through optsolve and its record, each solver's warm start from a record and from a record of zeros, lanes on one device"
+    },
+    {
+      "file": "tests/public_api/test_nested_fit.py",
+      "feature": "Nested least-squares fits: NestedLeastSquares through optsolve with the members' state carried by the trust region, against the joint fit, and the outer gradient by the forward and reverse Gauss-Newton rules against central differences"
     },
     {
       "file": "tests/multi_device/test_optimization_lanes.py",

@@ -23,7 +23,7 @@ from diff_soup._adjoints import AbstractAdjoint
 from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.inference.fitting.result import TerminationStatus
 from diff_soup.optimization.kkt import DenseKKT, KKTSolve
-from diff_soup.optimization.solvers import _hessian
+from diff_soup.optimization.solvers import _fixed, _hessian
 from diff_soup.optimization.solvers._barrier import Bounds, bounds_from
 from diff_soup.optimization.solvers._closures import (
     Closures,
@@ -43,10 +43,31 @@ from diff_soup.optimization.solvers._protocol import (
     SolverState,
     _int,
     _raw,
+    _raw_gauss_newton,
 )
 
 #: Ipopt's `diverging_iterates_tol`: an iterate entry beyond it ends the run with `DIVERGED`.
 DIVERGED_X = 1e20
+#: Ours: a tolerance left unset is at least this many machine epsilons of the iterate's dtype.
+#: Measured: the least decade at which every float32 run of the three solvers, in both Hessian
+#: modes, ends `KKT_TOL` on HS35, a bound-active toy and a least-squares toy, workstation CPU
+#: 2026-11-08 (10 eps fails SQP's QPs and the augmented Lagrangian on HS35).
+EPS_FACTOR = 100.0
+
+
+def default_tolerance(default: float, dtype: jnp.dtype) -> float:
+    """The float64 `default` raised to `EPS_FACTOR * eps` of `dtype`.
+
+    In float64 `EPS_FACTOR * eps` is `2.2e-14`, below every default, so `default` is returned
+    unchanged. In float32 it is `1.2e-5`.
+    """
+    return max(default, EPS_FACTOR * float(jnp.finfo(dtype).eps))
+
+
+def iterate_dtype(x: ArrayLike) -> jnp.dtype:
+    """The floating dtype of an iterate: that of `x`, or the default float when `x` is not floating."""
+    dtype = jnp.asarray(x).dtype
+    return dtype if jnp.issubdtype(dtype, jnp.inexact) else jnp.result_type(float)
 
 
 class CoreState(SolverState):
@@ -66,6 +87,8 @@ class CoreState(SolverState):
         failed_evaluations: The failed trial evaluations in all.
         inner_steps: The steps of the inner solves so far.
         subproblem_status: The status of the subproblem whose failure ended the run, else `UNKNOWN`.
+        budget: The step budget of this run, a runtime value.
+        tol: The scaled optimality error at which this run ends, a runtime value.
     """
 
     lam_e: Float[Array, "n_eq"]
@@ -81,6 +104,8 @@ class CoreState(SolverState):
     failed_evaluations: Int[Array, ""]
     inner_steps: Int[Array, ""]
     subproblem_status: Int[Array, ""]
+    budget: Int[Array, ""]
+    tol: Float[Array, ""]
 
 
 class Start(NamedTuple):
@@ -91,12 +116,14 @@ class Start(NamedTuple):
         evaluation: The scaled evaluation at `x`.
         scales: The scales.
         warm: `(lam_e, lam_i, z_lower, z_upper)` of a warm start in the scaled problem, or `None`.
+        limits: `(budget, tol)`, the run's step budget and tolerance, numbers or arrays.
     """
 
     x: Float[Array, "n"]
     evaluation: Evaluation
     scales: Scales
     warm: tuple | None
+    limits: tuple
 
 
 def core_fields(start: Start, closures: Closures, hessian: str) -> dict:
@@ -116,6 +143,7 @@ def core_fields(start: Start, closures: Closures, hessian: str) -> dict:
         multipliers = start.warm
     valid = start.evaluation.finite
     lam_e, lam_i, z_lower, z_upper = multipliers
+    budget, tol = start.limits
     return dict(
         x=x,
         step=_int(0),
@@ -134,6 +162,8 @@ def core_fields(start: Start, closures: Closures, hessian: str) -> dict:
         failed_evaluations=_int(0),
         inner_steps=_int(0),
         subproblem_status=_int(TerminationStatus.UNKNOWN),
+        budget=_int(budget),
+        tol=jnp.asarray(tol, dtype),
     )
 
 
@@ -189,10 +219,21 @@ class ConstrainedSolver(CompiledSolver):
     """A compiled constrained solver: the shared start, termination, record and loop."""
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
-    tol: eqx.AbstractVar[float]
+    #: Each tolerance field and its float64 default, which `None` resolves to.
+    _default_tolerances: ClassVar[dict[str, float]] = {"tol": 1e-8}
+    tol: eqx.AbstractVar[float | None]
     max_steps: eqx.AbstractVar[int]
     hessian: eqx.AbstractVar[str]
     adjoint: eqx.AbstractVar[AbstractAdjoint]
+
+    def _for_dtype(self, dtype: jnp.dtype):
+        """This solver with each tolerance left `None` resolved for an iterate of `dtype`."""
+        unset = {
+            name: default_tolerance(default, dtype)
+            for name, default in self._default_tolerances.items()
+            if getattr(self, name) is None
+        }
+        return dataclasses.replace(self, **unset) if unset else self
 
     @abc.abstractmethod
     def _place(self, x0: Float[Array, "n"], bounds: Bounds, warm: bool) -> Float[Array, "n"]:
@@ -235,16 +276,21 @@ class ConstrainedSolver(CompiledSolver):
         return jnp.zeros((), state.x.dtype)
 
     def _converged(self, state: CoreState) -> Bool[Array, ""]:
-        """Whether the scaled optimality error is below `tol`."""
-        return state.kkt_error <= self.tol
+        """Whether the scaled optimality error is below the run's `tol`."""
+        return state.kkt_error <= state.tol
 
     def _prepare(
         self, problem: OptimizationProblem, like: Float[ArrayLike, "n"]
     ) -> tuple[Closures, Closures, Bounds]:
-        """The raw closures, the scaled closures and the bounds of `problem`."""
+        """The raw closures, the scaled closures and the bounds of `problem`.
+
+        A coordinate whose bounds are equal is fixed at its value (`_fixed.fix`): the closures
+        read it as a parameter and the bounds no longer hold it.
+        """
         raw = closures_of(problem)
         self._check(raw)
-        return raw, scaled_closures(raw), bounds_from(*bounds_of(problem, like))
+        raw, bounds = _fixed.fix(raw, bounds_from(*bounds_of(problem, like)))
+        return raw, scaled_closures(raw), bounds
 
     def _init(
         self,
@@ -255,14 +301,23 @@ class ConstrainedSolver(CompiledSolver):
         x0: Float[ArrayLike, "n"],
         args: PyTree,
         warm_start: SolveRecord | None,
+        limits: tuple = (None, None),
     ) -> CoreState:
-        """The state at the first point, from one evaluation of the problem as given."""
-        x = self._place(jnp.asarray(x0), bounds, warm_start is not None)
+        """The state at the first point, from one evaluation of the problem as given.
+
+        `limits` is `(max_steps, tol)` of this run, each `None` for the solver's own field.
+        """
+        x = _fixed.start(raw, bounds, self._place(jnp.asarray(x0), bounds, warm_start is not None))
         unscaled = evaluate(raw, x, args, _hessian.uses_gauss_newton(self.hessian, raw))
         scales = self._scales(problem, raw, unscaled)
         warm = None if warm_start is None else warm_multipliers(warm_start, scales, x.dtype)
-        state = self._begin(closures, bounds, Start(x, unscaled.scaled(scales), scales, warm))
-        return self._with_termination(state)
+        max_steps, tol = limits
+        limits = (
+            self.max_steps if max_steps is None else max_steps,
+            self.tol if tol is None else tol,
+        )
+        start = Start(x, unscaled.scaled(scales), scales, warm, limits)
+        return self._with_termination(self._begin(closures, bounds, start))
 
     def init(
         self,
@@ -273,19 +328,21 @@ class ConstrainedSolver(CompiledSolver):
         warm_start: SolveRecord | None = None,
     ) -> CoreState:
         """The state at `x0` moved into its bounds, or from a `warm_start` record's multipliers."""
-        raw, closures, bounds = self._prepare(problem, x0)
-        return self._init(problem, raw, closures, bounds, x0, args, warm_start)
+        solver = self._for_dtype(iterate_dtype(x0))
+        raw, closures, bounds = solver._prepare(problem, x0)
+        return solver._init(problem, raw, closures, bounds, x0, args, warm_start)
 
     def step(self, problem: OptimizationProblem, state: CoreState, args: PyTree) -> CoreState:
         """One step, without the termination test."""
-        _, closures, bounds = self._prepare(problem, state.x)
-        return self._iterate(closures, bounds, state, (args, state.scales))
+        solver = self._for_dtype(state.x.dtype)
+        _, closures, bounds = solver._prepare(problem, state.x)
+        return solver._iterate(closures, bounds, state, (args, state.scales))
 
     def terminate(
         self, problem: OptimizationProblem | None, state: CoreState, args: PyTree
     ) -> tuple[Bool[Array, ""], Int[Array, ""]]:
         """End on the scaled optimality error, the budget, divergence, or an earlier failure."""
-        converged = self._converged(state)
+        converged = self._for_dtype(state.x.dtype)._converged(state)
         finite = (
             jnp.all(jnp.isfinite(state.x))
             & jnp.all(jnp.isfinite(state.lam_e))
@@ -293,7 +350,7 @@ class ConstrainedSolver(CompiledSolver):
             & jnp.isfinite(state.kkt_error)
         )
         diverged = ~finite | (jnp.max(jnp.abs(state.x), initial=0.0) > DIVERGED_X)
-        over = state.step >= self.max_steps
+        over = state.step >= state.budget
         status = jnp.where(
             state.done,
             state.status,
@@ -308,7 +365,7 @@ class ConstrainedSolver(CompiledSolver):
     def _with_termination(self, state: CoreState) -> CoreState:
         """`state` with `done` and `status` from `terminate`."""
         done, status = self.terminate(None, state, None)
-        return eqx.tree_at(lambda s: (s.done, s.status), state, (done, status))
+        return dataclasses.replace(state, done=done, status=status)
 
     def _advance(
         self, closures: Closures, bounds: Bounds, state: CoreState, args: PyTree
@@ -322,14 +379,29 @@ class ConstrainedSolver(CompiledSolver):
         x0: Float[ArrayLike, "n"],
         args: PyTree,
         *,
-        max_steps: int | None = None,
+        max_steps: Int[ArrayLike, ""] | None = None,
         warm_start: SolveRecord | None = None,
+        tol: Float[ArrayLike, ""] | None = None,
     ) -> tuple[Float[Array, "n"], SolveRecord]:
         """The compiled loop, as [CompiledSolver.run][diff_soup.optimization.solvers.CompiledSolver.run] describes."""
-        solver = self if max_steps is None else dataclasses.replace(self, max_steps=max_steps)
+        solver = self._for_dtype(iterate_dtype(x0))
+        limits = tuple(None if v is None else jnp.asarray(v) for v in (max_steps, tol))
         return implicit_run(
-            solver._run_primal, _raw, self._kkt, problem, x0, args, warm_start, self.adjoint
+            solver._run_primal,
+            self._rule,
+            self._kkt,
+            problem,
+            x0,
+            args,
+            warm_start,
+            self.adjoint,
+            limits,
         )
+
+    @property
+    def _rule(self):
+        """`prepare` of the implicit derivative: the Gauss-Newton form under Gauss-Newton steps."""
+        return _raw_gauss_newton if self.hessian == "gauss-newton" else _raw
 
     def _run_primal(
         self,
@@ -337,16 +409,18 @@ class ConstrainedSolver(CompiledSolver):
         x0: Float[ArrayLike, "n"],
         args: PyTree,
         warm_start: SolveRecord | None,
+        limits: tuple = (None, None),
     ) -> tuple[Float[Array, "n"], SolveRecord]:
-        """The loop itself, never differentiated."""
+        """The loop itself, never differentiated; `limits` is `(max_steps, tol)` of the run."""
         raw, closures, bounds = self._prepare(problem, x0)
-        state = self._init(problem, raw, closures, bounds, x0, args, warm_start)
+        state = self._init(problem, raw, closures, bounds, x0, args, warm_start, limits)
 
         def body(current):
             return self._advance(closures, bounds, current, (args, current.scales))
 
         state = lax.while_loop(lambda current: ~current.done, body, state)
-        return state.x, self._record(state, bounds)
+        record = self._record(state, bounds)
+        return _fixed.restore(closures_of(problem), raw.fixed, bounds, state.x, record, args)
 
     def _record(self, state: CoreState, bounds: Bounds) -> SolveRecord:
         """The `SolveRecord` of a finished state, unscaled."""

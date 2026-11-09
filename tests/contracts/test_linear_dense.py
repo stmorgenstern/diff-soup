@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+import threading
 from collections import Counter
 from functools import partial
 
@@ -385,6 +386,26 @@ def test_a_checked_solve_reports_its_status_and_a_failed_factor_never_finite_out
     coarse = factor(analyze(topology, backend=Dense(), precision="fp32"), values)
     # measured fp32 residual 6.0e-8, CPU VM 2026-10-22
     assert 1e-13 < float(solve_checked(coarse, _rhs())[2].residual) < 1e-5
+
+
+def test_a_solve_context_belongs_to_the_thread_that_first_factors_in_it(system):
+    """A factor in a context from a second thread is refused with an error that names the
+    thread rule."""
+    _, values, analysis = system
+    caught = []
+
+    def other():
+        try:
+            factor(analysis, values, ctx=ctx)
+        except FactorContractError as error:
+            caught.append(str(error))
+
+    with SolveContext() as ctx:
+        factor(analysis, values, ctx=ctx)
+        thread = threading.Thread(target=other)
+        thread.start()
+        thread.join()
+    assert len(caught) == 1 and "another thread" in caught[0]
 
 
 def test_a_factor_is_a_static_pytree_that_outlives_its_context_and_refuses_malformed_input(system):

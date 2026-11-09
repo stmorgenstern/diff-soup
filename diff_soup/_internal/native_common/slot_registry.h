@@ -9,7 +9,8 @@
 //     (context id, slot id)) and records the site that created it;
 //   * the sites by 64-bit key: a site is a lowered factor or refactor call, created on the
 //     first call that carries its key, and keys its slots by (context id, slot token or held
-//     slot id);
+//     slot id). A site belongs to its analysis and is erased when the analysis is released
+//     (ForgetAnalysis); the slots it made hold the analysis themselves;
 //   * the shared-storage slots, keyed by a tuple that starts with the context id;
 //   * the released contexts, whose calls are refused.
 //
@@ -484,13 +485,25 @@ void BuildPattern(HostPattern<Index>& a, int64_t n, int64_t nnz, const int32_t* 
 // Python-facing functions
 // --------------------------------------------------------------------------
 
-// Drop the registry's reference to an analysis; sites and slots that use it keep it alive.
+// Drop the registry's reference to analysis `id` and erase its sites. The slots of the analysis
+// hold their own reference, so it lives until the last of their contexts is released. A call
+// that names the analysis afterwards finds neither the analysis nor its sites and is refused
+// (SiteFor).
+template <class R>
+void ForgetAnalysis(R& reg, int64_t id) {
+    reg.analyses.erase(id);
+    for (auto it = reg.sites.begin(); it != reg.sites.end();) {
+        it = it->second->analysis->id == id ? reg.sites.erase(it) : std::next(it);
+    }
+}
+
+// Release an analysis (ForgetAnalysis) from Python.
 template <class R>
 void AnalysisRelease(int64_t id) {
     nb::gil_scoped_release release;
     R& reg = Instance<R>();
     std::lock_guard<std::mutex> lock(reg.mutex);
-    reg.analyses.erase(id);
+    ForgetAnalysis(reg, id);
 }
 
 // Create a site on an analysis with an id of its own and return the id.

@@ -5,6 +5,11 @@ multiplier exceeds its slack. Where both are below `DEGENERATE * sqrt(mu)` the a
 degenerate, and the system is instead the barrier solution's at the final `mu`, whose blocks
 replace the active-set masks with the barrier diagonals `Z / d` and `s / lam`; the record's
 `degenerate` says so. The exact Lagrangian Hessian is computed once, at the solution.
+
+The Gauss-Newton form, for a least-squares objective whose solver steps on Gauss-Newton,
+replaces that Hessian with `J_r^T J_r` of the residual rows and drops the constraint
+curvature: its derivatives in `args` are first order, the rows' (`rows_of`) and the
+constraints'. At a solution with zero residual and linear rows the two forms agree.
 """
 
 from __future__ import annotations
@@ -37,12 +42,15 @@ class ActiveSet(eqx.Module):
         lower: Where a lower bound is active, `(n,)`.
         upper: Where an upper bound is active, `(n,)`.
         degenerate: Whether a multiplier and its slack (or bound distance) are both near zero.
+        pinned: Where equal bounds fix a coordinate; it counts as active on its lower bound
+            when that multiplier is the larger, else on its upper, and is never degenerate.
     """
 
     inequality: Bool[Array, "n_ineq"]
     lower: Bool[Array, "n"]
     upper: Bool[Array, "n"]
     degenerate: Bool[Array, ""]
+    pinned: Bool[Array, "n"]
 
 
 def active_set(
@@ -68,9 +76,13 @@ def active_set(
         degenerate = mask & (multiplier < threshold) & (gap < threshold)
         return active, jnp.any(degenerate)
 
+    pinned = bounds.has_lower & bounds.has_upper & (bounds.lower == bounds.upper)
     inequality, deg_i = side(lam, slack, jnp.ones_like(lam, dtype=bool))
-    lower, deg_l = side(z_lower, below, bounds.has_lower)
-    upper, deg_u = side(z_upper, above, bounds.has_upper)
+    lower, deg_l = side(z_lower, below, bounds.has_lower & ~pinned)
+    upper, deg_u = side(z_upper, above, bounds.has_upper & ~pinned)
+    on_lower = z_lower >= z_upper
+    lower = lower | (pinned & on_lower)
+    upper = upper | (pinned & ~on_lower)
     degenerate = deg_i | deg_l | deg_u
     if jac_eq is not None:
         free = (~(lower | upper)).astype(x.dtype)
@@ -78,7 +90,7 @@ def active_set(
         idle = jnp.concatenate([jnp.zeros(jac_eq.shape[0], bool), ~inequality])
         _, independent = cholesky(rows @ rows.T + jnp.diag(idle.astype(x.dtype)))
         degenerate = degenerate | ~independent
-    return ActiveSet(inequality, lower, upper, degenerate)
+    return ActiveSet(inequality, lower, upper, degenerate, pinned)
 
 
 def _lagrangian_gradient(
@@ -113,7 +125,7 @@ class KKTSystem(eqx.Module):
         gradient: The objective's gradient.
         jac_eq: The equality rows' Jacobian.
         jac_ineq: The inequality rows' Jacobian.
-        hessian: The exact Lagrangian Hessian.
+        hessian: The exact Lagrangian Hessian, or `J_r^T J_r` in the Gauss-Newton form.
         primal: The primal block: the Hessian on the free coordinates, or plus the barrier diagonals.
         rows: The constraint rows of the system, masked to the free coordinates and active rows.
         dual: The dual diagonal: 0 for an equality, 1 for an inactive row, `s / lam` degenerate.
@@ -152,6 +164,16 @@ def residual_of(closures: Closures, x: Float[Array, "n"], record: SolveRecord) -
     return residual
 
 
+def rows_of(closures: Closures, x: Float[Array, "n"]) -> Callable:
+    """`args -> ((r, c_E, c_I), (J_E, J_I))` at `x`: the Gauss-Newton form's first-order terms."""
+
+    def rows(a):
+        equality, inequality, jac_eq, jac_ineq = closures.constraints_and_jacobians(x, a)
+        return (closures.residual(x, a), equality, inequality), (jac_eq, jac_ineq)
+
+    return rows
+
+
 def system_at(
     closures: Closures,
     bounds: Bounds,
@@ -159,34 +181,42 @@ def system_at(
     record: SolveRecord,
     args: PyTree,
     derivatives: tuple[Float[Array, "n"], Float[Array, "n_eq n"], Float[Array, "n_ineq n"]],
+    jacobian: Float[Array, "m n"] | None = None,
 ) -> KKTSystem:
-    """The KKT system at the solution, with the exact Lagrangian Hessian computed once."""
+    """The KKT system at the solution.
+
+    With the residual rows' Jacobian `jacobian` the primal block is `J_r^T J_r`, the
+    Gauss-Newton form; without it the exact Lagrangian Hessian, computed once.
+    """
     gradient, jac_eq, jac_ineq = derivatives
     lam_e, lam_i = record.multipliers_equality, record.multipliers_inequality
     dtype = x.dtype
     active = active_set(x, record, bounds, jac_eq, jac_ineq)
     degenerate = active.degenerate
-    hessian = _hessian(closures, x, lam_e, lam_i, args)
+    if jacobian is None:
+        hessian = _hessian(closures, x, lam_e, lam_i, args)
+    else:
+        hessian = jacobian.T @ jacobian
     below, above = distances(x, bounds)
     z_lower, z_upper = record.bound_multipliers
     tiny = jnp.finfo(dtype).tiny
     cap = min(_CAP, float(jnp.finfo(dtype).max))
+    barrier_lower = bounds.has_lower & ~active.pinned
+    barrier_upper = bounds.has_upper & ~active.pinned
     sigma_lower = jnp.where(
-        bounds.has_lower, jnp.minimum(z_lower / jnp.maximum(below, tiny), cap), 0.0
+        barrier_lower, jnp.minimum(z_lower / jnp.maximum(below, tiny), cap), 0.0
     )
     sigma_upper = jnp.where(
-        bounds.has_upper, jnp.minimum(z_upper / jnp.maximum(above, tiny), cap), 0.0
+        barrier_upper, jnp.minimum(z_upper / jnp.maximum(above, tiny), cap), 0.0
     )
     # At `mu = 0` (SQP, the augmented Lagrangian) an active slack can be exactly 0, and two
     # identical active rows would then give an exact zero pivot; the floor keeps it finite.
     slack_ratio = jnp.clip(record.slacks / jnp.maximum(lam_i, tiny), jnp.finfo(dtype).eps, cap)
-    fixed = (active.lower | active.upper) & ~degenerate
+    # A coordinate equal bounds fix is fixed in the degenerate system too, without a barrier.
+    fixed = ((active.lower | active.upper) & ~degenerate) | active.pinned
     keep = (~fixed).astype(dtype)
-    primal = jnp.where(
-        degenerate,
-        hessian + jnp.diag(sigma_lower + sigma_upper),
-        keep[:, None] * hessian * keep[None, :] + jnp.diag(1.0 - keep),
-    )
+    curvature = hessian + jnp.where(degenerate, jnp.diag(sigma_lower + sigma_upper), 0.0)
+    primal = keep[:, None] * curvature * keep[None, :] + jnp.diag(1.0 - keep)
     rows_i = jnp.where(degenerate, 1.0, active.inequality.astype(dtype))
     rows = jnp.concatenate([jac_eq * keep[None, :], rows_i[:, None] * jac_ineq * keep[None, :]])
     dual_i = jnp.where(degenerate, slack_ratio, jnp.where(active.inequality, 0.0, 1.0))
