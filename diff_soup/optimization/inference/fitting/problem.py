@@ -11,7 +11,7 @@ import os
 import time
 import types
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, NamedTuple, Optional
 
 import jax
@@ -73,7 +73,7 @@ class InferenceProblem(EstimationProblem):
         experiments: An `Experiment`, a sequence of them, or a `Study`, which already declares its parameters and clusters.
         parameters: The handles the fit moves: one handle, a tuple of them, a `ParameterSet` or a `Hierarchy`.
         objective: [MLE][diff_soup.optimization.inference.MLE], or [MAP][diff_soup.optimization.inference.MAP], which adds the declared priors.
-        clusters: The cluster label of each experiment, for a parameter with one value per cluster.
+        clusters: A mapping from cluster name to one owner label per experiment, for a parameter with one value per cluster.
         layout: The placement of the experiments on a device mesh.
         trajectory: A `SingleShoot` or `Multishoot` applied to every experiment.
         regularization: A penalty on the parameters added to the objective, such as `Tikhonov`.
@@ -88,7 +88,7 @@ class InferenceProblem(EstimationProblem):
         *,
         parameters: Any = None,
         objective: MLE | MAP = MLE(),
-        clusters: Any = None,
+        clusters: Mapping[str, Iterable[object]] | None = None,
         layout: Optional[Layout] = None,
         trajectory: Optional[Trajectory] = None,
         regularization: Optional[Regularizer] = None,

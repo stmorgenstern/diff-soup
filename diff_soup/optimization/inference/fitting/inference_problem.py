@@ -35,7 +35,7 @@ import copy
 import dataclasses
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -95,7 +95,7 @@ from diff_soup.optimization.inference.fitting.parameter_groups import (
     _resolve_spec_declared_bounds,
     parameter_values,
 )
-from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.regularization import NoReg, Regularizer
 from diff_soup.optimization.inference.fitting.series import FullState, Series, observes_full_state
 from diff_soup.optimization.inference.fitting.windows import (
     RestartStep,
@@ -103,6 +103,12 @@ from diff_soup.optimization.inference.fitting.windows import (
     WindowInitialization,
 )
 from diff_soup.problem.parameters import ParameterSchema
+
+if TYPE_CHECKING:
+    from diff_soup.problem._ir.lowered_problem import LoweredProblem
+    from diff_soup.problem.implicit.problems import ImplicitProblem, MassProblem
+    from diff_soup.problem.implicit.solver_problem import SolverView
+    from diff_soup.timestepping.vsvo.classes import JBDF, JIDA, JNDF
 
 # ---------------------------------------------------------------------------
 # Initial-state policy objects
@@ -237,15 +243,15 @@ class InferenceProblem:
         )
     """
 
-    problem: Any
+    problem: LoweredProblem | MassProblem | ImplicitProblem | SolverView
     data: tuple
-    solver: Any
+    solver: JIDA | JBDF | JNDF
     objective: Objective
     trajectory: Trajectory
     initial_state: InitialState
     parameters: ParameterGroups
     parameter_schema: Optional[ParameterSchema]
-    regularization: Any
+    regularization: Regularizer
     _seam: ForwardSeam
     _segment_fns: tuple
     _residual_builder: Callable
@@ -292,15 +298,15 @@ class InferenceProblem:
 
     def __init__(
         self,
-        problem: Any,
+        problem: LoweredProblem | MassProblem | ImplicitProblem | SolverView,
         data: Union[Series, tuple],
         *,
-        solver: Any,
+        solver: JIDA | JBDF | JNDF,
         parameters: Optional[ParameterGroups] = None,
         objective: Optional[Objective] = None,
         trajectory: Optional[Trajectory] = None,
         initial_state: Optional[InitialState | ArrayLike | Sequence] = None,
-        regularizer: Any = None,
+        regularizer: Regularizer | None = None,
         state_prior_weight: float = 0.0,
         theta_only_steps: int = 0,
         project_windows: bool = True,
