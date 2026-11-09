@@ -172,24 +172,34 @@ class _NestedFit(_JointFit):
     trial and its ``blocks`` request, every member of the cut level iterates
     on its own subtree with the outer coordinates held, all members in
     lockstep, each with its own radius, growth lock and acceptance, for at
-    most the polish's number of iterations. A member done leaves the polish:
-    an iteration's requests cover the lanes of the members still in it, and
-    the polish ends with a ``blocks`` request of every lane where it ended,
-    whose point, cost and system are the next attempt's. A member whose lanes
+    most the polish's number of iterations. An iteration's request is a
+    frozen pass: each lane's cost at the members' trial and its ``J^T r``
+    there on the Jacobian of its last ``blocks`` request, the gradient the
+    moved members step from next on the kept matrix. A member done leaves the
+    polish: an iteration's requests cover the lanes of the members still in
+    it, and the polish ends with a ``blocks`` request of every lane where it
+    ended, whose point, cost and system are the next attempt's. A member whose lanes
     fail at its polished point retreats along its polish step. The members' radii and locks carry from
     one polish to the next. With no polish iterations the fit makes the joint
     mode's attempts.
     """
 
-    # The mode of the polish's request at its trial: "value", whose moved members a blocks
-    # request then reads, or "frozen", whose gradients on the kept Jacobians they take.
-    polish_pass = "value"
+    # Whether the polish's request at its trial is a frozen pass when the lanes run that
+    # mode; False makes it a value request (for measurements).
+    frozen_polish = True
 
     def __init__(self, solver: TrustRegion, route: _LaneRoute, callbacks: tuple):
         super().__init__(solver, route, callbacks)
         self.inner = solver if solver.inner is None else solver.inner
         # The polish's largest number of iterations per member and attempt.
         self.polish_steps = _DEFAULT_POLISH if solver.inner is None else int(solver.inner.max_steps)
+        # The mode of the polish's request at its trial: a frozen pass, whose gradients on
+        # the Jacobians the last blocks request kept the moved members take, when the polish
+        # makes an iteration and the lanes run that mode; else value, whose moved members a
+        # blocks request then reads.
+        polishing = self.polish_steps > 0 or int(solver.inner_start_iterations) > 0
+        frozen = self.frozen_polish and polishing and route.problem._offers("frozen")
+        self.polish_pass = "frozen" if frozen else "value"
         self.cut = route.names.index(solver.nested_at) + 1
         self.members = tuple(route.members[self.cut - 1])
         self.lane_member = np.asarray(route.nodes[:, self.cut - 1], dtype=np.int64)
@@ -848,6 +858,53 @@ class _NestedFit(_JointFit):
                 unlogged = failures
                 pending = self.failed_members(failures) if failures else pending[:0]
 
+    def settle(
+        self,
+        point: np.ndarray,
+        base: _Point,
+        moved: np.ndarray,
+        every: bool,
+        radii: np.ndarray,
+        retreats: np.ndarray,
+        attempt: int,
+        codes: np.ndarray,
+        active: np.ndarray,
+    ) -> tuple:
+        """The system at ``point``, where the members ``moved`` left ``base``, a point where every lane solved.
+
+        One ``blocks`` request at ``point``: of every lane with ``every``,
+        else of the lanes of ``moved`` (``retreating_blocks``, whose member
+        that fails retreats toward ``base``). A member that no retreat solves
+        goes back to its coordinates in ``base`` and leaves the polish (its
+        code ``_UNSOLVED`` in ``codes``, cleared in ``active``), and the
+        request is made again for the others; with none left, it is ``base``.
+
+        Returns ``(point, lane_costs, system, partial)``: ``partial`` whether
+        the system holds nodes of a request of some lanes only, ``None`` when
+        it is ``base``'s.
+        """
+        owners = self.owners
+        below = owners >= 0
+        member_of = np.maximum(owners, 0)
+        moved = np.array(moved, dtype=bool, copy=True)
+        point = np.array(point, copy=True)
+        while True:
+            reached, lane_costs, system, failures = self.retreating_blocks(
+                point, base, None if every else moved, radii, retreats, attempt
+            )
+            if not failures:
+                return reached, lane_costs, system, not every
+            unsolved = self.failed_members(failures)
+            codes[unsolved] = _UNSOLVED
+            active[unsolved] = False
+            progress = bool(moved[unsolved].any())
+            moved[unsolved] = False
+            if not progress or not moved.any():
+                return np.array(base.point, copy=True), base.lane_costs, base.system, None
+            point = reached
+            back = below & np.isin(member_of, unsolved)
+            point[back] = np.asarray(base.point)[back]
+
     def polish_request(self, point: np.ndarray, members: np.ndarray) -> Any:
         """The polish's request at its trial ``point`` over the lanes of ``members``.
 
@@ -877,12 +934,15 @@ class _NestedFit(_JointFit):
         with the radii, locks and gradient thresholds the fit carries and make
         at most ``limit`` lockstep iterations; ``limit=0`` reads ``point``
         alone. An iteration makes one request at the members' combined trial
-        over the lanes of the members it moves (``polish_request``), and one
-        ``blocks`` request at their new point over the lanes of the members
-        that moved, whose nodes of the system it updates (``request_blocks``):
-        of every lane when they hold every lane or it is the last iteration. A
+        over the lanes of the members it moves (``polish_request``). After a
+        frozen pass the members that moved take its gradient on the kept
+        matrix; after a ``value`` request (or a frozen pass with a failed lane)
+        one ``blocks`` request at their new point over the lanes of the members
+        that moved updates their nodes of the system (``request_blocks``): of
+        every lane when they hold every lane or it is the last iteration. A
         polish that ends on a system of some lanes' requests makes the
-        ``blocks`` request of every lane where it ended. ``start`` marks the
+        ``blocks`` request of every lane where it ended, a member whose lanes
+        fail there retreating toward where the polish started. ``start`` marks the
         start's polish, whose iterations count apart. A member whose lane fails
         at a ``blocks`` request after an iteration retreats along its last
         step (``retreating_blocks``); one that no retreat solves goes back to
@@ -1192,41 +1252,24 @@ class _NestedFit(_JointFit):
                 continue
             # (1) of the next iteration: the system at the members' new point. The last
             # iteration requests every lane there, and so does one whose moved members
-            # hold every lane; an earlier one the lanes of the members that moved. A
-            # member whose lane fails retreats along its last step, and one that no
-            # retreat solves goes back to its point before it.
-            moved = accepted.copy()
-            final = k == int(limit) or not active.any() or bool(np.all(moved[self.lane_member]))
+            # hold every lane; an earlier one the lanes of the members that moved.
+            every = k == int(limit) or not active.any() or bool(np.all(accepted[self.lane_member]))
             base = _Point(previous, system, lane_costs)
-            while True:
-                reached, solved_costs, solved, failures = self.retreating_blocks(
-                    x, base, None if final else moved, radii, retreats, attempt
-                )
-                if not failures:
-                    x, system, lane_costs = reached, solved, solved_costs
-                    spliced = not final
-                    break
-                unsolved = self.failed_members(failures)
-                codes[unsolved] = _UNSOLVED
-                active[unsolved] = False
-                progress = bool(moved[unsolved].any())
-                moved[unsolved] = False
-                if not progress or not (moved.any() or final):
-                    x, system, lane_costs = base
-                    break
-                x = reached
-                back = below & np.isin(member_of, unsolved)
-                x[back] = previous[back]
+            x, lane_costs, system, partial = self.settle(
+                x, base, accepted, every, radii, retreats, attempt, codes, active
+            )
+            if partial is not None:
+                spliced = partial
         if spliced:
-            # The exit's request of every lane at the polished point, whose root block and
-            # levels above the cut the next attempt reads; should it fail, the polish
-            # ends where it started.
-            solved_costs, solved, failures = self.request_blocks(x, attempt)
-            if failures:
-                work.record(attempt, failures, inner=True)
-                x, system, lane_costs = start
-            else:
-                system, lane_costs = solved, solved_costs
+            # The exit's request of every lane where the polish ended, whose root block and
+            # levels above the cut the next attempt reads; a member whose lanes fail there
+            # retreats toward where the polish started.
+            changed = np.bincount(
+                member_of[below], weights=(x != start.point)[below], minlength=count
+            )
+            x, lane_costs, system, _ = self.settle(
+                x, start, changed > 0, True, radii, retreats, attempt, codes, active
+            )
         if int(limit) == 0:
             codes[~held] = _SKIPPED
         else:

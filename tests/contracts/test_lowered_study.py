@@ -571,10 +571,12 @@ def test_a_frozen_system_of_some_lanes_replaces_the_gradient_of_their_members_on
     assert np.isnan(float(some.cost)) and np.isfinite(float(every.cost))
 
 
-def test_blocks_keep_no_jacobian_unless_the_frozen_mode_is_prepared(lowered, frozen):
+def test_blocks_keep_no_jacobian_unless_the_frozen_mode_is_prepared(frozen):
     """Without the frozen mode prepared a blocks request keeps nothing and a frozen request is
     refused; with it, a lane that has no blocks result yet is refused by name."""
-    _, study, _ = lowered
+    # A study of its own: a nested fit with a polish prepares the frozen mode on its study.
+    study = ds.lower(_two_owners("unkept_decay"), objective=inf.MAP())
+    study.prepare()
     route = _LaneRoute(inf.TrustRegion(), study)
     point = np.asarray(study.x0, dtype=np.float64)
     route.evaluate("blocks", point)

@@ -234,7 +234,10 @@ The options, with their defaults:
 - `nested_at=None` names a level whose members polish their own
   parameters after every accepted step, the other parameters held.
   `inner=TrustRegion(max_steps=k)` allows `k` polish iterations per
-  step; with `k=0` the fit makes the steps of `nested_at=None`.
+  step; with `k=0` the fit makes the steps of `nested_at=None`. A polish
+  iteration solves the polished members' experiments without derivatives
+  and steps on their Jacobians from the step's evaluation; one evaluation
+  with derivatives ends the polish.
 - `radius_init=`, `radius_max=`, `eta=`, `grad_tol=`, `step_tol=`,
   `cost_tol=`, and `x_scale=` are the trust-region options of
   `ds.optimization.NewtonTrustRegion` ([Newton trust
