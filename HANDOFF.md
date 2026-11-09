@@ -109,7 +109,70 @@ one bugfix line.
 three must travel: KLU `4473e5ae`, SuperLU `f3f08ca5`, cuDSS cu12 `fe5009d4`. The cu13 module and the
 aarch64 modules are not rebuilt yet (milestone 5 rebuilds the Jetson ones).
 
+## Milestone 3: SuperLU_MT (N11), measured; the shipped patch kept
+
+**Decision: the shipped patch stays** (no native source change). The lighter fix (fixupL's fix plus
+acquire-release spin locks, pipelining kept) gives no wrong solve in 8,000 at 5 and at 32 threads
+where fixupL's fix alone gives 7 in 12,000, so pipelining's wrong answers were a memory-ordering
+fault, but its factors are not bit-identical to one thread's (1,629 and 2,000 rounds of 2,000 differ
+at 5 threads): pipelining applies a parent's updates in a schedule-dependent order. R17's gate asks
+for both, so it fails, and the six-run row was not needed. The patch costs time on some patterns
+(the random one 3.3x at 5 threads) and saves it on others (the LFP cell); recorded for the owner.
+
+Setup (`.ports/m3/`): SuperLU_MT 1e4bc160 built four ways at the release flags with the host gcc 13.3
+(`slu/variant.sh <name> <kind>`): `up` (upstream), `ship` (`patches/0001` as shipped), `fixl` (its
+`util.c` hunk only, RP6's fault 1 fixed, pipelining kept), `fence` (`fixl` plus `slu/fence.py`: an
+acquire load in `await` and before it in `p?gstrf_panel_bmod.c`, a release store for every column
+release in `p?gstrf_thread.c`; on x86 these compile to the same moves, so what they change is the
+compiler's ordering). Driver `slu_time.c` (RP6's `slu_driver.c`, the extension's exact calls, plus the
+wall time of each `pdgstrf`). Patterns: `chain` (banded, n 50,000, half-bandwidth 20: a one-path
+elimination tree, `dump_matrix.py chain`), `lfp50x10` (the LFP half cell of `batjax-wt/sparsity.py` at
+50 volumes x 10 particles, n 51,748, 458,101 entries, `J + M/h` at its start with h = 1e-3,
+`dump_lfp.py 50 10` run from the batjax checkout), `random` (n 1,500, density 0.2 %; a sparser
+4,000 x 4,000 one overflows the driver's fixed L storage). Workstation (32 logical CPUs), slot queue,
+machine otherwise idle at 00:30 EST; 32 threads is every logical CPU, so those rows are noisy.
+
+**Factor time, ms, median (minimum) of 20 rounds** (`timing.sh 20 up ship fixl fence`, exit 0, `timing.log`):
+
+| pattern | threads | up | ship | fixl | fence |
+|---|---:|---:|---:|---:|---:|
+| chain | 1 | 44.4 (44.1) | 44.7 (44.3) | 44.7 (44.5) | 45.1 (44.7) |
+| chain | 5 | 52.7 (51.6) | 51.1 (50.4) | 52.3 (51.0) | 52.8 (51.0) |
+| chain | 32 | 648 (407) | 339 (142) | 673 (603) | 660 (554) |
+| lfp50x10 | 1 | 30.1 (29.8) | 31.4 (30.3) | 29.9 (29.6) | 29.9 (29.3) |
+| lfp50x10 | 5 | 22.5 (21.3) | **20.0 (18.8)** | 23.7 (21.8) | 22.6 (22.3) |
+| lfp50x10 | 32 | 136 (109) | **91 (74)** | 134 (111) | 144 (116) |
+| random | 1 | 20.2 (20.0) | 19.9 (19.8) | 20.0 (19.9) | 20.0 (19.6) |
+| random | 5 | 6.0 (6.0) | **19.9 (19.9)** | 6.1 (6.0) | 6.0 (6.0) |
+| random | 32 | 12.6 (10.0) | **33.0 (29.6)** | 13.8 (10.8) | 14.1 (10.5) |
+
+**R17's gate rounds** (`gate.sh <variant>`: 2,000 factor-and-solve rounds of the 24 x 24 system and of
+a random 400 x 400 at 1, 5 and 32 threads, bits compared with one thread's; exit 0 each):
+
+| variant | wrong at 5 / 32 (24 x 24; 400) | rounds not bit-identical to 1 thread at 5 / 32 (24 x 24; 400) |
+|---|---|---|
+| up | 78 / 35; 98 / 108 | 1,645 / 1,593; 2,000 / 2,000 |
+| ship | 0 / 0; 0 / 0 | **0 / 0; 0 / 0** |
+| fixl | 0 / 0; 0 / 3 | 1,762 / 1,597; 2,000 / 2,000 |
+| fence | 0 / 0; 0 / 0 | **1,629 / 1,569; 2,000 / 2,000** |
+
+Three more runs of the 400 x 400 (`extra.sh`, exit 0): fixl wrong 1, 0, 0 at 5 and 2, 3, 1 at 32;
+fence 0 everywhere.
+
+**Row 10, the per-thread OpenMP pools: recorded, not routed.** `drv_pool` (`slu_pool.c`, ship library,
+5 threads; `pool.sh`, exit 0, `pool.log`), factor ms median (minimum): every round on one host thread /
+rotating over 14 long-lived host threads with warm pools / a new host thread (a new pool) each round:
+24 x 24 0.009 / 0.014 / 0.067; 400 x 400 1.15 / 1.30 / 1.38; LFP 20.3 (19.6) / 23.7 (18.4) / 33.6 (23.6).
+A pool is built once per XLA thread (the review saw 14 OS threads added over 400 calls, three or four
+pools of five); after that, rotating over warm pools costs 0 to 17 % at the median and nothing at the
+minimum, while one worker thread would add a hand-off to every call, more than a 24 x 24 factor
+takes. Routing was not built.
+
+Docs: the stale warnings "SuperLU_MT on more than one thread ... an upstream defect ... set
+`OMP_NUM_THREADS=1`" (`docs/reference/simulation/linear.md`, `docs/overview/simulation/linear.md`),
+false since R17's patch, are now notes: bit-identical to one thread, and more threads are not always
+faster.
+
 ## Next
 
-Milestone 3 (SuperLU_MT measurements and the fenced locks), 4 (rows
-14, 15), 5 (Jetson), 6 (GPU files, suite rows, ruff).
+Milestone 4 (rows 14, 15), 5 (Jetson), 6 (GPU files, suite rows, ruff).
