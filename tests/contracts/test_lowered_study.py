@@ -106,6 +106,29 @@ def test_joint_and_nested_fits_reach_the_same_optimum(lowered, joint_fit):
     np.testing.assert_allclose(nested.params, joint_fit.params, atol=1e-5)
 
 
+def test_the_nested_mode_without_polish_makes_the_joint_attempts():
+    """With no polish iterations the nested mode's attempts are the joint mode's: at every attempt
+    the same acceptance, cost, point and radius, and the fits end with the same stop and status."""
+    study = ds.lower(_two_owners("zero_polish_decay"), objective=inf.MAP())
+    fits = []
+    for solver in (
+        inf.TrustRegion(max_steps=8),
+        inf.TrustRegion(max_steps=8, nested_at="cell", inner=inf.TrustRegion(max_steps=0)),
+    ):
+        records = _Records()
+        fits.append((small_fit(study, solver, callbacks=(records,)), records.steps))
+    (joint, joint_steps), (nested, nested_steps) = fits
+    assert (nested.status, nested.trust_region.stop) == (joint.status, joint.trust_region.stop)
+    assert [info.accepted for info, _ in nested_steps] == [info.accepted for info, _ in joint_steps]
+    rows = [
+        [(info.cost, info.radius, *info.params) for info, _ in steps]
+        for steps in (joint_steps, nested_steps)
+    ]
+    # measured 0.0 relative difference over every attempt and field, CPU workstation 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k without_polish
+    np.testing.assert_allclose(rows[1], rows[0], rtol=1e-10, atol=0.0)
+
+
 class _StopAtSecondAttempt(inf.Callback):
     def __init__(self):
         self.attempts = 0
@@ -338,19 +361,18 @@ class _Records(inf.Callback):
         self.steps.append((info, dict(info.state)))
 
 
-@pytest.fixture(scope="module")
-def two_owners():
-    """A two-owner MAP decay study, its owners' data of different noise, lowered."""
+def _two_owners(name):
+    """Two owners sharing ``rate``, each with its own ``source``, under priors on both."""
     from tests.support.inference import NOISE, decay_experiment
 
     decay = decay_recipe(
-        "owner_cost_decay",
+        name,
         source=True,
         rate_prior=inf.NormalPrior(mean=0.5, scale=0.5),
         source_prior=inf.NormalPrior(mean=0.0, scale=0.2),
     )
     cells = CELLS[:2]
-    study = inf.Study(
+    return inf.Study(
         tuple(
             decay_experiment(decay, owner, source=source, noise=(index + 1) * NOISE)
             for index, (owner, source) in enumerate(cells)
@@ -359,37 +381,16 @@ def two_owners():
         clusters={"cell": tuple(owner for owner, _ in cells)},
         independent=True,
     )
-    return ds.lower(study, objective=inf.MAP())
 
 
-def test_the_nested_mode_without_polish_makes_the_joint_attempts(two_owners):
-    """With no polish iterations the nested mode's attempts are the joint mode's: at every attempt
-    the same acceptance, cost, point and radius, and the fits end with the same stop and status."""
-    fits = []
-    for solver in (
-        inf.TrustRegion(max_steps=8),
-        inf.TrustRegion(max_steps=8, nested_at="cell", inner=inf.TrustRegion(max_steps=0)),
-    ):
-        records = _Records()
-        fits.append((small_fit(two_owners, solver, callbacks=(records,)), records.steps))
-    (joint, joint_steps), (nested, nested_steps) = fits
-    assert (nested.status, nested.trust_region.stop) == (joint.status, joint.trust_region.stop)
-    assert [info.accepted for info, _ in nested_steps] == [info.accepted for info, _ in joint_steps]
-    rows = [
-        [(info.cost, info.radius, *info.params) for info, _ in steps]
-        for steps in (joint_steps, nested_steps)
-    ]
-    # measured 0.0 relative difference over every attempt and field, CPU workstation 2026-11-09,
-    # pytest tests/contracts/test_lowered_study.py -k without_polish
-    np.testing.assert_allclose(rows[1], rows[0], rtol=1e-10, atol=0.0)
-
-
-def test_nested_attempt_records_split_the_cost_by_owner(two_owners):
-    """A nested fit's record of every attempt holds each owner's cost at the current point and where
-    the attempt ended, and the shared remainder; at every attempt they sum to the fit's cost there."""
+def test_nested_attempt_records_split_the_cost_by_owner():
+    """A nested fit's record of every attempt holds each owner's cost at the current point and at
+    the trial, and the shared remainder; at every attempt they sum to the fit's cost there."""
     records = _Records()
     fit = small_fit(
-        two_owners, inf.TrustRegion(max_steps=8, nested_at="cell"), callbacks=(records,)
+        ds.lower(_two_owners("owner_cost_decay"), objective=inf.MAP()),
+        inf.TrustRegion(max_steps=8, nested_at="cell"),
+        callbacks=(records,),
     )
     assert records.steps
     current = float(fit.cost_history[0])
@@ -397,7 +398,7 @@ def test_nested_attempt_records_split_the_cost_by_owner(two_owners):
         owners = np.asarray(state["record.owner_costs"], dtype=np.float64)
         assert owners.shape == (2,)
         total = float(owners.sum() + state["record.owner_shared_cost"])
-        # measured 1.9e-16 relative difference, CPU workstation 2026-11-09,
+        # measured 1.8e-16 relative difference, workstation RTX 4070 Ti 2026-10-25,
         # pytest tests/contracts/test_lowered_study.py -k owner
         np.testing.assert_allclose(total, current, rtol=1e-10)
         assert np.asarray(state["record.owner_predicted"]).shape == (2,)
