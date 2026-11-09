@@ -1,7 +1,7 @@
 """Compiled constrained solvers: solutions in vmap lanes, each Hessian mode, the implicit
 derivative in args and in the bounds, its reverse form and the adjoint that selects it, the
-refusal of a tangent on a derivative-free input, its Gauss-Newton form, a
-forward-only residual under forward-over-forward, a runtime budget and tolerance, and how a run
+refusal of a tangent on a derivative-free input, a coordinate equal bounds fix, its Gauss-Newton
+form, a forward-only residual under forward-over-forward, a runtime budget and tolerance, and how a run
 ends: degenerate, infeasible, out of steps, diverged, a failed subproblem, restoration, failed
 evaluations, float32."""
 
@@ -208,6 +208,33 @@ def test_a_tangent_on_a_derivative_free_input_raises(leaf):
         solver = dataclasses.replace(SOLVERS["interior_point"], adjoint=adjoint)
         with pytest.raises(ds.ConfigurationError, match=leaf):
             derivative(lambda t: run(solver, t))(0.0)
+
+
+def _fixed_at(solver, value):
+    """`min (x0 - 1)^2 + (x1 - 2)^2` with `0 <= x0 <= 5` and `value <= x1 <= value`."""
+    problem = objective(
+        [0.5, 0.5],
+        lambda x: (x[0] - 1.0) ** 2 + (x[1] - 2.0) ** 2,
+        (jnp.array([0.0, value]), jnp.array([5.0, value])),
+    )
+    x, record = solver.run(problem, problem.x0, None)
+    return _flat(x, record), record.status
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_equal_bounds_fix_a_coordinate(solver):
+    """Equal bounds make a coordinate a parameter of the solve, as Ipopt's `make_parameter` does:
+    the run ends `KKT_TOL` at `x* = (1, v)` with the upper multiplier `2 (2 - v)`, the gradient
+    of the Lagrangian there, and the solution moves with `v`."""
+    run = jax.jit(lambda v: _fixed_at(SOLVERS[solver], v))
+    point, status = run(0.3)
+    tangent = jax.jit(jax.jacfwd(lambda v: _fixed_at(SOLVERS[solver], v)[0]))(0.3)
+    errors = [
+        jnp.max(jnp.abs(point - jnp.array([1.0, 0.3, 0.0, 0.0, 0.0, 3.4]))),
+        jnp.max(jnp.abs(tangent - jnp.array([0.0, 1.0, 0.0, 0.0, 0.0, -2.0]))),
+    ]
+    # measured 1.3e-13 (worst over solvers), workstation CPU 2026-11-08
+    assert int(status) == TerminationStatus.KKT_TOL and float(max(errors)) <= _SOLUTION
 
 
 def _residual(x, a):
