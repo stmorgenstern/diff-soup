@@ -1,7 +1,8 @@
 """Compiled constrained solvers: solutions in vmap lanes, each Hessian mode, the implicit
-derivative in args, its reverse form and the adjoint that selects it, a forward-only residual
-under forward-over-forward, and how a run ends: degenerate, infeasible, out of steps, diverged,
-a failed subproblem, restoration, failed evaluations, float32."""
+derivative in args, its reverse form and the adjoint that selects it, its Gauss-Newton form, a
+forward-only residual under forward-over-forward, a runtime budget and tolerance, and how a run
+ends: degenerate, infeasible, out of steps, diverged, a failed subproblem, restoration, failed
+evaluations, float32."""
 
 from __future__ import annotations
 
@@ -51,6 +52,9 @@ _COMPOSITION = 1e-10
 # measured 4.1e-16 (worst over solvers and lanes), workstation CPU 2026-11-06,
 # pytest tests/contracts/test_compiled_solvers.py::test_the_reverse_form_gradient_equals_the_forward_form_jacobian
 _REVERSE_FORM = 1e-10
+# measured 8.4e-13 (worst of jit and lanes, tangents and cotangents), workstation CPU 2026-11-08,
+# pytest tests/contracts/test_compiled_solvers.py::test_the_gauss_newton_form_equals_the_exact_form_at_a_zero_residual_solution
+_RULE_EQUALITY = 1e-10
 
 
 def _flat(x, record):
@@ -300,3 +304,92 @@ def test_the_interior_point_solves_through_its_restoration_phase():
     problem = _wachter_biegler()
     _, record = jax.jit(lambda a: SOLVERS["interior_point"].run(problem, problem.x0, a))(-1.0)
     assert int(record.inner_steps) > 0 and int(record.status) == TerminationStatus.KKT_TOL
+
+
+def _zero_residual_rows(z, a):
+    """Rows that vanish at `z* = (1/2, 7/10 + w1/10, 2/5)` for the data `a["y"]` made there, and
+    two linear rows that hold `z0` on its lower bound and `z1` on its inequality."""
+    w = a["w"]
+    model = jnp.stack(
+        [
+            jnp.exp(w[0] * z[2]) * z[0] + w[1] * z[1],
+            z[1] * z[2] + w[1] * z[2] ** 2 + w[0] * z[0],
+            jnp.sin(z[2]) * (1.0 + w[0]) + z[0] * z[1],
+        ]
+    )
+    return jnp.concatenate([model - a["y"], jnp.stack([z[0] - 0.2, z[1] - 0.3])])
+
+
+def _zero_residual_args(w):
+    """`args` whose data the model meets exactly at `z*`."""
+    z = jnp.array([0.5, 0.7 + 0.1 * w[1], 0.4])
+    return {"w": w, "y": _zero_residual_rows(z, {"w": w, "y": jnp.zeros(3)})[:3]}
+
+
+def test_the_gauss_newton_form_equals_the_exact_form_at_a_zero_residual_solution():
+    """Under `hessian="gauss-newton"` the implicit derivative takes the Gauss-Newton form, which at
+    a zero-residual solution with an active bound and an active inequality gives the exact form's
+    tangents and cotangents, jitted and in lanes."""
+    problem = LeastSquaresProblem.from_residual(
+        jnp.array([1.0, 1.0, 0.0]),
+        _zero_residual_rows,
+        args=_zero_residual_args(jnp.array([0.3, 0.6])),
+        bounds=(jnp.array([0.5, -jnp.inf, -jnp.inf]), None),
+    ).with_constraints(
+        Constraints(inequality=lambda z, a: 0.7 + 0.1 * a["w"][1:] - z[1:2], n_inequality=1)
+    )
+    ws = jnp.array([[0.3, 0.6], [0.4, 0.4], [0.15, 0.9]])
+    x0 = jnp.broadcast_to(problem.x0, (3, 3))
+
+    def lane(solver, w, data):
+        x, record = solver.run(problem, problem.x0, {"w": w, "y": data})
+        return _flat(x, record), jnp.sum(jnp.sin(x)) + jnp.sum(_flat(x, record)[3:])
+
+    def derivatives(hessian):
+        # measured: both modes end KKT_TOL at 1.3e-13, workstation CPU 2026-11-08
+        solver = InteriorPoint(hessian=hessian, tol=1e-12)
+        reverse = dataclasses.replace(solver, adjoint=ds.nonlinear.ImplicitAdjoint())
+        data = jax.vmap(lambda w: _zero_residual_args(w)["y"])(ws)
+        jitted = jax.jit(jax.jacfwd(lambda w: lane(solver, w, data[0])[0]))(ws[0])
+        grad = jax.jit(jax.grad(lambda w: lane(reverse, w, data[0])[1]))(ws[0])
+
+        def in_lanes(s, w):
+            x, record = ds.optimization.lanes(s, problem, {"w": w, "y": data}, x0)
+            return jax.vmap(_flat)(x, record)
+
+        tangent = jax.jacfwd(lambda w: in_lanes(solver, w))(ws)
+        cotangent = jax.grad(lambda w: jnp.sum(jnp.sin(in_lanes(reverse, w))))(ws)
+        return jitted, grad, tangent, cotangent
+
+    gauss_newton, exact = derivatives("gauss-newton"), derivatives("exact")
+    errors = [
+        float(jnp.max(jnp.abs(g - e)) / jnp.max(jnp.abs(e))) for g, e in zip(gauss_newton, exact)
+    ]
+    assert max(errors) <= _RULE_EQUALITY
+
+
+def _decay_rows(x, a):
+    """A decay fitted to data it does not quite meet: a nonzero residual."""
+    t = jnp.linspace(0.0, 3.0, 40)
+    return x[0] * jnp.exp(-x[1] * t) + x[2] - a * (jnp.exp(-0.7 * t) + 0.05 * jnp.sin(5.0 * t))
+
+
+def test_a_runtime_budget_and_tolerance_run_without_a_new_compile():
+    """`run(max_steps=, tol=)` takes both as runtime values: three budgets trace once, and a loose
+    tolerance stops the run sooner, within that tolerance and above the tight one."""
+    problem = LeastSquaresProblem.from_residual(jnp.array([1.0, 0.5, 0.0]), _decay_rows, args=2.0)
+    # measured: KKT error 6.8e-14 after 9 steps, 3.4e-4 after 4 at 1e-3, workstation CPU 2026-11-08
+    solver = InteriorPoint(hessian="gauss-newton", tol=1e-12, max_steps=200)
+    traces = []
+
+    def run(max_steps, tol):
+        traces.append(max_steps)
+        return solver.run(problem, problem.x0, 2.0, max_steps=max_steps, tol=tol)[1]
+
+    run = jax.jit(run)
+    budgets = [run(jnp.int32(m), 1e-12) for m in (2, 5, 200)]
+    loose = run(jnp.int32(200), 1e-3)
+    tight = budgets[-1]
+    assert len(traces) == 1 and [int(r.steps) for r in budgets[:2]] == [2, 5]
+    assert int(loose.status) == int(tight.status) == TerminationStatus.KKT_TOL
+    assert 1e-12 < float(loose.kkt_error) <= 1e-3 and int(loose.steps) < int(tight.steps)
