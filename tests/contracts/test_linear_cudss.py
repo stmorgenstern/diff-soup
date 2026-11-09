@@ -720,6 +720,19 @@ def test_the_handlers_dispatch_statically_where_a_program_states_its_factor():
 
 
 @cudss_only
+def test_a_function_called_twice_in_one_program_solves_each_call_with_its_own_factor():
+    """A jitted factor-and-solve called twice in one program is lowered once, so its two factor
+    calls share one site and one slot; each solve still applies its own call's factor."""
+    topology, values = _system()
+    analysis = analyze(topology, backend=CuDSS())
+    with SolveContext("twice") as ctx:
+        inner = jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), _B)[0])
+        xs = jnp.stack(jax.jit(lambda v, w: (inner(v), inner(w)))(values, 2.0 * values))
+    expected = [np.linalg.solve(_matrix(topology, k * values), _B) for k in (1.0, 2.0)]
+    np.testing.assert_allclose(xs, np.stack(expected), **EXACT)
+
+
+@cudss_only
 def test_the_csr_assembly_sums_duplicates_and_replaces_dirichlet_rows():
     """The values handed to the extension are the CSR values of ``A_bc``: shuffled coordinates
     with duplicates and Dirichlet rows assemble entry by entry in row-major order, eagerly and

@@ -115,7 +115,7 @@ class _KLUContractAnalysis:
 
 
 def _release_native_analysis(native_id: int) -> None:
-    """Drop the native registry's reference to an analysis (its sites keep it alive)."""
+    """Release a native analysis and its call sites (its slots keep it alive)."""
     try:
         _native().analysis_release(native_id)
     except Exception:  # noqa: BLE001 - interpreter shutdown or a missing module

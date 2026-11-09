@@ -583,10 +583,11 @@ ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
     // values than the ones it carries. Such a refactor (a derivative solve of an older factor
     // runs after a later refactor of the storage) leaves the slot holding this solve's matrix,
     // so the slot stops being trusted: a later solve of this execution compares values again.
-    // A trusted shared-storage slot holds the matrix of the factor a refactor of this execution
-    // returned, of the kind of that refactor's values, which are this solve's.
+    // A slot of the other kind (a refactor of this execution with complex values, then a real
+    // solve, or the reverse) never counts as holding these values, so it is factored afresh like
+    // a slot of other values.
     constexpr bool complex = kComplex<T>;
-    const bool trusted = storage != 0 && slot->trusted_run == run.run_id;
+    const bool trusted = storage != 0 && slot->trusted_run == run.run_id && slot->complex == complex;
     if (!trusted && !SameValues(*slot, Doubles(values), complex)) {
         slot->trusted_run = -1;
         ++reg.stats.rebuilds;
@@ -769,7 +770,8 @@ NB_MODULE(_native_superlu, m) {
           "Analyse a sparsity pattern: compressed-column structure, Dirichlet rows and the "
           "column ordering. Returns the analysis id.");
     m.def("analysis_release", &slot_registry::AnalysisRelease<Registry>, nb::arg("analysis_id"),
-          "Drop the registry's reference to an analysis; slots that use it keep it alive.");
+          "Release an analysis: drop the registry's reference and free its call sites; the "
+          "factor slots that use it keep it alive until their SolveContext is released.");
     m.def("site_create", &slot_registry::SiteCreate<Registry>, nb::arg("analysis_id"),
           "Create a factor site on an analysis with an id of its own (a lowered call names its "
           "site by a key computed from the call, and the site is created on the first call "
