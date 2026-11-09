@@ -65,12 +65,15 @@ two ways:
   id and lane token are constants of the program (as they are when a
   jitted function factors in a context it closes over) passes
   ``static_context`` and ``static_lane``. A solve, refactor or invalidation
-  whose handle is the direct result of such a factor call, or of a refactor
-  call whose own held handle resolves the same way, passes ``static_path``
-  (the factor call's site, then each refactor call's site in order) with
-  the factor's context and lane ([handle_path][]); such a refactor still
-  reads its predicate. A static dispatch is counted as
-  ``static_dispatches`` in [contract_stats][].
+  whose handle is the direct result of a factor or refactor call of the
+  program passes ``static_path`` ([handle_path][]), whose last site is
+  that producing call's; the handler then takes the handle words the
+  producing call wrote, when they are this handle's: written in the same
+  execution of the program into the buffer the call reads its handle
+  from. Otherwise (another execution, or another call of the same site in
+  this execution, wrote the site since) it reads the handle, as a dynamic
+  dispatch does. Such a refactor still reads its predicate. A static
+  dispatch is counted as ``static_dispatches`` in [contract_stats][].
 - Dynamic dispatch. Every other handle (one carried through a loop, passed
   into the program, computed, or produced under ``lax.map`` lanes or a
   traced context) is read back to the host before cuDSS is called: one
@@ -1452,8 +1455,10 @@ def lower_apply(
     shape ``(lanes, n)`` or ``(lanes, nrhs, n)``, lane ``k`` solving with
     lane ``k`` of the batch slot. When the handle resolves by the rule of
     [handle_path][], the call carries ``static_path``, ``static_context``
-    and ``static_lane`` and the handler finds the slot without reading the
-    handle back; otherwise they are an empty path and ``-1``.
+    and ``static_lane``, and the handler takes the handle words of its
+    producing call in place of a read when they are this handle's (see the
+    module's "Static dispatch"); otherwise they are an empty path and
+    ``-1``.
 
     A solve with ``transpose=False`` of a factor that names shared storage
     (``storage``) carries the storage's key and, when the program states it,
@@ -1556,10 +1561,10 @@ def lower_refactor(
     is refactored, a lane that asks from the values the call carries for it
     and a lane that does not from the values its slot already holds. When
     the held handle resolves by the rule of [handle_path][], the call
-    carries ``static_path``, ``static_context`` and ``static_lane`` and the
-    handler finds the held slot without reading the handle back; otherwise
-    they are an empty path and ``-1``. The predicate is always read back to
-    the host.
+    carries ``static_path``, ``static_context`` and ``static_lane``, and the
+    handler takes the handle words of its producing call in place of a read
+    when they are this handle's; otherwise they are an empty path and
+    ``-1``. The predicate is always read back to the host.
 
     The call receives ``values`` and ``held_values`` in the coordinate order
     of the topology and the predicate before the handle; the handler

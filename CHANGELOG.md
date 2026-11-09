@@ -13,6 +13,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - While a crossing is located, `Event` conditions now receive the solve's `theta` as `args`, as they do when the event is detected, so a condition can read and differentiate a parameter. Previously they received `None` there, and a condition that tests `args is None` now takes the other branch.
 - `spec.build()` now declares only the Jacobian entries a tangent can reach, unless an equation uses `q.dt` (`exact_sparsity=None`, the new default). Pass `exact_sparsity=False` for the declared blocks with a dense border per global.
 - `InteriorPoint`, `SQP` and `AugmentedLagrangian` with `hessian="gauss-newton"` on a least-squares problem now differentiate their solution by the Gauss-Newton form of the implicit rule, first order throughout: `J^T J` in place of the Lagrangian Hessian, the mixed term from the residual rows' derivative in `args`, no constraint curvature. It equals the exact rule at a zero-residual solution. Pass `hessian="exact"` or `"auto"` for the exact rule.
+- A `SolveContext` now belongs to the thread that first factors in it: `factor` and `empty_factor` in it from another thread raise `FactorContractError`. Create one context per thread.
 
 ### Features
 
@@ -44,6 +45,8 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - A `KLU`, `SuperLU` or `CuDSS` factor lowered into a program over several devices of one process now raises `FactorContractError`. Previously XLA failed with an internal error, or, in a `shard_map` body, the devices shared one native factor.
 - Complex values on an analysis declared `spd=True`, and on a `CuDSS` analysis with `downcast_factors` or `emulation_mantissa_bits`, now raise `FactorContractError`. Previously cuDSS factored them as a real symmetric positive definite matrix, or ignored the option.
 - Fixed `SuperLU` on more than one thread, which returned a wrong solution for a few factors in a hundred with a success status. Its factors on any number of threads now equal one thread's, bit for bit; the build patches SuperLU_MT 4.0.2 (`diff_soup/_internal/superlu_ffi/patches/`).
+- Fixed `CuDSS` solves that could apply another factor and report success: two executions of one compiled program at once on one `SolveContext`, or two calls of one jitted function inside one program, which share a factor slot. A solve now always applies its own handle's factor.
+- A released `Analysis` of `KLU`, `SuperLU` or `CuDSS` now frees its native call sites and, once its factors' contexts are released, its native analysis. Previously the sites kept every analysis for the life of the process.
 
 ### Performance
 

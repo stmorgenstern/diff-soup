@@ -769,7 +769,8 @@ NB_MODULE(_native_superlu, m) {
           "Analyse a sparsity pattern: compressed-column structure, Dirichlet rows and the "
           "column ordering. Returns the analysis id.");
     m.def("analysis_release", &slot_registry::AnalysisRelease<Registry>, nb::arg("analysis_id"),
-          "Drop the registry's reference to an analysis; slots that use it keep it alive.");
+          "Release an analysis: drop the registry's reference and free its call sites; the "
+          "factor slots that use it keep it alive until their SolveContext is released.");
     m.def("site_create", &slot_registry::SiteCreate<Registry>, nb::arg("analysis_id"),
           "Create a factor site on an analysis with an id of its own (a lowered call names its "
           "site by a key computed from the call, and the site is created on the first call "
