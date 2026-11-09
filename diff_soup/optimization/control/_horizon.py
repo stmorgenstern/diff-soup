@@ -25,7 +25,7 @@ from diff_soup.optimization._derived import identity
 if TYPE_CHECKING:
     from diff_soup._adjoints import AbstractAdjoint
     from diff_soup.optimization.constraints import Constraints
-    from diff_soup.optimization.control.problem import PiecewiseConstant
+    from diff_soup.optimization.control.problem import AbstractControls
     from diff_soup.timestepping.vsvo.classes import JBDF, JIDA, JNDF
 
 
@@ -33,7 +33,7 @@ class Configuration(NamedTuple):
     """What a horizon's closures read besides `(u, args)`; hashable, and free of arrays."""
 
     model: Held
-    controls: PiecewiseConstant
+    controls: AbstractControls
     cost: Callable
     path: Callable | None
     terminal: Callable | None
@@ -105,7 +105,7 @@ def _build(configuration: Configuration) -> Lowered:
     n_path = configuration.n_path * times.size
     extra = configuration.constraints
     lowered = None if extra is None else extra.lower(None, identity)
-    n = controls.intervals
+    n = controls.size
     modes = tuple(model.operational_modes())
     reverse = configuration.adjoint is not None
     # Reverse mode needs an adjoint that supports it, and pays when columns exceed rows.

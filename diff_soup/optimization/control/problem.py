@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import abc
 import dataclasses
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
@@ -41,7 +42,50 @@ def _lengths(duration: ArrayLike | Sequence[float]) -> float | tuple:
     return tuple(float(d) for d in np.asarray(duration, dtype=np.float64).ravel())
 
 
-class PiecewiseConstant(eqx.Module):
+class AbstractControls(eqx.Module):
+    """The parameterization of a horizon's operational targets by a decision vector.
+
+    A [ControlProblem][diff_soup.optimization.control.ControlProblem] reads `size` and lowers
+    each decision vector through `segments` onto the schedule it solves, which runs to
+    `horizon`. [receding_horizon][diff_soup.optimization.control.receding_horizon] and the
+    estimators step the controls by `interval`, through `durations` and `interval_controls()`.
+    """
+
+    @property
+    @abc.abstractmethod
+    def size(self) -> int:
+        """The length of the decision vector."""
+
+    @property
+    @abc.abstractmethod
+    def durations(self) -> tuple:
+        """The length of each segment, static."""
+
+    @property
+    @abc.abstractmethod
+    def horizon(self) -> float:
+        """The end of the horizon: the durations added in order, as the schedule adds them."""
+
+    @property
+    @abc.abstractmethod
+    def interval(self) -> float:
+        """The one length of every interval, which the receding horizon and the estimators step by."""
+
+    @abc.abstractmethod
+    def interval_controls(self) -> AbstractControls:
+        """The parameterization of one interval, which the estimators advance the model by."""
+
+    @abc.abstractmethod
+    def segments(self, u: ArrayLike, modes: tuple[str, ...]) -> ScheduleArrays:
+        """The schedule arrays of the horizon for the decision vector `u`, traced.
+
+        Args:
+            u: The decision vector, `(size,)`.
+            modes: The model's mode names, `problem.operational_modes()`.
+        """
+
+
+class PiecewiseConstant(AbstractControls):
     """Controls that hold one target of an operational row per interval of a fixed grid.
 
     Interval `k` holds the target `scale * u[k]`.
@@ -59,6 +103,11 @@ class PiecewiseConstant(eqx.Module):
     duration: float | tuple = eqx.field(static=True, converter=_lengths)
     carry_step: bool | None = eqx.field(static=True, default=None)
     scale: float = eqx.field(static=True, default=1.0, converter=float)
+
+    @property
+    def size(self) -> int:
+        """The length of the decision vector, one target per interval."""
+        return self.intervals
 
     def __check_init__(self) -> None:
         """Refuse a grid whose lengths do not match `intervals` or are not positive."""
@@ -159,7 +208,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
 
     Args:
         problem: A built diff-soup problem whose operational table has the row `controls` drives.
-        controls: The parameterization of the decision vector, such as [PiecewiseConstant][diff_soup.optimization.control.PiecewiseConstant].
+        controls: The parameterization of the decision vector, [AbstractControls][diff_soup.optimization.control.AbstractControls] such as [PiecewiseConstant][diff_soup.optimization.control.PiecewiseConstant].
         cost: `cost(sol, u, args) -> scalar`, with `sol` the `Solution` over the horizon at `save_times`.
         path: `path(sol, u, args) -> rows` at or below 0 at every saved time, or `None`.
         terminal: `terminal(sol, u, args) -> rows` at 0 at the end of the horizon, or `None`.
@@ -180,7 +229,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
     problem: Held = eqx.field(static=True, converter=hold)
     constraints: Constraints | None = None
     bounds: tuple[ArrayLike | None, ArrayLike | None] | None = None
-    controls: PiecewiseConstant | None = eqx.field(static=True, default=None)
+    controls: AbstractControls | None = eqx.field(static=True, default=None)
     cost: Callable | None = eqx.field(static=True, default=None)
     path: Callable | None = eqx.field(static=True, default=None)
     terminal: Callable | None = eqx.field(static=True, default=None)
@@ -214,7 +263,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
     def numeric_problem(self, optimizer: OptSolver) -> OptimizationProblem:
         """Lower to closures over `u` and `args`; see [AbstractOptimizationProblem.numeric_problem][diff_soup.optimization.AbstractOptimizationProblem.numeric_problem]."""
         horizon = self._closures()
-        n = self.controls.intervals
+        n = self.controls.size
         start = _middle(self.bounds, n) if self.start is None else jnp.asarray(self.start)
         x0 = jnp.reshape(jnp.asarray(start, dtype=jnp.float64), (n,))
         structure = {
@@ -301,6 +350,11 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
             missing.insert(0, "problem")
         if missing:
             raise ConfigurationError(f"ControlProblem needs {', '.join(missing)}.")
+        if not isinstance(self.controls, AbstractControls):
+            raise ConfigurationError(
+                "ControlProblem controls must be AbstractControls, such as PiecewiseConstant; "
+                f"got {type(self.controls).__name__}."
+            )
         if (self.path is None) != (self.n_path == 0) or (self.terminal is None) != (
             self.n_terminal == 0
         ):

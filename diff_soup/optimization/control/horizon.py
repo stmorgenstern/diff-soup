@@ -199,7 +199,7 @@ def _next_start(control_problem, numeric, solution, record, warm_start):
         return numeric.x0, record
     if warm_start == "previous":
         return solution, record
-    moves = _shift_map(control_problem.controls.intervals)
+    moves = _shift_map(control_problem.controls.size)
     rows = _row_shift_map(control_problem)
     lower, upper = record.bound_multipliers
     shifted = dataclasses.replace(
