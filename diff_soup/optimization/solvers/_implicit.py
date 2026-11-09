@@ -163,9 +163,7 @@ def kkt_tangent(
     the inactive rows' dual diagonal 1, and does not solve when its inertia is not `(n, m, 0)`.
     Closures with the Gauss-Newton rule take its form, from `jacobian` when it is given.
     """
-    dx, tangent, solved, _ = _kkt_tangent(
-        closures, bounds, kkt, x, record, args, dargs, jacobian
-    )
+    dx, tangent, solved, _ = _kkt_tangent(closures, bounds, kkt, x, record, args, dargs, jacobian)
     return dx, tangent, solved
 
 
