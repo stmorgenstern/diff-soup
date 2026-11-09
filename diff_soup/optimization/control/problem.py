@@ -177,9 +177,9 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         layout: The placement of a batch of horizons.
     """
 
+    problem: Held = eqx.field(static=True, converter=hold)
     constraints: Constraints | None = None
     bounds: tuple[ArrayLike | None, ArrayLike | None] | None = None
-    problem: Held = eqx.field(static=True, default=None, converter=hold)
     controls: PiecewiseConstant | None = eqx.field(static=True, default=None)
     cost: Callable | None = eqx.field(static=True, default=None)
     path: Callable | None = eqx.field(static=True, default=None)

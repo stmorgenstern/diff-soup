@@ -11,6 +11,7 @@ import numpy as np
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jaxtyping import Array, ArrayLike, Float, Int, PyTree
 
+from diff_soup._layout import Layout
 from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.solvers._protocol import CompiledSolver, SolveRecord
 
@@ -72,7 +73,7 @@ def map_lanes(fn: Callable, batch: tuple, mesh: Mesh | None) -> PyTree:
     return mapped(*batch)
 
 
-def placement(layout: object) -> Mesh | None:
+def placement(layout: Layout | None) -> Mesh | None:
     """The `"data"` mesh of `layout` with every axis `Auto`, or `None` for one device."""
     mesh = None if layout is None else layout.mesh
     if mesh is None or "data" not in mesh.axis_names:
@@ -104,7 +105,7 @@ def lanes(
     args_batch: PyTree,
     x0_batch: Float[ArrayLike, "count n"],
     *,
-    layout: object = None,
+    layout: Layout | None = None,
     max_steps: Int[ArrayLike, "..."] | None = None,
     tol: Float[ArrayLike, "..."] | None = None,
     warm_start: SolveRecord | None = None,
