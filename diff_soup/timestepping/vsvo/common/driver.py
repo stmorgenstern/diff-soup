@@ -79,6 +79,7 @@ from .contract import (
     validate_requirements,
 )
 from .decisions import init_decision_tape
+from .engine import Engine, StepReport
 from .trace import (
     finalize_trace,
 )
@@ -759,4 +760,6 @@ def _build_saveat_grid(saveat, t0, t1, dtype) -> jax.Array:
     return _build_save_plan(saveat, t0, t1, dtype).query_ts
 
 
-__all__ = ["DriverConfig", "run_engine"]
+# `Engine` and `StepReport` live in `engine`; re-exported for the import path they had before
+# the split.
+__all__ = ["DriverConfig", "Engine", "StepReport", "run_engine"]

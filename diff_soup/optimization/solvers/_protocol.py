@@ -182,8 +182,12 @@ class CompiledSolver(OptSolver):
     ) -> tuple[Float[Array, " n"], SolveRecord]:
         """Minimize from `x0` and return the solution and its record, arrays only.
 
-        The derivative in `args` is the implicit one at the solution, and `x0`, `warm_start`,
-        `max_steps` and `tol` carry none. A run that did not end with `KKT_TOL` has NaN tangents.
+        The derivative in `args` and in the problem's bounds is the implicit one at the
+        solution: an active bound moves the coordinate it holds, and the multiplier is the
+        objective's rate in it. `x0`, `warm_start` and the problem's `objective_scale`,
+        `constraint_scales` and `x0` are derivative-free, and a tangent on any of them raises
+        `ConfigurationError` naming it; `max_steps` and `tol` carry none. A run that did not end
+        with `KKT_TOL` has NaN tangents.
 
         `max_steps` and `tol` are runtime values of the loop, not part of the compiled
         program: a traced or batched budget and tolerance run without a new compile, so the

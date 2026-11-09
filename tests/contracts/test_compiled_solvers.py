@@ -1,6 +1,7 @@
 """Compiled constrained solvers: solutions in vmap lanes, each Hessian mode, the implicit
-derivative in args, its reverse form and the adjoint that selects it, its Gauss-Newton form, a
-forward-only residual under forward-over-forward, a runtime budget and tolerance, and how a run
+derivative in args and in the bounds, its reverse form and the adjoint that selects it, the
+refusal of a tangent on a derivative-free input, a coordinate equal bounds fix, its Gauss-Newton
+form, a forward-only residual under forward-over-forward, a runtime budget and tolerance, and how a run
 ends: degenerate, infeasible, out of steps, diverged, a failed subproblem, restoration, failed
 evaluations, float32."""
 
@@ -154,6 +155,86 @@ def test_a_solver_refuses_an_adjoint_without_an_implicit_rule():
     solver = dataclasses.replace(SOLVERS["interior_point"], adjoint=ds.CheckpointAdjoint())
     with pytest.raises(ds.ConfigurationError):
         solver.run(toy.problem, toy.problem.x0, toy.args_batch[0])
+
+
+def _in_lower_bound(solver, lower):
+    """The bound toy's point, multipliers and value with `x0 >= lower`, at `a = 1`."""
+    problem = TOYS["bound"].problem
+    bounds = (problem.bounds[0].at[0].set(lower), problem.bounds[1])
+    x, record = solver.run(dataclasses.replace(problem, bounds=bounds), problem.x0, 1.0)
+    return jnp.concatenate([_flat(x, record), record.value[None]])
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_the_solution_differentiates_in_an_active_bound(solver):
+    """`jax.jacfwd` and `jax.grad` under `ImplicitAdjoint()` in the active lower bound `l` give the
+    closed form: `x* = (l, (1 - l)/2, (1 - l)/2)`, `lam = l - 1`, `z0 = 1 + 3l`, and the value's
+    rate `z0`, the multiplier."""
+    forward, reverse = (
+        SOLVERS[solver],
+        dataclasses.replace(SOLVERS[solver], adjoint=ds.nonlinear.ImplicitAdjoint()),
+    )
+    exact = jnp.array([1.0, -0.5, -0.5, 1.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    by_forward = jax.jit(jax.jacfwd(lambda lower: _in_lower_bound(forward, lower)))(0.0)
+    weights = jnp.linspace(0.5, 1.5, exact.shape[0])
+    by_reverse = jax.jit(jax.grad(lambda lower: weights @ _in_lower_bound(reverse, lower)))(0.0)
+    errors = [jnp.max(jnp.abs(by_forward - exact)), jnp.abs(by_reverse - weights @ exact)]
+    # measured 5.6e-13 (worst over solvers and rules), workstation CPU 2026-11-08
+    assert float(max(errors)) <= _TANGENT
+
+
+@pytest.mark.parametrize("leaf", ["x0", "warm_start", "objective_scale"])
+def test_a_tangent_on_a_derivative_free_input_raises(leaf):
+    """The start point, the warm start and the problem's scales carry no derivative: a tangent on
+    one raises `ConfigurationError` naming it, under the forward and the reverse rule."""
+    toy = TOYS["inequality"]
+    a = toy.args_batch[0]
+    _, warm = SOLVERS["interior_point"].run(toy.problem, toy.problem.x0, a)
+
+    def run(solver, t):
+        problem, x0, start = toy.problem, toy.problem.x0, None
+        if leaf == "x0":
+            x0 = x0 + t
+        elif leaf == "warm_start":
+            start = dataclasses.replace(warm, value=warm.value + t)
+        else:
+            problem = dataclasses.replace(problem, objective_scale=1.0 + t)
+        return jnp.sum(solver.run(problem, x0, a, warm_start=start)[0])
+
+    for adjoint, derivative in (
+        (ds.ForwardAdjoint(), jax.jacfwd),
+        (ds.nonlinear.ImplicitAdjoint(), jax.grad),
+    ):
+        solver = dataclasses.replace(SOLVERS["interior_point"], adjoint=adjoint)
+        with pytest.raises(ds.ConfigurationError, match=leaf):
+            derivative(lambda t: run(solver, t))(0.0)
+
+
+def _fixed_at(solver, value):
+    """`min (x0 - 1)^2 + (x1 - 2)^2` with `0 <= x0 <= 5` and `value <= x1 <= value`."""
+    problem = objective(
+        [0.5, 0.5],
+        lambda x: (x[0] - 1.0) ** 2 + (x[1] - 2.0) ** 2,
+        (jnp.array([0.0, value]), jnp.array([5.0, value])),
+    )
+    x, record = solver.run(problem, problem.x0, None)
+    return _flat(x, record), record.status
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_equal_bounds_fix_a_coordinate(solver):
+    """Equal bounds make a coordinate a parameter of the solve, as Ipopt's `make_parameter` does:
+    the run ends `KKT_TOL` at `x* = (1, v)` with the upper multiplier `2 (2 - v)`, the gradient
+    of the Lagrangian there, and the solution moves with `v`."""
+    run = jax.jit(lambda v: _fixed_at(SOLVERS[solver], v))
+    point, status = run(0.3)
+    tangent = jax.jit(jax.jacfwd(lambda v: _fixed_at(SOLVERS[solver], v)[0]))(0.3)
+    errors = [
+        jnp.max(jnp.abs(point - jnp.array([1.0, 0.3, 0.0, 0.0, 0.0, 3.4]))),
+        jnp.max(jnp.abs(tangent - jnp.array([0.0, 1.0, 0.0, 0.0, 0.0, -2.0]))),
+    ]
+    # measured 1.3e-13 (worst over solvers), workstation CPU 2026-11-08
+    assert int(status) == TerminationStatus.KKT_TOL and float(max(errors)) <= _SOLUTION
 
 
 def _residual(x, a):

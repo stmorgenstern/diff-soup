@@ -33,8 +33,16 @@ from diff_soup.optimization.inference.statistics._bootstrap_saved import (
     _saved_at_fit,
     _shard_of,
 )
-from diff_soup.optimization.inference.statistics.bootstrap_intervals import _one_of
-from diff_soup.optimization.inference.statistics.bootstrap_outcomes import BootstrapOutcomes
+from diff_soup.optimization.inference.statistics.bootstrap_intervals import (
+    BootstrapBand,
+    BootstrapInterval,
+    BootstrapOneStep,
+    _one_of,
+)
+from diff_soup.optimization.inference.statistics.bootstrap_outcomes import (
+    BootstrapOutcome,
+    BootstrapOutcomes,
+)
 from diff_soup.optimization.inference.statistics.bootstrap_result import BootstrapResult
 
 # Smallest number of resampling clusters a cluster bootstrap can report from.
@@ -398,4 +406,15 @@ def bootstrap(
     )
 
 
-__all__ = ["bootstrap"]
+# Re-exported for the import path they had before the split: `BootstrapBand`,
+# `BootstrapInterval` and `BootstrapOneStep` live in `bootstrap_intervals`, `BootstrapOutcome`
+# and `BootstrapOutcomes` in `bootstrap_outcomes`, and `BootstrapResult` in `bootstrap_result`.
+__all__ = [
+    "BootstrapBand",
+    "BootstrapInterval",
+    "BootstrapOneStep",
+    "BootstrapOutcome",
+    "BootstrapOutcomes",
+    "BootstrapResult",
+    "bootstrap",
+]

@@ -48,6 +48,8 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Fixed `CuDSS` solves that could apply another factor and report success: two executions of one compiled program at once on one `SolveContext`, or two calls of one jitted function inside one program, which share a factor slot. A solve now always applies its own handle's factor.
 - A released `Analysis` of `KLU`, `SuperLU` or `CuDSS` now frees its native call sites and, once its factors' contexts are released, its native analysis. Previously the sites kept every analysis for the life of the process.
 - Fixed a `SuperLU` solve with real values of a shared storage that a refactor with complex values filled earlier in the same program, which returned `nan` with a success status. It now factors the real values first, as `KLU` does.
+- Fixed the derivative of an `InteriorPoint`, `SQP` or `AugmentedLagrangian` solution in the problem's bounds, which was silently zero: an active bound now moves the coordinate it holds, in both implicit rules, and the bound's multiplier is the objective's rate in it. A tangent on the start point, the warm start or the problem's scales now raises `ConfigurationError`; previously it was dropped.
+- Fixed `InteriorPoint` and `SQP` on a variable whose lower and upper bounds are equal, which ended with `SOLVER_FAILED` at the first step. The variable is now fixed at its value before the solve, as Ipopt's `fixed_variable_treatment="make_parameter"` does, under all three compiled solvers, and its bound multipliers are the gradient of the Lagrangian there.
 
 ### Performance
 
