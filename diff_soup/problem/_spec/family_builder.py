@@ -182,6 +182,33 @@ class _MemberView:
         return object.__getattribute__(self, "_row")[name]
 
 
+def _member_q(view, ctx, var_map, t) -> _QView:
+    """The ``q`` a member equation reads.
+
+    ``q.<field>`` and ``q.ops`` are the member's own; ``q.p`` and ``q.fn`` are
+    the problem's declared parameters and functions, which the member kernel
+    puts on ``ctx`` from the evaluation's runtime namespaces, so a substituted
+    parameter value and its tangent reach member equations as they reach
+    component equations. A ctx that carries none leaves both empty.
+    """
+    params = getattr(ctx, "params", None)
+    functions = getattr(ctx, "functions", None)
+    pointwise = getattr(ctx, "pointwise_functions", None) or getattr(
+        functions, "pointwise_names", ()
+    )
+    return _QView(
+        view=view,
+        var_map=var_map,
+        ops=ctx.ops,
+        params=params.as_dict() if hasattr(params, "as_dict") else params,
+        functions=functions.as_dict() if hasattr(functions, "as_dict") else functions,
+        pointwise_functions=pointwise,
+        t=t,
+        coords=None,
+        controls=getattr(ctx, "controls", None),
+    )
+
+
 class _FamilyMemberRHS:
     """Adapter wrapping a user ``(q, m)`` closure for the IR rhs callsite.
 
@@ -191,7 +218,7 @@ class _FamilyMemberRHS:
     member-domain ctx (``ctx.ops``), the runtime member-view ``m`` (built from
     the vmapped param row), and ``t``.  These are re-wrapped in a
     [_QView][diff_soup.problem._spec.q_accessor._QView] so the user closure reads
-    ``q.c_s`` / ``q.ops`` exactly as in a plain
+    ``q.c_s`` / ``q.ops`` / ``q.p`` exactly as in a plain
     ``@spec.equation`` body, then calls ``inner(q, m)``.
 
     A plain Python closure is captured by reference; an ``eqx.Module`` closure
@@ -214,17 +241,7 @@ class _FamilyMemberRHS:
         return self._inner
 
     def __call__(self, view, ctx, m, t):
-        q = _QView(
-            view=view,
-            var_map=self._var_map,
-            ops=ctx.ops,
-            params={},
-            functions={},
-            t=t,
-            coords=None,
-            controls=getattr(ctx, "controls", None),
-        )
-        return self._inner(q, m)
+        return self._inner(_member_q(view, ctx, self._var_map, t), m)
 
 
 class _FamilyMemberAdapter(eqx.Module):
@@ -243,17 +260,7 @@ class _FamilyMemberAdapter(eqx.Module):
         return self.inner
 
     def __call__(self, view, ctx, m, t):
-        q = _QView(
-            view=view,
-            var_map=self.var_map,
-            ops=ctx.ops,
-            params={},
-            functions={},
-            t=t,
-            coords=None,
-            controls=getattr(ctx, "controls", None),
-        )
-        return self.inner(q, m)
+        return self.inner(_member_q(view, ctx, self.var_map, t), m)
 
 
 def _make_member_rhs(inner: Callable, var_map: dict[str, Any]) -> Callable:

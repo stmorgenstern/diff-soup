@@ -211,10 +211,19 @@ class _GraphEdgeView:
 
 
 class _FamilyCtx:
-    """Residual ctx for member equations — carries the member-domain ops."""
+    """Residual ctx for member equations.
 
-    def __init__(self, ops):
+    Carries the member-domain ops and the problem's declared parameters and
+    functions, read from the evaluation's boundary context, so a member
+    equation's ``q.p`` and ``q.fn`` resolve as a component equation's do.
+    """
+
+    def __init__(self, ops, context=None):
+        context = context or {}
         self.ops = ops
+        self.params = context.get("params")
+        self.functions = context.get("functions")
+        self.pointwise_functions = context.get("pointwise_functions", ())
 
 
 def _check_member_multi_return(fam: Family, eq: MultiEquation, r) -> None:
@@ -302,13 +311,25 @@ class _FamilyResidualBlock:
     time untouched.
     """
 
-    def __init__(self, fam: Family, fam_base: int, total_size: int, *, time_ref: float = 1.0):
+    def __init__(
+        self,
+        fam: Family,
+        fam_base: int,
+        total_size: int,
+        *,
+        time_ref: float = 1.0,
+        context=None,
+    ):
         self._fam = fam
         self._fam_base = int(fam_base)
         self._total_size = int(total_size)
         self._count = int(fam.count)
         self._member_state = int(fam.member_state_size)
         self._time_ref = float(time_ref)
+        # The build-time declared namespaces, read only by the build-time
+        # member evaluations (form capture, reach check); a residual call
+        # reads its own from the runtime boundary context.
+        self._build_context = dict(context or {})
         self.trace_count = 0
 
         # Member-field local offsets within one member's flat slab.
@@ -588,7 +609,8 @@ class _FamilyResidualBlock:
         """
         u_row, m_row, member_globals, gather_row = self._synthetic_member_inputs()
         view = self._build_member_view(u_row, gather_row, member_globals)
-        return rhs_fn(view, _FamilyCtx(self._tag_ops), _MemberView(m_row), jnp.asarray(0.0))
+        ctx = _FamilyCtx(self._tag_ops, self._build_context)
+        return rhs_fn(view, ctx, _MemberView(m_row), jnp.asarray(0.0))
 
     def _probe_member_form_state_deps(self, u_row, m_row, member_globals, gather_row):
         """Which member fields each captured form's coefficients read.
@@ -605,7 +627,7 @@ class _FamilyResidualBlock:
         from diff_soup.problem._spec.derivative_expr import DerivativeExpr
 
         m = _MemberView(m_row)
-        ctx = _FamilyCtx(self._tag_ops)
+        ctx = _FamilyCtx(self._tag_ops, self._build_context)
 
         def coefficient_values(inner, row):
             view = self._build_member_view(row, gather_row, member_globals)
@@ -800,7 +822,7 @@ class _FamilyResidualBlock:
         fam = self._fam
         member_view = self._build_member_view(u_row, gather_row, member_globals)
         m = _MemberView(m_row)
-        ctx = _FamilyCtx(self._tag_ops)
+        ctx = _FamilyCtx(self._tag_ops, boundary_context)
 
         def _eval_member_equations() -> list:
             parts: list = []
@@ -1128,7 +1150,7 @@ class _FamilyResidualBlock:
 
 
 def _build_family_residual(
-    fam: Family, fam_base: int, *, total_size: int, time_ref: float = 1.0
+    fam: Family, fam_base: int, *, total_size: int, time_ref: float = 1.0, context=None
 ) -> _FamilyResidualBlock:
     """Build the batched residual block for one [Family][diff_soup.problem._ir.family.Family].
 
@@ -1141,6 +1163,9 @@ def _build_family_residual(
             converts the internal solve time to dimensional once before it calls a member
             boundary flux, the clock every boundary callback is authored on;
             ``1.0`` (the unscaled default) leaves the time untouched.
+        context: The problem's declared namespaces at build time
+            ([_boundary_context][diff_soup.problem._lowering.bcs._boundary_context]),
+            which the build-time member evaluations read for ``q.p`` and ``q.fn``.
 
     Returns:
         A
@@ -1151,4 +1176,4 @@ def _build_family_residual(
         ``{global_name: value}`` dict supplying galvanostatic globals read by
         member equations.
     """
-    return _FamilyResidualBlock(fam, fam_base, total_size, time_ref=time_ref)
+    return _FamilyResidualBlock(fam, fam_base, total_size, time_ref=time_ref, context=context)

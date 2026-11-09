@@ -1,22 +1,22 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 469,
-    "collected_tests": 801,
-    "source_lines": 17014
+    "test_functions": 471,
+    "collected_tests": 803,
+    "source_lines": 17138
   },
   "tier_budgets": {
     "public_api": {
       "files": 21,
-      "functions": 202,
-      "collected": 323,
-      "lines": 6569
+      "functions": 203,
+      "collected": 324,
+      "lines": 6614
     },
     "contracts": {
       "files": 22,
-      "functions": 207,
-      "collected": 404,
-      "lines": 6903
+      "functions": 208,
+      "collected": 405,
+      "lines": 6982
     },
     "performance_contracts": {
       "files": 2,
@@ -203,7 +203,7 @@
     },
     {
       "file": "tests/public_api/test_recipe_families.py",
-      "feature": "Recipe API: family recipes, per-member parameters, member boundary flux, surface projection, declared stencil radius, member rows as wide as their member recovered by shared pullbacks, family graphs"
+      "feature": "Recipe API: family recipes, per-member parameters, declared parameters in member equations, member boundary flux, surface projection, declared stencil radius, member rows as wide as their member recovered by shared pullbacks, family graphs"
     },
     {
       "file": "tests/public_api/test_boundary_callbacks.py",
@@ -331,7 +331,7 @@
     },
     {
       "file": "tests/contracts/test_lowered_study.py",
-      "feature": "Lowered studies: TrustRegion defaults and refusals, joint and nested fits to one optimum, the nested mode without polish making the joint attempts, resume equality, prepare reports, StopFit with checkpoints, bootstrap and sample on a lowered study"
+      "feature": "Lowered studies: TrustRegion defaults and refusals, joint and nested fits to one optimum, the nested mode without polish making the joint attempts, inequality rows against the interior point, resume equality, prepare reports, StopFit with checkpoints, bootstrap and sample on a lowered study"
     },
     {
       "file": "tests/contracts/test_structural_fitting.py",

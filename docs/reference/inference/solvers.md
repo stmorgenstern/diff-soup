@@ -17,6 +17,10 @@
     options:
       members: false
 
+::: diff_soup.optimization.inference.InequalityRows
+    options:
+      members: false
+
 ::: diff_soup.optimization.LevenbergMarquardt
     options:
       members: false

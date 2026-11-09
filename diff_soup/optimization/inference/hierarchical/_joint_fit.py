@@ -23,6 +23,7 @@ from diff_soup.optimization.inference.fitting.result import (
     TrustRegionReport,
 )
 from diff_soup.optimization.inference.hierarchical import _bounds as box
+from diff_soup.optimization.inference.hierarchical import _inequality as inequality
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._lane_route import _LABEL, _LaneRoute, _listed
 from diff_soup.optimization.inference.hierarchical._trust_step import (
@@ -92,6 +93,95 @@ class _JointFit:
         # The bound of the gradient's error at the current point, from the lanes'
         # tolerances and blocks.
         self.floor = _GradientFloor(solver, route)
+        # The inequality rows kept at or below zero, or None.
+        cut = None if solver.nested_at is None else route.names.index(solver.nested_at) + 1
+        self.rows = (
+            inequality.RowSet(solver.inequalities, route, cut) if solver.inequalities else None
+        )
+
+    def held_attempt(self, system, point: np.ndarray, coordinates: box.Scaling, radius: float):
+        """``solve(active)`` for ``active_solve``: the attempt with the rows ``active`` held.
+
+        It returns ``(attempt, held)``, the attempt and the system holding the rows.
+        """
+        c, C = self.rows(point)
+
+        def solve(active):
+            held = inequality.with_rows(system, point, c, C, active)
+            return self.route.solve_attempt(held, coordinates, radius), held
+
+        return solve
+
+    def zero_solve(self, system, point, coordinates, radius, empty) -> tuple:
+        """The solve at zero damping under the inequality rows its full step would violate.
+
+        ``empty`` is the attempt with no row held. Returns ``(zero, held)``: the attempt
+        whose ``z`` is that solve, and the system holding those rows at their boundary
+        (``system`` itself when none is).
+        """
+        c, C = self.rows(point)
+        attempts = self.held_attempt(system, point, coordinates, radius)
+
+        def solve(active):
+            attempt, held = attempts(active)
+            self.work.solves += attempt.solves
+            with np.errstate(all="ignore"):
+                return attempt.z / coordinates.scale, attempt, held
+
+        with np.errstate(all="ignore"):
+            first = (empty.z / coordinates.scale, empty, system)
+        _, (_, zero, held), _ = inequality.active_solve(solve, c, C, first=first)
+        return zero, held
+
+    def rows_trial(self, system, point, gradient, coordinates, radius, fixed, bounds, empty):
+        """``_trial_point``'s trial under the inequality rows.
+
+        ``empty`` is the attempt with no row held. The step of each round holds the rows
+        the last one's trial violated at their boundary; a trial that crosses another row
+        beyond its slack is scaled back along its step to that row's boundary, and its
+        predicted decrease is the model's for the shorter step. The trial is then moved
+        back onto the rows it violates, as a step on a curved row's linearization leaves
+        it (``onto_rows``). Returns ``_trial_point``'s ``(trial, norm, predicted,
+        multiplier, solves)``, ``solves`` those of every round.
+        """
+        c, C = self.rows(point)
+        attempts = self.held_attempt(system, point, coordinates, radius)
+        solves = []
+
+        def trial(attempt, held):
+            answer = _trial_point(
+                held,
+                point,
+                gradient,
+                coordinates,
+                radius,
+                first=attempt,
+                fixed=fixed,
+                bounds=bounds,
+                equality=int(held.constraint_matrix.shape[0]) > 0,
+            )
+            solves.append(answer[4])
+            return answer[0] - point, *answer[1:4]
+
+        active, answer, _ = inequality.active_solve(
+            lambda active: trial(*attempts(active)), c, C, first=trial(empty, system)
+        )
+        step, norm, predicted, multiplier = answer
+        fraction = inequality.step_back(self.rows, point, step, active)
+        if fraction < 1.0:
+            step = fraction * step
+            norm = fraction * norm
+            scaled = coordinates.scale * step
+            quadratic = elimination.level_quadratic(system, step)
+            if coordinates.addition is not None:
+                quadratic += float(np.asarray(coordinates.addition) @ (scaled * scaled))
+            predicted = -(float(gradient @ step) + 0.5 * quadratic)
+        trial = inequality.onto_rows(
+            self.rows, point + step, coordinates.scale, ~inequality.frozen(system)
+        )
+        if bounds is not None:
+            trial = box.make_strictly_feasible(trial, bounds[0], bounds[1], rstep=0)
+        return trial, norm, predicted, multiplier, sum(solves)
 
     def evaluate(self, mode: str, point: np.ndarray, lanes: Iterable[str] | None = None) -> Any:
         """One request at ``point``, every lane (or ``lanes``) at the rung it holds.
@@ -514,6 +604,14 @@ class _JointFit:
                 x = box.make_strictly_feasible(x, bounds[0], bounds[1], rstep=0)
             if not trial_is_valid(route.view, x):
                 raise ValueError("TrustRegion initial point failed the trial predicate.")
+            if self.rows is not None:
+                c = self.rows.values(x)
+                if np.any(c > inequality.tolerance(c, np.zeros((c.size, 1)), np.zeros((1,)))):
+                    raise ValueError(
+                        "TrustRegion keeps its inequality rows at or below zero from a start where "
+                        f"they hold, and rows {np.flatnonzero(c > 0).tolist()} are above zero at "
+                        f"the start (largest {float(np.max(c)):.3g}); start inside them."
+                    )
         else:
             # The saved point is the start or an accepted point: every lane solved
             # there and the predicate passed. Its blocks are evaluated again below.
@@ -531,7 +629,11 @@ class _JointFit:
             label=_LABEL,
         )
         fixed = np.asarray(route.fixed, dtype=np.int64)
-        n_constraints = int(route.constraint_matrix.shape[0])
+        # With equality or inequality rows the gradient test is off: the projected
+        # stationarity number ends the fit.
+        n_constraints = int(route.constraint_matrix.shape[0]) + (
+            0 if self.rows is None else self.rows.count
+        )
         route.problem.prepare(modes=("value", self.matrix))
         system, lane_costs = self.blocks(x, start=state is None)
         x, system, lane_costs = self.at_start(x, system, lane_costs, fresh=state is None)
@@ -598,10 +700,14 @@ class _JointFit:
                 zero = first
             else:
                 zero = route.solve_attempt(system, coordinates, loop.radius)
+            empty, held = zero, system
+            if self.rows is not None:
+                # Under inequality rows: the full step with the rows it would violate held.
+                zero, held = self.zero_solve(system, loop.point, coordinates, loop.radius, empty)
             # Every relative number of the attempt is relative to the cost scale here.
             relative_to = cost_scale(loop.cost, cost_tol, cost_atol)
             stationarity = _stationarity(
-                system, gradient, coordinates.scale, zero, relative_to, coordinates.addition
+                held, gradient, coordinates.scale, zero, relative_to, coordinates.addition
             )
             # The model predicts no further decrease the evaluation can show here.
             if stationarity <= _stationarity_limit(
@@ -623,17 +729,22 @@ class _JointFit:
                 break
             radius_floor = _radius_floor(level, full_norm, gradient, coordinates.scale)
             step_radius = loop.radius
-            trial, scaled_step_norm, predicted, multiplier, solves = _trial_point(
-                system,
-                loop.point,
-                gradient,
-                coordinates,
-                loop.radius,
-                first=zero,
-                fixed=fixed,
-                bounds=bounds,
-                equality=n_constraints > 0,
-            )
+            if self.rows is None:
+                trial, scaled_step_norm, predicted, multiplier, solves = _trial_point(
+                    system,
+                    loop.point,
+                    gradient,
+                    coordinates,
+                    loop.radius,
+                    first=zero,
+                    fixed=fixed,
+                    bounds=bounds,
+                    equality=n_constraints > 0,
+                )
+            else:
+                trial, scaled_step_norm, predicted, multiplier, solves = self.rows_trial(
+                    system, loop.point, gradient, coordinates, loop.radius, fixed, bounds, empty
+                )
             work.solves += solves
             step = trial - loop.point
             step_norm = float(np.linalg.norm(step))
@@ -768,13 +879,14 @@ class _JointFit:
         end_scale = candidate if loop.scale is None else np.maximum(loop.scale, candidate)
         end = _subproblem(loop.point, gradient, end_scale, bounds)
         projected_grad_norm = float(np.linalg.norm(_bounded_gradient(gradient, end, bounds)))
-        end_step = _full_step(
-            system,
-            gradient,
-            end.scale,
-            elimination.solve_scaled(system, end.scale, 0.0, end.addition),
-            end.addition,
-        )
+        if self.rows is None:
+            end_held = system
+            end_zero = elimination.solve_scaled(system, end.scale, 0.0, end.addition)
+        else:
+            # Under inequality rows: the full step with the rows it would violate held.
+            empty = route.solve_attempt(system, end, loop.radius)
+            end_zero, end_held = self.zero_solve(system, loop.point, end, loop.radius, empty)
+        end_step = _full_step(end_held, gradient, end.scale, end_zero, end.addition)
         end_relative_to = cost_scale(loop.cost, cost_tol, cost_atol)
         end_stationarity = end_step.decrease / end_relative_to
         return self.outcome(

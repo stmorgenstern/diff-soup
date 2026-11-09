@@ -33,9 +33,11 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - `run(max_steps=, tol=)` of the compiled solvers and `ds.optimization.lanes(max_steps=, tol=, warm_start=)` take the budget and the tolerance as runtime values, one per lane or one for all, so a new value no longer compiles the loop again.
 - Added `adjoint=` to `InteriorPoint`, `SQP` and `AugmentedLagrangian`. `ds.nonlinear.ImplicitAdjoint()` differentiates the solution in `args` by one reverse rule, a transposed KKT solve, so `jax.grad` costs one solve however large `args` is and runs through closures that differentiate in reverse mode only. The default, `ds.ForwardAdjoint()`, keeps the forward rule.
 - `InteriorPoint`, `SQP` and `AugmentedLagrangian` run in float32 and return float32 records. A tolerance left unset follows the iterate's dtype: `max(default, 100 * eps)`, which is the float64 default unchanged and `1.2e-5` in float32.
+- Added `ds.optimization.inference.InequalityRows`, rows `c(own, shared, data) <= 0` on the fitted values of a lowered study, per member of a level or on the shared values, which `TrustRegion(inequalities=...)` keeps. Each step holds the rows it would cross at their boundary, through the projection that keeps the equality rows, and a trial that crosses a row is moved back to it. See [Optimization solvers](https://stmorgenstern.github.io/diff-soup/reference/inference/solvers/).
 
 ### Bugfixes
 
+- Fixed member equations, whose `q.p.<name>` and `q.fn.<name>` raised `AttributeError`. They now read the problem's declared parameters and functions, with their tangents, as component equations do.
 - Fixed consistent initialization of a family problem whose step backend is a `MemberBlock` over the full state, which raised a `ConfigurationError`. Initialization now solves its smaller system on the backend `linear="auto"` chooses for its size.
 - Fixed `SaveAt(output="projected")` rows that came back `NaN` at a tight `atol`. Projected samples now pass the same gate as the solve's own initialization.
 - Fixed JIDA solves that stalled at a tight `atol` after a short step, where Newton's corrections are pure rounding. A correction within twice the rounding floor on a fresh matrix is now accepted as the root.
