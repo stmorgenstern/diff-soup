@@ -47,6 +47,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Fixed `SuperLU` on more than one thread, which returned a wrong solution for a few factors in a hundred with a success status. Its factors on any number of threads now equal one thread's, bit for bit; the build patches SuperLU_MT 4.0.2 (`diff_soup/_internal/superlu_ffi/patches/`).
 - Fixed `CuDSS` solves that could apply another factor and report success: two executions of one compiled program at once on one `SolveContext`, or two calls of one jitted function inside one program, which share a factor slot. A solve now always applies its own handle's factor.
 - A released `Analysis` of `KLU`, `SuperLU` or `CuDSS` now frees its native call sites and, once its factors' contexts are released, its native analysis. Previously the sites kept every analysis for the life of the process.
+- Fixed a `SuperLU` solve with real values of a shared storage that a refactor with complex values filled earlier in the same program, which returned `nan` with a success status. It now factors the real values first, as `KLU` does.
 
 ### Performance
 
