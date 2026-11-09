@@ -16,6 +16,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.optimization import inference as inf
+from diff_soup.optimization.inference.engine._kernel import _solve
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._lane_route import _LaneRoute
 from diff_soup.optimization.inference.hierarchical._trust_step import (
@@ -338,19 +339,18 @@ class _Records(inf.Callback):
         self.steps.append((info, dict(info.state)))
 
 
-def test_nested_attempt_records_split_the_cost_by_owner():
-    """A nested fit's record of every attempt holds each owner's cost at the current point and at
-    the trial, and the shared remainder; at every attempt they sum to the fit's cost there."""
+def _two_owners(name):
+    """Two owners sharing ``rate``, each with its own ``source``, under priors on both."""
     from tests.support.inference import NOISE, decay_experiment
 
     decay = decay_recipe(
-        "owner_cost_decay",
+        name,
         source=True,
         rate_prior=inf.NormalPrior(mean=0.5, scale=0.5),
         source_prior=inf.NormalPrior(mean=0.0, scale=0.2),
     )
     cells = CELLS[:2]
-    study = inf.Study(
+    return inf.Study(
         tuple(
             decay_experiment(decay, owner, source=source, noise=(index + 1) * NOISE)
             for index, (owner, source) in enumerate(cells)
@@ -359,9 +359,14 @@ def test_nested_attempt_records_split_the_cost_by_owner():
         clusters={"cell": tuple(owner for owner, _ in cells)},
         independent=True,
     )
+
+
+def test_nested_attempt_records_split_the_cost_by_owner():
+    """A nested fit's record of every attempt holds each owner's cost at the current point and at
+    the trial, and the shared remainder; at every attempt they sum to the fit's cost there."""
     records = _Records()
     fit = small_fit(
-        ds.lower(study, objective=inf.MAP()),
+        ds.lower(_two_owners("owner_cost_decay"), objective=inf.MAP()),
         inf.TrustRegion(max_steps=8, nested_at="cell"),
         callbacks=(records,),
     )
@@ -381,6 +386,102 @@ def test_nested_attempt_records_split_the_cost_by_owner():
             # measured 1.8e-16 relative difference, as above
             np.testing.assert_allclose(trial_total, float(info.cost), rtol=1e-10)
         current = float(info.cost)
+
+
+@pytest.fixture(scope="module")
+def frozen():
+    """The two-owner study prepared with the frozen mode, a route, and blocks at the start."""
+    study = ds.lower(_two_owners("frozen_decay"), objective=inf.MAP())
+    study.prepare(modes=("value", "frozen"))
+    route = _LaneRoute(inf.TrustRegion(), study)
+    point = np.asarray(study.x0, dtype=np.float64)
+    return route, point, route.evaluate("blocks", point)
+
+
+def _kept_times_rows(route, lane, kept_at, point):
+    """``(J^T r, |r|^2 / 2)`` of one lane, unbatched: ``J`` its rows' Jacobian at ``kept_at`` in
+    narrow coordinates, by forward mode, and ``r`` its rows at ``point``."""
+    lanes = route.problem._lanes
+    bucket, position = lanes.where[lane]
+    entry = lanes.buckets[bucket]
+    leaves = jax.device_put([leaf[position] for leaf in entry.leaves])
+    inputs = jax.tree_util.tree_unflatten(entry.tree, leaves)
+    columns = entry.gather[position]
+
+    def rows(narrow):
+        return _solve(entry.program, narrow, inputs)[0]
+
+    jacobian = jax.jacfwd(rows)(jax.device_put(np.asarray(kept_at)[columns]))
+    new = rows(jax.device_put(np.asarray(point)[columns]))
+    return np.asarray(jacobian.T @ new), float(0.5 * new @ new)
+
+
+def test_the_frozen_mode_at_the_blocks_point_gives_the_blocks_gradient_and_system(frozen):
+    """At the point of the last blocks request a frozen request of every lane, or of one, gives
+    the blocks gradient and cost, and the frozen system there is the blocks system."""
+    route, point, blocks = frozen
+    every = route.evaluate("frozen", point)
+    one = route.evaluate("frozen", point, lanes=route.ids[1:])
+    # measured 0.0 on every entry, workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k frozen
+    np.testing.assert_allclose(every.gradient, blocks.gradient, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(every.cost, blocks.cost, rtol=1e-12, atol=0.0)
+    # measured 0.0, as above
+    np.testing.assert_allclose(one.gradient[0, 0], blocks.gradient[0, 1], rtol=1e-12, atol=0.0)
+    system = route.system(blocks, point)
+    again = route.frozen_system(system, every, point)
+    for ours, expected in zip(route.vectors(again), route.vectors(system)):
+        # measured 0.0, as above
+        np.testing.assert_allclose(ours, expected, rtol=1e-12, atol=0.0)
+    # measured 0.0 relative, as above
+    np.testing.assert_allclose(float(again.cost), float(system.cost), rtol=1e-12)
+
+
+def test_the_frozen_mode_at_a_moved_point_steps_on_the_kept_jacobian(frozen):
+    """At a moved point a frozen request of every lane, and of each lane alone, gives each lane's
+    cost there and J^T r with J its Jacobian at the blocks point and r its rows there."""
+    route, point, _ = frozen
+    moved = point + np.asarray([0.03, -0.02, 0.01])
+    every = route.evaluate("frozen", moved)
+    for column, lane in enumerate(route.ids):
+        gradient, cost = _kept_times_rows(route, lane, point, moved)
+        alone = route.evaluate("frozen", moved, lanes=(lane,))
+        # measured at most 1.5e-14 relative on the gradient and 2.9e-14 on the cost (batched
+        # lanes against one unbatched solve), workstation CPU 2026-11-09, -k frozen
+        np.testing.assert_allclose(every.gradient[0, column], gradient, rtol=1e-12, atol=0.0)
+        np.testing.assert_allclose(alone.gradient[0, 0], gradient, rtol=1e-12, atol=0.0)
+        # measured as above
+        np.testing.assert_allclose(every.cost[0, column], cost, rtol=1e-12)
+
+
+def test_a_frozen_system_of_some_lanes_replaces_the_gradient_of_their_members_only(frozen):
+    """A frozen system from a request of one owner's lanes takes that owner's gradient from a
+    request of every lane and keeps every other gradient of the blocks system; its cost is NaN."""
+    route, point, blocks = frozen
+    moved = point + np.asarray([0.0, -0.02, 0.01])
+    system = route.system(blocks, point)
+    every = route.frozen_system(system, route.evaluate("frozen", moved), moved)
+    some = route.frozen_system(system, route.evaluate("frozen", moved, lanes=route.ids[1:]), moved)
+    # measured 0.0, workstation CPU 2026-11-09, -k frozen
+    np.testing.assert_allclose(some.gradient[1][1], every.gradient[1][1], rtol=1e-12, atol=0.0)
+    np.testing.assert_array_equal(some.gradient[1][0], system.gradient[1][0])
+    np.testing.assert_array_equal(some.root_gradient, system.root_gradient)
+    assert np.isnan(float(some.cost)) and np.isfinite(float(every.cost))
+
+
+def test_blocks_keep_no_jacobian_unless_the_frozen_mode_is_prepared(lowered, frozen):
+    """Without the frozen mode prepared a blocks request keeps nothing and a frozen request is
+    refused; with it, a lane that has no blocks result yet is refused by name."""
+    _, study, _ = lowered
+    route = _LaneRoute(inf.TrustRegion(), study)
+    point = np.asarray(study.x0, dtype=np.float64)
+    route.evaluate("blocks", point)
+    assert route.problem._lanes.kept == {}
+    with pytest.raises(ValueError, match="prepare"):
+        route.evaluate("frozen", point)
+    fresh = _LaneRoute(inf.TrustRegion(), frozen[0].problem)
+    with pytest.raises(ValueError, match="no kept Jacobian"):
+        fresh.evaluate("frozen", frozen[1])
 
 
 def test_a_member_whose_step_cannot_be_bracketed_is_held_when_asked(attempt):

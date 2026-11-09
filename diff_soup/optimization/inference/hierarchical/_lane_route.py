@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 from collections.abc import Iterable
 from typing import Any, NamedTuple
 
@@ -18,6 +19,7 @@ from diff_soup.optimization.inference.engine._levels import (
     LevelTables,
     _lane_weights,
     member_row,
+    reduce_level_gradients,
     reduce_levels,
     weigh_levels,
 )
@@ -229,6 +231,17 @@ def _route_tables(
     return tables, members
 
 
+def _member_row(results: Any, member: int) -> int:
+    """The row of population member ``member`` in ``results``."""
+    rows = np.flatnonzero(np.asarray(results.members) == int(member))
+    if rows.shape[0] != 1:
+        raise ValueError(
+            f"member {int(member)} is not among the members of these results "
+            f"{np.asarray(results.members).tolist()}; ask for one of them."
+        )
+    return int(rows[0])
+
+
 class _LaneRoute:
     """What a fit on the lanes of a lowered study needs: tables, weights, rows, bounds, labels.
 
@@ -252,6 +265,8 @@ class _LaneRoute:
     kept_regularizer: tuple[tuple[str, bytes, tuple[float, ...] | None], tuple] | None = None
     # The index tables of every level system of the fit, built and placed once.
     layout: elimination.LevelLayout | None = None
+    # The level tables of subsets of the planned lanes, by their ids in canonical order.
+    subset_tables: dict | None = None
 
     def __init__(self, solver: Any, problem: Any):
         lowered = _lowered(solver, problem)
@@ -415,7 +430,11 @@ class _LaneRoute:
 
         ``rungs`` and ``first_steps`` are the request's (one row, one column per
         requested lane): the rung each lane runs at and the first step of its
-        rung-0 solve; ``None`` runs every lane at rung 0.
+        rung-0 solve; ``None`` runs every lane at rung 0. A ``frozen`` request
+        steps each lane on the Jacobian its last ``blocks`` request kept, once
+        the study has prepared that mode
+        ([gradients][diff_soup.optimization.inference.hierarchical._lane_route._LaneRoute.gradients],
+        [frozen_system][diff_soup.optimization.inference.hierarchical._lane_route._LaneRoute.frozen_system]).
         """
         results = self.problem.evaluate(
             Request(mode=mode, points=point, lanes=lanes, rungs=rungs, first_steps=first_steps)
@@ -510,6 +529,127 @@ class _LaneRoute:
             regularizer_blocks=self.regularizer_at(point, dtype),
         )
 
+    def tables_of(self, ids: tuple) -> Any:
+        """The level tables of the planned lanes ``ids``, in canonical order; built once per subset.
+
+        The tables keep every node of the study, so the sums of a subset fit
+        the route's levels.
+        """
+        ids = tuple(ids)
+        if ids == self.ids:
+            return self.tables
+        if self.subset_tables is None:
+            self.subset_tables = {}
+        tables = self.subset_tables.get(ids)
+        if tables is None:
+            tables, _ = _route_tables(
+                self.problem, self.view, ids, self.problem.plan(), self.device
+            )
+            self.subset_tables[ids] = tables
+        return tables
+
+    def gradients(self, results: Any, *, member: int = 0) -> LevelGradients:
+        """The weighted level gradients of the lanes of a ``gradient`` or ``frozen`` evaluation.
+
+        ``results`` may hold any of the planned lanes; a node with none of
+        them below it sums to zero. The lanes are weighed by the route's
+        weights, and a failed lane or a unit left out of nonzero weight is
+        refused, as ``system`` refuses them. Results of lanes evaluated in
+        several processes carry the sums of the levels already
+        (``Results.levels``); the weights are then applied to those sums.
+
+        Returns:
+            The [LevelGradients][diff_soup.optimization.inference.engine.LevelGradients]
+            of ``member``, on the route's device.
+        """
+        ids = tuple(results.lane_ids)
+        if getattr(results, "levels", None) is not None:
+            row = _member_row(results, member)
+            status = LaneStatus(
+                kind=np.asarray(results.status.kind)[row],
+                t_reached=np.asarray(results.status.t_reached)[row],
+                rung=np.asarray(results.status.rung)[row],
+            )
+            omega = None
+            if self.weights is not None:
+                omega = self.omega[[self.position[lane] for lane in ids]]
+            refuse_failed(status, ids, omega)
+            sums = weigh_levels(self.tables, member_row(results.levels, row), self.weights)
+            sums = LevelGradients(
+                gradient=sums.gradient,
+                gradient_shared=sums.gradient_shared,
+                cost=sums.cost,
+                rows=sums.rows,
+            )
+            return jax.device_put(sums, self.device)
+        lanes = (
+            results.lane_result(member)
+            if self.device is None
+            else results.lane_result(member, self.device)
+        )
+        return reduce_level_gradients(self.tables_of(ids), lanes, ids, self.weights)
+
+    def frozen_system(
+        self,
+        system: elimination.LevelSystem,
+        results: Any,
+        point: np.ndarray,
+        *,
+        member: int = 0,
+    ) -> elimination.LevelSystem:
+        """``system`` with its matrix kept and its gradient at ``point`` from a ``frozen`` evaluation.
+
+        Every node of a level whose lanes are all in ``results`` takes the
+        weighted ``J^T r`` of its lanes
+        ([gradients][diff_soup.optimization.inference.hierarchical._lane_route._LaneRoute.gradients])
+        and the regularizer's slope at ``point``, zero at a fixed coordinate
+        and at a held node of ``system``; so does the root when ``results``
+        hold every planned lane. Every other node keeps the gradient of
+        ``system``. The cost is the weighted lane costs and the regularizer's
+        at ``point`` when ``results`` hold every planned lane, and NaN
+        otherwise. At the point of ``system``, from a ``frozen`` evaluation of
+        every lane, the system is ``system`` again.
+        """
+        sums = self.gradients(results, member=member)
+        dtype = np.dtype(system.root.dtype)
+        point = np.asarray(point, dtype=dtype)
+        regularizer = self.regularizer_at(point, dtype)
+        extra = None if regularizer is None else regularizer[0]
+        layout = self.levels()
+        counts, widths, offsets = layout.counts, layout.widths, layout.offsets
+        free = ~np.asarray(system.fixed_mask, dtype=bool)
+        positions = np.asarray([self.position[lane] for lane in results.lane_ids], dtype=np.int64)
+        gradient = [None]
+        for level in range(1, self.depth + 1):
+            count = int(counts[level - 1])
+            column = self.nodes[:, level - 1]
+            covered = np.bincount(column[positions], minlength=count) == np.bincount(
+                column, minlength=count
+            )
+            new = np.array(sums.gradient[level], dtype=dtype)
+            if extra is not None and extra[4][level] is not None:
+                new = new + np.asarray(extra[4][level], dtype=dtype)
+            own = free[offsets[level] : offsets[level + 1]].reshape(count, int(widths[level]))
+            own = own & ~np.asarray(system.held_mask[level], dtype=bool)[:, None]
+            kept = np.asarray(system.gradient[level], dtype=dtype)
+            gradient.append(np.where(covered[:, None], new * own, kept))
+        if positions.shape[0] == len(self.ids):
+            root = np.sum(np.asarray(sums.gradient_shared, dtype=dtype), axis=0)
+            if extra is not None:
+                root = root + np.asarray(extra[1], dtype=dtype)
+            root = root * free[: int(widths[0])]
+            cost = float(np.sum(np.asarray(sums.cost[self.depth], dtype=np.float64)))
+            cost += 0.0 if regularizer is None else float(regularizer[1])
+        else:
+            root = np.asarray(system.root_gradient, dtype=dtype)
+            cost = float("nan")
+        root, gradient, point, cost = jax.device_put(
+            (root, tuple(gradient), point, np.asarray(cost, dtype=dtype)), layout.device
+        )
+        return dataclasses.replace(
+            system, root_gradient=root, gradient=gradient, point=point, cost=cost
+        )
+
     def levels(self) -> elimination.LevelLayout:
         """The [LevelLayout][diff_soup.optimization.inference.hierarchical._level_system.LevelLayout] of the tables, built once."""
         if self.layout is None:
@@ -573,13 +713,7 @@ class _LaneRoute:
         route's weights as ``reduce_levels`` refuses them; the sums, every
         lane weighing one, are then weighed by the route's weights.
         """
-        rows = np.flatnonzero(np.asarray(results.members) == int(member))
-        if rows.shape[0] != 1:
-            raise ValueError(
-                f"member {int(member)} is not among the members of these results "
-                f"{np.asarray(results.members).tolist()}; ask for one of them."
-            )
-        row = int(rows[0])
+        row = _member_row(results, member)
         if tuple(results.lane_ids) != tuple(self.ids):
             raise ValueError(
                 f"the results are for the lanes {_listed(results.lane_ids)} and the route's tables "
@@ -650,13 +784,7 @@ class _LaneRoute:
         ``member`` is the population member of ``results`` whose lane costs
         are summed; a fit's own requests hold the one member 0.
         """
-        rows = np.flatnonzero(np.asarray(results.members) == int(member))
-        if rows.shape[0] != 1:
-            raise ValueError(
-                f"member {int(member)} is not among the members of these results "
-                f"{np.asarray(results.members).tolist()}; ask for one of them."
-            )
-        costs = np.asarray(results.cost, dtype=np.float64)[int(rows[0])]
+        costs = np.asarray(results.cost, dtype=np.float64)[_member_row(results, member)]
         lanes = float(np.sum(self.omega * costs))
         # The regularizer's cost from its blocks at the trial, which the system there reuses
         # when the trial is accepted: the regularizer is evaluated once per point.
