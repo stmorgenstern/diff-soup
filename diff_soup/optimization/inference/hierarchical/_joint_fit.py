@@ -94,7 +94,10 @@ class _JointFit:
         # tolerances and blocks.
         self.floor = _GradientFloor(solver, route)
         # The inequality rows kept at or below zero, or None.
-        self.rows = inequality.RowSet(solver.inequalities, route) if solver.inequalities else None
+        cut = None if solver.nested_at is None else route.names.index(solver.nested_at) + 1
+        self.rows = (
+            inequality.RowSet(solver.inequalities, route, cut) if solver.inequalities else None
+        )
 
     def held_attempt(self, system, point: np.ndarray, coordinates: box.Scaling, radius: float):
         """``solve(active)`` for ``active_solve``: the attempt with the rows ``active`` held.

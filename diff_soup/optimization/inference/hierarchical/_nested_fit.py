@@ -18,6 +18,7 @@ from diff_soup.optimization.inference.fitting.result import (
     OptResult,
 )
 from diff_soup.optimization.inference.hierarchical import _bounds as box
+from diff_soup.optimization.inference.hierarchical import _inequality as inequality
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._joint_fit import _JointFit
 from diff_soup.optimization.inference.hierarchical._lane_route import (
@@ -974,9 +975,18 @@ class _NestedFit(_JointFit):
             # Every member's solve at zero damping: its predicted decrease and its
             # stationarity number at the current point, and the first solve of the
             # active members' searches.
-            zero = elimination.inner_solve_scaled(
-                system, coordinates.scale, self.cut, addition=coordinates.addition
-            )
+            # Under inequality rows on the members' own values, every member's solve holds
+            # those its full step would violate; ``first`` is the solve holding none.
+            own = None
+            if self.rows is not None:
+                own = inequality.member_rows(self.rows, system, x, self.cut)
+            if own is None:
+                zero = first = elimination.inner_solve_scaled(
+                    system, coordinates.scale, self.cut, addition=coordinates.addition
+                )
+            else:
+                zero, first, solves = inequality.member_zero(own, system, coordinates, self.cut)
+                work.solves += solves - 1
             decreases = self.member_decrease(system, coordinates.scale, zero, coordinates.addition)
             stationarity = _member_numbers(decreases, self.member_scales(costs))
             full_steps = self.member_full_steps(zero, costs)
@@ -995,16 +1005,21 @@ class _NestedFit(_JointFit):
                 work.solves += 1
                 break
             # (5) every active member's step; (6) bounds, fixed coordinates, predicate
-            step, predicted, multipliers, solves = elimination.inner_secular_step(
-                system,
-                coordinates.scale,
-                radii,
-                self.cut,
-                active,
-                first=zero,
-                addition=coordinates.addition,
-                hold=True,
-            )
+            if own is None:
+                step, predicted, multipliers, solves = elimination.inner_secular_step(
+                    system,
+                    coordinates.scale,
+                    radii,
+                    self.cut,
+                    active,
+                    first=zero,
+                    addition=coordinates.addition,
+                    hold=True,
+                )
+            else:
+                step, predicted, multipliers, solves, held_rows = inequality.member_step(
+                    own, system, x, gradient, coordinates, radii, self.cut, active, first, bounds
+                )
             work.solves += solves
             # A member with no finite step inside its radius (its subtree's model is not
             # finite) ends its polish at its current point; the others go on.
@@ -1027,6 +1042,11 @@ class _NestedFit(_JointFit):
                 )
                 trial[moving] = box.make_strictly_feasible(
                     x[moving] + step[moving], bounds[0][moving], bounds[1][moving], rstep=0
+                )
+            if own is not None:
+                # A member whose trial crosses an own row it does not hold is scaled back.
+                trial, scaled, predicted = inequality.member_back(
+                    self.rows, own, system, x, trial, coordinates, predicted, held_rows, self.cut
                 )
             step = trial - x
             step_norms = per_member(step)

@@ -22,6 +22,7 @@ the host.
 from __future__ import annotations
 
 from diff_soup.optimization.inference.hierarchical._level_inner import (
+    MemberRows,
     inner_added,
     inner_bounded_response,
     inner_predicted,
@@ -58,6 +59,7 @@ __all__ = [
     "AttemptSolve",
     "LevelLayout",
     "LevelSystem",
+    "MemberRows",
     "attempt_solve",
     "inner_added",
     "inner_bounded_response",

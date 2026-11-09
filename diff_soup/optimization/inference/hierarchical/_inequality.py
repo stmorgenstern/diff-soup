@@ -7,8 +7,10 @@ projection every damped solve already makes, and the step is solved again, a few
 most. The rows ride at a fixed count with a mask of the active ones, so one program solves
 every active set. A trial at which a row is violated beyond its tolerance, as the rows are
 nonlinear, is scaled back along its step to the boundary, as a trial leaving the box is,
-and moved back onto a curved row that its step held on the row's linearization. There is
-no barrier, no new solver and no derivative rule.
+and moved back onto a curved row that its step held on the row's linearization. The joint
+step keeps every row; a member's polish step keeps the member's own rows at the
+cut level, the values above it held. There is no barrier, no new solver and no derivative
+rule.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from diff_soup._errors import ConfigurationError
+from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._level_system import _offsets
 
@@ -71,12 +74,14 @@ class RowSet:
     ``r`` of member ``n`` and ``columns[n]`` the member's joint columns at the level.
     """
 
-    def __init__(self, specs: tuple, route: Any):
+    def __init__(self, specs: tuple, route: Any, cut: int | None = None):
         """Place every spec's rows on the route's joint columns and compile their evaluation.
+
+        ``cut`` is the nested mode's cut level (``1 .. D``), or ``None``.
 
         Raises:
             ConfigurationError: If a spec is not an `InequalityRows`, names a level the
-                study does not have, or its data miss a member.
+                study does not have or one below the cut, or its data miss a member.
         """
         counts, widths, names = route.tables.counts, route.tables.widths, route.names
         shared = int(widths[0])
@@ -103,6 +108,13 @@ class RowSet:
                     f"levels are {tuple(names)}."
                 )
             level = names.index(spec.level) + 1
+            if cut is not None and level > cut:
+                raise ConfigurationError(
+                    f"InequalityRows level={spec.level!r} lies below the nested mode's cut "
+                    f"{names[cut - 1]!r}, and the members' polish keeps rows on the values at "
+                    "the cut or above only; put the rows at that level, or fit with "
+                    "nested_at=None."
+                )
             members = tuple(route.members[level - 1])
             data = spec.data
             if data is not None:
@@ -354,6 +366,164 @@ def onto_rows(rows: RowSet, x: np.ndarray, scale: np.ndarray, moving: np.ndarray
         with np.errstate(all="ignore"):
             x = x - np.where(moving, (A.T @ multipliers) / scale, 0.0)
     return x
+
+
+# ---------------------------------------------------------------------------
+# A member's own rows in the polish
+# ---------------------------------------------------------------------------
+
+
+def member_rows(
+    rows: RowSet, system: elimination.LevelSystem, x: np.ndarray, level: int
+) -> tuple | None:
+    """The rows of the members of ``level`` on their own values at ``x``, the values above held.
+
+    Returns ``(c, C, coefficients)``: the rows ``(N R,)`` and their Jacobian ``(N R, n)``
+    member by member, and the coefficients ``(N, v, R)`` on each member's own columns,
+    with the columns a step never moves set to zero; ``None`` when the level has no rows.
+    """
+    if level not in rows.levels:
+        return None
+    positions, columns = rows.levels[level]
+    c, C = rows(x)
+    C = np.where(frozen(system)[None, :], 0.0, C)[positions]
+    count, per = positions.shape
+    own = C[np.arange(count)[:, None, None], np.arange(per)[None, :, None], columns[:, None, :]]
+    return c[positions].reshape(-1), C.reshape(count * per, -1), np.transpose(own, (0, 2, 1))
+
+
+def _held(own: tuple, active: np.ndarray) -> elimination.MemberRows | None:
+    """The members' rows of ``own`` with ``active`` held, or ``None`` when none is."""
+    c, _, coefficients = own
+    count, _, per = coefficients.shape
+    on = np.asarray(active).reshape(count, per) & np.any(coefficients != 0.0, axis=1)
+    if not on.any():
+        return None
+    return elimination.MemberRows(coefficients, -c.reshape(count, per), on)
+
+
+def member_zero(own: tuple, system, coordinates: box.Scaling, level: int) -> tuple:
+    """Every member's solve at zero damping under the own rows its full step would violate.
+
+    Returns ``(zero, first, solves)``: the solve ``(z, q_squared)``, the solve with no row
+    held (the first solve of the members' searches), and the solves made.
+    """
+    c, C, _ = own
+    scale, addition = coordinates.scale, coordinates.addition
+
+    def solve(active):
+        held = _held(own, active)
+        zero = elimination.inner_solve_scaled(system, scale, level, addition=addition, rows=held)
+        with np.errstate(all="ignore"):
+            return zero[0] / scale, zero
+
+    first = solve(np.zeros(c.shape, dtype=bool))
+    _, (_, zero), rounds = active_solve(solve, c, C, first=first)
+    return zero, first[1], rounds + 1
+
+
+def member_predicted(system, step: np.ndarray, coordinates: box.Scaling, level: int) -> np.ndarray:
+    """The decrease every member's scaled model predicts for its part of ``step``."""
+    predicted = elimination.inner_predicted(system, step, level)
+    if coordinates.addition is not None:
+        predicted -= 0.5 * elimination.inner_added(
+            system, coordinates.addition, coordinates.scale * step, level
+        )
+    return predicted
+
+
+def member_step(
+    own: tuple,
+    system,
+    x: np.ndarray,
+    gradient: np.ndarray,
+    coordinates: box.Scaling,
+    radii: np.ndarray,
+    level: int,
+    members: np.ndarray,
+    first: tuple,
+    bounds: tuple | None,
+) -> tuple:
+    """``inner_secular_step`` under every member's own rows, and the rows it holds.
+
+    The step of each round holds the rows the last one violated at their boundary. A
+    member that holds a row and leaves the box takes its step shortened to stay inside,
+    which keeps the rows, as the joint step under equality rows does. Returns ``(step,
+    predicted, multipliers, solves, active)``.
+    """
+    c, C, _ = own
+    scale, addition = coordinates.scale, coordinates.addition
+
+    def solve(active):
+        held = _held(own, active)
+        return elimination.inner_secular_step(
+            system,
+            scale,
+            radii,
+            level,
+            members,
+            first=first if held is None else None,
+            addition=addition,
+            hold=True,
+            rows=held,
+        )
+
+    active, answer, _ = active_solve(solve, c, C)
+    step, predicted, multipliers, solves = answer
+    holding = np.any(active.reshape(len(radii), -1), axis=1) & members
+    if bounds is None or not holding.any():
+        return step, predicted, multipliers, solves, active
+    owners = elimination.node_of_columns(system, level)
+    for member in np.flatnonzero(holding):
+        columns = np.flatnonzero(owners == member)
+        lower, upper = bounds[0][columns], bounds[1][columns]
+        if box.in_bounds(x[columns] + step[columns], lower, upper):
+            continue
+        stride, _ = box.step_size_to_bound(x[columns], step[columns], lower, upper)
+        theta = box.step_back_ratio(gradient[columns], coordinates.v[columns])
+        step[columns] *= stride * theta
+    predicted = np.where(holding, member_predicted(system, step, coordinates, level), predicted)
+    return step, predicted, multipliers, solves, active
+
+
+def member_back(
+    rows: RowSet,
+    own: tuple,
+    system,
+    x: np.ndarray,
+    trial: np.ndarray,
+    coordinates: box.Scaling,
+    predicted: np.ndarray,
+    active: np.ndarray,
+    level: int,
+) -> tuple:
+    """Every member's trial scaled back to the boundary of an inactive own row it crosses.
+
+    The trial is then moved back onto the own rows it violates (``onto_rows``), each
+    member's coordinates alone. Returns ``(trial, scaled, predicted)``: the trial, its step
+    in the subproblem's coordinates before that move, and every member's predicted
+    decrease, the model's for that step.
+    """
+    positions, _ = rows.levels[level]
+    count, per = positions.shape
+    step = trial - x
+    owners = elimination.node_of_columns(system, level)
+    member_of = np.maximum(owners, 0)
+    below = owners >= 0
+
+    def values(fractions: np.ndarray) -> np.ndarray:
+        moved = x + np.where(below, fractions[member_of], 0.0) * step
+        return rows.values(moved)[positions].reshape(-1)
+
+    groups = np.repeat(np.arange(count), per)
+    fractions = _fractions(values, own[0], ~np.asarray(active, dtype=bool), groups, count)
+    shorter = fractions < 1.0
+    if shorter.any():
+        step = np.where(below, fractions[member_of], 1.0) * step
+        predicted = np.where(shorter, member_predicted(system, step, coordinates, level), predicted)
+    moving = below & (step != 0.0) & ~frozen(system)
+    trial = onto_rows(rows, x + step, coordinates.scale, moving)
+    return trial, coordinates.scale * step, predicted
 
 
 __all__ = ["InequalityRows"]
