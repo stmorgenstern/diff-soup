@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 469,
-    "collected_tests": 801,
-    "source_lines": 17068
+    "test_functions": 470,
+    "collected_tests": 802,
+    "source_lines": 17113
   },
   "tier_budgets": {
     "public_api": {
       "files": 21,
-      "functions": 202,
-      "collected": 323,
-      "lines": 6569
+      "functions": 203,
+      "collected": 324,
+      "lines": 6614
     },
     "contracts": {
       "files": 22,
@@ -203,7 +203,7 @@
     },
     {
       "file": "tests/public_api/test_recipe_families.py",
-      "feature": "Recipe API: family recipes, per-member parameters, member boundary flux, surface projection, declared stencil radius, member rows as wide as their member recovered by shared pullbacks, family graphs"
+      "feature": "Recipe API: family recipes, per-member parameters, declared parameters in member equations, member boundary flux, surface projection, declared stencil radius, member rows as wide as their member recovered by shared pullbacks, family graphs"
     },
     {
       "file": "tests/public_api/test_boundary_callbacks.py",

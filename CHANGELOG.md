@@ -37,6 +37,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Bugfixes
 
+- Fixed member equations, whose `q.p.<name>` and `q.fn.<name>` raised `AttributeError`. They now read the problem's declared parameters and functions, with their tangents, as component equations do.
 - Fixed consistent initialization of a family problem whose step backend is a `MemberBlock` over the full state, which raised a `ConfigurationError`. Initialization now solves its smaller system on the backend `linear="auto"` chooses for its size.
 - Fixed `SaveAt(output="projected")` rows that came back `NaN` at a tight `atol`. Projected samples now pass the same gate as the solve's own initialization.
 - Fixed JIDA solves that stalled at a tight `atol` after a short step, where Newton's corrections are pure rounding. A correction within twice the rounding floor on a fresh matrix is now accepted as the root.
