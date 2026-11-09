@@ -29,6 +29,8 @@ from diff_soup.optimization.solvers.interior_point import InteriorPoint
 
 #: Ours: how far inside the shifted bounds each QP starts.
 QP_PUSH = 1e-8
+#: Ipopt's `bound_frac`: inside a two-sided bound the push is at most this fraction of its width.
+QP_FRAC = 0.01
 
 
 class SQPState(CoreState):
@@ -195,10 +197,14 @@ class SQP(ConstrainedSolver):
             ev.jacobian_inequality,
         )
         inner = self._qp_solver()
+        both = qp_bounds.has_lower & qp_bounds.has_upper
+        push = jnp.where(
+            both, jnp.minimum(QP_PUSH, QP_FRAC * (qp_bounds.upper - qp_bounds.lower)), QP_PUSH
+        )
         d0 = jnp.clip(
             jnp.zeros((n,), dtype),
-            jnp.where(qp_bounds.has_lower, qp_bounds.lower + QP_PUSH, -jnp.inf),
-            jnp.where(qp_bounds.has_upper, qp_bounds.upper - QP_PUSH, jnp.inf),
+            jnp.where(qp_bounds.has_lower, qp_bounds.lower + push, -jnp.inf),
+            jnp.where(qp_bounds.has_upper, qp_bounds.upper - push, jnp.inf),
         )
         start = inner._start(
             qp,

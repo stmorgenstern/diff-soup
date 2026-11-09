@@ -315,6 +315,14 @@ def _unbounded():
     return constrained(objective([0.0, 0.0], lambda x: -x[0] - x[1]), 1.0)
 
 
+def _narrow_bound():
+    """`min (x0 / w - 2)^2 + (x1 - 2)^2` with `0 <= x0 <= w` for `w = 1e-9`, narrower than SQP's
+    absolute QP push."""
+    w = 1e-9
+    bounds = (jnp.array([0.0, 0.0]), jnp.array([w, 5.0]))
+    return objective([0.5 * w, 0.5], lambda x: (x[0] / w - 2.0) ** 2 + (x[1] - 2.0) ** 2, bounds)
+
+
 _STATUS = TerminationStatus
 # How a run ends: the solver and its options, the problem, the value of `args`, the status.
 ENDS = {
@@ -335,6 +343,7 @@ ENDS = {
         3.0,
         _STATUS.SOLVER_FAILED,
     ),
+    "narrow_bound": ("sqp", {}, _narrow_bound, None, _STATUS.KKT_TOL),
     **{
         f"max_steps-{name}": (name, {"max_steps": 1}, lambda: hs7().problem, 4.0, _STATUS.MAX_STEPS)
         for name in SOLVERS
@@ -361,8 +370,8 @@ ENDS = {
 
 @pytest.mark.parametrize("end", ENDS)
 def test_each_way_a_run_ends_sets_its_status(end):
-    """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, a run
-    allowed one step and each solver in float32 on its default tolerances each end with their own
+    """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, SQP on a
+    bound narrower than its QP push, a run allowed one step and each solver in float32 on its default tolerances each end with their own
     status, with every floating record in the iterate's dtype."""
     name, options, make, a, status = ENDS[end]
     problem = make()
