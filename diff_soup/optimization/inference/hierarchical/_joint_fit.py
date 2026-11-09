@@ -90,6 +90,8 @@ class _JointFit:
         # The mode whose matrix the attempts step on: the Gauss-Newton blocks, or the
         # exact Hessian under hessian="true".
         self.matrix = "hessian" if solver.hessian == "true" else "blocks"
+        # The modes the fit evaluates, compiled before its first request.
+        self.modes = ("value", self.matrix)
         # The bound of the gradient's error at the current point, from the lanes'
         # tolerances and blocks.
         self.floor = _GradientFloor(solver, route)
@@ -299,21 +301,29 @@ class _JointFit:
         """The nested mode's start (its polish at a ``fresh`` start); here ``point``, ``system`` and ``lane_costs``."""
         return point, system, lane_costs
 
-    def polish(
+    def trial_pass(self) -> str:
+        """The mode of the request at an attempt's trial: ``value``."""
+        return "value"
+
+    def accept(
         self,
         loop: LoopState,
         system: elimination.LevelSystem,
-        lane_costs: np.ndarray,
+        results: Any,
         *,
         attempt: int,
         predicted: float,
         level: Real | None,
     ) -> tuple:
-        """The nested mode's polish at an accepted point; here ``system`` and ``lane_costs``.
+        """The system and lane costs at the accepted trial ``loop.point``; ``loop.cost`` is set there.
 
-        The nested mode moves ``loop.point``, ``loop.cost`` and ``loop.scale``
-        to where its polish ended and returns the system and lane costs there.
+        One request of the matrix's mode at the trial. ``system`` is the
+        system the attempt stepped on and ``results`` the trial's request;
+        the nested mode polishes from them and moves ``loop.point``,
+        ``loop.cost`` and ``loop.scale`` to where its polish ended.
         """
+        system, lane_costs = self.blocks(loop.point, start=False)
+        loop.cost = float(system.cost)
         return system, lane_costs
 
     def verdict(
@@ -379,7 +389,7 @@ class _JointFit:
         budget = None
         if stop == "max_evaluations":
             budget = (
-                f"{self.work.blocks + self.work.value} evaluations reached "
+                f"{self.work.evaluations()} evaluations reached "
                 f"max_evaluations={self.solver.max_evaluations}"
             )
         message, report = _stop_report(
@@ -425,9 +435,9 @@ class _JointFit:
             radius=float(loop.radius),
             accepted_count=loop.accepted,
             attempt_count=attempt + 1,
-            residual_evals=work.blocks + work.value,
+            residual_evals=work.evaluations(),
             jacobian_evals=work.blocks,
-            trial_cost_evals=work.value,
+            trial_cost_evals=work.value + work.frozen,
             statistics_evals=work.blocks,
             trial_predicate_rejections=work.predicate_rejections,
             invalid_pde_trials=work.invalid_trials,
@@ -482,7 +492,7 @@ class _JointFit:
             ),
             floor=floor,
         )
-        evaluations = work.blocks + work.value
+        evaluations = work.evaluations()
         result = OptResult(
             params=np.array(loop.point),
             initial_params=x0,
@@ -498,7 +508,7 @@ class _JointFit:
                 residual_evals=evaluations,
                 jacobian_evals=work.blocks,
                 pde_solves=evaluations * len(route.ids),
-                trial_cost_evals=work.value,
+                trial_cost_evals=work.value + work.frozen,
                 statistics_evals=work.blocks,
                 trial_predicate_rejections=work.predicate_rejections,
                 invalid_pde_trials=work.invalid_trials,
@@ -634,7 +644,7 @@ class _JointFit:
         n_constraints = int(route.constraint_matrix.shape[0]) + (
             0 if self.rows is None else self.rows.count
         )
-        route.problem.prepare(modes=("value", self.matrix))
+        route.problem.prepare(modes=self.modes)
         system, lane_costs = self.blocks(x, start=state is None)
         x, system, lane_costs = self.at_start(x, system, lane_costs, fresh=state is None)
         cost = float(system.cost)
@@ -760,7 +770,7 @@ class _JointFit:
                 rejection_reason = "the trial predicate rejected the point"
             else:
                 before = work.lane_rungs.copy()
-                results = self.evaluate("value", trial)
+                results = self.evaluate(self.trial_pass(), trial)
                 # A failed lane of weight zero is outside the objective: logged, ignored.
                 failures, ignored = route.weigh(route.failures(results))
                 work.record(attempt, ignored, inner=False)
@@ -808,13 +818,11 @@ class _JointFit:
             previous_cost = loop.cost
             if accepted:
                 loop.point = trial
-                system, lane_costs = self.blocks(loop.point, start=False)
-                loop.cost = float(system.cost)
                 loop.accepted += 1
-                system, lane_costs = self.polish(
+                system, lane_costs = self.accept(
                     loop,
                     system,
-                    lane_costs,
+                    results,
                     attempt=attempt,
                     predicted=predicted_value,
                     level=level,
@@ -861,8 +869,8 @@ class _JointFit:
                 step_small=step_small(step_norm, loop.point, step_tol, tested=after.evaluated),
                 accepted_count=loop.accepted,
                 target_steps=solver.target_accepted_steps,
-                # The budget counts the consistency re-solves too.
-                evaluations=work.blocks + work.value,
+                # The budget counts the consistency re-solves and the frozen passes too.
+                evaluations=work.evaluations(),
                 max_evaluations=solver.max_evaluations,
             )
             if stop is not None:

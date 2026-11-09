@@ -167,21 +167,25 @@ def _member_numbers(decreases: np.ndarray, scales: np.ndarray) -> np.ndarray:
 class _NestedFit(_JointFit):
     """The joint fit, its members polished at one level after every accepted step.
 
-    Every attempt is the joint mode's: its scale, subproblem, trial, ``value``
-    request, gain ratio, radius, stop rules and verdict. After an accepted
-    trial and its ``blocks`` request, every member of the cut level iterates
-    on its own subtree with the outer coordinates held, all members in
-    lockstep, each with its own radius, growth lock and acceptance, for at
-    most the polish's number of iterations. An iteration's request is a
-    frozen pass: each lane's cost at the members' trial and its ``J^T r``
-    there on the Jacobian of its last ``blocks`` request, the gradient the
-    moved members step from next on the kept matrix. A member done leaves the
+    Every attempt is the joint mode's: its scale, subproblem, trial, gain
+    ratio, radius, stop rules and verdict, the acceptance read on the trial's
+    cost. While the polish is on, the trial's request is a frozen pass: each
+    lane's cost at the trial and its ``J^T r`` there on the Jacobian of its
+    last ``blocks`` request. After an accepted trial every member of the cut
+    level iterates on its own subtree from there, the outer coordinates held,
+    on the matrix of the point the attempt stepped from with the trial's
+    gradient; all members in lockstep, each with its own radius, growth lock
+    and acceptance, for at most the polish's number of iterations. An
+    iteration's request is a frozen pass too, whose ``J^T r`` the moved
+    members step from next on the kept matrix. A member done leaves the
     polish: an iteration's requests cover the lanes of the members still in
-    it, and the polish ends with a ``blocks`` request of every lane where it
-    ended, whose point, cost and system are the next attempt's. A member whose lanes
-    fail at its polished point retreats along its polish step. The members' radii and locks carry from
-    one polish to the next. With no polish iterations the fit makes the joint
-    mode's attempts.
+    it. The polish ends with a ``blocks`` request of every lane where it
+    ended, the attempt's one, whose point, cost and system are the next
+    attempt's. A member whose lanes fail at its polished point retreats along
+    its polish step. The members' radii and locks carry from one polish to
+    the next. With no polish iterations, or the polish switched off, the
+    trial's request is ``value`` and the fit makes the joint mode's attempts;
+    a polish in which no member iterates does too.
     """
 
     # Whether the polish's request at its trial is a frozen pass when the lanes run that
@@ -200,6 +204,10 @@ class _NestedFit(_JointFit):
         polishing = self.polish_steps > 0 or int(solver.inner_start_iterations) > 0
         frozen = self.frozen_polish and polishing and route.problem._offers("frozen")
         self.polish_pass = "frozen" if frozen else "value"
+        if frozen:
+            # Every blocks request keeps its lanes' Jacobians, which the frozen pass reads;
+            # both programs are compiled with the others before the fit's first request.
+            self.modes = ("value", "blocks", "frozen")
         self.cut = route.names.index(solver.nested_at) + 1
         self.members = tuple(route.members[self.cut - 1])
         self.lane_member = np.asarray(route.nodes[:, self.cut - 1], dtype=np.int64)
@@ -254,9 +262,6 @@ class _NestedFit(_JointFit):
             self.polish_off = bool(_saved_count(state, "polish_off"))
             self.small_gains = _saved_count(state, "polish_small_gains")
             self.resumed_scale = np.array(state["scale"], dtype=dtype)
-        if self.polish_pass == "frozen":
-            # Every blocks request keeps its lanes' Jacobians, which the frozen pass reads.
-            self.route.problem.prepare(modes=("value", "blocks", "frozen"))
         return super().run(state)
 
     def nested_entries(self) -> dict:
@@ -279,12 +284,12 @@ class _NestedFit(_JointFit):
     # -- the joint loop's hooks ------------------------------------------------
 
     def evaluate(self, mode: str, point: np.ndarray, lanes: Iterable[str] | None = None) -> Any:
-        """The joint fit's request; a ``value`` request of every lane keeps its lane costs.
+        """The joint fit's request; a ``value`` or ``frozen`` request of every lane keeps its lane costs.
 
         The record of a rejected trial reads them (``owner_split``).
         """
         results = super().evaluate(mode, point, lanes)
-        if mode == "value" and lanes is None:
+        if mode in ("value", "frozen") and lanes is None:
             self.trial_lanes = (
                 np.array(point, copy=True),
                 np.array(results.cost, dtype=np.float64)[0],
@@ -358,6 +363,48 @@ class _NestedFit(_JointFit):
         self.polished = polished if fresh else None
         return polished.point, polished.system, polished.lane_costs
 
+    def trial_pass(self) -> str:
+        """``frozen`` while the polish is on and iterates on frozen passes; else ``value``.
+
+        The polish's switch moves only in ``record``, after the attempt.
+        """
+        if self.polish_pass == "frozen" and self.polish_steps > 0 and not self.polish_off:
+            return "frozen"
+        return "value"
+
+    def accept(
+        self,
+        loop: LoopState,
+        system: elimination.LevelSystem,
+        results: Any,
+        *,
+        attempt: int,
+        predicted: float,
+        level: Real | None,
+    ) -> tuple:
+        """The polish from the accepted trial ``loop.point``; the system and lane costs where it ended.
+
+        After a frozen pass at the trial (``trial_pass``) the members polish
+        from the trial on ``system``'s matrix, that of the point the attempt
+        stepped from, with the gradient the pass gave at the trial
+        (``frozen_system``); the ``blocks`` request where the polish ends is
+        the attempt's one. After a ``value`` request the joint mode's
+        ``blocks`` request at the trial comes first. ``loop.point``,
+        ``loop.cost`` and ``loop.scale`` move to where the polish ended.
+        """
+        if self.trial_pass() == "frozen":
+            lane_costs = np.array(results.cost, dtype=np.float64)[0]
+            kept = self.route.frozen_system(system, results, loop.point)
+            return self.polish(
+                loop, kept, lane_costs, attempt=attempt, predicted=predicted, level=level, kept=True
+            )
+        system, lane_costs = super().accept(
+            loop, system, results, attempt=attempt, predicted=predicted, level=level
+        )
+        return self.polish(
+            loop, system, lane_costs, attempt=attempt, predicted=predicted, level=level
+        )
+
     def polish(
         self,
         loop: LoopState,
@@ -367,6 +414,7 @@ class _NestedFit(_JointFit):
         attempt: int,
         predicted: float,
         level: Real | None,
+        kept: bool = False,
     ) -> tuple:
         """The members' polish at the accepted point, the outer values held.
 
@@ -374,8 +422,10 @@ class _NestedFit(_JointFit):
         switched off; every member done at ``inner_fraction`` of the outer
         step's predicted decrease ``predicted``, by its stationarity number
         (raised to its gradient floor, ``level`` times its full step, once the
-        floor is measured) and by its own tests (``lockstep``). ``loop.point``,
-        ``loop.cost`` and ``loop.scale`` move to where it ended.
+        floor is measured) and by its own tests (``lockstep``). With ``kept``
+        ``system`` is a frozen system at the point (``lockstep``).
+        ``loop.point``, ``loop.cost`` and ``loop.scale`` move to where it
+        ended.
         """
         self.stepped_from = self.member_numbers
         limit = self.polish_steps
@@ -394,12 +444,13 @@ class _NestedFit(_JointFit):
             outer_predicted=predicted,
             noise=_median(loop.noise_dominated_cost_change),
             level=level,
+            kept=kept,
         )
         self.keep(polished)
         self.previous, self.polished, self.outer_predicted = before, polished, float(predicted)
+        loop.cost = float(polished.system.cost)
         if np.any(polished.iterations):
             loop.point, loop.scale = polished.point, polished.scale
-            loop.cost = float(polished.system.cost)
         return polished.system, polished.lane_costs
 
     def keep(self, polished: _Polish) -> None:
@@ -927,10 +978,15 @@ class _NestedFit(_JointFit):
         outer_predicted: Real | None = None,
         noise: float = 0.0,
         level: Real | None = None,
+        kept: bool = False,
     ) -> _Polish:
         """Every member of the cut level iterates on its subtree from ``point``, the outer values held.
 
-        ``system`` and ``lane_costs`` are those at ``point``. The members start
+        ``system`` and ``lane_costs`` are those at ``point``; with ``kept``
+        ``system`` is a frozen system there (``frozen_system``: the matrix of
+        an earlier point, the gradient at ``point``), and the polish ends with
+        a ``blocks`` request of every lane however it went: the joint
+        mode's at ``point`` when no member moved from it. The members start
         with the radii, locks and gradient thresholds the fit carries and make
         at most ``limit`` lockstep iterations; ``limit=0`` reads ``point``
         alone. An iteration makes one request at the members' combined trial
@@ -986,7 +1042,7 @@ class _NestedFit(_JointFit):
         # Where the polish started, and whether the system holds nodes of a request of
         # some lanes only.
         start = _Point(np.array(point, copy=True), system, lane_costs)
-        spliced = False
+        spliced = kept
         owners = self.owners
         below = owners >= 0
         member_of = np.maximum(owners, 0)
@@ -1267,9 +1323,15 @@ class _NestedFit(_JointFit):
             changed = np.bincount(
                 member_of[below], weights=(x != start.point)[below], minlength=count
             )
-            x, lane_costs, system, _ = self.settle(
-                x, start, changed > 0, True, radii, retreats, attempt, codes, active
-            )
+            settled = None
+            if not (kept and np.all(changed == 0)):
+                x, lane_costs, system, settled = self.settle(
+                    x, start, changed > 0, True, radii, retreats, attempt, codes, active
+                )
+            if kept and settled is None:
+                # The polish ends where it started, whose system holds an earlier point's
+                # matrix: the joint mode's blocks request there.
+                system, lane_costs = self.blocks(x, start=False)
         if int(limit) == 0:
             codes[~held] = _SKIPPED
         else:

@@ -225,6 +225,10 @@ class _Work:
             self.lane_failures[self.route.position[failure.lane]] += 1
             self.log.append((attempt, failure, inner))
 
+    def evaluations(self) -> int:
+        """The requests made: ``blocks`` (or ``hessian``), ``value`` and ``frozen``."""
+        return self.blocks + self.value + self.frozen
+
     def attempted(self, accepted: bool) -> None:
         """Count an attempt, its trial accepted or rejected."""
         if accepted:
