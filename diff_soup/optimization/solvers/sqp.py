@@ -90,10 +90,10 @@ class SQP(ConstrainedSolver):
     so it suits a sequence of nearby problems.
 
     Args:
-        tol: The scaled optimality error at which the run ends, `1e-8` by default.
+        tol: The scaled optimality error at which the run ends, by default `max(1e-8, 100 * eps)` for the iterate's dtype: `1e-8` in float64 and `1.2e-5` in float32.
         max_steps: The step budget, `100` by default.
         hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`, as for `InteriorPoint`.
-        qp_tol: The scaled optimality error at which each QP solve ends, `1e-10` by default.
+        qp_tol: The scaled optimality error at which each QP solve ends, by default `max(1e-10, 100 * eps)`: `1e-10` in float64 and `1.2e-5` in float32.
         qp_max_steps: The step budget of each QP solve, `50` by default.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
         kkt: The [KKTSolve][diff_soup.optimization.solvers.KKTSolve] backend, `DenseKKT()` by default.
@@ -101,11 +101,12 @@ class SQP(ConstrainedSolver):
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
+    _default_tolerances: ClassVar[dict[str, float]] = {"tol": 1e-8, "qp_tol": 1e-10}
 
-    tol: float = eqx.field(static=True, default=1e-8)
+    tol: float | None = eqx.field(static=True, default=None)
     max_steps: int = eqx.field(static=True, default=100)
     hessian: str = eqx.field(static=True, default="auto")
-    qp_tol: float = eqx.field(static=True, default=1e-10)
+    qp_tol: float | None = eqx.field(static=True, default=None)
     qp_max_steps: int = eqx.field(static=True, default=50)
     max_failed_evaluations: int = eqx.field(static=True, default=10)
     kkt: KKTSolve = eqx.field(static=True, default_factory=DenseKKT)

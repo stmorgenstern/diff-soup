@@ -258,23 +258,31 @@ ENDS = {
         f"max_steps-{name}": (name, {"max_steps": 1}, lambda: hs7().problem, 4.0, _STATUS.MAX_STEPS)
         for name in SOLVERS
     },
-    # measured: KKT error 2.1e-6, |x - x*| 5.2e-6, multiplier error 4.3e-6 in float32,
-    # workstation CPU 2026-11-07
-    "float32": (
-        "interior_point",
-        {"tol": 1e-5},
-        lambda: hs35(jnp.float32).problem,
-        jnp.float32(3.0),
-        _STATUS.KKT_TOL,
-    ),
+    # Each solver on the tolerances float32 resolves; measured: KKT error 2.1e-6, |x - x*| 5.2e-6,
+    # multiplier error 4.3e-6 (interior point and SQP), 4.8e-7, 9.2e-7, 5.8e-7 (augmented
+    # Lagrangian), workstation CPU 2026-11-08
+    **{
+        f"float32-{name}": (
+            name,
+            dict.fromkeys(tolerances, None),
+            lambda: hs35(jnp.float32).problem,
+            jnp.float32(3.0),
+            _STATUS.KKT_TOL,
+        )
+        for name, tolerances in {
+            "interior_point": ("tol",),
+            "sqp": ("tol", "qp_tol"),
+            "augmented_lagrangian": ("tol", "feasibility_tol"),
+        }.items()
+    },
 }
 
 
 @pytest.mark.parametrize("end", ENDS)
 def test_each_way_a_run_ends_sets_its_status(end):
     """Infeasible rows, a NaN region, an unbounded objective, a QP allowed one step, a run
-    allowed one step and a float32 run each end with their own status, with every floating
-    record in the iterate's dtype."""
+    allowed one step and each solver in float32 on its default tolerances each end with their own
+    status, with every floating record in the iterate's dtype."""
     name, options, make, a, status = ENDS[end]
     problem = make()
     solver = dataclasses.replace(SOLVERS[name], **options)

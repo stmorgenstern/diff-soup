@@ -49,7 +49,7 @@ class InteriorPoint(ConstrainedSolver):
     Gauss-Newton plus damped BFGS on a least-squares objective, and damped BFGS otherwise.
 
     Args:
-        tol: The scaled optimality error at which the run ends, `1e-8` by default.
+        tol: The scaled optimality error at which the run ends, by default `max(1e-8, 100 * eps)` for the iterate's dtype: `1e-8` in float64 and `1.2e-5` in float32.
         max_steps: The step budget, `300` by default.
         mu_init: The first barrier parameter, `0.1` by default, or smaller from a warm start.
         mu_min: The least barrier parameter, `1e-11` by default.
@@ -67,8 +67,9 @@ class InteriorPoint(ConstrainedSolver):
     """
 
     requires: ClassVar[frozenset] = frozenset({"value_gradient", "constraint_jacobian"})
+    _default_tolerances: ClassVar[dict[str, float]] = {"tol": 1e-8}
 
-    tol: float = eqx.field(static=True, default=1e-8)
+    tol: float | None = eqx.field(static=True, default=None)
     max_steps: int = eqx.field(static=True, default=300)
     mu_init: float = eqx.field(static=True, default=0.1)
     mu_min: float = eqx.field(static=True, default=1e-11)
