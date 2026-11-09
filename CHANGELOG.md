@@ -6,6 +6,7 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 
 ### Breaking changes
 
+- `TrustRegion(nested_at=...)` now takes the joint fit's step and, after an accepted step, polishes each member's own values with the outer values held, on lane passes that reuse the last Jacobian; with `inner=TrustRegion(max_steps=0)` it is the joint fit. Previously its outer step was the trust-region step of the Schur complement into the shared block, each member's response bounded by its own radius, and the polish ran before the outer acceptance. Its stop rules and verdict are now the joint fit's.
 - Removed `diff_soup.problem.implicit.get_or_build_solver_view`. Use `ds.solver_view`, which returns the same cached view.
 - Removed `ds.inference.constrained_optsolve` and `ds.inference.InequalityConstraints`. Declare the constraints as `ds.optimization.Constraints` on an `InferenceProblem` and solve it with `ds.optimization.InteriorPoint` or `ds.optimization.AugmentedLagrangian`.
 - JIDA with algebraic rows out of the error test, its stock setting, now takes a second Newton iteration when a step's first correction exceeds weighted norm 1. Previously a stale convergence rate could accept it, leaving an algebraic state far off its constraint and its gradients wrong. Results on DAEs change at the level of the solver tolerance.
@@ -34,9 +35,11 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - Added `adjoint=` to `InteriorPoint`, `SQP` and `AugmentedLagrangian`. `ds.nonlinear.ImplicitAdjoint()` differentiates the solution in `args` by one reverse rule, a transposed KKT solve, so `jax.grad` costs one solve however large `args` is and runs through closures that differentiate in reverse mode only. The default, `ds.ForwardAdjoint()`, keeps the forward rule.
 - `InteriorPoint`, `SQP` and `AugmentedLagrangian` run in float32 and return float32 records. A tolerance left unset follows the iterate's dtype: `max(default, 100 * eps)`, which is the float64 default unchanged and `1.2e-5` in float32.
 - Added `ds.optimization.inference.InequalityRows`, rows `c(own, shared, data) <= 0` on the fitted values of a lowered study, per member of a level or on the shared values, which `TrustRegion(inequalities=...)` keeps. Each step holds the rows it would cross at their boundary, through the projection that keeps the equality rows, and a trial that crosses a row is moved back to it. See [Optimization solvers](https://stmorgenstern.github.io/diff-soup/reference/inference/solvers/).
+- Added the `"frozen"` mode of a lowered study: after `prepare(modes=(..., "frozen"))` each `blocks` evaluation keeps its lanes' Jacobians, and a `"frozen"` evaluation returns each lane's cost from a plain solve and its gradient on the kept Jacobian, at the cost of a `value` evaluation. The nested `TrustRegion`'s polish runs on it.
 
 ### Bugfixes
 
+- Fixed MAP fits of a `@ds.recipe` template, which took every prior from the template's first build in the process, so a later build with another prior was fitted under the first one's. Each fit now takes each prior from its own experiments' builds (per owner for a parameter that varies by owner), a `GaussianCoefficientPrior` centers on its own build's coefficients, builds that differ only in a prior return two problems, and a MAP fit refuses a parameter shared by experiments whose builds declare different priors.
 - Fixed member equations, whose `q.p.<name>` and `q.fn.<name>` raised `AttributeError`. They now read the problem's declared parameters and functions, with their tangents, as component equations do.
 - Fixed consistent initialization of a family problem whose step backend is a `MemberBlock` over the full state, which raised a `ConfigurationError`. Initialization now solves its smaller system on the backend `linear="auto"` chooses for its size.
 - Fixed `SaveAt(output="projected")` rows that came back `NaN` at a tight `atol`. Projected samples now pass the same gate as the solve's own initialization.
@@ -72,18 +75,6 @@ Complex linear solves on every exact backend, a public schedule solve, and fixes
 - `diff_soup.inference` is now `diff_soup.optimization.inference`, and `optsolve`, `OptResult`, the optimization problems and the solvers are also at the top of `ds.optimization`. `ds.inference` and every `diff_soup.inference` import path still work for this release, return the same objects and warn once with a `DeprecationWarning`; they will be removed in 1.3.
 
 **Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.2.0
-
-## 1.1.1 (unreleased)
-
-A bugfix release: each build of a recipe template is now fitted under its own priors.
-
-### Bugfixes
-
-- Fixed MAP fits of a `@ds.recipe` template, which took every prior from the template's first build in the process, so a later build with another prior was fitted under the first one's without a word. Each fit now takes each prior from its own experiments' builds (per owner for a parameter that varies by owner), and a `GaussianCoefficientPrior` centers on its own build's coefficients. Results change only where one process built a template with different priors.
-- Builds that differ only in a prior now return two problems. Previously they returned one problem, whose declarations followed the latest build.
-- A MAP fit now refuses a parameter shared by experiments whose builds declare different priors. Previously it used the first build's prior.
-
-**Full Changelog**: https://github.com/stmorgenstern/diff-soup/compare/v1.1.0...v1.1.1
 
 ## 1.1.0 (2026-10-29)
 
