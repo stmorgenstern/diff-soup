@@ -5,7 +5,6 @@ from __future__ import annotations
 import functools
 from collections.abc import Sequence
 from numbers import Real
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -14,8 +13,10 @@ from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.hierarchical._level_solve import (
     _ancestor_values,
+    _carried,
     _lower_solve,
     _node_sum,
+    _row_block,
     _secular_search,
     _split,
     _upper_solve,
@@ -29,35 +30,16 @@ from diff_soup.optimization.inference.hierarchical._level_system import (
 )
 
 
-class MemberRows(NamedTuple):
-    """Equality rows on every member's own coordinates at a level, the same number per member.
-
-    Row ``r`` of member ``n`` holds ``coefficients[n, :, r] . s_n = target[n, r]`` on the
-    member's step ``s_n`` at the level, when ``active[n, r]``; an inactive row is not kept,
-    so one program solves every active set. The coordinates are those of the system the
-    rows are solved with.
-
-    Attributes:
-        coefficients: ``(N_level, v_level, R)``.
-        target: ``(N_level, R)``.
-        active: ``(N_level, R)``, boolean.
-    """
-
-    coefficients: ArrayLike
-    target: ArrayLike
-    active: ArrayLike
-
-
-def _inner_parts(system, damping, rows, level):
+def _inner_parts(system, damping, level):
     """Every member of ``level`` solves its own subtree with its own damping.
 
     The member's subtree (its block and every level below it) is eliminated
-    from the experiments up, as ``_fold`` does, but nothing is folded above
-    ``level``: the coordinates there are held. Member ``n`` solves
+    from the experiments up, as ``_eliminate`` does, but nothing is folded
+    above ``level``: the coordinates there are held. Member ``n`` solves
     ``(H_n + damping_n I) s_n = -g_n``, ``H_n`` and ``g_n`` its subtree's
-    blocks, under its active ``rows`` (``MemberRows``, or ``None``): their
-    coefficients ride as extra right-hand-side columns, and the step is
-    projected onto them as ``_solve`` projects onto the equality rows.
+    blocks, under its active rows at ``level`` (``system.member_rows[level]``,
+    their coefficients on its own coordinates alone): they are eliminated with
+    the member's block (``_row_block``), as the joint solve eliminates them.
     ``q_n^2 = s_n^T (H_n + damping_n I)^-1 s_n`` comes from the same factors.
     Returns the steps in joint columns (zero above ``level``), ``q^2`` per
     member, and every member's multipliers of its rows ``(N_level, R)``, those
@@ -68,7 +50,7 @@ def _inner_parts(system, damping, rows, level):
     depth = system.depth
     dtype = system.root.dtype
     offsets = _offsets(counts, widths)
-    extra = 0 if rows is None else rows.coefficients.shape[-1]
+    rows = None if system.member_rows is None else system.member_rows[level]
 
     def own_damping(at: int) -> jax.Array:
         return damping if at == level else damping[system.ancestors[at][level]]
@@ -77,15 +59,7 @@ def _inner_parts(system, damping, rows, level):
     cross = [None] + [list(row) for row in system.cross[1:]]
     rhs: list = [None] * (depth + 1)
     for at in range(level, depth + 1):
-        right = -system.gradient[at][..., None]
-        if extra:
-            columns = (
-                rows.coefficients
-                if at == level
-                else jnp.zeros(right.shape[:2] + (extra,), dtype=dtype)
-            )
-            right = jnp.concatenate([right, columns], axis=2)
-        rhs[at] = right
+        rhs[at] = -system.gradient[at][..., None]
     factors: list = [None] * (depth + 1)
     couplings: list = [None] * (depth + 1)
     solved: list = [None] * (depth + 1)
@@ -118,42 +92,38 @@ def _inner_parts(system, damping, rows, level):
             folded = jnp.einsum("nia,nik->nak", row[above], solved[at])
             rhs[above] = rhs[above] - _node_sum(system, folded, at, above)
     steps: list = [None] * (depth + 1)
+    multipliers = jnp.zeros((counts[level - 1], 0), dtype=dtype)
     if widths[level]:
         factor = jax.vmap(jnp.linalg.cholesky)(
             diagonal[level] + damping[:, None, None] * jnp.eye(widths[level], dtype=dtype)
         )
         factors[level] = factor
         solved[level] = _lower_solve(factor, rhs[level])
-        steps[level] = _upper_solve(factor, solved[level])
+        right = solved[level]
+        if rows is not None:
+            # Every member's rows eliminated with its block, the values above held:
+            # (W^T W) mu_n = W^T y_n - target_n on its active rows, W = L_n^-1 C_n^T.
+            block = _row_block(rows, factor, [None] * level)
+            target = jnp.asarray(rows.target, dtype=dtype)[..., None]
+            held = _upper_solve(block.factor, _carried(block, right, target))
+            multipliers = held[..., 0]
+            right = right - jnp.einsum("nir,nrk->nik", block.basis, held)
+        steps[level] = _upper_solve(factor, right)[..., 0]
     else:
-        steps[level] = jnp.zeros((counts[level - 1], 0, 1 + extra), dtype=dtype)
+        steps[level] = jnp.zeros((counts[level - 1], 0), dtype=dtype)
+        if rows is not None:
+            multipliers = jnp.zeros(np.shape(rows.target), dtype=dtype)
     for at in range(level + 1, depth + 1):
         if not widths[at]:
-            steps[at] = jnp.zeros((counts[at - 1], 0, 1 + extra), dtype=dtype)
+            steps[at] = jnp.zeros((counts[at - 1], 0), dtype=dtype)
             continue
-        right = solved[at]
+        right = solved[at][..., 0]
         for above in range(level, at):
             if not widths[above]:
                 continue
             above_steps = _ancestor_values(system, steps[above], at, above)
-            right = right - jnp.einsum("nia,nak->nik", couplings[at][above], above_steps)
-        steps[at] = _upper_solve(factors[at], right)
-    if extra:
-        # Every member's multipliers: (C_n Y_n) mu_n = C_n s_n - target_n on its active
-        # rows, an inactive row's row and column the identity's (a zero multiplier).
-        coefficients, on = rows.coefficients, rows.active
-        gram = jnp.einsum("nir,nis->nrs", coefficients, steps[level][..., 1:])
-        residual = jnp.einsum("nir,ni->nr", coefficients, steps[level][..., 0]) - rows.target
-        gram = jnp.where(on[:, :, None] & on[:, None, :], gram, 0.0) + jax.vmap(jnp.diag)(
-            jnp.where(on, 0.0, 1.0)
-        )
-        multipliers = jnp.linalg.solve(gram, jnp.where(on, residual, 0.0)[..., None])[..., 0]
-        for at in range(level, depth + 1):
-            own = multipliers if at == level else multipliers[system.ancestors[at][level]]
-            steps[at] = steps[at][..., 0] - jnp.einsum("nik,nk->ni", steps[at][..., 1:], own)
-    else:
-        steps = steps[:level] + [entry[..., 0] for entry in steps[level:]]
-        multipliers = jnp.zeros((counts[level - 1], 0), dtype=dtype)
+            right = right - jnp.einsum("nia,na->ni", couplings[at][above], above_steps)
+        steps[at] = _upper_solve(factors[at], right[..., None])[..., 0]
     halves: list = [None] * (depth + 1)
     q_squared = jnp.zeros((counts[level - 1],), dtype=dtype)
     for at in range(depth, level - 1, -1):
@@ -176,16 +146,16 @@ def _inner_parts(system, damping, rows, level):
 
 
 @functools.partial(jax.jit, static_argnames=("level",))
-def _inner_solve(system, damping, rows=None, *, level):
+def _inner_solve(system, damping, *, level):
     """``_inner_parts``'s steps and ``q^2``."""
-    step, q_squared, _ = _inner_parts(system, damping, rows, level)
+    step, q_squared, _ = _inner_parts(system, damping, level)
     return step, q_squared
 
 
 @functools.partial(jax.jit, static_argnames=("level",))
-def _inner_multipliers(system, damping, rows, *, level):
+def _inner_multipliers(system, damping, *, level):
     """``_inner_parts``'s multipliers."""
-    return _inner_parts(system, damping, rows, level)[2]
+    return _inner_parts(system, damping, level)[2]
 
 
 @functools.partial(jax.jit, static_argnames=("level",))
@@ -218,39 +188,19 @@ def _node_model(system, delta, *, level):
     return linear, quadratic
 
 
-def _scaled_rows(
-    system: LevelSystem, rows: MemberRows | None, scale: np.ndarray, level: int
-) -> MemberRows | None:
-    """``rows`` in the coordinates ``z = scale * s``: each coefficient over its column's scale."""
-    if rows is None:
-        return None
-    dtype = _dtype(system)
-    offsets = _offsets(system.counts, system.widths)
-    own = scale[offsets[level] : offsets[level + 1]].reshape(
-        system.counts[level - 1], system.widths[level]
-    )
-    with np.errstate(all="ignore"):
-        coefficients = np.asarray(rows.coefficients, dtype=dtype) / own[:, :, None]
-    return MemberRows(
-        jnp.asarray(coefficients),
-        jnp.asarray(np.asarray(rows.target, dtype=dtype)),
-        jnp.asarray(np.asarray(rows.active, dtype=bool)),
-    )
-
-
 def inner_solve_scaled(
     system: LevelSystem,
     scale: ArrayLike | Sequence[Real],
     level: int,
     *,
     addition: ArrayLike | Sequence | None = None,
-    rows: MemberRows | None = None,
 ) -> tuple:
     """Every member of ``level`` solves its subtree at zero damping, in ``z = scale * s``.
 
     The coordinates above ``level`` are held. This is the solve the members'
     multiplier searches of ``inner_secular_step`` make first, for every
-    member at once.
+    member at once. Every member's step keeps its active rows at ``level``
+    (``system.member_rows``).
 
     Args:
         system: The system.
@@ -258,9 +208,6 @@ def inner_solve_scaled(
         level: The level of the inner problems, ``1 .. D``.
         addition: Optional ``(n,)``, nonnegative, added to the diagonal of the
             scaled matrix (``scaled_system``).
-        rows: Optional ``MemberRows`` on the members' own coordinates at
-            ``level``, in the coordinates of ``system``: every member's step
-            keeps its active rows.
 
     Returns:
         ``(z, q_squared)`` as host arrays: the scaled steps ``(n,)`` in joint
@@ -272,8 +219,7 @@ def inner_solve_scaled(
     scale = np.asarray(scale, dtype=dtype)
     scaled = scaled_system(system, scale, addition)
     count = system.counts[int(level) - 1]
-    held = _scaled_rows(system, rows, scale, int(level))
-    step, q_squared = _inner_solve(scaled, np.zeros((count,), dtype=dtype), held, level=int(level))
+    step, q_squared = _inner_solve(scaled, np.zeros((count,), dtype=dtype), level=int(level))
     return np.asarray(step), np.asarray(q_squared)
 
 
@@ -282,11 +228,10 @@ def inner_row_multipliers(
     scale: ArrayLike | Sequence[Real],
     damping: ArrayLike,
     level: int,
-    rows: MemberRows,
     *,
     addition: ArrayLike | Sequence | None = None,
 ) -> np.ndarray:
-    """Every member's multipliers of its active ``rows`` at its damped solve in ``z = scale * s``.
+    """Every member's multipliers of its active rows at ``level`` at its damped solve in ``z = scale * s``.
 
     The solve is ``inner_solve_scaled``'s with member ``n`` damped by ``damping[n]``; a
     member's row is kept by its model only where its multiplier is at least zero. An
@@ -298,10 +243,7 @@ def inner_row_multipliers(
     dtype = _dtype(system)
     scale = np.asarray(scale, dtype=dtype)
     scaled = scaled_system(system, scale, addition)
-    held = _scaled_rows(system, rows, scale, int(level))
-    multipliers = _inner_multipliers(
-        scaled, np.asarray(damping, dtype=dtype), held, level=int(level)
-    )
+    multipliers = _inner_multipliers(scaled, np.asarray(damping, dtype=dtype), level=int(level))
     return np.asarray(multipliers, dtype=np.float64)
 
 
@@ -313,7 +255,6 @@ def _lockstep_search(
     first: tuple[ArrayLike, ArrayLike] | None,
     *,
     hold: bool = False,
-    rows: MemberRows | None = None,
 ) -> tuple:
     """The multiplier searches of the active members of ``level`` on a scaled system.
 
@@ -324,8 +265,8 @@ def _lockstep_search(
     ``(z, q_squared)`` of the solve at zero damping, already made; it answers
     every search's first request and counts as one solve. With ``hold``, a
     member whose search finds no finite step inside its radius takes a zero
-    step and a ``nan`` multiplier instead of raising. ``rows`` are the
-    members' ``MemberRows`` in the scaled coordinates, kept by every solve.
+    step and a ``nan`` multiplier instead of raising. Every solve keeps the
+    members' rows of ``scaled`` at ``level``.
 
     Returns:
         ``(multipliers, scaled_step, solves)``: the multipliers
@@ -373,7 +314,7 @@ def _lockstep_search(
         damping = np.ones((count,), dtype=dtype)
         for member, value in requests.items():
             damping[member] = value
-        step, q_squared = _inner_solve(scaled, damping, rows, level=level)
+        step, q_squared = _inner_solve(scaled, damping, level=level)
         solves += 1
         requests = answer(requests, np.asarray(step), np.asarray(q_squared))
     return multipliers, scaled_step, solves
@@ -389,7 +330,6 @@ def inner_secular_step(
     first: tuple[ArrayLike, ArrayLike] | None = None,
     addition: ArrayLike | Sequence | None = None,
     hold: bool = False,
-    rows: MemberRows | None = None,
 ) -> tuple:
     """The trust-region step of every active member of ``level`` over its own subtree.
 
@@ -414,9 +354,6 @@ def inner_secular_step(
         hold: A member for which no finite step inside its radius is found
             takes a zero step, a zero predicted decrease and a ``nan``
             multiplier instead of raising; the other members are unchanged.
-        rows: Optional ``MemberRows`` on the members' own coordinates at
-            ``level``, in the coordinates of ``system``: every member's step
-            keeps its active rows. ``first`` must have been solved with them.
 
     Returns:
         ``(step, predicted, multipliers, solves)``: the step ``(n,)`` in joint
@@ -441,7 +378,6 @@ def inner_secular_step(
         active,
         first,
         hold=hold,
-        rows=_scaled_rows(system, rows, scale, level),
     )
     with np.errstate(all="ignore"):
         delta = scaled_step / scale
@@ -553,7 +489,6 @@ def inner_programs(system: LevelSystem, level: int) -> None:
 
 
 __all__ = [
-    "MemberRows",
     "inner_added",
     "inner_row_multipliers",
     "inner_predicted",

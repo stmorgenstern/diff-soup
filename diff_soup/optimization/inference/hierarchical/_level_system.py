@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import equinox as eqx
 import jax
@@ -17,6 +17,32 @@ from diff_soup.optimization.inference.engine._levels import LevelBlocks, LevelTa
 # ---------------------------------------------------------------------------
 # The system
 # ---------------------------------------------------------------------------
+
+
+class MemberRows(NamedTuple):
+    """Equality rows on the members of one level, the same number per member.
+
+    Row ``r`` of member ``n`` reads the member's own step ``s_n`` and the steps
+    ``s_a`` of its ancestors: ``coefficients[n, :, r] . s_n + sum_a above[a][n, :, r]
+    . s_a = target[n, r]``, kept when ``active[n, r]``. An inactive row is not
+    kept and its multiplier is zero, so one program solves every active set. A
+    joint solve folds a member's rows into its ancestors with the member's
+    block; a member's own solve, the values above it held, reads
+    ``coefficients`` alone.
+
+    Attributes:
+        coefficients: ``(N_l, v_l, R)``, on the member's own coordinates.
+        above: ``above[a]``, ``(N_l, v_a, R)``, on the coordinates of its
+            level-``a`` ancestor, for ``a = 0 .. l - 1`` (``a = 0``, the
+            shared block).
+        target: ``(N_l, R)``.
+        active: ``(N_l, R)``, boolean.
+    """
+
+    coefficients: ArrayLike
+    above: tuple
+    target: ArrayLike
+    active: ArrayLike
 
 
 class LevelSystem(eqx.Module):
@@ -51,8 +77,13 @@ class LevelSystem(eqx.Module):
         counts: ``(N_1, ..., N_D)``.
         widths: ``(g, v_1, ..., v_D)``.
         constraint_active: Optional ``(c,)``, boolean: which equality rows a step
-            keeps; ``None`` keeps every row. The inequality rows of a fit ride
-            here at a fixed count, so one program solves every active set.
+            keeps; ``None`` keeps every row. The inequality rows of a fit that
+            read no member's own values ride here at a fixed count, so one
+            program solves every active set.
+        member_rows: Optional; ``member_rows[l]``, the ``MemberRows`` of
+            level ``l``, ``None`` at level 0 and at a level without rows: the
+            rows that read one member's own values and the values above it,
+            each kept at its member's node.
 
     The fixed coordinates and the held nodes are arrays of the system, not
     part of its structure: systems of one hierarchy that fix or hold different
@@ -77,11 +108,17 @@ class LevelSystem(eqx.Module):
     counts: tuple = eqx.field(static=True)
     widths: tuple = eqx.field(static=True)
     constraint_active: jax.Array | None = None
+    member_rows: tuple | None = None
 
     @property
     def depth(self) -> int:
         """The number of levels below the root."""
         return len(self.counts)
+
+    @property
+    def keeps_rows(self) -> bool:
+        """Whether a step of the system keeps rows: equality rows or members' rows."""
+        return int(self.constraint_matrix.shape[0]) > 0 or self.member_rows is not None
 
     @property
     def size(self) -> int:
@@ -806,6 +843,7 @@ def level_dense(system: LevelSystem) -> tuple:
 __all__ = [
     "LevelLayout",
     "LevelSystem",
+    "MemberRows",
     "level_dense",
     "level_layout",
     "level_system",

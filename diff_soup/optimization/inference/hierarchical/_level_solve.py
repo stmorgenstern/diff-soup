@@ -15,6 +15,7 @@ from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.hierarchical._level_system import (
     LevelSystem,
+    MemberRows,
     _addition,
     _dtype,
     _offsets,
@@ -66,43 +67,191 @@ def _upper_solve(factor: ArrayLike, right: ArrayLike) -> jax.Array:
     )
 
 
-def _fold(
-    system: LevelSystem, damping: Real | ArrayLike, rhs: Sequence[ArrayLike] | None, lowest: int
-) -> tuple:
-    """Eliminate the levels ``D .. lowest`` from the experiments up.
+def _factor(
+    diagonal: ArrayLike, cross: Sequence, damping: Real | ArrayLike, widths: tuple, level: int
+):
+    """Every node's factor ``L_n = chol(diag_n + damping I)`` and its couplings ``L_n^-1 cross_n^a``."""
+    factor = jax.vmap(jnp.linalg.cholesky)(
+        diagonal + damping * jnp.eye(widths[level], dtype=diagonal.dtype)
+    )
+    couplings = [
+        _lower_solve(factor, cross[above]) if widths[above] else None for above in range(level)
+    ]
+    return factor, couplings
 
-    Every node of a level is factored at once, ``L_n = chol(diag~_n + damping I)``;
-    its couplings ``Y_n^a = L_n^-1 cross~_n^a`` and right-hand sides
-    ``y_n = L_n^-1 R~_n`` are formed, and ``(Y_n^a)^T Y_n^b`` and
-    ``(Y_n^a)^T y_n`` are folded into the node's ancestors, summed over the
-    nodes below each ancestor in node order.
+
+def _row_sizes(system: LevelSystem, rows: MemberRows, level: int, damping) -> jax.Array:
+    """Per member's row, ``sum_j a_j^2 / (H_jj + damping)`` over the columns it reads, ``(N_l, R)``.
+
+    The size of the row's pivot among the multipliers, from the matrix's
+    diagonal; it stands for a row whose own coefficients vanish.
+    """
+
+    def inverse(diagonal: jax.Array) -> jax.Array:
+        diagonal = diagonal + damping
+        return jnp.where(diagonal > 0.0, 1.0 / jnp.where(diagonal > 0.0, diagonal, 1.0), 0.0)
+
+    own = inverse(jnp.diagonal(system.diagonal[level], axis1=1, axis2=2))
+    sizes = jnp.einsum("nir,ni->nr", rows.coefficients**2, own)
+    for above, entry in enumerate(rows.above):
+        if not system.widths[above]:
+            continue
+        if above == 0:
+            sizes = sizes + jnp.einsum("nir,i->nr", entry**2, inverse(jnp.diagonal(system.root)))
+        else:
+            diagonal = jnp.diagonal(system.diagonal[above], axis1=1, axis2=2)
+            ancestor = _ancestor_values(system, diagonal, level, above)
+            sizes = sizes + jnp.einsum("nir,ni->nr", entry**2, inverse(ancestor))
+    return sizes
+
+
+def _block_factor(gram: ArrayLike, on: ArrayLike, sizes: ArrayLike | None = None) -> jax.Array:
+    """``chol`` of every member's multipliers' block, a weak block lifted first.
+
+    A block with a pivot below ``sqrt(eps)`` of its row's size (the larger of
+    its diagonal entry and ``sizes``) belongs to a member that holds rows
+    dependent on its own values, or a row that reads none of them; its active
+    rows' diagonal is raised by that much, so its factor stays finite. A
+    joint solve refines the lifted answer to the exact one (``_refined``).
+    """
+    dtype = gram.dtype
+    size = jnp.diagonal(gram, axis1=1, axis2=2)
+    if sizes is not None:
+        size = jnp.maximum(size, sizes)
+    lift = jnp.where(on, jnp.sqrt(jnp.finfo(dtype).eps) * size + jnp.finfo(dtype).tiny, 0.0)
+    plain = jax.vmap(jnp.linalg.cholesky)(gram)
+    pivots = jnp.diagonal(plain, axis1=1, axis2=2)
+    weak = jnp.any(on & ~(pivots * pivots >= lift), axis=1)
+    raised = gram + jax.vmap(jnp.diag)(lift)
+    return jnp.where(weak[:, None, None], jax.vmap(jnp.linalg.cholesky)(raised), plain)
+
+
+class _RowBlock(NamedTuple):
+    """A level's member rows eliminated with its nodes, every node at once.
+
+    With ``L`` a node's factor and ``B`` its rows' coefficients on its own
+    coordinates, ``basis`` is ``W = L^-1 B``; the multipliers' block ``W^T W``,
+    an inactive row's row and column the identity's, is ``factor factor^T``
+    (``_block_factor``); ``coupled[a]`` is ``factor^-1 (W^T Y^a - B_a^T)``, zero
+    on an inactive row, for the couplings ``Y^a = L^-1 cross^a`` and the rows'
+    coefficients ``B_a`` on the level-``a`` ancestor (``None`` where the
+    ancestor has no width or is held).
+    """
+
+    basis: jax.Array
+    factor: jax.Array
+    coupled: list
+    active: jax.Array
+
+
+def _row_block(
+    rows: MemberRows, factor: ArrayLike, couplings: Sequence, sizes: ArrayLike | None = None
+) -> _RowBlock:
+    """``rows`` eliminated with the nodes of their level, whose factors and couplings are given.
+
+    ``sizes`` are the rows' sizes of ``_row_sizes``, or ``None`` to take the
+    multipliers' block's diagonal alone.
+    """
+    on = jnp.asarray(rows.active, dtype=bool)
+    basis = _lower_solve(factor, rows.coefficients)
+    gram = jnp.einsum("nir,nis->nrs", basis, basis)
+    gram = jnp.where(on[:, :, None] & on[:, None, :], gram, 0.0) + jax.vmap(jnp.diag)(
+        jnp.where(on, 0.0, 1.0)
+    )
+    block_factor = _block_factor(gram, on, sizes)
+    coupled = []
+    for above, coupling in enumerate(couplings):
+        if coupling is None:
+            coupled.append(None)
+            continue
+        value = jnp.einsum("nir,nia->nra", basis, coupling) - jnp.swapaxes(rows.above[above], 1, 2)
+        coupled.append(_lower_solve(block_factor, jnp.where(on[..., None], value, 0.0)))
+    return _RowBlock(basis, block_factor, coupled, on)
+
+
+def _carried(block: _RowBlock, solved: ArrayLike, targets: ArrayLike) -> jax.Array:
+    """``factor^-1 (W^T y - targets)`` for a level's right-hand sides ``y = L^-1 R``, zero on an inactive row."""
+    value = jnp.einsum("nir,nik->nrk", block.basis, solved) - targets
+    return _lower_solve(block.factor, jnp.where(block.active[..., None], value, 0.0))
+
+
+class _Elimination(NamedTuple):
+    """The factors of one damped elimination, as ``_eliminate`` makes them.
+
+    Per level: ``factors``, ``couplings`` and the members' ``blocks``
+    (``_RowBlock`` or ``None``) of the elimination that holds the members'
+    rows, and ``root`` its shared factor. ``plain_factors``,
+    ``plain_couplings`` and ``plain_root`` are those of the matrix alone,
+    ``H + damping I``, whose inverse-norm ``s^T (H + damping I)^-1 s`` the
+    search reads; they differ only above the deepest level with rows.
+    """
+
+    factors: list
+    couplings: list
+    blocks: list
+    root: jax.Array | None
+    plain_factors: list
+    plain_couplings: list
+    plain_root: jax.Array | None
+
+
+def _subtract(system: LevelSystem, blocks: list, level: int, above: int, other: int, product):
+    """Subtract ``product``, summed over the nodes of ``level`` below each node of ``above``, from block ``(above, other)``.
+
+    ``blocks`` is ``[root, diagonal, cross]``, changed in place.
+    """
+    total = _node_sum(system, product, level, above)
+    if above == 0:
+        blocks[0] = blocks[0] - total
+    elif other == above:
+        blocks[1][above] = blocks[1][above] - total
+    else:
+        blocks[2][above][other] = blocks[2][above][other] - total
+
+
+def _eliminate(system: LevelSystem, damping: Real | ArrayLike) -> _Elimination:
+    """Factor the levels ``D .. 1`` from the experiments up, then the shared block.
+
+    Every node of a level is factored at once, ``L_n = chol(diag~_n + damping
+    I)``, with its couplings ``Y_n^a = L_n^-1 cross~_n^a``; ``(Y_n^a)^T Y_n^b``
+    is folded into the node's ancestors, summed over the nodes below each
+    ancestor in node order. A level with members' rows eliminates them with its
+    nodes (``_row_block``): each member's multipliers are solved in its own
+    block, and its ancestors take ``(Y^a)^T Y^b - coupled[a]^T coupled[b]``,
+    the Schur complement of the member's step and multipliers together. The
+    work grows with the members, not with the square of the rows.
     """
     widths = system.widths
     depth = system.depth
     dtype = system.root.dtype
-    diagonal = list(system.diagonal)
-    cross = [None] + [list(row) for row in system.cross[1:]]
-    root = system.root
-    root_rhs = None if rhs is None else rhs[0]
-    level_rhs = None if rhs is None else list(rhs)
+    rows = system.member_rows if system.member_rows is not None else (None,) * (depth + 1)
+    deepest = max(
+        (level for level in range(1, depth + 1) if rows[level] is not None and widths[level]),
+        default=0,
+    )
+    held = [system.root, list(system.diagonal), [None] + [list(row) for row in system.cross[1:]]]
+    plain = [system.root, list(system.diagonal), [None] + [list(row) for row in system.cross[1:]]]
     factors: list = [None] * (depth + 1)
     couplings: list = [None] * (depth + 1)
-    solved: list = [None] * (depth + 1)
-    for level in range(depth, lowest - 1, -1):
-        width = widths[level]
-        if width == 0:
+    blocks: list = [None] * (depth + 1)
+    plain_factors: list = [None] * (depth + 1)
+    plain_couplings: list = [None] * (depth + 1)
+    for level in range(depth, 0, -1):
+        if not widths[level]:
             continue
-        factor = jax.vmap(jnp.linalg.cholesky)(
-            diagonal[level] + damping * jnp.eye(width, dtype=dtype)
-        )
-        factors[level] = factor
-        row: list = [None] * level
-        for above in range(level):
-            if widths[above]:
-                row[above] = _lower_solve(factor, cross[level][above])
-        couplings[level] = row
-        if rhs is not None:
-            solved[level] = _lower_solve(factor, level_rhs[level])
+        factor, row = _factor(held[1][level], held[2][level], damping, widths, level)
+        block = None
+        if rows[level] is not None:
+            sizes = _row_sizes(system, rows[level], level, damping)
+            block = _row_block(rows[level], factor, row, sizes)
+        if level < deepest:
+            plain_factor, plain_row = _factor(
+                plain[1][level], plain[2][level], damping, widths, level
+            )
+        else:
+            plain_factor, plain_row = factor, row
+        factors[level], couplings[level], blocks[level] = factor, row, block
+        plain_factors[level], plain_couplings[level] = plain_factor, plain_row
         for above in range(level):
             if not widths[above]:
                 continue
@@ -110,28 +259,296 @@ def _fold(
                 if not widths[other]:
                     continue
                 product = jnp.einsum("nia,nib->nab", row[above], row[other])
-                total = _node_sum(system, product, level, above)
-                if above == 0:
-                    root = root - total
-                elif other == above:
-                    diagonal[above] = diagonal[above] - total
-                else:
-                    cross[above][other] = cross[above][other] - total
-            if rhs is not None:
-                folded = jnp.einsum("nia,nik->nak", row[above], solved[level])
-                total = _node_sum(system, folded, level, above)
-                if above == 0:
-                    root_rhs = root_rhs - total
-                else:
-                    level_rhs[above] = level_rhs[above] - total
-    return root, root_rhs, diagonal, cross, level_rhs, factors, couplings, solved
+                folded = product
+                if block is not None:
+                    folded = product - jnp.einsum(
+                        "nra,nrb->nab", block.coupled[above], block.coupled[other]
+                    )
+                _subtract(system, held, level, above, other, folded)
+                if above < deepest:
+                    if level < deepest:
+                        product = jnp.einsum("nia,nib->nab", plain_row[above], plain_row[other])
+                    _subtract(system, plain, level, above, other, product)
+    g = widths[0]
+    root = plain_root = None
+    if g:
+        identity = damping * jnp.eye(g, dtype=dtype)
+        root = jnp.linalg.cholesky(held[0] + identity)
+        plain_root = jnp.linalg.cholesky(plain[0] + identity) if deepest else root
+    return _Elimination(
+        factors, couplings, blocks, root, plain_factors, plain_couplings, plain_root
+    )
+
+
+def _substitute(system: LevelSystem, elimination: _Elimination, rhs: list, targets: list) -> tuple:
+    """Solve with ``elimination`` for the right-hand sides ``rhs`` and the members' row ``targets``.
+
+    ``rhs`` holds the root's ``(g, k)`` and every level's ``(N_l, v_l, k)``;
+    ``targets[l]`` is ``(N_l, R_l, k)`` at a level with rows. The right-hand
+    sides are folded up the tree as the matrix was, the shared block is solved,
+    and the steps follow top-down, each member's multipliers with its step.
+    Returns ``(steps, multipliers)``: per level the steps ``(N_l, v_l, k)``
+    (the root's ``(g, k)`` first), and the multipliers ``(N_l, R_l, k)`` at a
+    level with rows.
+    """
+    counts, widths = system.counts, system.widths
+    depth = system.depth
+    dtype = system.root.dtype
+    rhs = list(rhs)
+    solved: list = [None] * (depth + 1)
+    carried: list = [None] * (depth + 1)
+    for level in range(depth, 0, -1):
+        if not widths[level]:
+            continue
+        row, block = elimination.couplings[level], elimination.blocks[level]
+        solved[level] = _lower_solve(elimination.factors[level], rhs[level])
+        if block is not None:
+            carried[level] = _carried(block, solved[level], targets[level])
+        for above in range(level):
+            if not widths[above]:
+                continue
+            folded = jnp.einsum("nia,nik->nak", row[above], solved[level])
+            if block is not None:
+                folded = folded - jnp.einsum("nra,nrk->nak", block.coupled[above], carried[level])
+            rhs[above] = rhs[above] - _node_sum(system, folded, level, above)
+    columns = rhs[0].shape[-1]
+    if widths[0]:
+        half = jax.scipy.linalg.solve_triangular(elimination.root, rhs[0], lower=True)
+        top = jax.scipy.linalg.solve_triangular(elimination.root, half, lower=True, trans="T")
+    else:
+        top = jnp.zeros((0, columns), dtype=dtype)
+    steps = [top]
+    multipliers: list = [None] * (depth + 1)
+    for level in range(1, depth + 1):
+        count, width = counts[level - 1], widths[level]
+        if width == 0:
+            steps.append(jnp.zeros((count, 0, columns), dtype=dtype))
+            continue
+        row, block = elimination.couplings[level], elimination.blocks[level]
+        right, held = solved[level], carried[level]
+        for above in range(level):
+            if not widths[above]:
+                continue
+            if above == 0:
+                right = right - jnp.einsum("nia,ak->nik", row[0], steps[0])
+                if block is not None:
+                    held = held - jnp.einsum("nra,ak->nrk", block.coupled[0], steps[0])
+            else:
+                above_steps = _ancestor_values(system, steps[above], level, above)
+                right = right - jnp.einsum("nia,nak->nik", row[above], above_steps)
+                if block is not None:
+                    held = held - jnp.einsum("nra,nak->nrk", block.coupled[above], above_steps)
+        if block is not None:
+            multipliers[level] = _upper_solve(block.factor, held)
+            right = right - jnp.einsum("nir,nrk->nik", block.basis, multipliers[level])
+        steps.append(_upper_solve(elimination.factors[level], right))
+    return steps, multipliers
+
+
+def _stacked(system: LevelSystem, steps: list) -> jax.Array:
+    """Per-level steps ``(N_l, v_l, k)`` as joint columns, ``(n, k)``."""
+    columns = steps[0].shape[-1]
+    return jnp.concatenate(
+        [steps[0]] + [steps[level].reshape(-1, columns) for level in range(1, system.depth + 1)],
+        axis=0,
+    )
+
+
+def _member_matvec(system: LevelSystem, step_parts: list, multipliers: list) -> tuple:
+    """The members' rows times the step, ``(N_l, R_l)``, and their transpose times the multipliers, per level."""
+    depth, widths = system.depth, system.widths
+    rows = system.member_rows
+    times_step: list = [None] * (depth + 1)
+    spread = [jnp.zeros_like(part) for part in step_parts]
+    for level in range(1, depth + 1):
+        if rows[level] is None or not widths[level]:
+            continue
+        member, mu = rows[level], multipliers[level]
+        value = jnp.einsum("nir,ni->nr", member.coefficients, step_parts[level])
+        spread[level] = spread[level] + jnp.einsum("nir,nr->ni", member.coefficients, mu)
+        for above in range(level):
+            if not widths[above]:
+                continue
+            other = (
+                step_parts[0][None, :]
+                if above == 0
+                else _ancestor_values(system, step_parts[above], level, above)
+            )
+            value = value + jnp.einsum("nir,ni->nr", member.above[above], other)
+            pushed = jnp.einsum("nir,nr->ni", member.above[above], mu)
+            spread[above] = spread[above] + _node_sum(system, pushed, level, above)
+        times_step[level] = value
+    return times_step, spread
+
+
+def _matvec(system: LevelSystem, parts: list, damping: Real | ArrayLike) -> list:
+    """``(H + damping I) s`` from the blocks, per level, for a step given per level."""
+    depth, widths = system.depth, system.widths
+    out = [system.root @ parts[0] + damping * parts[0]] + [
+        jnp.einsum("nij,nj->ni", system.diagonal[level], parts[level]) + damping * parts[level]
+        for level in range(1, depth + 1)
+    ]
+    for level in range(1, depth + 1):
+        if not widths[level]:
+            continue
+        for above in range(level):
+            if not widths[above]:
+                continue
+            coupling = system.cross[level][above]
+            if above == 0:
+                out[level] = out[level] + jnp.einsum("nij,j->ni", coupling, parts[0])
+            else:
+                other = _ancestor_values(system, parts[above], level, above)
+                out[level] = out[level] + jnp.einsum("nij,nj->ni", coupling, other)
+            pushed = jnp.einsum("nij,ni->nj", coupling, parts[level])
+            out[above] = out[above] + _node_sum(system, pushed, level, above)
+    return out
+
+
+# The refinements of a joint solve under rows, at most, and the size of a residual it stops at,
+# relative to its terms, as a power of eps (ours: a direct solve leaves a few eps; a lifted
+# block leaves about sqrt(eps)).
+_REFINEMENTS = 8
+_REFINED = 0.75
+
+
+def _refined(system, damping, elimination, answer, general):
+    """``answer`` refined until the step and multipliers solve the rows' system to rounding.
+
+    ``answer`` is ``(step, general_multipliers, members)``; ``general`` is
+    ``None`` or ``(spread, member_spread, gram)`` of the equality rows, the
+    solves of their columns and their masked multipliers' matrix. The residual of ``(H + damping I) s
+    + g + A^T mu = 0`` and of every kept row is solved again with the same
+    elimination, while it exceeds ``eps^0.75`` of its terms and at most
+    ``_REFINEMENTS`` times: a direct solve stops at once, a lifted block
+    (``_block_factor``) after a few rounds. A non-finite answer is left as it is.
+    """
+    depth = system.depth
+    dtype = system.root.dtype
+    matrix = system.constraint_matrix
+    rows = system.member_rows
+    gradient = [system.root_gradient] + list(system.gradient[1:])
+    general_active = (
+        None if system.constraint_active is None else jnp.asarray(system.constraint_active)
+    )
+    general_target = system.constraint_rhs - matrix @ system.point
+    tolerance = jnp.asarray(jnp.finfo(dtype).eps, dtype) ** _REFINED
+
+    def residual(state):
+        step, general_mu, members, _ = state
+        parts = _split(system, step)
+        member_mu = [None] + list(members)
+        times_step, spread = _member_matvec(system, parts, member_mu)
+        curvature = _matvec(system, parts, damping)
+        pushed = _split(system, matrix.T @ general_mu)
+        main = [
+            -(gradient[level] + curvature[level] + spread[level] + pushed[level])
+            for level in range(depth + 1)
+        ]
+        size = sum(
+            jnp.sum(gradient[level] ** 2)
+            + jnp.sum(curvature[level] ** 2)
+            + jnp.sum((spread[level] + pushed[level]) ** 2)
+            for level in range(depth + 1)
+        )
+        member_rest: list = [None] * (depth + 1)
+        error = sum(jnp.sum(entry**2) for entry in main)
+        for level in range(1, depth + 1):
+            if times_step[level] is None:
+                continue
+            on = jnp.asarray(rows[level].active, dtype=bool)
+            member_rest[level] = jnp.where(on, rows[level].target - times_step[level], 0.0)
+            error = error + jnp.sum(member_rest[level] ** 2)
+            size = size + jnp.sum(jnp.where(on, rows[level].target, 0.0) ** 2)
+            size = size + jnp.sum(jnp.where(on, times_step[level], 0.0) ** 2)
+        general_rest = general_target - matrix @ step
+        if general_active is not None:
+            general_rest = jnp.where(general_active, general_rest, 0.0)
+        error = error + jnp.sum(general_rest**2)
+        size = size + jnp.sum(general_target**2)
+        return main, member_rest, general_rest, error, size
+
+    def needed(state):
+        *_, rounds = state
+        _, _, _, error, size = residual(state)
+        return (rounds < _REFINEMENTS) & jnp.isfinite(error) & (error > tolerance**2 * size)
+
+    def round_(state):
+        step, general_mu, members, rounds = state
+        main, member_rest, general_rest, _, _ = residual(state)
+        rhs = [main[0][:, None]] + [entry[..., None] for entry in main[1:]]
+        member_targets = [None] + [
+            None if entry is None else entry[..., None] for entry in member_rest[1:]
+        ]
+        steps, correction = _substitute(system, elimination, rhs, member_targets)
+        change = _stacked(system, steps)[:, 0]
+        member_change = [None if entry is None else entry[..., 0] for entry in correction[1:]]
+        general_change = jnp.zeros_like(general_mu)
+        if general is not None:
+            spread, member_spread, gram = general
+            moved = matrix @ change - general_rest
+            if general_active is not None:
+                moved = jnp.where(general_active, moved, 0.0)
+            general_change = jnp.linalg.solve(gram, moved)
+            change = change - spread @ general_change
+            member_change = [
+                None if entry is None else entry - member_spread[level] @ general_change
+                for level, entry in enumerate(member_change, start=1)
+            ]
+        members = tuple(
+            None if entry is None else entry + member_change[level - 1]
+            for level, entry in enumerate(members, start=1)
+        )
+        return step + change, general_mu + general_change, members, rounds + 1
+
+    step, general_mu, members = answer
+    state = jax.lax.while_loop(needed, round_, (step, general_mu, tuple(members), jnp.asarray(0)))
+    return state[0], state[1], state[2]
+
+
+def _inverse_norm(system: LevelSystem, elimination: _Elimination, step: ArrayLike) -> jax.Array:
+    """``s^T (H + damping I)^-1 s`` from the plain factors, ``||L^-1 s||^2`` up the tree."""
+    widths, depth = system.widths, system.depth
+    parts = _split(system, step)
+    halves: list = [None] * (depth + 1)
+    q_squared = jnp.zeros((), dtype=system.root.dtype)
+    for level in range(depth, 0, -1):
+        if not widths[level]:
+            continue
+        right = parts[level]
+        for deeper in range(level + 1, depth + 1):
+            if not widths[deeper]:
+                continue
+            carried = jnp.einsum(
+                "nia,ni->na", elimination.plain_couplings[deeper][level], halves[deeper]
+            )
+            right = right - _node_sum(system, carried, deeper, level)
+        halves[level] = _lower_solve(elimination.plain_factors[level], right[..., None])[..., 0]
+        q_squared = q_squared + jnp.sum(halves[level] * halves[level])
+    if widths[0]:
+        right = parts[0]
+        for deeper in range(1, depth + 1):
+            if not widths[deeper]:
+                continue
+            carried = jnp.einsum(
+                "nia,ni->na", elimination.plain_couplings[deeper][0], halves[deeper]
+            )
+            right = right - _node_sum(system, carried, deeper, 0)
+        top_half = jax.scipy.linalg.solve_triangular(elimination.plain_root, right, lower=True)
+        q_squared = q_squared + top_half @ top_half
+    return q_squared
 
 
 def _solve_parts(system, damping):
-    """``_solve``'s step and ``q_squared``, and the multipliers of the equality rows, ``(c,)``.
+    """``_solve``'s step and ``q_squared``, and the multipliers of every row the step keeps.
 
-    The multipliers ``mu`` are those of ``(H + damping I) s + g + A^T mu = 0`` with
-    ``A (point + s) = constraint_rhs``; an inactive row's is zero.
+    The multipliers ``mu`` are those of ``(H + damping I) s + g + A^T mu = 0``
+    with ``A (point + s) = constraint_rhs`` on the equality rows and every
+    member's rows at their targets (``member_rows``); an inactive row's is
+    zero. The members' rows are eliminated with their nodes (``_eliminate``),
+    the equality rows ride as right-hand-side columns and are solved last, in
+    one small system. ``mu`` is ``(c + sum_l N_l R_l,)``: the equality rows,
+    then the members' rows level by level, member by member.
     """
     counts, widths = system.counts, system.widths
     depth = system.depth
@@ -140,42 +557,30 @@ def _solve_parts(system, damping):
     offsets = _offsets(counts, widths)
     matrix = system.constraint_matrix
     n_rows = matrix.shape[0]
-    columns = 1 + n_rows
+    rows = system.member_rows if system.member_rows is not None else (None,) * (depth + 1)
     rhs = [jnp.concatenate([-system.root_gradient[:, None], matrix[:, :g].T], axis=1)]
     for level in range(1, depth + 1):
         count, width = counts[level - 1], widths[level]
-        rows = matrix[:, offsets[level] : offsets[level + 1]].T.reshape(count, width, n_rows)
-        rhs.append(jnp.concatenate([-system.gradient[level][..., None], rows], axis=2))
-    root, root_rhs, _, _, _, factors, couplings, solved = _fold(system, damping, rhs, 1)
-    if g:
-        root_factor = jnp.linalg.cholesky(root + damping * jnp.eye(g, dtype=dtype))
-        half = jax.scipy.linalg.solve_triangular(root_factor, root_rhs, lower=True)
-        top = jax.scipy.linalg.solve_triangular(root_factor, half, lower=True, trans="T")
-    else:
-        root_factor = None
-        top = jnp.zeros((0, columns), dtype=dtype)
-    steps = [top]
+        columns = matrix[:, offsets[level] : offsets[level + 1]].T.reshape(count, width, n_rows)
+        rhs.append(jnp.concatenate([-system.gradient[level][..., None], columns], axis=2))
+    targets: list = [None] * (depth + 1)
     for level in range(1, depth + 1):
-        count, width = counts[level - 1], widths[level]
-        if width == 0:
-            steps.append(jnp.zeros((count, 0, columns), dtype=dtype))
-            continue
-        right = solved[level]
-        for above in range(level):
-            if not widths[above]:
-                continue
-            if above == 0:
-                right = right - jnp.einsum("nia,ak->nik", couplings[level][0], steps[0])
-            else:
-                above_steps = _ancestor_values(system, steps[above], level, above)
-                right = right - jnp.einsum("nia,nak->nik", couplings[level][above], above_steps)
-        steps.append(_upper_solve(factors[level], right))
-    stacked = jnp.concatenate(
-        [steps[0]] + [steps[level].reshape(-1, columns) for level in range(1, depth + 1)], axis=0
-    )
+        if rows[level] is not None and widths[level]:
+            target = jnp.asarray(rows[level].target, dtype=dtype)
+            targets[level] = jnp.concatenate(
+                [target[..., None], jnp.zeros(target.shape + (n_rows,), dtype=dtype)], axis=2
+            )
+    elimination = _eliminate(system, damping)
+    steps, member_parts = _substitute(system, elimination, rhs, targets)
+    stacked = _stacked(system, steps)
     step = stacked[:, 0]
+    members = tuple(None if entry is None else entry[..., 0] for entry in member_parts[1:])
+    general = None
     if n_rows:
         spread = stacked[:, 1:]
+        member_spread = [None] + [
+            None if entry is None else entry[..., 1:] for entry in member_parts[1:]
+        ]
         target = system.constraint_rhs - matrix @ system.point
         gram, residual = matrix @ spread, matrix @ step - target
         if system.constraint_active is not None:
@@ -185,34 +590,27 @@ def _solve_parts(system, damping):
             identity = jnp.diag(jnp.where(on, 0.0, 1.0))
             gram = jnp.where(on[:, None] & on[None, :], gram, 0.0) + identity
             residual = jnp.where(on, residual, 0.0)
-        multipliers = jnp.linalg.solve(gram, residual)
-        step = step - spread @ multipliers
+        general_mu = jnp.linalg.solve(gram, residual)
+        step = step - spread @ general_mu
+        members = tuple(
+            None if entry is None else entry - member_spread[level] @ general_mu
+            for level, entry in enumerate(members, start=1)
+        )
+        general = (spread, member_spread, gram)
     else:
-        multipliers = jnp.zeros((0,), dtype=dtype)
-    parts = _split(system, step)
-    halves: list = [None] * (depth + 1)
-    q_squared = jnp.zeros((), dtype=dtype)
-    for level in range(depth, 0, -1):
-        if not widths[level]:
-            continue
-        right = parts[level]
-        for deeper in range(level + 1, depth + 1):
-            if not widths[deeper]:
-                continue
-            carried = jnp.einsum("nia,ni->na", couplings[deeper][level], halves[deeper])
-            right = right - _node_sum(system, carried, deeper, level)
-        halves[level] = _lower_solve(factors[level], right[..., None])[..., 0]
-        q_squared = q_squared + jnp.sum(halves[level] * halves[level])
-    if g:
-        right = parts[0]
-        for deeper in range(1, depth + 1):
-            if not widths[deeper]:
-                continue
-            carried = jnp.einsum("nia,ni->na", couplings[deeper][0], halves[deeper])
-            right = right - _node_sum(system, carried, deeper, 0)
-        top_half = jax.scipy.linalg.solve_triangular(root_factor, right, lower=True)
-        q_squared = q_squared + top_half @ top_half
-    return step, q_squared, multipliers
+        general_mu = jnp.zeros((0,), dtype=dtype)
+    if system.member_rows is not None:
+        step, general_mu, members = _refined(
+            system,
+            damping,
+            elimination,
+            (step, general_mu, members),
+            general,
+        )
+    multipliers = jnp.concatenate(
+        [general_mu] + [entry.reshape(-1) for entry in members if entry is not None]
+    )
+    return step, _inverse_norm(system, elimination, step), multipliers
 
 
 @jax.jit
@@ -247,6 +645,26 @@ def _scaled(system, scale, addition):
                 other = _ancestor_values(system, parts[above], level, above)[:, None, :]
             row.append(system.cross[level][above] * own[:, :, None] * other)
         cross.append(tuple(row))
+    member_rows = system.member_rows
+    if member_rows is not None:
+        # A row's coefficient on a column, over that column's scale.
+        member_rows = tuple(
+            None
+            if rows is None
+            else rows._replace(
+                coefficients=rows.coefficients * parts[level][:, :, None],
+                above=tuple(
+                    entry
+                    * (
+                        shared[None, :, None]
+                        if above == 0
+                        else _ancestor_values(system, parts[above], level, above)[:, :, None]
+                    )
+                    for above, entry in enumerate(rows.above)
+                ),
+            )
+            for level, rows in enumerate(member_rows)
+        )
     return dataclasses.replace(
         system,
         root=system.root * shared[:, None] * shared[None, :] + jnp.diag(added[0]),
@@ -256,6 +674,7 @@ def _scaled(system, scale, addition):
         gradient=tuple(gradient),
         point=scale * system.point,
         constraint_matrix=system.constraint_matrix * inverse[None, :],
+        member_rows=member_rows,
     )
 
 
@@ -545,7 +964,7 @@ def scaled_system(
 
 
 def solve_damped(system: LevelSystem, damping: Real | ArrayLike) -> tuple:
-    """Solve ``(H + damping I) s = -g`` along the tree, under the system's equality rows.
+    """Solve ``(H + damping I) s = -g`` along the tree, under the system's equality and members' rows.
 
     Args:
         system: The system.
@@ -584,7 +1003,7 @@ def row_multipliers(
     damping: Real | ArrayLike,
     addition: ArrayLike | Sequence | None = None,
 ) -> np.ndarray:
-    """The multipliers of the system's equality rows at ``solve_scaled``'s solve, on the host.
+    """The multipliers of the system's rows at ``solve_scaled``'s solve, on the host.
 
     Row ``i``'s multiplier ``mu_i`` is that of ``(H~ + damping I) z + g~ + A~^T mu = 0`` in the
     scaled coordinates, which is that of the unscaled rows: a row held at a side of an
@@ -592,7 +1011,8 @@ def row_multipliers(
     inactive row's is zero.
 
     Returns:
-        ``(c,)``, one per row of ``system.constraint_matrix``.
+        ``(c + sum_l N_l R_l,)``: one per row of ``system.constraint_matrix``, then one per
+        row of ``system.member_rows``, level by level, member by member.
     """
     dtype = _dtype(system)
     multipliers = _scaled_multipliers(
