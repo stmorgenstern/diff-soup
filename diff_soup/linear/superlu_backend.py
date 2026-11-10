@@ -155,7 +155,7 @@ class _SuperLUAnalysis:
 
 
 def _release_analysis(native_id: int) -> None:
-    """Release a native analysis and its call sites (its slots keep it alive)."""
+    """Release a native analysis: its call sites and its factor slots in every context."""
     try:
         _native().analysis_release(native_id)
     except Exception:  # noqa: BLE001 - interpreter shutdown or a missing module

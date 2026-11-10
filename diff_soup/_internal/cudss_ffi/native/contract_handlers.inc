@@ -46,9 +46,8 @@
 //     (refactor). A call names its site by a key, a deterministic 64-bit hash of the lowered
 //     call that the lowering computes, and the site is created on the first call that carries
 //     an unknown key, so two lowerings of one program share their sites and their program text.
-//     Sites belong to no context; a site belongs to its analysis and is freed when the analysis
-//     is released (contract_analysis_release), while the slots it made keep the analysis alive
-//     until their context is released;
+//     Sites belong to no context; a site belongs to its analysis, and releasing the analysis
+//     (contract_analysis_release) frees its sites and its slots in every context;
 //   * shared storage: a slot named by (context id, device, analysis, precision, lane count,
 //     storage key) instead of by a site, for the factors that empty_factor(..., storage=...)
 //     starts. Every call site and program that refactors such a factor on one device writes
@@ -5937,16 +5936,40 @@ nb::dict AnalysisInfo(int64_t analysis_id) {
     return d;
 }
 
-// Release an analysis: the registry's reference, its sites and the contexts that declared its
-// storage keys. Its slots keep it alive until their contexts are released.
+// Release an analysis: its sites, its slots and batch slots in every context, the contexts that
+// declared its storage keys, its device patterns and the registry's reference.
 void AnalysisRelease(int64_t analysis_id) {
     nb::gil_scoped_release release;
     std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
-    slot_registry::ForgetAnalysis(reg, analysis_id);
+    int current = -1;
+    cudaGetDevice(&current);
+    // Wait for the work queued on every device that holds a slot of the analysis before its
+    // cuDSS objects and buffers are freed.
+    std::shared_ptr<Analysis> held;
+    if (auto found = reg.analyses.find(analysis_id); found != reg.analyses.end()) {
+        held = found->second;
+    }
+    std::set<int> devices;
+    for (const auto& entry : reg.slots) {
+        if (entry.second->analysis->id != analysis_id) continue;
+        devices.insert(entry.second->device);
+        held = entry.second->analysis;
+    }
+    for (int device : devices) {
+        if (cudaSetDevice(device) == cudaSuccess) cudaDeviceSynchronize();
+    }
+    slot_registry::ForgetAnalysis(reg, analysis_id, [](Slot&) {});
     for (auto it = reg.storage_contexts.begin(); it != reg.storage_contexts.end();) {
         it = it->first.first == analysis_id ? reg.storage_contexts.erase(it) : std::next(it);
     }
+    if (held != nullptr) {
+        held->contexts.clear();
+        if (held->FreeDevice()) --reg.device_analyses;
+        held.reset();  // the last reference: destroys the analysis
+    }
+    if (current >= 0) cudaSetDevice(current);
+    (void)cudaGetLastError();
 }
 
 void StorageDeclare(int64_t analysis_id, int64_t context_id, int64_t storage) {
@@ -5973,9 +5996,9 @@ void ContextRelease(int64_t context_id) {
     for (int device : devices) {
         if (cudaSetDevice(device) == cudaSuccess) cudaDeviceSynchronize();
     }
-    // Each slot frees its cuDSS objects and buffers. The slots of a released analysis are its
-    // last owners (ForgetAnalysis erased its sites), so `touched` holds each analysis until its
-    // device patterns are accounted for.
+    // Each slot frees its cuDSS objects and buffers. `touched` holds each analysis of the freed
+    // slots until its device patterns are accounted for, so the loop below never reads an
+    // analysis that its last slot destroyed.
     std::set<std::shared_ptr<Analysis>> touched;
     slot_registry::ReleaseContextSlots(reg, context, [&](Slot& slot) {
         slot.analysis->contexts.erase(context);
@@ -5987,7 +6010,7 @@ void ContextRelease(int64_t context_id) {
             --reg.device_analyses;
         }
     }
-    touched.clear();  // destroys the released analyses that no slot or site holds
+    touched.clear();
     if (current >= 0) cudaSetDevice(current);
     (void)cudaGetLastError();
 }
@@ -6122,8 +6145,9 @@ static void BindContract(nb::module_& m) {
           "ordinals per group; each factor spreads over the group that holds the device of its "
           "first call, that device first. Call before the analysis's first factor.");
     m.def("contract_analysis_release", &cc::AnalysisRelease, nb::arg("analysis_id"),
-          "Release an analysis: drop the registry's reference and free its call sites; the "
-          "factor slots that use it keep it alive until their SolveContext is released.");
+          "Release an analysis: wait for the devices holding its factors, free its call "
+          "sites, its factor slots and batch slots in every SolveContext and its device "
+          "patterns, and drop the registry's reference.");
     m.def("contract_analysis_info", &cc::AnalysisInfo, nb::arg("analysis_id"),
           "Report on an analysis: whether its patterns are on the device, the number of "
           "contexts holding them, the cold and seeded cuDSS analyses run on it (batch tiles "
