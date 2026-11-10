@@ -126,7 +126,8 @@ def bootstrap(
         weight_priors: Whether each member's prior and regularization terms take the member's
             weight.
         solver: The `TrustRegion` the replicates step with, which must not set `weights=`,
-            `nested_at=` or `inequalities=`, or `None` for `TrustRegion(stationarity_tol=1e-8)`.
+            `nested_at=` or `inequalities=`, or `None` for `TrustRegion(stationarity_tol=1e-8)`,
+            which refuses a fit made under inequality rows.
         max_attempts: The step attempts allowed per replicate, or `None` for the solver's
             `max_steps` under `"refit"` and `4 * steps` otherwise.
         require_converged: Whether to refuse a fit that did not converge.
@@ -155,6 +156,7 @@ def bootstrap(
     from diff_soup.optimization.inference.hierarchical._population import (
         PopulationCheckpoint,
         PopulationRoute,
+        refuse_inequality_fit,
     )
     from diff_soup.optimization.inference.hierarchical._replicates import (
         FitProducts,
@@ -250,6 +252,7 @@ def bootstrap(
             "require_converged=False to bootstrap from it as it is."
         )
     if solver is None:
+        refuse_inequality_fit(fit)
         solver = TrustRegion(stationarity_tol=1e-8)
     looped = refit or int(steps) >= 1
     if looped and max_attempts is None:

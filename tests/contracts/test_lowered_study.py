@@ -885,6 +885,25 @@ def test_trust_region_takes_a_bare_constraint_or_gauge_as_a_sequence_of_one():
     assert (solver.constraints, solver.gauges) == ((row,), (gauge,))
 
 
+def test_bootstrap_with_its_default_solver_refuses_a_fit_made_under_inequality_rows(lowered):
+    """The replicates of the default solver step without inequality rows, so a bootstrap of a fit
+    made under them with solver=None is refused, naming inequalities=."""
+    _, study, _ = lowered
+    rows = inf.InequalityRows(lambda own, w, d: own[:1] - 0.02, level="cell")
+    fit = small_fit(study, inf.TrustRegion(max_steps=30, inequalities=(rows,)))
+    with pytest.raises(ds.ConfigurationError, match="inequalities"):
+        inf.bootstrap(study, fit, replicates=2, key=jax.random.key(3), steps=1)
+
+
+@pytest.mark.parametrize(
+    ("stop", "sigma", "weights", "status"),
+    [
+        ("attempts", 1e-6, [0.0, 1.0, 2.0], "converged"),
+        ("attempts", 0.5, [0.0, 1.0, 2.0], "failed"),
+        ("attempts", 0.5, [1.0, 1.0, 1.0], "converged"),
+        ("evaluation_noise", 1e-6, [0.0, 1.0, 2.0], "converged"),
+    ],
+)
 def test_a_replicate_without_a_step_is_kept_where_it_needs_none(stop, sigma, weights, status):
     """A bootstrap replicate that ends without an accepted step from a converged fit is kept as
     converged when its point passes the converged test or its weights are the original sample's

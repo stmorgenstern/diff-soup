@@ -569,6 +569,7 @@ class _JointFit:
                 "linear_solver": "cholesky",
                 "subproblem": self.subproblem,
                 "active_bounds": box.active_bounds(loop.point, route.bounds),
+                "inequality_rows": 0 if self.rows is None else int(self.rows.count),
             },
             work=work.mapping(),
             state=state,
