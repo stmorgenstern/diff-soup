@@ -6,10 +6,14 @@
 #     auditwheel double-bundle: no diff_soup.libs/ at all);
 #   * the native extensions present (_native_klu and at least one cuDSS
 #     _native_solver under cudss_ffi/cu12/ or cudss_ffi/cu13/), and
-#     _native_superlu exactly once with DIFF_SOUP_RELEASE_SUPERLU=ON or absent
-#     with DIFF_SOUP_RELEASE_SUPERLU=OFF (the default, as in
-#     build_release_wheel.sh);
+#     _native_superlu exactly once with DIFF_SOUP_RELEASE_SUPERLU=ON (the
+#     default, as in build_release_wheel.sh) or absent with
+#     DIFF_SOUP_RELEASE_SUPERLU=OFF;
 #   * one OpenMP runtime in the wheel, klu_ffi/lib/libgomp.so.1;
+#   * the SuiteSparse libs and libgomp bundled under klu_ffi/lib/ (on x86-64
+#     also the vendored tree's libgfortran, libquadmath and libgcc_s), and
+#     every library that _native_klu and the bundled libs need either bundled
+#     there or a manylinux system library;
 #   * _native_klu RPATH == $ORIGIN/lib  (resolves the bundled SuiteSparse libs);
 #   * when present, _native_superlu carries SuperLU_MT and its BLAS statically: no SuperLU_MT
 #     or BLAS shared library among its DT_NEEDED entries or in the wheel, and
@@ -19,12 +23,13 @@
 #     the two CPU solvers share one OpenMP runtime;
 #   * every _native_solver RPATH is purely $ORIGIN-relative (nvidia pip
 #     wheels), no absolute build-toolchain path leaked in;
-#   * the wheel carries a manylinux_2_*_x86_64 platform tag, not linux_x86_64;
+#   * the wheel carries a manylinux_2_*_x86_64 or manylinux_2_*_aarch64
+#     platform tag, not linux_<machine>;
 #   * the CUDA libs (libcudss/libcudart/libcublas/libcublasLt/libnvrtc) are NOT bundled.
 #
 # Usage: [DIFF_SOUP_RELEASE_SUPERLU=ON|OFF] bash verify_release_wheel.sh <wheel.whl>
 set -euo pipefail
-EXPECT_SUPERLU="${DIFF_SOUP_RELEASE_SUPERLU:-OFF}"
+EXPECT_SUPERLU="${DIFF_SOUP_RELEASE_SUPERLU:-ON}"
 case "${EXPECT_SUPERLU}" in
     ON|OFF) ;;
     *) echo "ERROR: DIFF_SOUP_RELEASE_SUPERLU='${EXPECT_SUPERLU}' must be ON or OFF." >&2; exit 1 ;;
@@ -34,10 +39,12 @@ WHL="$(cd "$(dirname "${WHL}")" && pwd)/$(basename "${WHL}")"
 command -v patchelf >/dev/null || { echo "ERROR: patchelf not on PATH" >&2; exit 1; }
 command -v nm >/dev/null || { echo "ERROR: nm (binutils) not on PATH" >&2; exit 1; }
 
-case "${WHL}" in
-    *manylinux_2_*_x86_64*.whl) echo "OK   tag: manylinux ($(basename "${WHL}"))" ;;
-    *) echo "FAIL tag: not manylinux ($(basename "${WHL}"))" >&2; exit 1 ;;
+case "$(basename "${WHL}")" in
+    *manylinux_2_*_x86_64*.whl) ARCH=x86_64 ;;
+    *manylinux_2_*_aarch64*.whl) ARCH=aarch64 ;;
+    *) echo "FAIL tag: not manylinux x86_64 or aarch64 ($(basename "${WHL}"))" >&2; exit 1 ;;
 esac
+echo "OK   tag: manylinux ${ARCH} ($(basename "${WHL}"))"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
@@ -83,12 +90,32 @@ else
     echo "FAIL want exactly one libgomp, klu_ffi/lib/libgomp.so.1; found [${GOMP_ALL//"${WORK}"\//}]" >&2; rc=1
 fi
 
-# SuiteSparse and GCC runtime libs bundled exactly once, CUDA libs absent.
-for stem in klu amd colamd btf suitesparseconfig gomp gfortran quadmath gcc_s; do
+# SuiteSparse and GCC runtime libs bundled exactly once, CUDA libs absent. The
+# vendored x86-64 tree is conda-forge's build, whose AMD needs libgfortran; the
+# aarch64 source build has no Fortran.
+STEMS=(klu amd colamd btf suitesparseconfig gomp)
+[[ "${ARCH}" == x86_64 ]] && STEMS+=(gfortran quadmath gcc_s)
+for stem in "${STEMS[@]}"; do
     n="$(find "${KLU_LIB}" -name "lib${stem}.so*" 2>/dev/null | wc -l)"
     [[ "${n}" -ge 1 ]] || { echo "FAIL missing bundled lib${stem}" >&2; rc=1; }
 done
-echo "OK   SuiteSparse and GCC runtime libs bundled under klu_ffi/lib/"
+echo "OK   SuiteSparse and GCC runtime libs bundled under klu_ffi/lib/: $(cd "${KLU_LIB}" 2>/dev/null && ls | tr '\n' ' ')"
+# What _native_klu and the bundled libs need is bundled or a manylinux system library.
+SYSTEM_RE='^(libc|libm|libpthread|libdl|librt|libgcc_s|libstdc\+\+)\.so\.|^ld-linux-(x86-64|aarch64)\.so\.'
+unresolved=""
+for so in ${KLU} "${KLU_LIB}"/*.so*; do
+    [[ -f "${so}" ]] || continue
+    while IFS= read -r lib; do
+        [[ -n "${lib}" ]] || continue
+        grep -qE "${SYSTEM_RE}" <<<"${lib}" && continue
+        [[ -f "${KLU_LIB}/${lib}" ]] || unresolved+=" ${so##*/}->${lib}"
+    done < <(patchelf --print-needed "${so}")
+done
+if [[ -n "${unresolved}" ]]; then
+    echo "FAIL needed but neither bundled in klu_ffi/lib/ nor a system library:${unresolved}" >&2; rc=1
+else
+    echo "OK   every library _native_klu and klu_ffi/lib/ need is bundled there or a system library"
+fi
 for cuda in libcudss libcudart libcublas libcublasLt libnvrtc; do
     if find "${WORK}" -name "${cuda}.so*" | grep -q .; then
         echo "FAIL CUDA lib bundled (should be nvidia pip dep): ${cuda}" >&2; rc=1
@@ -141,7 +168,7 @@ if [[ -n "${SUPERLU}" ]]; then
     while IFS= read -r lib; do
         [[ -n "${lib}" ]] || continue
         case "${lib}" in
-            libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|ld-linux-x86-64.so.*|libgcc_s.so.*|libstdc++.so.*) continue ;;
+            libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|ld-linux-x86-64.so.*|ld-linux-aarch64.so.*|libgcc_s.so.*|libstdc++.so.*) continue ;;
         esac
         found=""
         while IFS= read -r entry; do

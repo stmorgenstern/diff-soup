@@ -133,7 +133,7 @@ def _surface_check(import_order: tuple[str, str]) -> str:
         assert metadata.version("diff_soup") == expected_version
         assert diff_soup.__version__ == expected_version
         required_exports = (
-            "inference",
+            "optimization",
             "problem",
             "recipe",
             "DenseOutputPolicy",
