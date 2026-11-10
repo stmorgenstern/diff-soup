@@ -122,6 +122,10 @@ def _build(configuration: Configuration) -> Lowered:
 
     def horizon(u, args):
         state, theta, _ = args
+        # `u` in the dtype `solve_schedule` solves in, so the sample times below are summed as
+        # it sums the durations, and a float32 `u` lowers as the float64 one of its values.
+        widest = jax.dtypes.canonicalize_dtype(jnp.float64)
+        u = jnp.asarray(u, jnp.promote_types(jnp.result_type(state), widest))
         schedule = controls.segments(u, modes)
         if fractions is None:
             t_end, sampled = controls.horizon, jnp.asarray(times)
