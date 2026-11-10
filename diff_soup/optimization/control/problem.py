@@ -228,13 +228,26 @@ class _Block:
 
     @classmethod
     def of(cls, index: int, block: Any) -> _Block:
-        """Read block `index`, a `(signal, mode, scale)` triple, refusing what cannot lower exactly."""
+        """Read block `index`, a `(signal, mode, scale)` triple, refusing what cannot lower exactly.
+
+        A `_Block` already read, as `dataclasses.replace` passes back, is returned as it is.
+        """
+        if isinstance(block, _Block):
+            return block
         if not isinstance(block, tuple) or len(block) != 3:
             raise ConfigurationError(
                 f"SignalControls block {index} must be a (signal, mode, scale) tuple; got {block!r}."
             )
         signal, mode, scale = block
         kind = type(signal).__name__
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            scale = math.nan
+        if not math.isfinite(scale):
+            raise ConfigurationError(
+                f"SignalControls block {index}: the scale must be a finite number; got {block[2]!r}."
+            )
         if mode not in operating_mode_names():
             raise ConfigurationError(
                 f"SignalControls block {index} drives the mode {mode!r}; the operational modes "
@@ -253,19 +266,32 @@ class _Block:
             )
         knots = np.asarray(knots, dtype=np.float64)
         lengths = np.diff(knots)
-        if knots.ndim != 1 or lengths.size < 1 or not np.all(lengths > 0):
+        if (
+            knots.ndim != 1
+            or lengths.size < 1
+            or not np.all(np.isfinite(knots))
+            or not np.all(lengths > 0)
+        ):
             raise ConfigurationError(
-                f"SignalControls block {index}: the {kind}'s knots must ascend strictly; got {knots}."
+                f"SignalControls block {index}: the {kind}'s knots must be finite and ascend "
+                f"strictly; got {knots}."
             )
-        shape = jax.eval_shape(signal.polynomials).shape
+        flat, structure = jax.tree_util.tree_flatten_with_path(signal)
+        names = [_dotted(path) for path, _ in flat]
+        try:
+            shape = jax.eval_shape(signal.polynomials).shape
+        except (TypeError, ValueError) as error:
+            leaves = ", ".join(f"{name} {np.shape(leaf)}" for name, (_, leaf) in zip(names, flat))
+            raise ConfigurationError(
+                f"SignalControls block {index}: the {kind} on {knots.size} knots, {lengths.size} "
+                f"segments, has leaves of shapes {leaves}, from which polynomials() fails: {error}"
+            ) from error
         if len(shape) != 2 or shape[0] != lengths.size:
             raise ConfigurationError(
                 f"SignalControls block {index}: a block's {kind} has one component, polynomials of "
                 f"shape ({lengths.size}, degree + 1); got {shape}."
             )
         paths = tuple(str(path) for path in signal.learnable_paths())
-        flat, structure = jax.tree_util.tree_flatten_with_path(signal)
-        names = [_dotted(path) for path, _ in flat]
         missing = [path for path in paths if path not in names]
         if not paths or missing:
             raise ConfigurationError(
@@ -288,7 +314,7 @@ class _Block:
             constants=tuple(constants),
             coefficients=coefficients,
             mode=mode,
-            scale=float(scale),
+            scale=scale,
             lengths=tuple(float(length) for length in lengths),
             span=float(knots[-1] - knots[0]),
             degree=shape[1] - 1,

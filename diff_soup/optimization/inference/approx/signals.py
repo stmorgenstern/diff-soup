@@ -405,8 +405,8 @@ class BSpline(eqx.Module):
 
         Raises:
             ValueError: If the knots are traced, are not a strictly ascending
-                one-dimensional array of at least two entries, or the control points do
-                not number two more than the knots.
+                one-dimensional array of at least two finite entries, or the control points
+                do not number two more than the knots.
         """
         if isinstance(knots, jax.core.Tracer):
             raise ValueError(
@@ -414,10 +414,15 @@ class BSpline(eqx.Module):
                 "knots, not traced ones."
             )
         edges = np.asarray(knots, dtype=np.float64)
-        if edges.ndim != 1 or edges.size < 2 or not np.all(np.diff(edges) > 0):
+        if (
+            edges.ndim != 1
+            or edges.size < 2
+            or not np.all(np.isfinite(edges))
+            or not np.all(np.diff(edges) > 0)
+        ):
             raise ValueError(
                 "BSpline knots must be a strictly ascending one-dimensional array of at least "
-                f"two segment edges; got {edges!r}."
+                f"two finite segment edges; got {edges!r}."
             )
         self._knots = tuple(float(edge) for edge in edges)
         self._knot_dtype = str(_inexact(knots).dtype)
