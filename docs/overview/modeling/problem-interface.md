@@ -62,8 +62,10 @@ spec.bc.periodic("u")
 problem = spec.build()
 ```
 
-The lowering derives the stencil sparsity from the domain and lowers
-the recipe to a `MassProblem`.
+`spec.build()` reads the Jacobian's sparsity pattern from the equations
+themselves and lowers the recipe to a `MassProblem`.
+`ds.jacobian_nnz(problem)` counts the pattern's entries, three per cell
+here.
 
 ### A hand-authored MassProblem
 
@@ -110,6 +112,8 @@ sol = ds.pdesolve(heat_mass, ds.JNDF(), (0.0, 0.05), u0)
 - `rhs_sparsity` holds the (row, column) pairs of
   \(\partial f/\partial u\). Passing `"dense"` (the default)
   differentiates the right-hand side densely instead.
+  `ds.jacobian_pattern(lambda u: rhs(0.0, u, None, None), u0)` reads the
+  same pairs from `rhs` itself.
 - `theta` is whatever the callables accept, passed to `pdesolve` as
   `theta=`.
 
