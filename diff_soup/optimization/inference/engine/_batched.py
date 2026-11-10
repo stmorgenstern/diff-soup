@@ -40,7 +40,8 @@ result and the record of every unit solved again.
 A study that prepared the ``frozen`` mode runs its ``blocks`` requests through
 the program that also returns each lane's Jacobian, and keeps those Jacobians
 on the device, call by call ([KeptJacobians][diff_soup.optimization.inference.engine._kept.KeptJacobians]):
-each unit's from its last ``blocks`` result. A ``frozen`` request runs the
+each unit's from its last ``blocks`` result that solved, a failed unit keeping the one
+before. A ``frozen`` request runs the
 kept calls that hold its units, in their own layout, each with its kept
 Jacobians; a unit without one is refused. A study that did not prepare the
 ``frozen`` mode keeps nothing.
@@ -101,6 +102,9 @@ from diff_soup.optimization.inference.engine._result import (
 )
 from diff_soup.optimization.inference.engine._status import KINDS
 from diff_soup.optimization.inference.statistics.hierarchy import Hierarchy
+
+#: The status code of a unit that solved.
+_SOLVED = KINDS.index("ok")
 
 
 class ProgramKey(NamedTuple):
@@ -822,11 +826,12 @@ def _run_bucket(
     Jacobians, each call is also returned as a
     [KeptCall][diff_soup.optimization.inference.engine._kept.KeptCall] with its count of
     own units, its Jacobians left on the device, its units named by ``keys``
-    (one per entry of ``members``; ``None`` takes ``members``).
+    (one per entry of ``members``; ``None`` takes ``members``), and which of its
+    own units solved.
 
     Returns:
-        ``(outputs, seconds, batch, kept)``: ``kept`` holds ``(call, own)`` per
-        call, empty for any other program.
+        ``(outputs, seconds, batch, kept)``: ``kept`` holds ``(call, own, solved)``
+        per call, ``solved`` one flag per own unit, empty for any other program.
 
     Raises:
         BackendError: If a call of the program, or the transfer of its
@@ -900,6 +905,12 @@ def _run_bucket(
         # has run before (JAX's fast dispatch path); both carry the runtime's message.
         raise _call_failed(entry.bucket, mode, count, width, len(calls), error) from error
     seconds = time.perf_counter() - start
+    # A unit that did not solve keeps the Jacobian of its last blocks result that did: its
+    # own is zero, and a frozen request would step on it as a gradient of zero.
+    kept = [
+        (call, own, np.asarray(output.status.kind)[:own] == _SOLVED)
+        for (call, own), output in zip(kept, fetched)
+    ]
     if keep_inputs:
         lanes.resident[index] = resident
 
@@ -970,8 +981,8 @@ def _run_frozen(
             raise ValueError(
                 f"lane {entry.bucket.lanes[int(positions[lane])]!r} of member {int(members[row])} "
                 "has no kept Jacobian: the frozen mode steps on the Jacobian of a unit's last "
-                "blocks evaluation after prepare(modes=(..., 'frozen')); evaluate the blocks "
-                "mode for it first."
+                "blocks evaluation that solved, after prepare(modes=(..., 'frozen')); evaluate "
+                "the blocks mode for it where it solves first."
             )
         groups.setdefault(place[0], []).append((unit, place[1]))
     narrow = points.astype(entry.dtype)[unit_row[:, None], entry.gather[positions[unit_lane]]]
@@ -1026,14 +1037,15 @@ def _run_frozen(
 
 
 def _keep(lanes: BatchedLanes, kept: list, replaced: set | None) -> None:
-    """Keep the Jacobians of ``kept``, ``(bucket index, (call, own))`` per call.
+    """Keep the Jacobians of ``kept``, ``(bucket index, (call, own, solved))`` per call.
 
-    Each call's own units point at it; with ``replaced``, a set of
-    ``(member, bucket index, position)``, only those of its own units do: a
-    pass that solved some units again replaces those units' results only.
+    Each call's own units that solved point at it; with ``replaced``, a set of
+    ``(member, bucket index, position)``, only those of them do: a pass that
+    solved some units again replaces those units' results only. A unit that
+    did not solve keeps pointing at its last Jacobian.
     """
-    for index, (call, own) in kept:
-        slots = range(own)
+    for index, (call, own, solved) in kept:
+        slots = [slot for slot in range(own) if solved[slot]]
         if replaced is not None:
             slots = [
                 slot

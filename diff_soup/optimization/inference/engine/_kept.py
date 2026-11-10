@@ -6,7 +6,7 @@ the program that also returns each lane's Jacobian
 The Jacobians of a call never leave the device: the call is kept as it ran,
 its Jacobians with the narrow points, first steps and lane inputs of its
 units, and each unit (population member, lane) points at the call and slot of
-its last ``blocks`` result. A ``frozen`` request runs every kept call that
+its last ``blocks`` result that solved. A ``frozen`` request runs every kept call that
 holds one of its units, in the call's own layout, so each unit is solved on
 the device that holds its Jacobian; the call's other slots solve their kept
 units again at their kept points and their results are dropped. A kept call no
