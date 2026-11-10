@@ -17,10 +17,12 @@
 #   * _native_klu RPATH == $ORIGIN/lib  (resolves the bundled SuiteSparse libs);
 #   * when present, _native_superlu carries SuperLU_MT and its BLAS statically: no SuperLU_MT
 #     or BLAS shared library among its DT_NEEDED entries or in the wheel, and
-#     no SuperLU_MT or BLAS symbol left undefined; its only non-system
-#     dependency is the OpenMP runtime libgomp.so.1, which its $ORIGIN-relative
-#     RPATH resolves to klu_ffi/lib/libgomp.so.1, the copy SuiteSparse uses, so
-#     the two CPU solvers share one OpenMP runtime;
+#     no SuperLU_MT or BLAS symbol left undefined; it defines no COLAMD symbol
+#     and takes colamd, colamd_recommended and colamd_set_defaults from
+#     SuiteSparse's COLAMD; its only non-system dependencies are libgomp.so.1,
+#     libcolamd.so.3 and libsuitesparseconfig.so.7, which its $ORIGIN-relative
+#     RPATH resolves to the copies in klu_ffi/lib/ that KLU uses, so the two CPU
+#     solvers share one OpenMP runtime and one COLAMD;
 #   * every _native_solver RPATH is purely $ORIGIN-relative (nvidia pip
 #     wheels), no absolute build-toolchain path leaked in;
 #   * the wheel carries a manylinux_2_*_x86_64 or manylinux_2_*_aarch64
@@ -139,7 +141,8 @@ for SOLVER in ${SOLVERS}; do
     fi
 done
 
-# _native_superlu: SuperLU_MT and its BLAS linked in, libgomp shared with KLU.
+# _native_superlu: SuperLU_MT and its BLAS linked in; libgomp and SuiteSparse's
+# COLAMD shared with KLU.
 if [[ -n "${SUPERLU}" ]]; then
     needed="$(patchelf --print-needed "${SUPERLU}")"
     r="$(patchelf --print-rpath "${SUPERLU}")"
@@ -156,6 +159,19 @@ if [[ -n "${SUPERLU}" ]]; then
     else
         echo "OK   _native_superlu defines its SuperLU_MT and BLAS symbols (statically linked)"
     fi
+    # COLAMD is SuiteSparse's (libcolamd.so.3), not SuperLU_MT's own LGPL copy:
+    # the module defines no COLAMD symbol and takes the three it calls from outside.
+    colamd_def="$( { nm -D --defined-only "${SUPERLU}"; nm --defined-only "${SUPERLU}" 2>/dev/null || true; } \
+        | awk '{print $NF}' | grep -E '^(colamd|symamd)' | sort -u | tr '\n' ' ' || true)"
+    colamd_undef="$(nm -D --undefined-only "${SUPERLU}" | awk '{print $NF}' \
+        | grep -E '^colamd(_recommended|_set_defaults)?$' | sort | tr '\n' ' ' || true)"
+    if [[ -n "${colamd_def}" ]]; then
+        echo "FAIL _native_superlu defines COLAMD symbols (SuperLU_MT's own copy linked in): ${colamd_def}" >&2; rc=1
+    elif [[ "${colamd_undef}" != "colamd colamd_recommended colamd_set_defaults " ]]; then
+        echo "FAIL _native_superlu does not take colamd, colamd_recommended and colamd_set_defaults from a shared COLAMD; undefined: [${colamd_undef}]" >&2; rc=1
+    else
+        echo "OK   _native_superlu defines no COLAMD symbol and takes ${colamd_undef}from libcolamd.so.3"
+    fi
     if tr ':' '\n' <<<"${r}" | grep -q '^/'; then
         echo "FAIL _native_superlu RPATH has absolute entry: '${r}'" >&2; rc=1
     else
@@ -163,7 +179,7 @@ if [[ -n "${SUPERLU}" ]]; then
     fi
     # Every needed library is a manylinux system library (glibc, libm, libgcc_s,
     # libstdc++) or resolves through the RPATH to a file inside the wheel; the
-    # libgomp one is klu_ffi/lib/libgomp.so.1.
+    # libgomp, libcolamd and libsuitesparseconfig ones are KLU's in klu_ffi/lib/.
     so_dir="$(dirname "${SUPERLU}")"
     while IFS= read -r lib; do
         [[ -n "${lib}" ]] || continue
@@ -178,14 +194,19 @@ if [[ -n "${SUPERLU}" ]]; then
         done < <(tr ':' '\n' <<<"${r}")
         if [[ -z "${found}" ]]; then
             echo "FAIL _native_superlu needs ${lib}, which neither the system set nor its RPATH inside the wheel provides" >&2; rc=1
-        elif [[ "${lib}" == libgomp* && "${found}" != "${GOMP}" ]]; then
-            echo "FAIL _native_superlu resolves ${lib} to ${found#"${WORK}"/}, not the shared ${GOMP#"${WORK}"/}" >&2; rc=1
+        elif [[ "${lib}" == libgomp* || "${lib}" == libcolamd* || "${lib}" == libsuitesparseconfig* ]] \
+            && [[ "${found}" != "${KLU_LIB}/${lib}" ]]; then
+            echo "FAIL _native_superlu resolves ${lib} to ${found#"${WORK}"/}, not KLU's ${KLU_LIB#"${WORK}"/}/${lib}" >&2; rc=1
         else
             echo "OK   _native_superlu ${lib} -> ${found#"${WORK}"/}"
         fi
     done <<<"${needed}"
     grep -qx 'libgomp.so.1' <<<"${needed}" \
         || { echo "FAIL _native_superlu does not need libgomp.so.1 (want the OpenMP build of SuperLU_MT sharing klu_ffi/lib/libgomp.so.1)" >&2; rc=1; }
+    for lib in libcolamd.so.3 libsuitesparseconfig.so.7; do
+        grep -qx "${lib}" <<<"${needed}" \
+            || { echo "FAIL _native_superlu does not need ${lib} (want SuiteSparse's COLAMD from klu_ffi/lib)" >&2; rc=1; }
+    done
 fi
 
 [[ "${rc}" -eq 0 ]] && echo "PASS  wheel is a coherent self-contained manylinux artifact" \

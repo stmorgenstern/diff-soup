@@ -29,13 +29,14 @@
 # ----------------------
 # The SuperLU_MT extension (superlu_ffi/_native_superlu) links SuperLU_MT and
 # the reference BLAS that ships with it statically (see
-# superlu_ffi/CMakeLists.txt), so the wheel carries no SuperLU_MT library and
-# the extension needs only libgomp at run time. It shares the OpenMP runtime
-# the KLU extension already ships (klu_ffi/lib/libgomp.so.1, which SuiteSparse
-# needs): before auditwheel runs, the script sets the _native_superlu RPATH to
-# $ORIGIN/../klu_ffi/lib, so auditwheel finds libgomp.so.1 inside the wheel and
+# superlu_ffi/CMakeLists.txt), so the wheel carries no SuperLU_MT library. Its
+# COLAMD is SuiteSparse's, not SuperLU_MT's own copy, which build_superlu_mt.sh
+# leaves out. At run time the extension needs libgomp, libcolamd and
+# libsuitesparseconfig, all of which the KLU extension already ships in
+# klu_ffi/lib/: before auditwheel runs, the script sets the _native_superlu
+# RPATH to $ORIGIN/../klu_ffi/lib, so auditwheel finds them inside the wheel and
 # bundles no second copy, and a process that uses both solvers loads a single
-# OpenMP runtime. The script builds SuperLU_MT
+# OpenMP runtime and a single COLAMD. The script builds SuperLU_MT
 # from source with diff_soup/_internal/superlu_ffi/build_superlu_mt.sh into a prefix
 # under its work directory and passes that prefix to the CUDA 13 line build with
 # DIFF_SOUP_BUILD_SUPERLU=ON, so a missing SuperLU_MT fails the build instead of
@@ -83,7 +84,8 @@
 #      and otherwise -C cmake.define.DIFF_SOUP_BUILD_SUPERLU=OFF.
 #      REPO_ROOT itself is never built in. Then merge the cu12 _native_solver
 #      into the cu13 wheel, set the _native_superlu RPATH (when built) to
-#      $ORIGIN/../klu_ffi/lib (the shared libgomp.so.1) and repack it as
+#      $ORIGIN/../klu_ffi/lib (the shared libgomp, libcolamd and
+#      libsuitesparseconfig) and repack it as
 #      diff_soup-<ver>-cp3XX-cp3XX-linux_<machine>.whl.
 #      The build runs without isolation because the nvidia wheels of the two
 #      lines are not in [build-system].requires: each line pins a different

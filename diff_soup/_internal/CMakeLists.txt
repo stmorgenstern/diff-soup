@@ -30,13 +30,21 @@ else()
   message(STATUS "diff_soup: DIFF_SOUP_BUILD_CUDSS=OFF — skipping cuDSS extension (CPU-only build)")
 endif()
 
+# The SuiteSparse tree that the KLU extension links and that the SuperLU_MT
+# extension takes COLAMD from: the vendored x86-64 tree by default; elsewhere
+# pass -DKLU_VENDOR_DIR=<tree> (klu_ffi/build_suitesparse.sh builds one).
+set(KLU_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/klu_ffi/vendor" CACHE PATH
+    "Tree holding include/suitesparse/klu.h and the SuiteSparse shared libraries in lib/")
+
 # The KLU extension links only the vendored SuiteSparse libraries (no NVIDIA
 # toolchain). DIFF_SOUP_BUILD_KLU is ON, OFF or AUTO; the vendored tree makes
 # the extension always buildable, so AUTO builds it too. Toggle from pip:
 #   pip install . -C cmake.define.DIFF_SOUP_BUILD_KLU=OFF
 set(DIFF_SOUP_BUILD_KLU "ON" CACHE STRING
     "Build the SuiteSparse KLU CPU linear-solver FFI extension: AUTO, ON or OFF")
+set(_diff_soup_klu OFF)
 if(DIFF_SOUP_BUILD_KLU STREQUAL "AUTO" OR DIFF_SOUP_BUILD_KLU)
+  set(_diff_soup_klu ON)
   add_subdirectory(klu_ffi)
 else()
   message(STATUS "diff_soup: DIFF_SOUP_BUILD_KLU=OFF — skipping the KLU extension")
@@ -47,6 +55,8 @@ endif()
 # lib/libsuperlu_mt_blas.a and include/superlu_mt/ under SUPERLU_MT_ROOT
 # (default: the active conda prefix).
 # diff_soup/_internal/superlu_ffi/build_superlu_mt.sh builds and installs one.
+# The extension takes COLAMD from the SuiteSparse tree above and, installed,
+# from the KLU extension's lib/, so it is built only with the KLU extension.
 # AUTO (default) builds the extension when that installation is present and
 # skips it otherwise; ON requires it; OFF skips it. Toggle from pip:
 #   pip install . -C cmake.define.DIFF_SOUP_BUILD_SUPERLU=ON -C cmake.define.SUPERLU_MT_ROOT=<prefix>
@@ -54,16 +64,26 @@ set(DIFF_SOUP_BUILD_SUPERLU "AUTO" CACHE STRING
     "Build the SuperLU_MT CPU linear-solver FFI extension: AUTO, ON or OFF")
 set(SUPERLU_MT_ROOT "$ENV{CONDA_PREFIX}" CACHE PATH
     "Prefix holding include/superlu_mt and lib/libsuperlu_mt_OPENMP.a")
+set(_diff_soup_superlu OFF)
 if(DIFF_SOUP_BUILD_SUPERLU STREQUAL "AUTO")
   if(EXISTS "${SUPERLU_MT_ROOT}/lib/libsuperlu_mt_OPENMP.a"
      AND EXISTS "${SUPERLU_MT_ROOT}/include/superlu_mt/slu_mt_ddefs.h")
-    add_subdirectory(superlu_ffi)
+    set(_diff_soup_superlu ON)
   else()
     message(STATUS "diff_soup: no SuperLU_MT under SUPERLU_MT_ROOT='${SUPERLU_MT_ROOT}' — "
                    "skipping the SuperLU extension (diff_soup/_internal/superlu_ffi/build_superlu_mt.sh installs one)")
   endif()
 elseif(DIFF_SOUP_BUILD_SUPERLU)
-  add_subdirectory(superlu_ffi)
+  set(_diff_soup_superlu ON)
 else()
   message(STATUS "diff_soup: DIFF_SOUP_BUILD_SUPERLU=OFF — skipping the SuperLU extension")
+endif()
+if(_diff_soup_superlu)
+  if(NOT _diff_soup_klu)
+    message(FATAL_ERROR
+      "diff_soup: the SuperLU_MT extension takes COLAMD from the KLU extension's SuiteSparse libraries, "
+      "and DIFF_SOUP_BUILD_KLU=OFF leaves them out. Build the KLU extension too, or pass "
+      "-DDIFF_SOUP_BUILD_SUPERLU=OFF.")
+  endif()
+  add_subdirectory(superlu_ffi)
 endif()

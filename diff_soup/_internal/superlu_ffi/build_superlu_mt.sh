@@ -6,7 +6,8 @@
 #
 # PREFIX defaults to $CONDA_PREFIX. The script installs into it:
 #   lib/libsuperlu_mt_OPENMP.a    SuperLU_MT, OpenMP threads, 32-bit indices, -fPIC,
-#                                 with the patches in patches/ applied
+#                                 with the patches in patches/ applied, without
+#                                 its own COLAMD
 #   lib/libsuperlu_mt_blas.a      the reference BLAS that ships with SuperLU_MT
 #   include/superlu_mt/*.h        the SuperLU_MT headers
 # Then `pip install .` (or a CMake build of diff_soup/_internal) builds the
@@ -22,9 +23,13 @@
 #   JOBS               parallel compile jobs (default: 8)
 #   CC                 C compiler (default: gcc)
 #
-# The patches in patches/ (applied in name order to a copy of the source, so a
-# given checkout is never modified) make the factorization correct on several
-# threads; they apply to the default commit only. The build needs git (unless
+# The patches in patches/ are applied in name order to a copy of the source, so
+# a given checkout is never modified, and apply to the default commit only.
+# 0001 makes the factorization correct on several threads. 0002 leaves
+# SuperLU_MT's own COLAMD (SRC/colamd.c, LGPL-2.1-or-later) out of the library,
+# so its colamd calls stay undefined; the extension links SuiteSparse's COLAMD
+# (BSD-3-Clause), the one the KLU extension ships, which has the same 32-bit
+# interface (see superlu_ffi/CMakeLists.txt). The build needs git (unless
 # SUPERLU_MT_SOURCE is set), CMake >= 3.13, a C compiler with OpenMP, patch and
 # make. SuperLU_MT is BSD-3 licensed; see
 # diff_soup/_internal/superlu_ffi/THIRD_PARTY_NOTICES.md.
