@@ -168,6 +168,21 @@ def _constraint_rows(
     return jnp.stack(lowered_rows), jnp.stack(lowered_rhs)
 
 
+@jax.jit
+def _onto_equality_rows(x: jax.Array, matrix: jax.Array, rhs: jax.Array, free: jax.Array) -> tuple:
+    """``(off, moved, missed)``: the rows ``x`` is off, the least move of its ``free`` coordinates, the rows still off."""
+    eps = float(np.finfo(np.float64).eps)
+    tiny = float(np.finfo(float).tiny)
+
+    def off(point: jax.Array) -> jax.Array:
+        size = jnp.abs(matrix) @ jnp.abs(point) + jnp.abs(rhs)
+        return jnp.abs(matrix @ point - rhs) > 256.0 * eps * size + tiny
+
+    move = jnp.linalg.lstsq(jnp.where(free[None, :], matrix, 0.0), matrix @ x - rhs)[0]
+    moved = x - move
+    return off(x), moved, off(moved)
+
+
 def start_on_rows(
     x: np.ndarray,
     matrix: np.ndarray,
@@ -181,31 +196,27 @@ def start_on_rows(
     least change of its free coordinates (those not in ``fixed``) that puts it on the rows,
     ``x - A_f^+ (A x - rhs)`` with ``A_f`` the rows on the free coordinates: the trust region
     keeps the rows at every step from a point on them, and a step from a point off them that
-    raises the cost would not be taken.
+    raises the cost would not be taken. One compiled least-squares program, in the start's
+    dtype.
 
     Raises:
         ValueError: If no change of the free coordinates puts the start on the rows, or the
             moved start leaves the inside of ``bounds``.
     """
-    matrix = np.asarray(matrix, dtype=np.float64)
-    if not matrix.shape[0]:
+    if not np.shape(matrix)[0]:
         return x
-    rhs = np.asarray(rhs, dtype=np.float64)
-    eps = float(np.finfo(np.float64).eps)
-
-    def off(point: np.ndarray) -> np.ndarray:
-        size = np.abs(matrix) @ np.abs(point) + np.abs(rhs)
-        return np.abs(matrix @ point - rhs) > 256.0 * eps * size + float(np.finfo(float).tiny)
-
-    if not off(x).any():
+    x = np.asarray(x)
+    free = np.ones(x.shape, dtype=bool)
+    free[np.asarray(fixed, dtype=np.int64)] = False
+    off, moved, missed = jax.device_get(
+        _onto_equality_rows(
+            x, np.asarray(matrix, dtype=x.dtype), np.asarray(rhs, dtype=x.dtype), free
+        )
+    )
+    if not np.any(off):
         return x
-    free = matrix.copy()
-    free[:, np.asarray(fixed, dtype=np.int64)] = 0.0
-    # On the host in float64, whatever JAX's precision, as the rows' test is.
-    move, *_ = np.linalg.lstsq(free, matrix @ x - rhs, rcond=None)
-    moved = np.asarray(x - move, dtype=np.asarray(x).dtype)
-    missed = off(moved)
-    if missed.any():
+    moved = np.asarray(moved, dtype=x.dtype)
+    if np.any(missed):
         raise ValueError(
             "TrustRegion keeps its equality rows (constraints= and gauges=) from a start on "
             f"them; rows {np.flatnonzero(missed).tolist()} are off at the start and no change "
