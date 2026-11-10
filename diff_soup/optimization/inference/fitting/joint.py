@@ -653,11 +653,18 @@ class JointInferenceProblem:
 
     @property
     def supported_compositions(self) -> frozenset[str]:
-        """Differentiation modes supported by every child problem."""
-        common = set(self.problems[0].supported_compositions)
-        for child in self.problems[1:]:
-            common.intersection_update(child.supported_compositions)
-        return frozenset(common)
+        """Differentiation modes supported by every child problem.
+
+        Read from the children once and kept on this problem; a copy reads them again.
+        """
+        kept = self.__dict__.get("_kept_compositions")
+        if kept is None or kept[0] is not self:
+            common = set(self.problems[0].supported_compositions)
+            for child in self.problems[1:]:
+                common.intersection_update(child.supported_compositions)
+            kept = (self, frozenset(common))
+            self.__dict__["_kept_compositions"] = kept
+        return kept[1]
 
     def resolved_hessian_composition(self, composition: str = "auto") -> str:
         """Resolve and validate a joint true-Hessian composition.

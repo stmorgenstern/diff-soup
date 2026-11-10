@@ -234,6 +234,14 @@ def _prior_penalty(blocks: tuple, x: Array) -> Array:
     return total
 
 
+def _log_prior(blocks: tuple, x: Array) -> Array:
+    """The normalized prior log density at ``x``: every prior block's, summed in block order (traced)."""
+    total = jnp.zeros((), dtype=x.dtype)
+    for columns, prior in blocks:
+        total = total + prior.log_prob(x[columns])
+    return total
+
+
 @dataclasses.dataclass(frozen=True)
 class _StructuredPriorRegularizer:
     """Expose independent MAP prior rows with their exact column ownership.
@@ -765,12 +773,15 @@ class EstimationProblem(AbstractOptimizationProblem):
         return self._prior_precision(jnp.asarray(x))
 
     def log_prior(self, x: ArrayLike) -> Array:
-        """Normalized physical-coordinate prior log density for a MAP problem."""
-        x = jnp.asarray(x, dtype=self._x0.dtype)
-        total = jnp.zeros((), dtype=x.dtype)
-        for columns, prior in self._prior_blocks:
-            total = total + prior.log_prob(x[columns])
-        return total
+        """Normalized physical-coordinate prior log density for a MAP problem.
+
+        One jitted program of ``_log_prior``, built once and kept on this problem.
+        """
+        kept = self.__dict__.get("_log_prior_program")
+        if kept is None or kept[0] is not self:
+            kept = (self, jax.jit(functools.partial(_log_prior, self._prior_blocks)))
+            self.__dict__["_log_prior_program"] = kept
+        return kept[1](jnp.asarray(x, dtype=self._x0.dtype))
 
     def finalize_opt_result(self, result: OptResult, *, optimizer: Any) -> OptResult:
         """Attach handle-based schema and normalized statistical provenance."""
