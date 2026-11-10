@@ -112,7 +112,7 @@ class _JointFit:
         c, C = self.rows(point)
 
         def solve(active):
-            held = inequality.with_rows(system, point, c, C, active)
+            held = inequality.with_rows(self.rows, system, point, c, C, active)
             return self.route.solve_attempt(held, coordinates, radius), held
 
         return solve
@@ -142,7 +142,7 @@ class _JointFit:
 
         def multipliers(active, answer):
             self.work.solves += 1
-            return inequality.held_multipliers(system, answer[2], coordinates, 0.0, len(c))
+            return inequality.held_multipliers(self.rows, system, answer[2], coordinates, 0.0)
 
         with np.errstate(all="ignore"):
             first = (empty.z / coordinates.scale, empty, system)
@@ -186,14 +186,14 @@ class _JointFit:
                 first=attempt,
                 fixed=fixed,
                 bounds=bounds,
-                equality=int(held.constraint_matrix.shape[0]) > 0,
+                equality=held.keeps_rows,
             )
             solves.append(answer[4])
             return answer[0] - point, *answer[1:4], held
 
         def multipliers(active, answer):
             solves.append(1)
-            return inequality.held_multipliers(system, answer[4], coordinates, answer[3], len(c))
+            return inequality.held_multipliers(self.rows, system, answer[4], coordinates, answer[3])
 
         found = active_set.active_solve(
             lambda active: trial(*attempts(active)), multipliers, c, C, point, trial(empty, system)

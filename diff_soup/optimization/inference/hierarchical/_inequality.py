@@ -223,58 +223,154 @@ def frozen(system: elimination.LevelSystem) -> np.ndarray:
     return mask
 
 
-def with_rows(
-    system: elimination.LevelSystem, x: np.ndarray, c: np.ndarray, C: np.ndarray, active: np.ndarray
+def _general_rows(rows: RowSet, system: elimination.LevelSystem) -> np.ndarray:
+    """The rows of no member, in order: those read the shared values only, or a level of no width."""
+    general = np.ones((rows.count,), dtype=bool)
+    for level, (positions, _) in rows.levels.items():
+        if system.widths[level]:
+            general[positions.reshape(-1)] = False
+    return np.flatnonzero(general)
+
+
+def _member_levels(rows: RowSet, system: elimination.LevelSystem) -> tuple:
+    """The levels whose rows are kept at their members' nodes, in increasing order."""
+    return tuple(level for level in sorted(rows.levels) if system.widths[level])
+
+
+def _place(
+    rows: RowSet,
+    system: elimination.LevelSystem,
+    c: np.ndarray,
+    C: np.ndarray,
+    active: np.ndarray,
+    level: int,
+) -> elimination.MemberRows:
+    """The members' rows of ``level`` as ``MemberRows``: their coefficients from ``C`` per node, target ``-c``.
+
+    Row ``i`` holds ``C_i s = -c_i``, the step on which its linearization at the point of
+    ``c`` and ``C`` is zero; ``C`` is read on each member's own columns and on those of its
+    ancestors. Host arrays of the system's dtype.
+    """
+    dtype = np.dtype(system.root.dtype)
+    positions, columns = rows.levels[level]
+    count, per = positions.shape
+    offsets = _offsets(system.counts, system.widths)
+    block = C[positions]
+    nodes = np.arange(count)[:, None, None]
+    numbers = np.arange(per)[None, :, None]
+
+    def read(read_columns: np.ndarray) -> np.ndarray:
+        return np.transpose(block[nodes, numbers, read_columns[:, None, :]], (0, 2, 1)).astype(
+            dtype
+        )
+
+    above = []
+    for at in range(level):
+        width = system.widths[at]
+        if at == 0:
+            node_columns = np.broadcast_to(np.arange(width), (count, width))
+        else:
+            ancestor = np.asarray(system.ancestors[level][at], dtype=np.int64)
+            node_columns = offsets[at] + ancestor[:, None] * width + np.arange(width)[None, :]
+        above.append(read(node_columns))
+    return elimination.MemberRows(
+        coefficients=read(columns),
+        above=tuple(above),
+        target=(-c[positions]).astype(dtype),
+        active=np.asarray(active, dtype=bool)[positions],
+    )
+
+
+def _holding(
+    system: elimination.LevelSystem, member_rows: tuple, **fields
 ) -> elimination.LevelSystem:
-    """``system`` with every row among its equality rows, the ``active`` ones kept at their boundary.
+    """``system`` with ``member_rows`` (one entry per level) and any other ``fields``, on its device."""
+    placed = system.point
+    device = placed.sharding if placed.committed else None
+    names = ("member_rows",) + tuple(fields)
+    values = (member_rows,) + tuple(fields.values())
+    return eqx.tree_at(
+        lambda s: tuple(getattr(s, name) for name in names),
+        system,
+        jax.device_put(values, device),
+        is_leaf=lambda leaf: leaf is None,
+    )
+
+
+def with_rows(
+    rows: RowSet,
+    system: elimination.LevelSystem,
+    x: np.ndarray,
+    c: np.ndarray,
+    C: np.ndarray,
+    active: np.ndarray,
+) -> elimination.LevelSystem:
+    """``system`` holding every row of ``rows``, the ``active`` ones kept at their boundary.
 
     Row ``i`` reads ``C_i (x + s) = C_i x - c_i``, the step ``s`` on which its
     linearization at ``x`` is zero, its columns that the step never moves set to zero; a
-    row with no column left is never kept. ``system`` itself when no row is kept.
+    row with no column left is never kept. A member's rows ride at its node
+    (``member_rows``), the others among the equality rows. ``system`` itself when no row
+    is kept.
     """
-    rows = np.where(frozen(system)[None, :], 0.0, C)
-    active = np.asarray(active, dtype=bool) & np.any(rows != 0.0, axis=1)
+    C = np.where(frozen(system)[None, :], 0.0, C)
+    active = np.asarray(active, dtype=bool) & np.any(C != 0.0, axis=1)
     if not active.any():
         return system
     dtype = np.dtype(system.root.dtype)
-    placed = system.point
-    device = placed.sharding if placed.committed else None
+    member_rows: list = [None] * (system.depth + 1)
+    for level in _member_levels(rows, system):
+        member_rows[level] = _place(rows, system, c, C, active, level)
+    general = _general_rows(rows, system)
+    if not general.size:
+        return _holding(system, tuple(member_rows))
     count = int(np.shape(system.constraint_matrix)[0])
     kept = (
         np.ones((count,), dtype=bool)
         if system.constraint_active is None
         else np.asarray(system.constraint_active, dtype=bool)
     )
-    matrix = np.concatenate([np.asarray(system.constraint_matrix, dtype=dtype), rows.astype(dtype)])
-    rhs = np.concatenate(
-        [np.asarray(system.constraint_rhs, dtype=dtype), (rows @ x - c).astype(dtype)]
+    matrix = np.concatenate(
+        [np.asarray(system.constraint_matrix, dtype=dtype), C[general].astype(dtype)]
     )
-    return eqx.tree_at(
-        lambda s: (s.constraint_matrix, s.constraint_rhs, s.constraint_active),
+    rhs = np.concatenate(
+        [
+            np.asarray(system.constraint_rhs, dtype=dtype),
+            (C[general] @ x - c[general]).astype(dtype),
+        ]
+    )
+    return _holding(
         system,
-        jax.device_put((matrix, rhs, np.concatenate([kept, active])), device),
-        is_leaf=lambda leaf: leaf is None,
+        tuple(member_rows) if any(entry is not None for entry in member_rows) else None,
+        constraint_matrix=matrix,
+        constraint_rhs=rhs,
+        constraint_active=np.concatenate([kept, active[general]]),
     )
 
 
 def held_multipliers(
+    rows: RowSet,
     system: elimination.LevelSystem,
     held: elimination.LevelSystem,
     coordinates: box.Scaling,
     damping: float,
-    count: int,
 ) -> np.ndarray:
-    """``(count,)``: the multipliers of the rows ``held`` keeps (``with_rows``), zero on the others.
+    """``(R,)``: the multipliers of the rows ``held`` keeps (``with_rows``), zero on the others.
 
-    They are those of ``held``'s damped solve in the subproblem's ``coordinates``; ``held``
-    is ``system`` itself when it keeps no row.
+    They are those of ``held``'s damped solve in the subproblem's ``coordinates``, in the
+    order of ``rows``; ``held`` is ``system`` itself when it keeps no row.
     """
     if held is system:
-        return np.zeros((count,))
-    multipliers = elimination.row_multipliers(
-        held, coordinates.scale, damping, coordinates.addition
-    )
-    return multipliers[-count:]
+        return np.zeros((rows.count,))
+    flat = elimination.row_multipliers(held, coordinates.scale, damping, coordinates.addition)
+    multipliers = np.zeros((rows.count,))
+    start, stop = int(system.constraint_matrix.shape[0]), int(held.constraint_matrix.shape[0])
+    multipliers[_general_rows(rows, system)] = flat[start:stop]
+    for level in _member_levels(rows, system):
+        positions = rows.levels[level][0].reshape(-1)
+        multipliers[positions] = flat[stop : stop + positions.size]
+        stop += positions.size
+    return multipliers
 
 
 def _fractions(
@@ -377,28 +473,33 @@ def member_rows(
 ) -> tuple | None:
     """The rows of the members of ``level`` on their own values at ``x``, the values above held.
 
-    Returns ``(c, C, coefficients)``: the rows ``(N R,)`` and their Jacobian ``(N R, n)``
-    member by member, and the coefficients ``(N, v, R)`` on each member's own columns,
-    with the columns a step never moves set to zero; ``None`` when the level has no rows.
+    Returns ``(c, C, placed)``: the rows ``(N R,)`` and their Jacobian ``(N R, n)`` member
+    by member, with the columns a step never moves set to zero, and the rows as the
+    system holds them (``_place``, every row active); ``None`` when the level has no rows.
     """
-    if level not in rows.levels:
+    if level not in rows.levels or not system.widths[level]:
         return None
-    positions, columns = rows.levels[level]
+    positions = rows.levels[level][0]
     c, C = rows(x)
-    C = np.where(frozen(system)[None, :], 0.0, C)[positions]
+    C = np.where(frozen(system)[None, :], 0.0, C)
+    placed = _place(rows, system, c, C, np.ones(c.shape, dtype=bool), level)
     count, per = positions.shape
-    own = C[np.arange(count)[:, None, None], np.arange(per)[None, :, None], columns[:, None, :]]
-    return c[positions].reshape(-1), C.reshape(count * per, -1), np.transpose(own, (0, 2, 1))
+    return c[positions].reshape(-1), C[positions].reshape(count * per, -1), placed
 
 
-def _held(own: tuple, active: np.ndarray) -> elimination.MemberRows | None:
-    """The members' rows of ``own`` with ``active`` held, or ``None`` when none is."""
-    c, _, coefficients = own
-    count, _, per = coefficients.shape
-    on = np.asarray(active).reshape(count, per) & np.any(coefficients != 0.0, axis=1)
+def _held(own: tuple, system: elimination.LevelSystem, level: int, active: np.ndarray):
+    """``system`` holding the members' rows of ``own`` with ``active`` kept, or ``None`` when none is.
+
+    A member's polish keeps a row only where it reads the member's own values.
+    """
+    _, _, placed = own
+    count, _, per = placed.coefficients.shape
+    on = np.asarray(active).reshape(count, per) & np.any(placed.coefficients != 0.0, axis=1)
     if not on.any():
         return None
-    return elimination.MemberRows(coefficients, -c.reshape(count, per), on)
+    member_rows = [None] * (system.depth + 1)
+    member_rows[level] = placed._replace(active=on)
+    return _holding(system, tuple(member_rows))
 
 
 def _groups(own: tuple, system: elimination.LevelSystem, level: int) -> tuple:
@@ -407,8 +508,8 @@ def _groups(own: tuple, system: elimination.LevelSystem, level: int) -> tuple:
     Returns ``(c, C, groups)``, ``C`` zero on the columns above ``level``, which the polish
     holds.
     """
-    c, C, coefficients = own
-    count, _, per = coefficients.shape
+    c, C, placed = own
+    count, _, per = placed.coefficients.shape
     owners = elimination.node_of_columns(system, level)
     return (
         c,
@@ -421,15 +522,14 @@ def _member_multipliers(
     own: tuple, system, coordinates: box.Scaling, level: int, active: np.ndarray, damping
 ) -> np.ndarray:
     """Every member's multipliers of its held rows at its damped solve, zero on the others."""
-    held = _held(own, active)
+    held = _held(own, system, level, active)
     if held is None:
         return np.zeros(own[0].shape)
     multipliers = elimination.inner_row_multipliers(
-        system,
+        held,
         coordinates.scale,
         np.nan_to_num(np.asarray(damping, dtype=np.float64)),
         level,
-        held,
         addition=coordinates.addition,
     )
     return multipliers.reshape(-1)
@@ -450,12 +550,14 @@ def member_zero(own: tuple, system, x: np.ndarray, coordinates: box.Scaling, lev
     """
     c, C, groups = _groups(own, system, level)
     scale, addition = coordinates.scale, coordinates.addition
-    count = own[2].shape[0]
+    count = own[2].coefficients.shape[0]
     made = [0]
 
     def solve(active):
-        held = _held(own, active)
-        zero = elimination.inner_solve_scaled(system, scale, level, addition=addition, rows=held)
+        held = _held(own, system, level, active)
+        zero = elimination.inner_solve_scaled(
+            system if held is None else held, scale, level, addition=addition
+        )
         with np.errstate(all="ignore"):
             return zero[0] / scale, zero
 
@@ -506,9 +608,9 @@ def member_step(
     made = [0]
 
     def solve(active):
-        held = _held(own, active)
+        held = _held(own, system, level, active)
         answer = elimination.inner_secular_step(
-            system,
+            system if held is None else held,
             scale,
             radii,
             level,
@@ -516,7 +618,6 @@ def member_step(
             first=first if held is None else None,
             addition=addition,
             hold=True,
-            rows=held,
         )
         made[0] += answer[3]
         return answer

@@ -9,9 +9,11 @@ coordinates, then every node of level 1, and so on down to the experiments.
 A damped solve eliminates the levels from the experiments up. Every node of a
 level is factored at once, and the Schur complement of its block is folded into
 the blocks of its ancestors, so the stored set of blocks never grows. The
-shared block is solved last, and the steps follow top-down. Equality rows are
-imposed by one small projection, and the factors give the inverse-norm
-``s^T (H + lambda I)^-1 s`` a secular search on ``lambda`` needs.
+shared block is solved last, and the steps follow top-down. A member's rows
+are eliminated with its node, so they cost in proportion to the members; the
+other equality rows are imposed by one small projection, and the factors give
+the inverse-norm ``s^T (H + lambda I)^-1 s`` a secular search on ``lambda``
+needs.
 
 Every array computation is compiled once per shape; the damping, the scale,
 the diagonal added to the scaled matrix, the point, and which coordinates are
@@ -22,7 +24,6 @@ the host.
 from __future__ import annotations
 
 from diff_soup.optimization.inference.hierarchical._level_inner import (
-    MemberRows,
     inner_added,
     inner_predicted,
     inner_programs,
@@ -45,6 +46,7 @@ from diff_soup.optimization.inference.hierarchical._level_solve import (
 from diff_soup.optimization.inference.hierarchical._level_system import (
     LevelLayout,
     LevelSystem,
+    MemberRows,
     level_dense,
     level_layout,
     level_system,
