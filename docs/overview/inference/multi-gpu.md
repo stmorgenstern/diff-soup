@@ -122,6 +122,10 @@ with ds.distributed.run(study) as lowered:
   written inside the block.
 - Start it with `mpirun -n K python -m mpi4py script.py`. In one process
   the block runs as written.
+- The split needs the MPI launch. In a run started for
+  `ds.distributed.initialize()`, such as with
+  `python -m diff_soup.distributed.launch`, the study is not split and
+  every process runs all of it.
 - A `Measurement` whose `values` is a function is loaded on the process
   that owns its experiment ([declare the data](fitting.md#declare-the-data)).
 
