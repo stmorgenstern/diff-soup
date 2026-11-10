@@ -223,44 +223,86 @@ def _resolve_handle_regularization(regularization: Any, schema: ParameterSchema)
 
 @dataclasses.dataclass(frozen=True)
 class _StructuredPriorRegularizer:
-    """Expose independent MAP prior rows with their exact column ownership."""
+    """Expose independent MAP prior rows with their exact column ownership.
+
+    ``residual``, ``penalty`` and ``block_rows`` each run one jitted program
+    over every block, built at the first call and kept on the object; a copy
+    of the object builds its own.
+    """
 
     blocks: tuple
     extra: Any = dataclasses.field(default_factory=NoReg)
 
-    def residual(self, x: ArrayLike) -> Array:
-        """Concatenate the same physical-prior rows used by dense LM."""
-        x = jnp.asarray(x)
+    def _program(self, name: str, build: Callable[[], Any]) -> Any:
+        """The jitted program ``name`` (with what it keeps), made by ``build`` at the first call."""
+        programs = self.__dict__.get("_programs")
+        if programs is None or programs[0] is not self:
+            programs = (self, {})
+            self.__dict__["_programs"] = programs
+        if name not in programs[1]:
+            programs[1][name] = build()
+        return programs[1][name]
+
+    def _residual(self, x: Array) -> Array:
+        """The rows of ``extra`` and of every prior block, concatenated (traced)."""
         parts = (self.extra.residual(x),) + tuple(
             prior.residual(x[columns]) for columns, prior in self.blocks
         )
         return jnp.concatenate(parts)
 
-    def penalty(self, x: ArrayLike) -> Array:
-        """Return half the squared norm of all prior residual rows."""
+    def _penalty(self, x: Array) -> Array:
+        """Half the squared norm of the rows of ``extra`` and of every prior block (traced)."""
         return self.extra.penalty(x) + sum(
             half_sum_of_squares(prior.residual(x[columns])) for columns, prior in self.blocks
         )
 
+    def _rows_program(self) -> tuple[Callable, list]:
+        """``(program, columns)``: the jitted rows and Jacobians of every block, and their columns.
+
+        The program returns one ``(residual, jacobian)`` pair per block, those
+        of ``extra.block_rows`` first; ``columns`` holds each block's columns,
+        static, filled when the program is traced.
+        """
+        columns: list = []
+
+        def rows(point: Array) -> tuple:
+            triples = []
+            if self.extra.residual(point).size:
+                provider = getattr(self.extra, "block_rows", None)
+                if not callable(provider):
+                    raise ValueError(
+                        f"regularization {type(self.extra).__name__} has no block_rows(x); a fit "
+                        "over the joint problem takes a regularization that defines "
+                        "block_rows(x) returning (columns, residual, jacobian) triples."
+                    )
+                triples.extend(provider(point))
+            for block, prior in self.blocks:
+                values = point[block]
+                triples.append(
+                    (
+                        tuple(int(item) for item in np.asarray(block)),
+                        prior.residual(values),
+                        jax.jacfwd(prior.residual)(values),
+                    )
+                )
+            columns[:] = [tuple(item[0]) for item in triples]
+            return tuple((item[1], item[2]) for item in triples)
+
+        return jax.jit(rows), columns
+
+    def residual(self, x: ArrayLike) -> Array:
+        """Concatenate the same physical-prior rows used by dense LM."""
+        return self._program("residual", lambda: jax.jit(self._residual))(jnp.asarray(x))
+
+    def penalty(self, x: ArrayLike) -> Array:
+        """Return half the squared norm of all prior residual rows."""
+        return self._program("penalty", lambda: jax.jit(self._penalty))(jnp.asarray(x))
+
     def block_rows(self, x: ArrayLike) -> tuple:
         """Return column-local ``(columns, residual, jacobian)`` triples of every prior row."""
-        x = jnp.asarray(x)
-        result = []
-        if self.extra.residual(x).size:
-            provider = getattr(self.extra, "block_rows", None)
-            if not callable(provider):
-                raise ValueError(
-                    f"regularization {type(self.extra).__name__} has no block_rows(x); a fit "
-                    "over the joint problem takes a regularization that defines "
-                    "block_rows(x) returning (columns, residual, jacobian) triples."
-                )
-            result.extend(provider(x))
-        for columns, prior in self.blocks:
-            values = x[columns]
-            residual = prior.residual(values)
-            jacobian = jax.jacfwd(prior.residual)(values)
-            result.append((tuple(int(item) for item in np.asarray(columns)), residual, jacobian))
-        return tuple(result)
+        program, columns = self._program("block_rows", self._rows_program)
+        values = program(jnp.asarray(x))
+        return tuple((block, *value) for block, value in zip(columns, values))
 
 
 @dataclasses.dataclass(frozen=True, init=False)
