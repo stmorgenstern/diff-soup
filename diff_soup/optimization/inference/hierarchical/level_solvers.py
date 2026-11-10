@@ -92,7 +92,7 @@ class TrustRegion(OptSolver):
         weights: One weight per member of the first level, or a `(level, weights)` pair, multiplying each member's share of the objective.
         weight_priors: If `True`, the weights also multiply each member's prior and regularization terms.
         constraints: Linear equality constraints on the joint parameter vector, as `LinearConstraint` objects.
-        inequalities: Rows kept at or below zero, as [InequalityRows][diff_soup.optimization.inference.InequalityRows] or a sequence of them.
+        inequalities: Rows kept at or below zero, as `InequalityRows` or a sequence of them.
         gauges: [Gauge][diff_soup.optimization.inference.Gauge] constraints that pin directions the data leave free.
         fixed_indices: The indices of the joint parameter vector held at their starting values.
         callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.

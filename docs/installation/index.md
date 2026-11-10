@@ -71,50 +71,10 @@ For CUDA 12, use the `cu12` extra, leave out `nvidia-cuda-nvcc`, and point the
 last command at a CUDA 12 toolkit's compiler with
 `-C cmake.define.DIFF_SOUP_NVCC=/usr/local/cuda-12/bin/nvcc`.
 
-The KLU solver links the SuiteSparse libraries vendored in the repository, which
-are built for x86-64. On ARM (aarch64), pass
-`-C cmake.define.KLU_VENDOR_DIR=<tree>` naming a SuiteSparse 7.10 tree built for
-the host, with `include/suitesparse/klu.h` and the shared libraries in `lib/`.
-
 `pip install -e` in the last command installs in development mode, and the
 `dev` extra adds the test and lint tools. The SuperLU_MT solver is built when
 a SuperLU_MT installation is found; `diff_soup/_internal/superlu_ffi/build_superlu_mt.sh`
 builds one.
-
-## Environment
-
-`import diff_soup` makes three changes to the process.
-
-- It adds three XLA GPU flags to `XLA_FLAGS`, keeping any flag already set
-  (`ds.distributed.configure`).
-- It turns on JAX's constant hoisting, as above.
-- It wraps JAX's custom-call builder so that every LAPACK, cuSOLVER and cuDSS
-  call reaches XLA as a typed FFI call.
-
-Loading the cuDSS solver adds the NVIDIA wheels' library directories to
-`LD_LIBRARY_PATH` for child processes.
-
-diff-soup reads these variables, with their defaults in brackets.
-
-- `DIFF_SOUP_INHERENT_FFI_CONFIG` (`1`) set to `0` leaves JAX's custom-call
-  builder unwrapped.
-- `DIFFSOUP_CACHE_DIR` is where window initializations are stored. Unset, it
-  is `diff_soup` beside JAX's compilation cache, or `~/.cache/diff_soup`.
-- `DIFFSOUP_COORDINATOR` is process 0's `host:port` for an MPI launch of
-  `ds.distributed.initialize()`.
-- `DIFFSOUP_MGMN` (`0`) set to `1` in every process runs cuDSS across the
-  GPUs of several processes.
-- `DIFFSOUP_MPI_LIBRARY` (`libmpi.so.40`) is the Open MPI library of that mode.
-- `DIFFSOUP_NODES` (`1`), `DIFFSOUP_GPUS_PER_NODE` (`2`) and
-  `DIFFSOUP_CPUS_PER_PROCESS` (`4`) shape a Slurm launch of
-  `python -m diff_soup.distributed.launch`.
-- `DIFFSOUP_PROCESSES` is the number of processes that launcher forks on one
-  host. A CPU-only host needs it.
-- `DIFF_SOUP_DEADLINE_SECONDS` (`600`) and
-  `DIFF_SOUP_PREPARE_DEADLINE_SECONDS` (`21600`) bound how long process 0 of
-  `ds.distributed.run` waits for a reply and for every process to prepare.
-
-An empty variable counts as unset.
 
 ## Troubleshooting
 
