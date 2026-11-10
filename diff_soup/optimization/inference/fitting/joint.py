@@ -480,8 +480,19 @@ class JointInferenceProblem:
         return out
 
     def trial_is_valid(self, x: ArrayLike):
-        """Validate a joint point before any residual/PDE trial is launched."""
-        point = jnp.asarray(x)
+        """Validate a joint point before any residual/PDE trial is launched.
+
+        One jitted program of the predicate and every child's check, built at
+        the first call and kept on this problem; a copy builds its own.
+        """
+        program = self.__dict__.get("_trial_program")
+        if program is None or program[0] is not self:
+            program = (self, jax.jit(self._trial_is_valid))
+            self.__dict__["_trial_program"] = program
+        return program[1](jnp.asarray(x))
+
+    def _trial_is_valid(self, point: jax.Array):
+        """The predicate and every child's ``trial_is_valid`` at ``point``, and-ed (traced)."""
         valid = jnp.asarray(True)
         if self._trial_predicate is not None:
             valid = valid & jnp.asarray(self._trial_predicate(point), dtype=bool)
