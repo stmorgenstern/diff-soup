@@ -78,14 +78,5 @@ class KeptJacobians:
                 if not self._held[before[0]]:
                     del self._held[before[0]], self.calls[before[0]]
 
-    def nbytes(self) -> int:
-        """The bytes of the kept Jacobians, over every device that holds a share."""
-        return sum(int(call.jacobian.nbytes) for call in self.calls.values())
 
-
-def kept_bytes(kept: dict) -> int:
-    """The bytes of the Jacobians kept for every bucket of ``kept`` (``BatchedLanes.kept``)."""
-    return sum(entry.nbytes() for entry in kept.values())
-
-
-__all__ = ["KeptCall", "KeptJacobians", "kept_bytes"]
+__all__ = ["KeptCall", "KeptJacobians"]

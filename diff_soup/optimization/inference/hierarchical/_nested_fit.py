@@ -189,10 +189,6 @@ class _NestedFit(_JointFit):
     a polish in which no member iterates does too.
     """
 
-    # Whether the polish's request at its trial is a frozen pass when the lanes run that
-    # mode; False makes it a value request (for measurements).
-    frozen_polish = True
-
     def __init__(self, solver: TrustRegion, route: _LaneRoute, callbacks: tuple):
         super().__init__(solver, route, callbacks)
         self.inner = solver if solver.inner is None else solver.inner
@@ -203,7 +199,7 @@ class _NestedFit(_JointFit):
         # makes an iteration and the lanes run that mode; else value, whose moved members a
         # blocks request then reads.
         polishing = self.polish_steps > 0 or int(solver.inner_start_iterations) > 0
-        frozen = self.frozen_polish and polishing and route.problem._offers("frozen")
+        frozen = polishing and route.problem._offers("frozen")
         self.polish_pass = "frozen" if frozen else "value"
         if frozen:
             # Every blocks request keeps its lanes' Jacobians, which the frozen pass reads;
