@@ -30,6 +30,12 @@ parallelism](../../overview/inference/multi-gpu.md).
 
 ::: diff_soup.distributed.run
 
+!!! warning "Launch through MPI"
+    `ds.distributed.run` splits a study only under an MPI launch, such as
+    `mpirun -n K python -m mpi4py script.py`. In a run started for
+    `ds.distributed.initialize()` the study is not split and every process
+    runs all of it.
+
 ::: diff_soup.distributed.initialize
 
 ::: diff_soup.distributed.configure
