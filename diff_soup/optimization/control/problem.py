@@ -596,7 +596,9 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         """Lower to closures over `u` and `args`; see [AbstractOptimizationProblem.numeric_problem][diff_soup.optimization.AbstractOptimizationProblem.numeric_problem]."""
         horizon = self._closures()
         n = self.controls.size
-        start = _start(self.controls, self.bounds) if self.start is None else jnp.asarray(self.start)
+        start = (
+            _start(self.controls, self.bounds) if self.start is None else jnp.asarray(self.start)
+        )
         x0 = jnp.reshape(jnp.asarray(start, dtype=jnp.float64), (n,))
         structure = {
             "value_gradient",
