@@ -155,7 +155,10 @@ class _SuperLUAnalysis:
 
 
 def _release_analysis(native_id: int) -> None:
-    """Release a native analysis: its call sites and its factor slots in every context."""
+    """Release a native analysis: its call sites and its factor slots in every context.
+
+    A compiled program that factors with it keeps it until the program is collected.
+    """
     try:
         _native().analysis_release(native_id)
     except Exception:  # noqa: BLE001 - interpreter shutdown or a missing module
@@ -206,9 +209,11 @@ def _site_key(
     A deterministic key of the lowered call
     ([lowered_site_key][diff_soup.linear._primitive.lowered_site_key]): the
     handler creates the site on the first call that carries it, so two
-    lowerings of one program share their sites and their program text. A
-    site belongs to no context: its slots are keyed by the context id the
-    call carries at run time, and each slot is freed with its context.
+    lowerings of one program share their sites and their program text. The
+    handler numbers the calls that carry one key in the live programs, so
+    each call of a function that a program calls several times has a site of
+    its own. A site belongs to no context: its slots are keyed by the context
+    id the call carries at run time, and each slot is freed with its context.
     ``parts`` are the call's parameters and operand shapes, which tell
     calls of otherwise equal programs apart; ``per_device`` marks a call on
     shared storage, whose slot the extension keys by device.

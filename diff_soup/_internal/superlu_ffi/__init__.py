@@ -38,6 +38,9 @@ _IMPORT_ERROR: Optional[BaseException] = None
 def load() -> ModuleType:
     """Import the native module and register its FFI targets (once per process).
 
+    The factor and refactor targets keep a state per call of a compiled program, whose type is
+    registered with XLA first.
+
     Returns:
         The ``_native_superlu`` module.
 
@@ -56,8 +59,18 @@ def load() -> ModuleType:
             raise ImportError(_BUILD_HINT) from exc
         import jax
 
-        for name, capsule in native.registrations().items():
-            jax.ffi.register_ffi_target(name, capsule, platform="cpu")
+        # XLA refuses a handler whose state type it does not know, and it applies the pending
+        # registrations of a platform handlers first when it makes the platform's client, so
+        # the CPU client is made before the state type and the handlers are registered.
+        try:
+            jax.devices("cpu")
+        except RuntimeError:  # the CPU platform is disabled; nothing can run the handlers
+            pass
+        state_type = getattr(native, "call_state_type", None)
+        if state_type is not None:  # a module built before the calls had their state has none
+            jax.ffi.register_ffi_type("diffsoup_superlu_call_state", state_type(), platform="cpu")
+        for name, handler in native.registrations().items():
+            jax.ffi.register_ffi_target(name, handler, platform="cpu")
         _NATIVE = native
         return native
 

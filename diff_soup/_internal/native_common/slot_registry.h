@@ -6,13 +6,33 @@
 // The registry of an extension holds, under one mutex:
 //   * the analyses by id;
 //   * the slots by id: a slot holds one factor, belongs to one context (its handle is the pair
-//     (context id, slot id)) and records the site that created it;
-//   * the sites by 64-bit key: a site is a lowered factor or refactor call, created on the
-//     first call that carries its key, and keys its slots by (context id, slot token or held
-//     slot id). A site belongs to its analysis. Releasing the analysis (ForgetAnalysis) erases
-//     its sites and frees its slots in every context; until then its slots and sites hold it;
+//     (context id, slot id)) and records the site and call that created it;
+//   * the sites by (64-bit key, call number): a site key names a lowered factor or refactor
+//     call, and the call number tells apart the calls that carry one key in the compiled
+//     programs alive at once (below). A site is created on the first call that carries its key
+//     and number, and keys its slots by (context id, slot token or held slot id). A site
+//     belongs to its analysis. Releasing the analysis (ForgetAnalysis) erases its sites and
+//     frees its slots in every context; until then its slots and sites hold it;
 //   * the shared-storage slots, keyed by a tuple that starts with the context id;
 //   * the released contexts, whose calls are refused.
+//
+// Calls: XLA gives every call of a handler in an executable an instance of its own, and the
+// factor and refactor handlers attach a CallState to it at instantiation, which XLA destroys
+// with the executable. JAX lowers a jitted function once however often a program calls it, so
+// its k calls carry one site key; their states number them 0, ..., k - 1 (the lowest numbers
+// no live call of that key holds), so each call has a site, and slots, of its own. A loop's
+// call or a batched call is one call. When an executable is destroyed its numbers are free
+// again, and the next program that carries the key takes them and reuses the sites and slots
+// they name, so programs that come and go add none. A slot outlives the executable whose
+// call made it: a factor returned from a program may be solved later by another one.
+//
+// Analyses: a CallState holds the analysis its call names, taken at instantiation. Releasing
+// an analysis from Python (its Analysis was collected) while a live call holds it only marks
+// it released: the programs that use it keep running, and it is forgotten (ForgetAnalysis)
+// when its last call is destroyed. A CallState may be destroyed on any thread, also one that
+// may not free device memory, so its destructor only records the end of its call under a
+// mutex of its own; the next registry entry that may free (DrainEndedCalls: every Python-facing
+// function, and a handler) forgets the analyses no call holds any more.
 //
 // The host backends (KLU, SuperLU_MT) create their slots with SiteSlot and StorageSlot below.
 // cuDSS creates its own (a device handle per slot, a range of ids per batch slot, a precision
@@ -27,11 +47,13 @@
 // Its slots derive from SlotBase, its sites are or derive from SiteBase, and its Stats has the
 // counter released_context_errors. Every function that takes a registry expects the caller to
 // hold its mutex, except the Python-facing ones (AnalysisRelease, ContextRelease,
-// ResidentBytes), which release the GIL and take it.
+// ResidentBytes), which release the GIL and take it, and the CallState functions, which say
+// what they take.
 
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -39,6 +61,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -68,6 +91,7 @@ template <class AnalysisT>
 struct SlotBase {
     int32_t id = 0;        // the slot's (first) id
     int64_t site = 0;      // the key of the site that created the slot
+    int32_t call = 0;      // the call number of that site
     int64_t storage = 0;   // the storage key of a shared-storage slot, 0 for a site's slot
     // The XLA execution (run id) of the latest refactor of a shared-storage slot: a solve of the
     // same execution trusts the slot to hold its factor's matrix. -1 once a solve that does not
@@ -80,10 +104,14 @@ struct SlotBase {
 
 template <class AnalysisT>
 struct SiteBase {
-    int64_t id = 0;
+    int64_t id = 0;    // the site key
+    int32_t call = 0;  // the call number
     std::shared_ptr<AnalysisT> analysis;
     std::map<SiteKey, int32_t> slot_of_key;
 };
+
+// A site's address in the registry: (site key, call number).
+using SiteAddress = std::pair<int64_t, int32_t>;
 
 template <class AnalysisT, class SlotT, class SiteT, class StatsT, class StorageKeyT>
 struct RegistryBase {
@@ -94,12 +122,28 @@ struct RegistryBase {
     std::mutex mutex;  // serialises every call into the extension's library
     std::unordered_map<int64_t, std::shared_ptr<AnalysisT>> analyses;
     std::map<int32_t, std::unique_ptr<SlotT>> slots;  // by the slot's (first) id
-    std::unordered_map<int64_t, std::unique_ptr<SiteT>> sites;
+    std::map<SiteAddress, std::unique_ptr<SiteT>> sites;
     std::map<StorageKeyT, int32_t> storage_slots;  // shared storage: the slot each key names
     std::unordered_set<int32_t> released_contexts;
     int64_t next_analysis = 1;
     int32_t next_slot = 1;
     StatsT stats;
+    // The live calls (CallState) that hold each analysis, and the analyses Python released
+    // while calls held them, forgotten when their last call ends. Under `mutex`.
+    std::unordered_map<int64_t, int64_t> holders;
+    std::unordered_set<int64_t> released_analyses;
+    // Under `calls_mutex`, which a CallState's destructor takes alone: the call numbers each
+    // site key's live calls hold, and the analyses of the calls that ended since the last
+    // DrainEndedCalls. `calls_mutex` is taken after `mutex` when both are held.
+    std::mutex calls_mutex;
+    std::map<int64_t, std::set<int32_t>> live_calls;
+    std::vector<int64_t> ended_holds;
+    std::atomic<bool> ended_pending{false};
+
+    // Forget analysis `id` (ForgetAnalysis, defined below); an extension whose slots hold more
+    // than host memory hides this with its own.
+    template <class Self>
+    static void Forget(Self& reg, int64_t id);
 };
 
 // The registry of type R. It is never destroyed, so no library object is freed during process
@@ -121,10 +165,18 @@ typename R::SlotType* FindSlot(R& reg, int32_t id) {
     return it == reg.slots.end() ? nullptr : it->second.get();
 }
 
+// The site of key `id` and call number `call`, or null.
 template <class R>
-typename R::SiteType* FindSite(R& reg, int64_t id) {
-    auto it = reg.sites.find(id);
+typename R::SiteType* FindSite(R& reg, int64_t id, int32_t call) {
+    auto it = reg.sites.find(SiteAddress{id, call});
     return it == reg.sites.end() ? nullptr : it->second.get();
+}
+
+// Whether `slot` is one of the slots of `site` (its key and call number), so a refactor at the
+// site may refactor it in place.
+template <class SlotT, class SiteT>
+bool SiteOwns(const SiteT& site, const SlotT& slot) {
+    return slot.site == site.id && slot.call == site.call;
 }
 
 // Refuse a context that cannot own factors: none (a negative id) or one that was released.
@@ -199,13 +251,15 @@ ffi::Error CheckAnalysis(const R&, const typename R::SlotType& slot, int64_t ana
     return ffi::Error::Success();
 }
 
-// The site of a lowered factor or refactor call: the site under `key`, created on the first call
-// that carries the key, on the call's analysis. A site key is a deterministic hash of the lowered
-// call, so two lowerings of one program share their sites.
+// The site of a lowered factor or refactor call: the site under `key` and `call` (the call
+// number its CallState holds), created on the first call that carries them, on the call's
+// analysis. A site key is a deterministic hash of the lowered call, so two lowerings of one
+// program share their sites.
 template <class R>
-ffi::Error SiteFor(R& reg, int64_t key, int64_t analysis_id, typename R::SiteType** out) {
+ffi::Error SiteFor(R& reg, int64_t key, int32_t call, int64_t analysis_id,
+                   typename R::SiteType** out) {
     using SiteT = typename R::SiteType;
-    SiteT* site = FindSite(reg, key);
+    SiteT* site = FindSite(reg, key, call);
     if (site == nullptr) {
         auto found = reg.analyses.find(analysis_id);
         if (found == reg.analyses.end()) {
@@ -218,9 +272,10 @@ ffi::Error SiteFor(R& reg, int64_t key, int64_t analysis_id, typename R::SiteTyp
         }
         auto made = std::make_unique<SiteT>();
         made->id = key;
+        made->call = call;
         made->analysis = found->second;
         site = made.get();
-        reg.sites.emplace(key, std::move(made));
+        reg.sites.emplace(SiteAddress{key, call}, std::move(made));
     }
     if (site->analysis->id != analysis_id) {
         return ffi::Error(ffi::ErrorCode::kInvalidArgument,
@@ -278,6 +333,7 @@ ffi::Error SiteSlot(R& reg, typename R::SiteType& site, int32_t context, int64_t
     }
     auto slot = std::make_unique<SlotT>();
     slot->site = site.id;
+    slot->call = site.call;
     slot->context = context;
     slot->key = address;
     slot->analysis = site.analysis;
@@ -308,6 +364,7 @@ ffi::Error StorageSlot(R& reg, typename R::SiteType& site, int32_t context, int3
     }
     auto slot = std::make_unique<SlotT>();
     slot->site = site.id;
+    slot->call = site.call;
     slot->storage = storage;
     slot->context = context;
     slot->key = SiteKey{context, std::numeric_limits<int64_t>::min()};
@@ -349,7 +406,7 @@ void ReleaseContextSlots(R& reg, int32_t context, OnSlot&& on_slot) {
             ++it;
             continue;
         }
-        if (auto* site = FindSite(reg, slot.site); site != nullptr && slot.storage == 0) {
+        if (auto* site = FindSite(reg, slot.site, slot.call); site != nullptr && slot.storage == 0) {
             site->slot_of_key.erase(slot.key);
         }
         on_slot(slot);
@@ -502,14 +559,15 @@ void BuildPattern(HostPattern<Index>& a, int64_t n, int64_t nnz, const int32_t* 
 }
 
 // --------------------------------------------------------------------------
-// Python-facing functions
+// Analyses and calls
 // --------------------------------------------------------------------------
 
-// Release analysis `id`: erase its sites, free its slots in every context (ReleaseAnalysisSlots,
+// Forget analysis `id`: erase its sites, free its slots in every context (ReleaseAnalysisSlots,
 // calling `on_slot` on each) and drop the registry's reference, the last one. Its factors can no
-// longer be named: a Factor holds its Analysis, which releases the native analysis only when it
-// is collected. A call that names the analysis afterwards finds neither the analysis nor its
-// sites and is refused (SiteFor), and a handle of one of its slots finds no slot (CheckHeld).
+// longer be named: a Factor holds its Analysis, and the analysis is forgotten only once that is
+// collected and no live call holds it. A call that names the analysis afterwards finds neither
+// the analysis nor its sites and is refused (SiteFor), and a handle of one of its slots finds no
+// slot (CheckHeld).
 template <class R, class OnSlot>
 void ForgetAnalysis(R& reg, int64_t id, OnSlot&& on_slot) {
     for (auto it = reg.sites.begin(); it != reg.sites.end();) {
@@ -519,13 +577,129 @@ void ForgetAnalysis(R& reg, int64_t id, OnSlot&& on_slot) {
     reg.analyses.erase(id);
 }
 
-// Release an analysis of a host backend (ForgetAnalysis) from Python.
+template <class AnalysisT, class SlotT, class SiteT, class StatsT, class StorageKeyT>
+template <class Self>
+void RegistryBase<AnalysisT, SlotT, SiteT, StatsT, StorageKeyT>::Forget(Self& reg, int64_t id) {
+    ForgetAnalysis(reg, id, [](auto&) {});
+}
+
+// The state XLA keeps for one call of a factor or refactor handler in one executable (the
+// instantiate stage of the FFI), destroyed with the executable: the call's site key, its call
+// number among the live calls of that key, and the analysis it holds (0 for none). R is the
+// extension's registry; each extension registers CallState<R> with XLA as a type of its own.
+template <class R>
+struct CallState {
+    static ffi::TypeId id;
+    int64_t site = 0;
+    int32_t call = 0;
+    int64_t analysis = 0;
+
+    CallState() = default;
+    CallState(const CallState&) = delete;
+    CallState& operator=(const CallState&) = delete;
+
+    // Frees the call number and records the end of the call's hold on its analysis, under
+    // `calls_mutex` alone: XLA may destroy an executable on any thread.
+    ~CallState() {
+        R& reg = Instance<R>();
+        std::lock_guard<std::mutex> lock(reg.calls_mutex);
+        auto it = reg.live_calls.find(site);
+        if (it != reg.live_calls.end()) {
+            it->second.erase(call);
+            if (it->second.empty()) reg.live_calls.erase(it);
+        }
+        if (analysis != 0) {
+            reg.ended_holds.push_back(analysis);
+            reg.ended_pending.store(true, std::memory_order_release);
+        }
+    }
+};
+
+template <class R>
+ffi::TypeId CallState<R>::id = XLA_FFI_UNKNOWN_TYPE_ID;
+
+// The state of a new call of site key `site` on analysis `analysis_id` (the instantiate stage):
+// the lowest call number no live call of the key holds, and a hold on the analysis when it
+// exists. Takes `mutex`, then `calls_mutex`.
+template <class R>
+ffi::ErrorOr<std::unique_ptr<CallState<R>>> InstantiateCall(int64_t site, int64_t analysis_id) {
+    R& reg = Instance<R>();
+    auto state = std::make_unique<CallState<R>>();
+    state->site = site;
+    std::lock_guard<std::mutex> lock(reg.mutex);
+    if (reg.analyses.count(analysis_id) != 0) {
+        ++reg.holders[analysis_id];
+        state->analysis = analysis_id;
+    }
+    std::lock_guard<std::mutex> calls(reg.calls_mutex);
+    std::set<int32_t>& taken = reg.live_calls[site];
+    int32_t call = 0;
+    while (taken.count(call) != 0) ++call;
+    taken.insert(call);
+    state->call = call;
+    return ffi::ErrorOr<std::unique_ptr<CallState<R>>>(std::move(state));
+}
+
+// Drop the holds of the calls that ended since the last drain, and forget each analysis that
+// Python released and no call holds any more (`forget(id)`, the extension's ForgetAnalysis).
+// Caller holds `mutex`, on a thread that may free what `forget` frees.
+template <class R, class ForgetFn>
+void DrainEndedCalls(R& reg, ForgetFn&& forget) {
+    if (!reg.ended_pending.load(std::memory_order_acquire)) return;
+    std::vector<int64_t> ended;
+    {
+        std::lock_guard<std::mutex> calls(reg.calls_mutex);
+        ended.swap(reg.ended_holds);
+        reg.ended_pending.store(false, std::memory_order_relaxed);
+    }
+    for (int64_t id : ended) {
+        auto it = reg.holders.find(id);
+        if (it == reg.holders.end()) continue;
+        if (--it->second > 0) continue;
+        reg.holders.erase(it);
+        if (reg.released_analyses.erase(id) != 0) forget(id);
+    }
+}
+
+// Release analysis `id` from Python: forget it (`forget(id)`) unless a live call holds it, which
+// keeps it for the programs that use it until the last such call ends. Caller holds `mutex`.
+template <class R, class ForgetFn>
+void ReleaseAnalysis(R& reg, int64_t id, ForgetFn&& forget) {
+    DrainEndedCalls(reg, forget);
+    if (reg.holders.count(id) != 0) {
+        reg.released_analyses.insert(id);
+        return;
+    }
+    forget(id);
+}
+
+// The forget function of the extension: R::Forget, which RegistryBase defines as
+// ForgetAnalysis (each slot frees its storage) and cuDSS redefines (device waits and patterns).
+template <class R>
+auto Forgetter(R& reg) {
+    return [&reg](int64_t id) { R::Forget(reg, id); };
+}
+
+// The number of live calls (CallState) of the extension. Takes `calls_mutex`.
+template <class R>
+int64_t LiveCalls(R& reg) {
+    std::lock_guard<std::mutex> calls(reg.calls_mutex);
+    int64_t total = 0;
+    for (const auto& entry : reg.live_calls) total += static_cast<int64_t>(entry.second.size());
+    return total;
+}
+
+// --------------------------------------------------------------------------
+// Python-facing functions
+// --------------------------------------------------------------------------
+
+// Release an analysis of a host backend from Python (ReleaseAnalysis).
 template <class R>
 void AnalysisRelease(int64_t id) {
     nb::gil_scoped_release release;
     R& reg = Instance<R>();
     std::lock_guard<std::mutex> lock(reg.mutex);
-    ForgetAnalysis(reg, id, [](auto&) {});
+    ReleaseAnalysis(reg, id, Forgetter(reg));
 }
 
 // Free every slot of a host context and record the context as released.
@@ -534,6 +708,7 @@ void ContextRelease(int64_t context) {
     nb::gil_scoped_release release;
     R& reg = Instance<R>();
     std::lock_guard<std::mutex> lock(reg.mutex);
+    DrainEndedCalls(reg, Forgetter(reg));
     ReleaseContextSlots(reg, static_cast<int32_t>(context), [](auto&) {});
 }
 
@@ -544,6 +719,7 @@ int64_t ResidentBytes(int64_t context) {
     nb::gil_scoped_release release;
     R& reg = Instance<R>();
     std::lock_guard<std::mutex> lock(reg.mutex);
+    DrainEndedCalls(reg, Forgetter(reg));
     int64_t total = 0;
     for (const auto& entry : reg.slots) {
         if (entry.second->context == context) {
