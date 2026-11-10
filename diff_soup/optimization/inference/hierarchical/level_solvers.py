@@ -68,7 +68,7 @@ class TrustRegion(OptSolver):
 
     Args:
         hessian: `"gauss-newton"` steps on the Gauss-Newton curvature, `"true"` on the exact Hessian.
-        nested_at: A level whose members polish their own parameters, the others held, after every accepted step.
+        nested_at: A level of the [Hierarchy][diff_soup.optimization.inference.Hierarchy] whose members polish, each refitting its own parameters with the others held after every accepted step.
         inner: A `TrustRegion` without `nested_at` whose budget and tolerances the polish uses, or `None` for two iterations per member; with `max_steps=0` the fit makes the steps of `nested_at=None`.
         radius_init: The initial trust radius, in scaled parameter units.
         radius_max: The largest trust radius.
