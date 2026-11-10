@@ -34,6 +34,7 @@ from diff_soup.optimization.inference.hierarchical._verdicts import (
     NONFINITE_BLOCKS,
     _failures_text,
     _stationarity_limit,
+    _within,
 )
 from diff_soup.optimization.solvers._loop import (
     _NOISE_RUN,
@@ -1092,7 +1093,7 @@ class _NestedFit(_JointFit):
                     system, coordinates.scale, self.cut, addition=coordinates.addition
                 )
             else:
-                zero, first, solves = inequality.member_zero(own, system, coordinates, self.cut)
+                zero, first, solves = inequality.member_zero(own, system, x, coordinates, self.cut)
                 work.solves += solves - 1
             decreases = self.member_decrease(system, coordinates.scale, zero, coordinates.addition)
             stationarity = _member_numbers(decreases, self.member_scales(costs))
@@ -1103,9 +1104,9 @@ class _NestedFit(_JointFit):
             # the gradient floor is measured, so is one whose model predicts no more
             # than its derivatives resolve.
             limits = member_limit if level is None else np.fmax(member_limit, level * full_steps)
-            finish(active & (stationarity <= limits), _STATIONARITY)
+            finish(active & _within(stationarity, limits), _STATIONARITY)
             if accuracy is not None:
-                finish(active & (decreases <= accuracy), _ACCURACY)
+                finish(active & _within(decreases, accuracy), _ACCURACY)
             # (4) the exit always follows a blocks request at the current point
             if not active.any() or k == int(limit):
                 # the exit makes no step; its one solve is the one above
