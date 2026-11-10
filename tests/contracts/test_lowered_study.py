@@ -876,6 +876,15 @@ def test_a_member_that_goes_back_to_its_start_takes_its_next_step_on_the_jacobia
     assert numbers.size and np.all(np.isfinite(numbers))
 
 
+def test_trust_region_takes_a_bare_constraint_or_gauge_as_a_sequence_of_one():
+    """constraints= and gauges= take one LinearConstraint or Gauge as a sequence of one."""
+    from diff_soup.optimization.inference.statistics import LinearConstraint
+
+    row, gauge = LinearConstraint({"rate": 1.0}, rhs=1.0), inf.Gauge.pin("rate", 1.0)
+    solver = inf.TrustRegion(constraints=row, gauges=gauge)
+    assert (solver.constraints, solver.gauges) == ((row,), (gauge,))
+
+
 def test_a_replicate_without_a_step_is_kept_where_it_needs_none(stop, sigma, weights, status):
     """A bootstrap replicate that ends without an accepted step from a converged fit is kept as
     converged when its point passes the converged test or its weights are the original sample's
