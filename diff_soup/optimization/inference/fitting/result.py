@@ -30,7 +30,7 @@ class TerminationStatus(int, enum.Enum):
     """How an optimizer run ended, at `result.status`.
 
     Each status is also its integer code, `int(status)`, so a compiled solver carries it under
-    `jit` as an integer array ([SolveRecord][diff_soup.optimization.SolveRecord]`.status`) and
+    `jit` as an integer array (`SolveRecord.status`) and
     compares it with a status directly. `TerminationStatus(code)` reads a code back, and
     `TerminationStatus(value)` a string value. `status.converged` is `True` for `SUCCESS`,
     `GRAD_TOL`, `STEP_TOL`, `COST_TOL`, `DERIVATIVE_ACCURACY` and `KKT_TOL`.
