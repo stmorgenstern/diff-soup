@@ -210,7 +210,7 @@ class _JointFit:
             norm = fraction * norm
             predicted = self.decrease(system, gradient, coordinates, step)
         trial = inequality.onto_rows(
-            self.rows, point + step, coordinates.scale, ~inequality.frozen(system)
+            self.rows, point + step, coordinates.scale, ~inequality.frozen(system), bounds
         )
         if bounds is not None:
             trial = box.make_strictly_feasible(trial, bounds[0], bounds[1], rstep=0)

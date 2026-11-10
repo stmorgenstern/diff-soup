@@ -1154,7 +1154,16 @@ class _NestedFit(_JointFit):
             if own is not None:
                 # A member whose trial crosses an own row it does not hold is scaled back.
                 trial, scaled, predicted = inequality.member_back(
-                    self.rows, own, system, x, trial, coordinates, predicted, held_rows, self.cut
+                    self.rows,
+                    own,
+                    system,
+                    x,
+                    trial,
+                    coordinates,
+                    predicted,
+                    held_rows,
+                    self.cut,
+                    bounds,
                 )
             step = trial - x
             step_norms = per_member(step)

@@ -322,16 +322,27 @@ def step_back(rows: RowSet, x: np.ndarray, step: np.ndarray, active: np.ndarray)
     return float(fraction[0])
 
 
-def onto_rows(rows: RowSet, x: np.ndarray, scale: np.ndarray, moving: np.ndarray) -> np.ndarray:
+def onto_rows(
+    rows: RowSet,
+    x: np.ndarray,
+    scale: np.ndarray,
+    moving: np.ndarray,
+    bounds: tuple | None = None,
+) -> np.ndarray:
     """``x`` moved back onto the rows it violates beyond their slack, the coordinates ``moving`` alone.
 
     A step that holds a curved row on its linearization leaves it by the square of the
     step; the Newton projection ``x - D^-2 C^T (C D^-2 C^T)^-1 c`` onto the violated rows,
     in the metric ``D = diag(scale)`` of the step, takes the trial back to their boundary,
     a few times at most. A row the coordinates ``moving`` do not reach is left as it is.
+    Under ``bounds`` a coordinate the projection takes out of the box is put back strictly
+    inside it and held, and the projection goes on with the others.
     """
     x = np.array(x, dtype=np.float64, copy=True)
-    for _ in range(_RESTORE_ITERATIONS):
+    moving = np.array(moving, dtype=bool, copy=True)
+    left = _RESTORE_ITERATIONS
+    while left:
+        left -= 1
         c, C = rows(x)
         with np.errstate(all="ignore"):
             A = np.where(moving[None, :], C, 0.0) / scale[None, :]
@@ -344,6 +355,14 @@ def onto_rows(rows: RowSet, x: np.ndarray, scale: np.ndarray, moving: np.ndarray
         multipliers = np.asarray(jnp.linalg.solve(A @ A.T, c[violated]))
         with np.errstate(all="ignore"):
             x = x - np.where(moving, (A.T @ multipliers) / scale, 0.0)
+        if bounds is None:
+            continue
+        lower, upper = bounds
+        out = moving & ~((x > lower) & (x < upper))
+        if out.any():
+            x = np.where(out, box.make_strictly_feasible(x, lower, upper, rstep=0), x)
+            moving &= ~out
+            left = _RESTORE_ITERATIONS
     return x
 
 
@@ -540,11 +559,13 @@ def member_back(
     predicted: np.ndarray,
     active: np.ndarray,
     level: int,
+    bounds: tuple | None,
 ) -> tuple:
     """Every member's trial scaled back to the boundary of an inactive own row it crosses.
 
     The trial is then moved back onto the own rows it violates (``onto_rows``), each
-    member's coordinates alone. Returns ``(trial, scaled, predicted)``: the trial, its step
+    member's coordinates alone, and kept strictly inside ``bounds`` as the joint trial
+    is. Returns ``(trial, scaled, predicted)``: the trial, its step
     in the subproblem's coordinates before that move, and every member's predicted
     decrease, the model's for that step.
     """
@@ -566,7 +587,10 @@ def member_back(
         step = np.where(below, fractions[member_of], 1.0) * step
         predicted = np.where(shorter, member_predicted(system, step, coordinates, level), predicted)
     moving = below & (step != 0.0) & ~frozen(system)
-    trial = onto_rows(rows, x + step, coordinates.scale, moving)
+    trial = onto_rows(rows, x + step, coordinates.scale, moving, bounds)
+    if bounds is not None:
+        inside = box.make_strictly_feasible(trial, bounds[0], bounds[1], rstep=0)
+        trial = np.where(moving, inside, trial)
     return trial, coordinates.scale * step, predicted
 
 
