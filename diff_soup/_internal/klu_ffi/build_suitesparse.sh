@@ -14,8 +14,9 @@
 #   lib/libgomp.so.1                the C compiler's OpenMP runtime, which
 #                                   libsuitesparseconfig needs and the
 #                                   SuperLU_MT extension shares
-# The build turns Fortran, CUDA and CHOLMOD off, so the libraries need nothing
-# else at run time beyond the C library. The libraries are unmodified.
+# The build turns Fortran, CUDA and CHOLMOD off and links no BLAS, so the
+# libraries need nothing else at run time beyond the C library. The libraries
+# are unmodified.
 #
 # Environment:
 #   SUITESPARSE_SOURCE  an unpacked SuiteSparse 7.10.1 tree, or its release
@@ -60,7 +61,12 @@ else
     SRC="${BUILD_DIR}/src"
 fi
 
+# SuiteSparse_config links no BLAS; it only records the BLAS integer type for
+# the packages that call the BLAS, none of which are built here. An empty
+# BLAS_LIBRARIES takes SuiteSparseBLAS.cmake's user-supplied path (32-bit BLAS
+# integers, as in conda-forge's build) instead of a search that needs a BLAS.
 cmake -S "${SRC}" -B "${BUILD_DIR}/cmake" -G "Unix Makefiles" \
+    -DBLAS_LIBRARIES= \
     -DCMAKE_C_COMPILER="${CC}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="${BUILD_DIR}/install" \
