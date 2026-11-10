@@ -5,6 +5,10 @@ The `_native_superlu` extension in this directory links SuperLU_MT 4.0.2
 reference BLAS routines distributed with it, both statically. SuperLU_MT is
 licensed under the BSD 3-clause license reproduced below.
 
+The release wheels' `_native_superlu` is built from commit `1e4bc160e900d601f31410f02ff77ecab59ad275` with `patches/0001-correct-on-several-threads.patch` and `patches/0002-colamd-from-suitesparse.patch` applied.
+
+SuperLU_MT's own COLAMD (`SRC/colamd.c`) is not in the extension: `patches/0002-colamd-from-suitesparse.patch` leaves it out, and the extension uses the SuiteSparse COLAMD that the KLU extension ships (`diff_soup/_internal/klu_ffi/lib/libcolamd.so.3`), whose license is in `diff_soup/_internal/klu_ffi/licenses/COLAMD-License.txt`.
+
 ```text
 Copyright (c) 2003, The Regents of the University of California, through
 Lawrence Berkeley National Laboratory (subject to receipt of any required
@@ -36,4 +40,28 @@ LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+```
+
+The build still compiles against SuperLU_MT's `SRC/colamd.h` for COLAMD's declarations; that header carries this notice:
+
+```text
+    Notice:
+
+	Copyright (c) 1998-2007, Timothy A. Davis, All Rights Reserved.
+
+	THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY
+	EXPRESSED OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
+
+	Permission is hereby granted to use, copy, modify, and/or distribute
+	this program, provided that the Copyright, this License, and the
+	Availability of the original version is retained on all copies and made
+	accessible to the end-user of any code or package that includes COLAMD
+	or any modified version of COLAMD.
+
+    Availability:
+
+	The colamd/symamd library is available at http://www.suitesparse.com
+	This file is required by the colamd.c, colamdmex.c, and symamdmex.c
+	files, and by any C code that calls the routines whose prototypes are
+	listed below, or that uses the colamd/symamd definitions listed below.
 ```

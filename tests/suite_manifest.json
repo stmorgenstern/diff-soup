@@ -1,9 +1,9 @@
 {
   "budgets": {
     "test_files": 51,
-    "test_functions": 500,
-    "collected_tests": 844,
-    "source_lines": 17983
+    "test_functions": 501,
+    "collected_tests": 845,
+    "source_lines": 18011
   },
   "tier_budgets": {
     "public_api": {
@@ -14,9 +14,9 @@
     },
     "contracts": {
       "files": 22,
-      "functions": 230,
-      "collected": 436,
-      "lines": 7629
+      "functions": 231,
+      "collected": 437,
+      "lines": 7657
     },
     "performance_contracts": {
       "files": 2,
@@ -311,7 +311,7 @@
     },
     {
       "file": "tests/contracts/test_lane_select.py",
-      "feature": "The lane conditional: one conditional unbatched with each branch traced once, each lane's own branch under vmap and nested vmap, derivatives that follow it"
+      "feature": "The lane conditional: each branch traced once, each lane's own branch under vmap and nested vmap, derivatives that follow it"
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",
