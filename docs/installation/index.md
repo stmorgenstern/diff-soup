@@ -13,14 +13,13 @@ pip install "diff-soup[cu12]"   # CUDA 12, driver 525 or newer
 
 Requirements:
 
-- Linux x86_64
+- Linux on x86_64 or ARM (aarch64)
 - Python 3.12 or 3.13
 - glibc 2.28 or newer
 - for the GPU extras, an NVIDIA GPU of compute capability 8.0 or newer
 
-The wheel bundles the KLU sparse solver and installs JAX 0.11. It does
-not include SuperLU_MT, which a [source build](#install-from-source)
-adds. The GPU extras add the CUDA build of JAX and the cuDSS sparse
+The wheel bundles the KLU and SuperLU_MT sparse solvers and installs
+JAX 0.11. The GPU extras add the CUDA build of JAX and the cuDSS sparse
 solver, so no compiler or CUDA toolkit is needed. The `mesh` extra installs
 gmsh, which meshes complex geometries, and meshio, which reads and writes mesh
 files, for example `pip install "diff-soup[cu13,mesh]"`. OpenCV, which
