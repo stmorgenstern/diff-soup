@@ -783,8 +783,19 @@ class _FamilyHandle:
         """Decorator that registers a member equation, as `@members.equation(writes=..., reads=..., name=None)`.
 
         The closure takes `(q, m)`, with `m.<name>` the member's entry of a
-        per-member parameter and `m.member_index` its index. `writes` names one
-        member field or a tuple of them.
+        per-member parameter and `m.member_index` its index. `q.p.<name>` and
+        `q.fn.<name>` read the problem's declared parameters and functions, the
+        same for every member. `writes` names one member field or a tuple of them.
+
+        !!! example
+
+            ```python
+            spec.param("scale", value=1.5)
+
+            @members.equation(writes="c", reads=("c",))
+            def member_decay(q, m):
+                return -q.p.scale * m.rate * q.c
+            ```
         """
         return _FamilyEquationDecorator(self)
 
