@@ -125,8 +125,8 @@ def bootstrap(
             one-step estimate, or `"refit"` to refit each replicate to convergence.
         weight_priors: Whether each member's prior and regularization terms take the member's
             weight.
-        solver: The `TrustRegion` the replicates step with, which must not set `weights=`, or
-            `None` for `TrustRegion(stationarity_tol=1e-8)`.
+        solver: The `TrustRegion` the replicates step with, which must not set `weights=`,
+            `nested_at=` or `inequalities=`, or `None` for `TrustRegion(stationarity_tol=1e-8)`.
         max_attempts: The step attempts allowed per replicate, or `None` for the solver's
             `max_steps` under `"refit"` and `4 * steps` otherwise.
         require_converged: Whether to refuse a fit that did not converge.

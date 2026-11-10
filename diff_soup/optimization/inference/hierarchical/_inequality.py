@@ -1,16 +1,16 @@
 """Inequality rows on the fitted values of a lowered study, ``c(own, shared, data) <= 0``.
 
 The level trust region keeps them by the smallest extension of its equality rows. At each
-step the rows are linearized at the current point, ``c + C s <= 0``; a row the step is
-predicted to violate joins the equality rows as ``C_i s = -c_i`` (the boundary), through the
-projection every damped solve already makes, and the step is solved again, a few times at
-most. The rows ride at a fixed count with a mask of the active ones, so one program solves
-every active set. A trial at which a row is violated beyond its tolerance, as the rows are
-nonlinear, is scaled back along its step to the boundary, as a trial leaving the box is,
-and moved back onto a curved row that its step held on the row's linearization. The joint
-step keeps every row; a member's polish step keeps the member's own rows at the
-cut level, the values above it held. There is no barrier, no new solver and no derivative
-rule.
+step the rows are linearized at the current point, ``c + C s <= 0``, and the step's active
+set is found by the primal active-set method (``_active_set``): a held row joins the
+equality rows as ``C_i s = -c_i`` (the boundary), through the projection every damped solve
+already makes, a row the step would cross joins the set and a held row whose multiplier is
+negative leaves it. The rows ride at a fixed count with a mask of the active ones, so one
+program solves every active set. A trial at which a row is violated beyond its tolerance, as
+the rows are nonlinear, is scaled back along its step to the boundary, as a trial leaving the
+box is, and moved back onto a curved row that its step held on the row's linearization. The
+joint step keeps every row; a member's polish step keeps the member's own rows at the cut
+level, the values above it held. There is no barrier, no new solver and no derivative rule.
 """
 
 from __future__ import annotations
@@ -26,10 +26,9 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._active_set import active_solve, slack
 from diff_soup.optimization.inference.hierarchical._level_system import _offsets
 
-#: The largest number of solves of one step's active set: each adds the rows it violates.
-_ACTIVE_ROUNDS = 4
 #: The bisections of the scale-back of a trial that violates a row.
 _STEP_BACK_BISECTIONS = 40
 #: The Newton iterations that move a trial back onto the rows it violates.
@@ -44,8 +43,9 @@ class InequalityRows(eqx.Module):
     fitted vector's order, and `data` the member's entry of `data`. Without `level` the rows
     are `rows(shared, data)`. Each call returns the same number of rows.
 
-    Each step holds the rows it would cross at their boundary, and a trial that crosses a
-    row is moved back to it, so the fit stays where the rows hold. Start it there.
+    Each step holds at their boundary the rows it would cross, and releases a held row the
+    fit gains by leaving; a trial that crosses a row is moved back to it, so the fit stays
+    where the rows hold. Start it there.
 
     Args:
         rows: The rows, a JAX function of the values, each kept at or below zero.
@@ -213,12 +213,6 @@ def _member_rows(rows: Callable) -> Callable:
     return evaluate
 
 
-def tolerance(c: np.ndarray, C: np.ndarray, step: np.ndarray) -> np.ndarray:
-    """A row's slack for rounding: a few hundred eps of the sizes its linearization adds."""
-    eps = float(np.finfo(np.float64).eps)
-    return 256.0 * eps * (np.abs(c) + np.abs(C) @ np.abs(step)) + float(np.finfo(np.float64).tiny)
-
-
 def frozen(system: elimination.LevelSystem) -> np.ndarray:
     """``(n,)``: the coordinates a step of ``system`` never moves, fixed or of a held node."""
     mask = np.array(system.fixed_mask, dtype=bool)
@@ -263,38 +257,24 @@ def with_rows(
     )
 
 
-def active_solve(
-    solve: Callable, c: np.ndarray, C: np.ndarray, first: tuple | None = None
-) -> tuple:
-    """Solve a step under the rows it is predicted to violate, adding them a few rounds at most.
+def held_multipliers(
+    system: elimination.LevelSystem,
+    held: elimination.LevelSystem,
+    coordinates: box.Scaling,
+    damping: float,
+    count: int,
+) -> np.ndarray:
+    """``(count,)``: the multipliers of the rows ``held`` keeps (``with_rows``), zero on the others.
 
-    ``solve(active)`` returns ``(step, *rest)`` with the step in joint columns, solved with the
-    rows of ``active`` at their boundary; ``first`` is its answer with no row held, when
-    already made. Every row the step's linearization violates beyond its slack joins the set
-    and the step is solved again. A round whose solve fails (no finite step keeps the set
-    within the radius) ends the rounds with the last answer, which the scale-back then keeps
-    inside the rows. Returns ``(active, (step, *rest), rounds)``, ``rounds`` the solves made.
+    They are those of ``held``'s damped solve in the subproblem's ``coordinates``; ``held``
+    is ``system`` itself when it keeps no row.
     """
-    active = np.zeros(c.shape, dtype=bool)
-    rounds = 0
-    if first is None:
-        first, rounds = solve(active), 1
-    answer = first
-    for _ in range(_ACTIVE_ROUNDS - 1):
-        step = np.asarray(answer[0])
-        with np.errstate(all="ignore"):
-            violated = ~active & (c + C @ step > tolerance(c, C, step))
-        if not violated.any():
-            break
-        try:
-            following = solve(active | violated)
-        except ValueError:
-            break
-        rounds += 1
-        if not np.all(np.isfinite(np.asarray(following[0]))):
-            break
-        active, answer = active | violated, following
-    return active, answer, rounds
+    if held is system:
+        return np.zeros((count,))
+    multipliers = elimination.row_multipliers(
+        held, coordinates.scale, damping, coordinates.addition
+    )
+    return multipliers[-count:]
 
 
 def _fractions(
@@ -307,7 +287,7 @@ def _fractions(
     alone. A bisection of every group at once, the rows being nonlinear: a group whose step
     crosses a row is scaled back to that row's boundary.
     """
-    limit = np.maximum(c0, 0.0) + tolerance(c0, np.zeros((c0.size, 1)), np.zeros((1,)))
+    limit = np.maximum(c0, 0.0) + slack(c0, np.zeros((c0.size, 1)), np.zeros((1,)))
 
     def broken(fractions: np.ndarray) -> np.ndarray:
         crossed = watched & ~(values(fractions) <= limit)
@@ -343,28 +323,47 @@ def step_back(rows: RowSet, x: np.ndarray, step: np.ndarray, active: np.ndarray)
     return float(fraction[0])
 
 
-def onto_rows(rows: RowSet, x: np.ndarray, scale: np.ndarray, moving: np.ndarray) -> np.ndarray:
+def onto_rows(
+    rows: RowSet,
+    x: np.ndarray,
+    scale: np.ndarray,
+    moving: np.ndarray,
+    bounds: tuple | None = None,
+) -> np.ndarray:
     """``x`` moved back onto the rows it violates beyond their slack, the coordinates ``moving`` alone.
 
     A step that holds a curved row on its linearization leaves it by the square of the
     step; the Newton projection ``x - D^-2 C^T (C D^-2 C^T)^-1 c`` onto the violated rows,
     in the metric ``D = diag(scale)`` of the step, takes the trial back to their boundary,
     a few times at most. A row the coordinates ``moving`` do not reach is left as it is.
+    Under ``bounds`` a coordinate the projection takes out of the box is put back strictly
+    inside it and held, and the projection goes on with the others.
     """
     x = np.array(x, dtype=np.float64, copy=True)
-    for _ in range(_RESTORE_ITERATIONS):
+    moving = np.array(moving, dtype=bool, copy=True)
+    left = _RESTORE_ITERATIONS
+    while left:
+        left -= 1
         c, C = rows(x)
         with np.errstate(all="ignore"):
             A = np.where(moving[None, :], C, 0.0) / scale[None, :]
         A = np.where(np.isfinite(A), A, 0.0)
         reached = np.any(A != 0.0, axis=1)
-        violated = reached & (c > tolerance(c, np.zeros((c.size, 1)), np.zeros((1,))))
+        violated = reached & (c > slack(c, np.zeros((c.size, 1)), np.zeros((1,))))
         if not violated.any():
             break
         A = A[violated]
         multipliers = np.asarray(jnp.linalg.solve(A @ A.T, c[violated]))
         with np.errstate(all="ignore"):
             x = x - np.where(moving, (A.T @ multipliers) / scale, 0.0)
+        if bounds is None:
+            continue
+        lower, upper = bounds
+        out = moving & ~((x > lower) & (x < upper))
+        if out.any():
+            x = np.where(out, box.make_strictly_feasible(x, lower, upper, rstep=0), x)
+            moving &= ~out
+            left = _RESTORE_ITERATIONS
     return x
 
 
@@ -402,14 +401,57 @@ def _held(own: tuple, active: np.ndarray) -> elimination.MemberRows | None:
     return elimination.MemberRows(coefficients, -c.reshape(count, per), on)
 
 
-def member_zero(own: tuple, system, coordinates: box.Scaling, level: int) -> tuple:
-    """Every member's solve at zero damping under the own rows its full step would violate.
+def _groups(own: tuple, system: elimination.LevelSystem, level: int) -> tuple:
+    """``active_solve``'s rows and groups for the members' polish: one group per member.
+
+    Returns ``(c, C, groups)``, ``C`` zero on the columns above ``level``, which the polish
+    holds.
+    """
+    c, C, coefficients = own
+    count, _, per = coefficients.shape
+    owners = elimination.node_of_columns(system, level)
+    return (
+        c,
+        np.where((owners >= 0)[None, :], C, 0.0),
+        (np.repeat(np.arange(count), per), owners, count),
+    )
+
+
+def _member_multipliers(
+    own: tuple, system, coordinates: box.Scaling, level: int, active: np.ndarray, damping
+) -> np.ndarray:
+    """Every member's multipliers of its held rows at its damped solve, zero on the others."""
+    held = _held(own, active)
+    if held is None:
+        return np.zeros(own[0].shape)
+    multipliers = elimination.inner_row_multipliers(
+        system,
+        coordinates.scale,
+        np.nan_to_num(np.asarray(damping, dtype=np.float64)),
+        level,
+        held,
+        addition=coordinates.addition,
+    )
+    return multipliers.reshape(-1)
+
+
+def _open_columns(system, level: int, settled: np.ndarray) -> np.ndarray:
+    """``(n,)``: the columns of the members whose active set did not settle."""
+    owners = elimination.node_of_columns(system, level)
+    return (owners >= 0) & ~settled[np.maximum(owners, 0)]
+
+
+def member_zero(own: tuple, system, x: np.ndarray, coordinates: box.Scaling, level: int) -> tuple:
+    """Every member's solve at zero damping under its own rows, by ``active_solve``.
 
     Returns ``(zero, first, solves)``: the solve ``(z, q_squared)``, the solve with no row
-    held (the first solve of the members' searches), and the solves made.
+    held (the first solve of the members' searches), and the solves made. A member whose
+    active set did not settle has ``q_squared`` ``nan``: its model's decrease is not known.
     """
-    c, C, _ = own
+    c, C, groups = _groups(own, system, level)
     scale, addition = coordinates.scale, coordinates.addition
+    count = own[2].shape[0]
+    made = [0]
 
     def solve(active):
         held = _held(own, active)
@@ -417,9 +459,17 @@ def member_zero(own: tuple, system, coordinates: box.Scaling, level: int) -> tup
         with np.errstate(all="ignore"):
             return zero[0] / scale, zero
 
+    def multipliers(active, answer):
+        made[0] += 1
+        return _member_multipliers(own, system, coordinates, level, active, np.zeros((count,)))
+
     first = solve(np.zeros(c.shape, dtype=bool))
-    _, (_, zero), rounds = active_solve(solve, c, C, first=first)
-    return zero, first[1], rounds + 1
+    found = active_solve(solve, multipliers, c, C, x, first, groups)
+    z, q_squared = (np.array(part, dtype=np.float64) for part in found.answer[1])
+    if not found.settled.all():
+        z = np.where(_open_columns(system, level, found.settled), scale * found.step, z)
+        q_squared = np.where(found.settled, q_squared, np.nan)
+    return (z, q_squared), first[1], found.solves + 1 + made[0]
 
 
 def member_predicted(system, step: np.ndarray, coordinates: box.Scaling, level: int) -> np.ndarray:
@@ -444,19 +494,20 @@ def member_step(
     first: tuple,
     bounds: tuple | None,
 ) -> tuple:
-    """``inner_secular_step`` under every member's own rows, and the rows it holds.
+    """``inner_secular_step`` under every member's own rows by ``active_solve``, and the rows held.
 
-    The step of each round holds the rows the last one violated at their boundary. A
-    member that holds a row and leaves the box takes its step shortened to stay inside,
-    which keeps the rows, as the joint step under equality rows does. Returns ``(step,
-    predicted, multipliers, solves, active)``.
+    A member whose active set does not settle takes the method's last iterate, a descent
+    step inside its radius that keeps its rows. A member that holds a row and leaves the box
+    takes its step shortened to stay inside, which keeps the rows, as the joint step under
+    equality rows does. Returns ``(step, predicted, multipliers, solves, active)``.
     """
-    c, C, _ = own
+    c, C, groups = _groups(own, system, level)
     scale, addition = coordinates.scale, coordinates.addition
+    made = [0]
 
     def solve(active):
         held = _held(own, active)
-        return elimination.inner_secular_step(
+        answer = elimination.inner_secular_step(
             system,
             scale,
             radii,
@@ -467,12 +518,25 @@ def member_step(
             hold=True,
             rows=held,
         )
+        made[0] += answer[3]
+        return answer
 
-    active, answer, _ = active_solve(solve, c, C)
-    step, predicted, multipliers, solves = answer
+    def multipliers(active, answer):
+        made[0] += 1
+        return _member_multipliers(own, system, coordinates, level, active, answer[2])
+
+    found = active_solve(solve, multipliers, c, C, x, None, groups)
+    active = found.active
+    step, predicted, multipliers, _ = found.answer
+    if not found.settled.all():
+        step = np.where(_open_columns(system, level, found.settled), found.step, step)
+        predicted = np.where(
+            found.settled, predicted, member_predicted(system, step, coordinates, level)
+        )
+        predicted[~members | np.isnan(multipliers)] = 0.0
     holding = np.any(active.reshape(len(radii), -1), axis=1) & members
     if bounds is None or not holding.any():
-        return step, predicted, multipliers, solves, active
+        return step, predicted, multipliers, made[0], active
     owners = elimination.node_of_columns(system, level)
     for member in np.flatnonzero(holding):
         columns = np.flatnonzero(owners == member)
@@ -483,7 +547,7 @@ def member_step(
         theta = box.step_back_ratio(gradient[columns], coordinates.v[columns])
         step[columns] *= stride * theta
     predicted = np.where(holding, member_predicted(system, step, coordinates, level), predicted)
-    return step, predicted, multipliers, solves, active
+    return step, predicted, multipliers, made[0], active
 
 
 def member_back(
@@ -496,11 +560,13 @@ def member_back(
     predicted: np.ndarray,
     active: np.ndarray,
     level: int,
+    bounds: tuple | None,
 ) -> tuple:
     """Every member's trial scaled back to the boundary of an inactive own row it crosses.
 
     The trial is then moved back onto the own rows it violates (``onto_rows``), each
-    member's coordinates alone. Returns ``(trial, scaled, predicted)``: the trial, its step
+    member's coordinates alone, and kept strictly inside ``bounds`` as the joint trial
+    is. Returns ``(trial, scaled, predicted)``: the trial, its step
     in the subproblem's coordinates before that move, and every member's predicted
     decrease, the model's for that step.
     """
@@ -522,7 +588,10 @@ def member_back(
         step = np.where(below, fractions[member_of], 1.0) * step
         predicted = np.where(shorter, member_predicted(system, step, coordinates, level), predicted)
     moving = below & (step != 0.0) & ~frozen(system)
-    trial = onto_rows(rows, x + step, coordinates.scale, moving)
+    trial = onto_rows(rows, x + step, coordinates.scale, moving, bounds)
+    if bounds is not None:
+        inside = box.make_strictly_feasible(trial, bounds[0], bounds[1], rstep=0)
+        trial = np.where(moving, inside, trial)
     return trial, coordinates.scale * step, predicted
 
 
