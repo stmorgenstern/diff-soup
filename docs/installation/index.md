@@ -123,3 +123,6 @@ An empty variable counts as unset.
 - If `libcudss.so.1` is not found, add the `nvidia/*/lib` directories of
   the installed wheels to `LD_LIBRARY_PATH` before starting Python.
 - To run on the CPU of a GPU machine, set `JAX_PLATFORMS=cpu`.
+- On a host with more than 64 logical CPUs, the threaded OpenBLAS of the
+  numpy and scipy wheels can crash JAX on the CPU. Set
+  `OPENBLAS_NUM_THREADS=1` before importing numpy or jax.
