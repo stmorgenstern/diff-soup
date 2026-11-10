@@ -206,9 +206,9 @@ def test_the_closed_loop_differentiates_in_the_limit_under_its_warm_start(toy, c
     that starts each horizon from the last one's solution and record, is the central
     difference's."""
 
-    def moves(charge):
+    def moves(charge, ip=ds.optimization.InteriorPoint(tol=1e-8)):  # measured floor 1.1e-10, GPU
         problem = charging(toy, charge=charge)
-        return control.receding_horizon(problem, toy.plant, control.FullState(), 3, solver=IP)
+        return control.receding_horizon(problem, toy.plant, control.FullState(), 3, solver=ip)
 
     jacobian = jax.jacfwd(lambda charge: moves(charge).controls)(jnp.asarray(CHARGE))
     # The moves are affine in the charge (the closed form), so a wide difference is exact up
