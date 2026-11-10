@@ -46,9 +46,8 @@
 //     (refactor). A call names its site by a key, a deterministic 64-bit hash of the lowered
 //     call that the lowering computes, and the site is created on the first call that carries
 //     an unknown key, so two lowerings of one program share their sites and their program text.
-//     Sites belong to no context; a site belongs to its analysis and is freed when the analysis
-//     is released (contract_analysis_release), while the slots it made keep the analysis alive
-//     until their context is released;
+//     Sites belong to no context; a site belongs to its analysis, and releasing the analysis
+//     (contract_analysis_release) frees its sites and its slots in every context;
 //   * shared storage: a slot named by (context id, device, analysis, precision, lane count,
 //     storage key) instead of by a site, for the factors that empty_factor(..., storage=...)
 //     starts. Every call site and program that refactors such a factor on one device writes
@@ -110,8 +109,8 @@
 // Static dispatch: a call whose identity is a constant of the compiled program receives it as
 // attributes and finds its slot on the host, without reading an operand. A factor with
 // static_context and static_lane keys its slot by them. A solve, refactor or invalidate whose
-// handle the program states to be the result of one of its factor or refactor calls (the last
-// site of its static_path) takes the handle words that call wrote, exactly as it would read
+// handle the program states to be the result of one of its factor or refactor calls (the site
+// its static_path names) takes the handle words that call wrote, exactly as it would read
 // them back from the device, when the site's latest words are those of this very handle: written
 // in the same execution of the program (XLA's run id tells executions apart) into the device
 // buffer the call reads its handle from. Anything else is a miss, and the call reads its handle
@@ -1143,24 +1142,24 @@ struct CallAttrs {
     bool transpose = false;  // a solve with the transpose of the handle's matrix
     bool adopt = false;  // refactor in place in the held slot, whichever site owns it
     int64_t analysis_id = 0;
-    int64_t static_context = -1;  // -1: read the context id
-    int64_t static_lane = -1;     // -1: read the lane token
-    // The sites of the factor and refactor calls the handle went through, the producing call's
-    // last; empty: read the handle.
-    std::vector<int64_t> static_path;
+    int64_t static_context = -1;  // a factor's context id; -1: read it
+    int64_t static_lane = -1;     // a factor's lane token; -1: read it
+    // The site of the factor or refactor call whose result is the handle (the last entry of the
+    // static_path attribute); 0: read the handle.
+    int64_t producer = 0;
     int64_t storage = 0;           // shared-storage key of the factor, 0 for none
     int64_t storage_context = -1;  // the factor's context id when it is a program constant
 
-    // Whether the context id and lane token are constants of the program.
+    // Whether a factor's context id and lane token are constants of the program.
     bool StaticKey() const {
         return static_context >= 0 && static_context <= std::numeric_limits<int32_t>::max() &&
                static_lane != -1 && static_lane >= std::numeric_limits<int32_t>::min() &&
                static_lane <= std::numeric_limits<int32_t>::max();
     }
 
-    // Whether the program states that the handle is the result of the call at the last site of
-    // the path (in the same execution).
-    bool RunLocalPath() const { return !static_path.empty(); }
+    // Whether the program states that the handle is the result of the call at the producing
+    // site (in the same execution).
+    bool RunLocalPath() const { return producer > 0; }
 };
 
 ffi::Error AttrMissing(const char* name, const char* type) {
@@ -1190,20 +1189,21 @@ ffi::Error BoolAttr(const ffi::Dictionary& attrs, const char* name, bool* out) {
     return ffi::Error::Success();
 }
 
-ffi::Error PathAttr(const ffi::Dictionary& attrs, const char* name, std::vector<int64_t>* out) {
-    out->clear();
+// The last entry of an integer array attribute (0 when it is absent or empty).
+ffi::Error LastOfPathAttr(const ffi::Dictionary& attrs, const char* name, int64_t* out) {
+    *out = 0;
     if (!attrs.contains(name)) return ffi::Error::Success();
     {
         ffi::ErrorOr<ffi::Span<const int64_t>> path = attrs.get<ffi::Span<const int64_t>>(name);
         if (path.has_value()) {
-            out->assign(path->begin(), path->end());
+            if (path->size() != 0) *out = path->back();
             return ffi::Error::Success();
         }
     }
     {
         ffi::ErrorOr<ffi::Span<const int32_t>> path = attrs.get<ffi::Span<const int32_t>>(name);
         if (path.has_value()) {
-            out->assign(path->begin(), path->end());
+            if (path->size() != 0) *out = path->back();
             return ffi::Error::Success();
         }
     }
@@ -1222,16 +1222,18 @@ ffi::Error DecodeAttrs(const ffi::Dictionary& attrs, CallKind kind, CallAttrs* o
         CONTRACT_TRY(BoolAttr(attrs, "symmetric", &out->symmetric));
         CONTRACT_TRY(BoolAttr(attrs, "spd", &out->spd));
     }
+    if (kind == CallKind::kFactor) {
+        CONTRACT_TRY(IntAttr(attrs, "static_context", false, &out->static_context));
+        CONTRACT_TRY(IntAttr(attrs, "static_lane", false, &out->static_lane));
+    }
     if (kind == CallKind::kSolve) {
         CONTRACT_TRY(BoolAttr(attrs, "transpose", &out->transpose));
     }
     if (kind == CallKind::kRefactor) {
         CONTRACT_TRY(BoolAttr(attrs, "adopt", &out->adopt));
     }
-    CONTRACT_TRY(IntAttr(attrs, "static_context", false, &out->static_context));
-    CONTRACT_TRY(IntAttr(attrs, "static_lane", false, &out->static_lane));
     if (kind != CallKind::kFactor) {
-        CONTRACT_TRY(PathAttr(attrs, "static_path", &out->static_path));
+        CONTRACT_TRY(LastOfPathAttr(attrs, "static_path", &out->producer));
         CONTRACT_TRY(IntAttr(attrs, "storage", false, &out->storage));
         CONTRACT_TRY(IntAttr(attrs, "storage_context", false, &out->storage_context));
     }
@@ -4797,7 +4799,7 @@ ffi::Error RawOperand(const ffi::AnyBuffer& values, const char* what, RawValues*
 }
 
 // The handle words of a call whose program states that its handle is the result of the call at
-// the last site of its static path: the words that call wrote (context ids, slot ids,
+// its producing site: the words that call wrote (context ids, slot ids,
 // generations, `lanes` of each) when the site's latest call ran in this very execution
 // (`run_id`) and wrote its generations into `generations`, the call's own generation operand;
 // null otherwise (a miss: the call reads its handle). The execution's identity comes from XLA,
@@ -4806,9 +4808,7 @@ ffi::Error RawOperand(const ffi::AnyBuffer& values, const char* what, RawValues*
 const int32_t* RunLocalWords(Registry& reg, const CallAttrs& at, int64_t run_id, int64_t lanes,
                              const void* generations) {
     if (!at.RunLocalPath()) return nullptr;
-    const int64_t id = at.static_path.back();
-    if (id <= 0) return nullptr;
-    Site* site = FindSite(reg, id);
+    Site* site = FindSite(reg, at.producer);
     if (site == nullptr || site->result_run_id != run_id || site->result_lanes != lanes ||
         site->result_buffer != generations) {
         return nullptr;
@@ -5937,16 +5937,40 @@ nb::dict AnalysisInfo(int64_t analysis_id) {
     return d;
 }
 
-// Release an analysis: the registry's reference, its sites and the contexts that declared its
-// storage keys. Its slots keep it alive until their contexts are released.
+// Release an analysis: its sites, its slots and batch slots in every context, the contexts that
+// declared its storage keys, its device patterns and the registry's reference.
 void AnalysisRelease(int64_t analysis_id) {
     nb::gil_scoped_release release;
     std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
-    slot_registry::ForgetAnalysis(reg, analysis_id);
+    int current = -1;
+    cudaGetDevice(&current);
+    // Wait for the work queued on every device that holds a slot of the analysis before its
+    // cuDSS objects and buffers are freed.
+    std::shared_ptr<Analysis> held;
+    if (auto found = reg.analyses.find(analysis_id); found != reg.analyses.end()) {
+        held = found->second;
+    }
+    std::set<int> devices;
+    for (const auto& entry : reg.slots) {
+        if (entry.second->analysis->id != analysis_id) continue;
+        devices.insert(entry.second->device);
+        held = entry.second->analysis;
+    }
+    for (int device : devices) {
+        if (cudaSetDevice(device) == cudaSuccess) cudaDeviceSynchronize();
+    }
+    slot_registry::ForgetAnalysis(reg, analysis_id, [](Slot&) {});
     for (auto it = reg.storage_contexts.begin(); it != reg.storage_contexts.end();) {
         it = it->first.first == analysis_id ? reg.storage_contexts.erase(it) : std::next(it);
     }
+    if (held != nullptr) {
+        held->contexts.clear();
+        if (held->FreeDevice()) --reg.device_analyses;
+        held.reset();  // the last reference: destroys the analysis
+    }
+    if (current >= 0) cudaSetDevice(current);
+    (void)cudaGetLastError();
 }
 
 void StorageDeclare(int64_t analysis_id, int64_t context_id, int64_t storage) {
@@ -5973,18 +5997,21 @@ void ContextRelease(int64_t context_id) {
     for (int device : devices) {
         if (cudaSetDevice(device) == cudaSuccess) cudaDeviceSynchronize();
     }
-    // Each slot frees its cuDSS objects and buffers.
-    std::set<Analysis*> touched;
+    // Each slot frees its cuDSS objects and buffers. `touched` holds each analysis of the freed
+    // slots until its device patterns are accounted for, so the loop below never reads an
+    // analysis that its last slot destroyed.
+    std::set<std::shared_ptr<Analysis>> touched;
     slot_registry::ReleaseContextSlots(reg, context, [&](Slot& slot) {
         slot.analysis->contexts.erase(context);
-        touched.insert(slot.analysis.get());
+        touched.insert(slot.analysis);
     });
     for (auto& entry : reg.storage_contexts) entry.second.erase(context);
-    for (Analysis* a : touched) {
+    for (const auto& a : touched) {
         if (a->contexts.empty() && a->FreeDevice()) {
             --reg.device_analyses;
         }
     }
+    touched.clear();
     if (current >= 0) cudaSetDevice(current);
     (void)cudaGetLastError();
 }
@@ -6119,8 +6146,9 @@ static void BindContract(nb::module_& m) {
           "ordinals per group; each factor spreads over the group that holds the device of its "
           "first call, that device first. Call before the analysis's first factor.");
     m.def("contract_analysis_release", &cc::AnalysisRelease, nb::arg("analysis_id"),
-          "Release an analysis: drop the registry's reference and free its call sites; the "
-          "factor slots that use it keep it alive until their SolveContext is released.");
+          "Release an analysis: wait for the devices holding its factors, free its call "
+          "sites, its factor slots and batch slots in every SolveContext and its device "
+          "patterns, and drop the registry's reference.");
     m.def("contract_analysis_info", &cc::AnalysisInfo, nb::arg("analysis_id"),
           "Report on an analysis: whether its patterns are on the device, the number of "
           "contexts holding them, the cold and seeded cuDSS analyses run on it (batch tiles "
@@ -6182,12 +6210,6 @@ static void BindContract(nb::module_& m) {
             return cc::Reg().batch_tile_lanes;
         },
         "The cap on lanes per batch tile set by contract_set_batch_tile_lanes (0 for none).");
-    m.def("contract_site_create", &slot_registry::SiteCreate<cc::Registry>,
-          nb::arg("analysis_id"),
-          "Create a factor site on an analysis with an id of its own (a lowered call names its "
-          "site by a key computed from the call, and the site is created on the first call "
-          "that carries it); its slots are keyed by the context id and lane token (or held "
-          "slot) each execution carries. Returns the site id.");
     m.def("contract_storage_declare", &cc::StorageDeclare, nb::arg("analysis_id"),
           nb::arg("context_id"), nb::arg("storage"),
           "Record that a factor of the given context names the shared storage `storage` (the "
@@ -6220,7 +6242,7 @@ static void BindContract(nb::module_& m) {
           "host blocks of hybrid-memory factors pinned (pinned_blocks_allocated) and handed "
           "out again from returned blocks (pinned_blocks_reused), single factors and batch tiles "
           "configured to store a float64 factor downcast to float32 (downcast_configurations), "
-          "factorizations in which cuDSS perturbed a pivot, sides analysed again because a "
+          "sides analysed again because a "
           "factorization of other values than their analysis's ended singular (reanalyses), "
           "handler calls that found their slot from their attributes (static_dispatches), "
           "refactor calls that read their predicate, invalidate calls, numeric phases and "

@@ -9,8 +9,8 @@
 //     (context id, slot id)) and records the site that created it;
 //   * the sites by 64-bit key: a site is a lowered factor or refactor call, created on the
 //     first call that carries its key, and keys its slots by (context id, slot token or held
-//     slot id). A site belongs to its analysis and is erased when the analysis is released
-//     (ForgetAnalysis); the slots it made hold the analysis themselves;
+//     slot id). A site belongs to its analysis. Releasing the analysis (ForgetAnalysis) erases
+//     its sites and frees its slots in every context; until then its slots and sites hold it;
 //   * the shared-storage slots, keyed by a tuple that starts with the context id;
 //   * the released contexts, whose calls are refused.
 //
@@ -26,7 +26,7 @@
 //     };
 // Its slots derive from SlotBase, its sites are or derive from SiteBase, and its Stats has the
 // counter released_context_errors. Every function that takes a registry expects the caller to
-// hold its mutex, except the Python-facing ones (AnalysisRelease, SiteCreate, ContextRelease,
+// hold its mutex, except the Python-facing ones (AnalysisRelease, ContextRelease,
 // ResidentBytes), which release the GIL and take it.
 
 #pragma once
@@ -99,7 +99,6 @@ struct RegistryBase {
     std::unordered_set<int32_t> released_contexts;
     int64_t next_analysis = 1;
     int32_t next_slot = 1;
-    int64_t next_site = 1;  // ids of sites made by SiteCreate
     StatsT stats;
 };
 
@@ -202,7 +201,7 @@ ffi::Error CheckAnalysis(const R&, const typename R::SlotType& slot, int64_t ana
 
 // The site of a lowered factor or refactor call: the site under `key`, created on the first call
 // that carries the key, on the call's analysis. A site key is a deterministic hash of the lowered
-// call, so two lowerings of one program share their sites, or an id SiteCreate made.
+// call, so two lowerings of one program share their sites.
 template <class R>
 ffi::Error SiteFor(R& reg, int64_t key, int64_t analysis_id, typename R::SiteType** out) {
     using SiteT = typename R::SiteType;
@@ -317,6 +316,27 @@ ffi::Error StorageSlot(R& reg, typename R::SiteType& site, int32_t context, int3
     reg.storage_slots[key] = raw->id;
     *out = raw;
     return ffi::Error::Success();
+}
+
+// Free the slots of analysis `id` in every context (calling `on_slot` on each just before it is
+// destroyed) and forget their shared-storage keys. The analysis's sites, which hold the slots'
+// addresses, are erased by ForgetAnalysis.
+template <class R, class OnSlot>
+void ReleaseAnalysisSlots(R& reg, int64_t id, OnSlot&& on_slot) {
+    std::unordered_set<int32_t> freed;
+    for (auto it = reg.slots.begin(); it != reg.slots.end();) {
+        auto& slot = *it->second;
+        if (slot.analysis->id != id) {
+            ++it;
+            continue;
+        }
+        on_slot(slot);
+        freed.insert(slot.id);
+        it = reg.slots.erase(it);  // the slot frees its factorization
+    }
+    for (auto it = reg.storage_slots.begin(); it != reg.storage_slots.end();) {
+        it = freed.count(it->second) != 0 ? reg.storage_slots.erase(it) : std::next(it);
+    }
 }
 
 // Free every slot of `context` (calling `on_slot` on each just before it is destroyed), forget
@@ -485,48 +505,27 @@ void BuildPattern(HostPattern<Index>& a, int64_t n, int64_t nnz, const int32_t* 
 // Python-facing functions
 // --------------------------------------------------------------------------
 
-// Drop the registry's reference to analysis `id` and erase its sites. The slots of the analysis
-// hold their own reference, so it lives until the last of their contexts is released. A call
-// that names the analysis afterwards finds neither the analysis nor its sites and is refused
-// (SiteFor).
-template <class R>
-void ForgetAnalysis(R& reg, int64_t id) {
-    reg.analyses.erase(id);
+// Release analysis `id`: erase its sites, free its slots in every context (ReleaseAnalysisSlots,
+// calling `on_slot` on each) and drop the registry's reference, the last one. Its factors can no
+// longer be named: a Factor holds its Analysis, which releases the native analysis only when it
+// is collected. A call that names the analysis afterwards finds neither the analysis nor its
+// sites and is refused (SiteFor), and a handle of one of its slots finds no slot (CheckHeld).
+template <class R, class OnSlot>
+void ForgetAnalysis(R& reg, int64_t id, OnSlot&& on_slot) {
     for (auto it = reg.sites.begin(); it != reg.sites.end();) {
         it = it->second->analysis->id == id ? reg.sites.erase(it) : std::next(it);
     }
+    ReleaseAnalysisSlots(reg, id, on_slot);
+    reg.analyses.erase(id);
 }
 
-// Release an analysis (ForgetAnalysis) from Python.
+// Release an analysis of a host backend (ForgetAnalysis) from Python.
 template <class R>
 void AnalysisRelease(int64_t id) {
     nb::gil_scoped_release release;
     R& reg = Instance<R>();
     std::lock_guard<std::mutex> lock(reg.mutex);
-    ForgetAnalysis(reg, id);
-}
-
-// Create a site on an analysis with an id of its own and return the id.
-template <class R>
-int64_t SiteCreate(int64_t analysis_id) {
-    using SiteT = typename R::SiteType;
-    nb::gil_scoped_release release;
-    R& reg = Instance<R>();
-    std::lock_guard<std::mutex> lock(reg.mutex);
-    auto it = reg.analyses.find(analysis_id);
-    if (it == reg.analyses.end()) {
-        throw std::invalid_argument(std::string(R::kName) + " analysis " +
-                                    std::to_string(analysis_id) +
-                                    " does not exist in this process; analyse the pattern "
-                                    "again.");
-    }
-    while (reg.sites.count(reg.next_site) != 0) ++reg.next_site;
-    auto site = std::make_unique<SiteT>();
-    site->id = reg.next_site++;
-    site->analysis = it->second;
-    const int64_t id = site->id;
-    reg.sites.emplace(id, std::move(site));
-    return id;
+    ForgetAnalysis(reg, id, [](auto&) {});
 }
 
 // Free every slot of a host context and record the context as released.

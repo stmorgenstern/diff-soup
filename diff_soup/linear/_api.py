@@ -780,9 +780,10 @@ def _missing_hook_message(cls: type, hook: str) -> str:
 _ANALYSES: weakref.WeakValueDictionary[tuple, Analysis] = weakref.WeakValueDictionary()
 #: The most recent analyses, kept alive for callers that analyze again without holding one.
 _RECENT: collections.OrderedDict[tuple, Analysis] = collections.OrderedDict()
-#: The capacity of ``_RECENT`` (ours): it bounds the native analyses and patterns no caller
-#: holds, while a study's systems (its iteration, mass, sensitivity and initialization
-#: patterns per experiment) stay analysed once.
+#: The capacity of ``_RECENT`` (ours): a study's systems (its iteration, mass, sensitivity and
+#: initialization patterns per experiment) stay analysed once. It does not bound the live
+#: analyses: JAX's caches also hold every ``Analysis`` that a traced program names as an
+#: equation parameter, until ``jax.clear_caches()``.
 _RECENT_ANALYSES = 64
 _ANALYSES_LOCK = threading.Lock()
 
@@ -803,8 +804,9 @@ def _clear_analyses() -> None:
     are dropped with the memo, and an analysis made again with equal content
     gets a native analysis of its own. A jitted program compiled against a
     dropped analysis is not dropped: it still names the dropped native
-    analysis, whose storage is freed once the dropped ``Analysis`` is
-    collected. Call it only where no such program runs afterwards.
+    analysis, which is freed with its factors in every context once the
+    dropped ``Analysis`` is collected. Call it only where no such program
+    runs afterwards.
     """
     with _ANALYSES_LOCK:
         _ANALYSES.clear()
@@ -840,6 +842,12 @@ def analyze(
     Equal arguments return the same `Analysis` while it is held or among the 64 most recent, so
     the work runs once per pattern. A request the backend cannot serve raises here, before
     anything is traced.
+
+    On KLU, SuperLU and cuDSS the `Analysis` owns the backend's native analysis, and collecting
+    it frees that and every factor built from it, in every `SolveContext`. A `Factor` holds its
+    `Analysis`, but a compiled program may not: keep the `Analysis` while a program that factors
+    with it can still run, for example one compiled ahead of time or one that calls `analyze`
+    inside its trace. Once it is collected, that program's factor calls raise.
 
     Args:
         topology: The `SparseTopology` of the matrix.

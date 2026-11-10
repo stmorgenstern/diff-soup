@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import itertools
 import threading
+import weakref
 from typing import Any, Optional
 
 import jax
@@ -48,12 +49,14 @@ class SolveContext:
     Pass it as `ctx=` to `factor` or `empty_factor`. Releasing it, or leaving its `with`
     block, frees every factor it owns, and their solves raise from then on.
 
-    A context belongs to the thread that first factors in it: `factor` and `empty_factor`
-    raise `FactorContractError` in any other thread, so create one context per thread. A
-    compiled program still runs from any thread. Two executions of one program at once on one
-    context share its factor slots: their answers stay right, but each rebuilds the factors the
-    other replaced. `DEFAULT_CONTEXT`, which the solver engines factor in from every thread, has
-    no owner.
+    A context belongs to the thread that first factors in it, whatever the backend, `Dense`
+    included: `factor` and `empty_factor` raise `FactorContractError` in any other thread, also
+    after that thread has ended, so create one context per thread. Tracing a function that
+    factors in the context counts as factoring, so a retrace in another thread raises too. A
+    compiled program still runs from any thread, and so do `solve` and `refactor` of a factor
+    already built. Two executions of one program at once on one context share its factor slots:
+    their answers stay right, but each rebuilds the factors the other replaced.
+    `DEFAULT_CONTEXT`, which the solver engines factor in from every thread, has no owner.
 
     Args:
         name: A label shown in its `repr`.
@@ -94,7 +97,7 @@ class SolveContext:
         self._backends: list = []
         self._released = False
         self._lock = threading.Lock()
-        self._owner: Optional[int] = None
+        self._owner: Optional[weakref.ref[threading.Thread]] = None
 
     def __hash__(self) -> int:
         """Hash by the integer identity."""
@@ -163,7 +166,9 @@ class SolveContext:
         Called by [factor][diff_soup.linear.factor] and
         [empty_factor][diff_soup.linear.empty_factor]; registering a backend
         twice has no effect. The first call makes the calling thread the
-        context's owner.
+        context's owner, except in ``DEFAULT_CONTEXT``. The owner is the
+        ``threading.Thread`` object, held weakly, not its ident, which Python
+        reuses after a thread ends.
 
         Args:
             backend: The configured backend.
@@ -172,16 +177,17 @@ class SolveContext:
             FactorContractError: If the context has been released, or belongs
                 to another thread.
         """
-        thread = threading.get_ident()
+        thread = threading.current_thread()
         with self._lock:
             self.check_open()
-            if self._owner is None:
-                self._owner = thread
-            elif self._owner != thread and self is not DEFAULT_CONTEXT:
-                raise FactorContractError(
-                    f"{self!r} belongs to the thread that first factored in it, and this is "
-                    "another thread; create a SolveContext in each thread that factors."
-                )
+            if self is not DEFAULT_CONTEXT:
+                if self._owner is None:
+                    self._owner = weakref.ref(thread)
+                elif self._owner() is not thread:
+                    raise FactorContractError(
+                        f"{self!r} belongs to the thread that first factored in it, and this "
+                        "is another thread; create a SolveContext in each thread that factors."
+                    )
             if not any(b is backend or b == backend for b in self._backends):
                 self._backends.append(backend)
 

@@ -6,6 +6,7 @@ and the host backends' per-device storage rows is ``requires_cudss``."""
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import subprocess
@@ -730,6 +731,33 @@ def test_a_function_called_twice_in_one_program_solves_each_call_with_its_own_fa
         xs = jnp.stack(jax.jit(lambda v, w: (inner(v), inner(w)))(values, 2.0 * values))
     expected = [np.linalg.solve(_matrix(topology, k * values), _B) for k in (1.0, 2.0)]
     np.testing.assert_allclose(xs, np.stack(expected), **EXACT)
+
+
+@cudss_only
+def test_an_analysis_collected_before_its_context_is_released_leaves_no_device_analysis():
+    """A cuDSS analysis collected while an open context holds its factor, and the context
+    released after it, leave no device analysis alive."""
+    backend = CuDSS()
+    topology, values = _system(n=11)
+    b = jnp.linspace(-1.0, 1.0, 11)
+
+    def collect(first):
+        # analyze keeps the 64 most recent analyses alive: 64 others, then JAX's caches
+        # cleared, leave an Analysis that nothing else holds to the collector.
+        for n in range(first, first + 64):
+            index = np.arange(n, dtype=np.int32)
+            analyze(SparseTopology(rows=index, cols=index, n_dofs=n), backend=backend)
+        jax.clear_caches()
+        gc.collect()
+
+    collect(100)
+    live = backend.contract_stats()["live_device_analyses"]
+    with SolveContext("analysis first") as ctx:
+        analysis = analyze(topology, backend=backend)
+        jax.block_until_ready(jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), b)[0])(values))
+        del analysis
+        collect(200)
+    assert backend.contract_stats()["live_device_analyses"] == live
 
 
 @cudss_only
