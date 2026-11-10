@@ -424,10 +424,11 @@ def cut_by_member(lanes: BatchedLanes, members: Mapping) -> bool:
 
     Lanes on a GPU stay whole: a call there costs about as much at one member's
     width as at the bucket's, so many narrow calls take longer than one wide
-    call. On batjax's 12-cell cohort (one lane per cell, one bucket of 16
-    slots) a ``blocks`` request took 15.0 s whole and 8.1 s cut on the CPU, and
-    4.4 s whole and 19.0 s cut on the GPU; a ``frozen`` call of one cell took
-    0.93 s on the GPU against 2.1 s for the whole bucket (ours, 2026-11-09).
+    call. On a 12-cell cohort of full-cell fits (one lane per cell, one bucket
+    of 16 slots) a ``blocks`` request took 15.0 s whole and 8.1 s cut on the
+    CPU, and 4.4 s whole and 19.0 s cut on the GPU; a ``frozen`` call of one
+    cell took 0.93 s on the GPU against 2.1 s for the whole bucket (ours,
+    2026-11-09).
 
     Args:
         lanes: The lanes, changed in place.
