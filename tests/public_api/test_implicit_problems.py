@@ -16,7 +16,7 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.linear import MemberBlock, MemberBlockLayout
-from tests.support.problems import SparseChainDAE, reaction_diffusion_recipe, thirds_dae
+from tests.support.problems import SparseChainDAE, reaction_diffusion_recipe
 
 _CONSTANT = ds.Dependencies(time=False, state=False, parameters=False, control=False)
 _OPTIONS = ds.AlgebraicProjectionOptions(
@@ -185,28 +185,28 @@ def test_a_family_solve_on_a_member_block_backend_initializes_consistently():
     np.testing.assert_allclose(np.concatenate(got), np.concatenate(expected), rtol=_MEMBER_BOUND)
 
 
-#: A start ``y`` near 2e8 whose nearest floats ``z`` to ``y/3`` all leave ``3 z - y`` at 7.5e-9,
-#: the residual initialization ends with (measured, workstation 2026-11-05).
-_FLOOR_Y = 195046369.6325935
+#: A start ``y`` whose floats ``z`` near ``sqrt(y)`` all leave ``z z - y`` at 1.5e-8 or more, fused
+#: or not: measured 1.7e-8 and 1.5e-8 over the 6001 nearest, exact rationals, 2026-11-10.
+_FLOOR_Y = 123456789.123
 #: Requested tolerances (not asserted bounds): ``atol`` far below the residual floor.
 _FLOOR_TOLERANCES = {"rtol": 1e-8, "atol": 1e-12}
 
 
 def test_a_start_at_the_rounding_floor_of_large_values_passes_the_relative_gate():
-    """``y' = -y``, ``0 = 3 z - y`` from ``y = 1.95e8``, ``z = y/3`` holds an algebraic residual
-    of 7.5e-9 that no float ``z`` lowers, far above ``atol = 1e-12``: initialization's relative
-    gate, whose round-off term scales with ``|F_y| |y|``, accepts the start, and the
-    absolute-only gate of ``ic_rtol=0`` refuses it with INCONSISTENT_IC."""
+    """``y' = -y``, ``0 = z^2 - y`` from ``y = 1.2e8``, ``z = sqrt(y)``, holds a residual no float
+    ``z`` lowers below 1.5e-8, far above ``atol = 1e-12``: initialization's relative gate accepts
+    the start, and the absolute-only gate of ``ic_rtol=0`` refuses it with INCONSISTENT_IC."""
+    dae = ds.MassProblem(
+        rhs=lambda t, y, theta, control: jnp.stack([-y[0], y[1] * y[1] - y[0]]),
+        mass=ds.MassOperator.sparse([0], [0], jnp.ones(1), n=2),
+        structure=ds.DAEStructure(differential_vars=np.array([True, False])),
+    )
+    start = jnp.asarray([_FLOOR_Y, np.sqrt(_FLOOR_Y)])
 
     def solve(ic_rtol):
-        return ds.pdesolve(
-            thirds_dae(),
-            ds.JIDA(linear="dense", **_FLOOR_TOLERANCES),
-            (0.0, 0.01),
-            jnp.asarray([_FLOOR_Y, _FLOOR_Y / 3.0]),
-            tolerances=ds.ToleranceSpec(**_FLOOR_TOLERANCES, ic_rtol=ic_rtol),
-            saveat=ds.SaveAt(t1=True),
-        )
+        tolerances = ds.ToleranceSpec(**_FLOOR_TOLERANCES, ic_rtol=ic_rtol)
+        solver = ds.JIDA(linear="dense", **_FLOOR_TOLERANCES)
+        return ds.pdesolve(dae, solver, (0.0, 0.01), start, tolerances=tolerances)
 
     accepted, refused = solve(None), solve(0.0)
     assert bool(accepted.ok) and refused.result == ds.RESULT.INCONSISTENT_IC
