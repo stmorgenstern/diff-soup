@@ -6,9 +6,9 @@
 #     auditwheel double-bundle: no diff_soup.libs/ at all);
 #   * the native extensions present (_native_klu and at least one cuDSS
 #     _native_solver under cudss_ffi/cu12/ or cudss_ffi/cu13/), and
-#     _native_superlu exactly once with DIFF_SOUP_RELEASE_SUPERLU=ON or absent
-#     with DIFF_SOUP_RELEASE_SUPERLU=OFF (the default, as in
-#     build_release_wheel.sh);
+#     _native_superlu exactly once with DIFF_SOUP_RELEASE_SUPERLU=ON (the
+#     default, as in build_release_wheel.sh) or absent with
+#     DIFF_SOUP_RELEASE_SUPERLU=OFF;
 #   * one OpenMP runtime in the wheel, klu_ffi/lib/libgomp.so.1;
 #   * _native_klu RPATH == $ORIGIN/lib  (resolves the bundled SuiteSparse libs);
 #   * when present, _native_superlu carries SuperLU_MT and its BLAS statically: no SuperLU_MT
@@ -24,7 +24,7 @@
 #
 # Usage: [DIFF_SOUP_RELEASE_SUPERLU=ON|OFF] bash verify_release_wheel.sh <wheel.whl>
 set -euo pipefail
-EXPECT_SUPERLU="${DIFF_SOUP_RELEASE_SUPERLU:-OFF}"
+EXPECT_SUPERLU="${DIFF_SOUP_RELEASE_SUPERLU:-ON}"
 case "${EXPECT_SUPERLU}" in
     ON|OFF) ;;
     *) echo "ERROR: DIFF_SOUP_RELEASE_SUPERLU='${EXPECT_SUPERLU}' must be ON or OFF." >&2; exit 1 ;;

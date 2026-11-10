@@ -39,13 +39,13 @@
 # DIFF_SOUP_BUILD_SUPERLU=OFF, so _native_superlu is built once and reaches the
 # release wheel through the CUDA 13 wheel the merge starts from.
 #
-# The extension goes in only with DIFF_SOUP_RELEASE_SUPERLU=ON. By default
-# (OFF) the script builds no SuperLU_MT, both lines build with
-# DIFF_SOUP_BUILD_SUPERLU=OFF and the wheel has no _native_superlu: SuperLU_MT
-# 1e4bc160 run with more than one OpenMP thread returns a wrong solution, with
-# info = 0, in a few factorizations per thousand (its own pdgssv on a
-# 1600-unknown nonsymmetric matrix: none in 500 with 1 thread, 5 in 500 with
-# 8).
+# The extension goes in by default (DIFF_SOUP_RELEASE_SUPERLU=ON).
+# build_superlu_mt.sh applies the patches in superlu_ffi/patches/ to SuperLU_MT
+# 1e4bc160, which unpatched returns a wrong solution with info = 0 in a few
+# factorizations per thousand when it runs on more than one OpenMP thread.
+# With DIFF_SOUP_RELEASE_SUPERLU=OFF the script builds no SuperLU_MT, both
+# lines build with DIFF_SOUP_BUILD_SUPERLU=OFF and the wheel has no
+# _native_superlu.
 #
 # Why the two CUDA lines are built separately and merged
 # ------------------------------------------------------
@@ -61,15 +61,15 @@
 # wheel.
 #
 # Pipeline:
-#   1. With DIFF_SOUP_RELEASE_SUPERLU=ON, build SuperLU_MT (OpenMP, 32-bit
-#      indices, -fPIC, static, with its reference BLAS) with
+#   1. Unless DIFF_SOUP_RELEASE_SUPERLU=OFF, build SuperLU_MT (OpenMP, 32-bit
+#      indices, -fPIC, static, with its reference BLAS, patched) with
 #      diff_soup/_internal/superlu_ffi/build_superlu_mt.sh into <work dir>/superlu_mt.
 #   2. For each CUDA line (13, then 12), copy REPO_ROOT to a temporary
 #      directory and run `python -m build --wheel --no-isolation` there with
 #        -C cmake.define.DIFF_SOUP_CUDA_LINES=<line>
 #        -C cmake.define.DIFF_SOUP_CUDA_KERNEL_BUILD=command
 #        -C cmake.define.DIFF_SOUP_BUILD_KLU=ON
-#      plus, for the CUDA 13 line with DIFF_SOUP_RELEASE_SUPERLU=ON,
+#      plus, for the CUDA 13 line unless DIFF_SOUP_RELEASE_SUPERLU=OFF,
 #        -C cmake.define.DIFF_SOUP_BUILD_SUPERLU=ON
 #        -C cmake.define.SUPERLU_MT_ROOT=<work dir>/superlu_mt
 #      and otherwise -C cmake.define.DIFF_SOUP_BUILD_SUPERLU=OFF.
@@ -114,9 +114,9 @@
 #   * a CUDA 12 toolkit nvcc (for example the CUDA 12.9 redistributable
 #     cuda_nvcc archive), named by the CUDACXX environment variable, which
 #     cudss_ffi/CMakeLists.txt reads when the nvcc wheel of a line has none.
-# The SuperLU_MT build also needs a C compiler with OpenMP, make, and git to
-# fetch the SuperLU_MT sources (not needed when SUPERLU_MT_SOURCE names a
-# checkout); the manylinux image provides all three.
+# The SuperLU_MT build also needs a C compiler with OpenMP, make, patch, and
+# git to fetch the SuperLU_MT sources (not needed when SUPERLU_MT_SOURCE names
+# a checkout); the manylinux image provides all four.
 #
 #   python3.12 -m venv /work/venv-cp312 && source /work/venv-cp312/bin/activate
 #   pip install build auditwheel patchelf wheel cmake ninja \
@@ -152,9 +152,9 @@
 #   AUDITWHEEL_PLAT  manylinux platform tag to request (default manylinux_2_28_x86_64)
 #   CUDACXX          path to the CUDA 12 toolkit nvcc used for the CUDA 12 line
 #                    (needed unless a CUDA 12 nvcc is first on PATH)
-#   DIFF_SOUP_RELEASE_SUPERLU  ON to build SuperLU_MT and ship _native_superlu,
-#                    OFF (default) to leave it out; verify_release_wheel.sh
-#                    reads the same variable
+#   DIFF_SOUP_RELEASE_SUPERLU  ON (default) to build SuperLU_MT and ship
+#                    _native_superlu, OFF to leave it out;
+#                    verify_release_wheel.sh reads the same variable
 #   SUPERLU_MT_SOURCE  an existing SuperLU_MT checkout to build instead of
 #                    cloning it (passed to
 #                    diff_soup/_internal/superlu_ffi/build_superlu_mt.sh, as are
@@ -168,14 +168,14 @@ REPO_ROOT="$(cd "${1:-${SCRIPT_DIR}/../../..}" && pwd)"
 OUTDIR="${2:-${REPO_ROOT}/dist_release}"
 PLAT="${AUDITWHEEL_PLAT:-manylinux_2_28_x86_64}"
 SUPERLU_MT_BUILD="${REPO_ROOT}/diff_soup/_internal/superlu_ffi/build_superlu_mt.sh"
-SUPERLU="${DIFF_SOUP_RELEASE_SUPERLU:-OFF}"
+SUPERLU="${DIFF_SOUP_RELEASE_SUPERLU:-ON}"
 case "${SUPERLU}" in
     ON|OFF) ;;
     *) echo "ERROR: DIFF_SOUP_RELEASE_SUPERLU='${SUPERLU}' must be ON or OFF." >&2; exit 1 ;;
 esac
 
 TOOLS=(python auditwheel patchelf)
-[[ "${SUPERLU}" == ON ]] && TOOLS+=(make "${CC:-gcc}")
+[[ "${SUPERLU}" == ON ]] && TOOLS+=(make patch "${CC:-gcc}")
 for tool in "${TOOLS[@]}"; do
     command -v "${tool}" >/dev/null 2>&1 || {
         echo "ERROR: '${tool}' is not on PATH; activate the release build environment described in this script's header." >&2
