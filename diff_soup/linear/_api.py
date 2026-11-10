@@ -843,6 +843,12 @@ def analyze(
     the work runs once per pattern. A request the backend cannot serve raises here, before
     anything is traced.
 
+    On KLU, SuperLU and cuDSS the `Analysis` owns the backend's native analysis, and collecting
+    it frees that and every factor built from it, in every `SolveContext`. A `Factor` holds its
+    `Analysis`, but a compiled program may not: keep the `Analysis` while a program that factors
+    with it can still run, for example one compiled ahead of time or one that calls `analyze`
+    inside its trace. Once it is collected, that program's factor calls raise.
+
     Args:
         topology: The `SparseTopology` of the matrix.
         backend: The backend object, for example `Dense()` or `KLU(ordering="colamd")`.
