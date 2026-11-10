@@ -16,6 +16,7 @@ from diff_soup.optimization.solvers._loop_judge import (
     _floor_sample,
     _floor_sigma,
     _judge,
+    _next_radius,
     cost_scale,
 )
 from diff_soup.optimization.solvers.tangent import (
@@ -373,6 +374,14 @@ def test_noise_windows_floor_and_gain_ratio_do_not_depend_on_cost_units(unit):
     # ratio 0.9975 (accepted); every unit agrees exactly.
     assert reference["noise"][1] == 3 and reference["verdict"][1]
     assert _loop_numbers(unit) == reference
+
+
+def test_a_trial_of_zero_length_keeps_the_radius():
+    """A trial whose step did not move the point (scaled norm 0) keeps the radius, whatever its gain
+    ratio; a trial of the same ratio that moved shrinks it to a quarter of its step."""
+    rule = {"lock": 0, "radius_max": 1000.0, "computed": True}
+    assert _next_radius(2.0, float("-inf"), 0.0, **rule) == 2.0
+    assert _next_radius(2.0, float("-inf"), 1.0, **rule) == 0.25
 
 
 def _constrained(jacobian: str = "auto"):

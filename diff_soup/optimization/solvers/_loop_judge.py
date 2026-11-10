@@ -170,7 +170,9 @@ def _next_radius(
     to a quarter of the trial's scaled step norm; a gain ratio above 0.75 with
     the growth lock 0 and the scaled step at least 0.95 of the radius doubles
     it, up to ``radius_max``; otherwise it stays. A trial the predicate
-    rejected or whose objective could not be evaluated quarters it.
+    rejected or whose objective could not be evaluated quarters it. A trial of
+    zero length (its scaled step norm 0: the step did not move the point) keeps
+    the radius whatever its gain ratio, which then measures nothing of it.
 
     A gain ratio under 0.25 never shrinks the radius below ``floor``, the
     radius at which the model's predicted decrease falls to what the
@@ -183,12 +185,14 @@ def _next_radius(
     quarters the radius regardless of ``floor``.
     """
     xp = _namespace(radius, rho, scaled_norm, lock, computed, floor)
+    rho = xp.asarray(rho)
     quarter = _larger(radius / 4.0, _TINY)
     shrink = _larger(_larger(0.25 * scaled_norm, _smaller(floor, radius)), _TINY)
     grow = _smaller(2.0 * radius, float(radius_max))
     with np.errstate(invalid="ignore"):
         growing = (rho > 0.75) & (lock == 0) & (scaled_norm >= 0.95 * radius)
         judged = xp.where(~(rho >= 0.25), shrink, xp.where(growing, grow, radius))
+        judged = xp.where(scaled_norm == 0.0, radius, judged)
     return xp.where(computed, judged, quarter)
 
 
