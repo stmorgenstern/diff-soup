@@ -4,10 +4,12 @@ that a solve by name keeps its backend."""
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import subprocess
 import sys
+import weakref
 from pathlib import Path
 
 import jax
@@ -321,6 +323,77 @@ def test_native_statistics_count_one_factorization_per_setup_and_release_their_s
         names = ("factorizations", "refactorizations", "rebuilds")
         assert [counts[k] for k in names] == [2, len(steps) - 1, 0]
     assert backend.native_stats()["live_slots"] == live
+
+
+@pytest.mark.parametrize("name", HOSTS)
+def test_each_call_of_a_jitted_factor_keeps_one_slot_however_often_it_runs(name):
+    """A jitted factor-and-solve that a program calls three times is lowered once, yet each call
+    keeps a slot of its own and factors once per run, without a rebuild; a call in the body of a
+    scan keeps one slot over all its steps."""
+    topology = _pattern()
+    values = _values(topology, seed=70)
+    backend = BACKENDS[name]()
+    analysis = analyze(topology, backend=backend)
+    with SolveContext() as ctx:
+        inner = jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), _B)[0])
+        thrice = jax.jit(lambda v: [inner(k * v) for k in (1.0, 2.0, 3.0)])
+        first = _delta(backend, lambda: thrice(values))
+        again = _delta(backend, lambda: thrice(values))
+        xs = thrice(values)
+
+        def body(total, k):
+            return total + solve(factor(analysis, k * values, ctx=ctx), _B)[0], None
+
+        loop = _delta(
+            backend, jax.jit(lambda: jax.lax.scan(body, 0.0 * _B, jnp.arange(1.0, 5.0))[0])
+        )
+    work = [again[key] for key in ("factorizations", "refactorizations", "rebuilds")]
+    assert (first["live_slots"], work, loop["live_slots"]) == (3, [0, 3, 0], 1)
+    for k, x in zip((1.0, 2.0, 3.0), xs):
+        np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, k * values), _B), **EXACT)
+
+
+@pytest.mark.parametrize("name", HOSTS)
+def test_a_program_compiled_ahead_of_time_outlives_its_analysis_and_frees_it_with_itself(name):
+    """A program that analyzes inside its trace, compiled ahead of time, still solves after its
+    Analysis is collected; once the program is collected too, the backend holds no slot, site,
+    analysis or call of either."""
+    base = _pattern()
+    # One more duplicate entry: a pattern of its own, whose Analysis no other test's program holds.
+    topology = SparseTopology(
+        np.append(base.rows, 0), np.append(base.cols, 0), N, bc_indices=base.bc_indices
+    )
+    values = _values(topology, seed=71)
+    backend = BACKENDS[name]()
+    gauges = ("live_slots", "live_sites", "live_analyses", "live_calls")
+    traced = []
+
+    def collect(first):
+        # analyze keeps the 64 most recent analyses alive: 64 others, then JAX's caches
+        # cleared, leave an Analysis that nothing else holds to the collector.
+        for n in range(first, first + 64):
+            index = np.arange(n, dtype=np.int32)
+            analyze(SparseTopology(rows=index, cols=index, n_dofs=n), backend=backend)
+        jax.clear_caches()
+        gc.collect()
+
+    def run(v, ctx):
+        analysis = analyze(topology, backend=backend)
+        traced.append(weakref.ref(analysis))
+        return solve(factor(analysis, v, ctx=ctx), _B)[0]
+
+    collect(100)
+    start = [backend.native_stats()[key] for key in gauges]
+    with SolveContext() as ctx:
+        program = jax.jit(lambda v: run(v, ctx)).lower(values).compile()
+        collect(200)
+        collected = traced[0]() is None
+        x = program(values)
+        del program
+        collect(300)
+        left = [backend.native_stats()[key] for key in gauges]
+    assert (collected, left) == (True, start)
+    np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, values), _B), **EXACT)
 
 
 @pytest.mark.parametrize("name", HOSTS)

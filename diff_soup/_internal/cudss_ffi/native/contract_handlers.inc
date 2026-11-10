@@ -41,13 +41,17 @@
 //     lane's CSR values (lane i at offset i * nse) and every lane's status. Like a single side it
 //     factors A_bc whatever the slot's orientation and solves with A_bc^T in cuDSS's transpose
 //     solve mode;
-//   * a site per lowered factor or refactor call: the slots it writes are keyed at the site by
-//     the context id the call carries at run time and the lane token (factor) or the held slot
-//     (refactor). A call names its site by a key, a deterministic 64-bit hash of the lowered
-//     call that the lowering computes, and the site is created on the first call that carries
-//     an unknown key, so two lowerings of one program share their sites and their program text.
-//     Sites belong to no context; a site belongs to its analysis, and releasing the analysis
-//     (contract_analysis_release) frees its sites and its slots in every context;
+//   * a site per lowered factor or refactor call and call number: the slots it writes are keyed
+//     at the site by the context id the call carries at run time and the lane token (factor) or
+//     the held slot (refactor). A call names its site by a key, a deterministic 64-bit hash of
+//     the lowered call that the lowering computes, and by the call number its state holds
+//     (slot_registry.h, CallState): a function that a program calls k times is lowered once,
+//     and its k calls carry one key and k numbers. The site is created on the first call that
+//     carries an unknown key and number, so two lowerings of one program share their sites and
+//     their program text. Sites belong to no context; a site belongs to its analysis, which
+//     every live call that names it holds, and once the analysis is released
+//     (contract_analysis_release) and no live call holds it, its sites and its slots in every
+//     context are freed;
 //   * shared storage: a slot named by (context id, device, analysis, precision, lane count,
 //     storage key) instead of by a site, for the factors that empty_factor(..., storage=...)
 //     starts. Every call site and program that refactors such a factor on one device writes
@@ -110,16 +114,17 @@
 // attributes and finds its slot on the host, without reading an operand. A factor with
 // static_context and static_lane keys its slot by them. A solve, refactor or invalidate whose
 // handle the program states to be the result of one of its factor or refactor calls (the site
-// its static_path names) takes the handle words that call wrote, exactly as it would read
-// them back from the device, when the site's latest words are those of this very handle: written
-// in the same execution of the program (XLA's run id tells executions apart) into the device
-// buffer the call reads its handle from. Anything else is a miss, and the call reads its handle
-// operands: another execution wrote the site since (two executions of one program on one
-// SolveContext), or another call of the same site in this execution did (a function the program
-// calls twice, lowered once, whose two calls share their sites). The handle read then names its
-// own slot and generation, and the generation rule rebuilds a side that holds another factor. A
-// miss never takes a slot's latest generation for the handle's. A call without these attributes
-// reads its operands.
+// key its static_path names) takes the handle words that call wrote, exactly as it would read
+// them back from the device, when a call of that key wrote them in the same execution of the
+// program (XLA's run id tells executions apart), on the same device, into the device buffer the
+// call reads its handle from; of several such calls, the latest. Each call of a key (each call
+// number, on each device) keeps the words it wrote last, so the k calls of a function the
+// program calls k times, lowered once, each find their own. Anything else is a miss, and the
+// call reads its handle operands: another execution wrote them since (two executions of one
+// program on one SolveContext), or the handle came from outside the program. The handle read
+// then names its own slot and generation, and the generation rule rebuilds a side that holds
+// another factor. A miss never takes a slot's latest generation for the handle's. A call
+// without these attributes reads its operands.
 //
 // One thread at a time: the mutex orders the host side of every call, and the generation rule
 // keeps the answers right when two executions share a slot, but such executions factor the slot
@@ -872,16 +877,23 @@ inline int StatusRefinementSteps(const Analysis& a, const Slot& slot) {
     return Downcast(a, slot) ? RefinementSteps(a, slot) : 0;
 }
 
+// The handle words (context ids, slot ids, generations; `lanes` of each) a site's call wrote last
+// on one device, the XLA execution (run id) it ran in, the device buffer it wrote the generations
+// to, and the registry's count of such records when it was written (`sequence`, the latest is the
+// largest): a later call of that same execution on that device whose handle the program states
+// to be this call's result, and whose generation operand is that buffer, takes them in place of a
+// device read.
+struct SiteResult {
+    int device = -1;
+    int64_t run_id = -1;
+    int64_t lanes = 0;
+    const void* buffer = nullptr;
+    uint64_t sequence = 0;
+    std::vector<int32_t> words;
+};
+
 struct Site : slot_registry::SiteBase<Analysis> {
-    // The handle words (context ids, slot ids, generations; result_lanes of each) the site's
-    // latest call wrote, the XLA execution (run id) it ran in and the device buffer it wrote the
-    // generations to: a later call of that same execution whose handle the program states to be
-    // this call's result, and whose generation operand is that buffer, takes them in place of a
-    // device read.
-    int64_t result_run_id = -1;
-    int64_t result_lanes = 0;
-    const void* result_buffer = nullptr;
-    std::vector<int32_t> result_words;
+    std::vector<SiteResult> results;  // one per device the call ran on
 };
 
 // Pinned host words for one handler call: operands are read into the first words, results
@@ -923,15 +935,23 @@ struct Registry : slot_registry::RegistryBase<Analysis, Slot, Site, Stats, Stora
     int64_t device_analyses = 0;  // analyses whose patterns are uploaded
     int64_t batch_tile_lanes = 0;  // lanes per batch tile at most; 0 for the int32 limits only
     bool seeding = true;
+    uint64_t result_sequence = 0;  // SiteResult records written so far
+
+    // Forget an analysis: wait for the devices that hold its slots, free its sites and slots,
+    // its storage declarations and its device patterns (defined with the Python functions).
+    static void Forget(Registry& reg, int64_t analysis_id);
 };
 
 Registry& Reg() { return slot_registry::Instance<Registry>(); }
 
+using CallState = slot_registry::CallState<Registry>;
 using slot_registry::CheckAnalysis;
 using slot_registry::CheckContext;
-using slot_registry::FindSite;
+using slot_registry::DrainEndedCalls;
 using slot_registry::FindSlot;
+using slot_registry::Forgetter;
 using slot_registry::SiteFor;
+using slot_registry::SiteOwns;
 
 // --------------------------------------------------------------------------
 // Errors
@@ -4361,10 +4381,10 @@ ffi::Error RefactorSingle(Registry& reg, Site& site, Slot* held, int32_t empty_i
     // In place when the held factor is already this site's, or when the call adopts the held
     // slot whichever site owns it; otherwise the site's slot for that held factor, so other
     // holders of it keep it.
-    const bool in_place = held != nullptr && (held->site == site.id || adopt);
+    const bool in_place = held != nullptr && (SiteOwns(site, *held) || adopt);
     Slot* slot = held;
     if (in_place) {
-        const bool adopted = held->site != site.id;
+        const bool adopted = !SiteOwns(site, *held);
         CONTRACT_TRY(CheckInPlace(*held, spec, adopted));
     } else {
         if (held == nullptr) CONTRACT_TRY(CheckContext(reg, context));
@@ -4459,10 +4479,10 @@ ffi::Error RefactorBatchSlot(Registry& reg, Site& site, Slot* held,
         }
         return ffi::Error::Success();
     }
-    const bool in_place = held != nullptr && (held->site == site.id || adopt);
+    const bool in_place = held != nullptr && (SiteOwns(site, *held) || adopt);
     Slot* slot = held;
     if (in_place) {
-        const bool adopted = held->site != site.id;
+        const bool adopted = !SiteOwns(site, *held);
         CONTRACT_TRY(CheckInPlace(*held, spec, adopted));
     } else {
         if (held == nullptr) CONTRACT_TRY(CheckContext(reg, context));
@@ -4798,33 +4818,55 @@ ffi::Error RawOperand(const ffi::AnyBuffer& values, const char* what, RawValues*
     return ffi::Error::Success();
 }
 
-// The handle words of a call whose program states that its handle is the result of the call at
-// its producing site: the words that call wrote (context ids, slot ids,
-// generations, `lanes` of each) when the site's latest call ran in this very execution
-// (`run_id`) and wrote its generations into `generations`, the call's own generation operand;
-// null otherwise (a miss: the call reads its handle). The execution's identity comes from XLA,
-// so the words of another execution of the same program are never taken, and the buffer tells
-// apart two calls of one site in one execution, whose handles live in buffers of their own.
-const int32_t* RunLocalWords(Registry& reg, const CallAttrs& at, int64_t run_id, int64_t lanes,
-                             const void* generations) {
+// The handle words of a call whose program states that its handle is the result of a call at
+// its producing site key: the words (context ids, slot ids, generations, `lanes` of each) that
+// the latest call of that key (any call number) wrote on `device` in this very execution
+// (`run_id`) into `generations`, the call's own generation operand; null otherwise (a miss: the
+// call reads its handle). The execution's identity comes from XLA, so the words of another
+// execution of the same program are never taken; the device and the buffer tell apart the calls
+// of one key in one execution, whose handles live in buffers of their own, and of two calls that
+// wrote one buffer in turn the later wrote what the buffer holds.
+const int32_t* RunLocalWords(Registry& reg, const CallAttrs& at, int64_t run_id, int device,
+                             int64_t lanes, const void* generations) {
     if (!at.RunLocalPath()) return nullptr;
-    Site* site = FindSite(reg, at.producer);
-    if (site == nullptr || site->result_run_id != run_id || site->result_lanes != lanes ||
-        site->result_buffer != generations) {
-        return nullptr;
+    const SiteResult* best = nullptr;
+    auto it = reg.sites.lower_bound({at.producer, std::numeric_limits<int32_t>::min()});
+    for (; it != reg.sites.end() && it->first.first == at.producer; ++it) {
+        for (const SiteResult& result : it->second->results) {
+            if (result.run_id == run_id && result.device == device && result.lanes == lanes &&
+                result.buffer == generations &&
+                (best == nullptr || result.sequence > best->sequence)) {
+                best = &result;
+            }
+        }
     }
-    return site->result_words.data();
+    return best == nullptr ? nullptr : best->words.data();
 }
 
-// Keep the handle words a call at `site` wrote (`words`: context ids, slot ids and generations,
-// `lanes` of each, in that order) as the site's result in execution `run_id`, with `generations`,
-// the device buffer of its generation result.
-void RecordSiteResult(Site& site, int64_t run_id, int64_t lanes, const int32_t* words,
-                      const void* generations) {
-    site.result_run_id = run_id;
-    site.result_lanes = lanes;
-    site.result_buffer = generations;
-    site.result_words.assign(words, words + 3 * lanes);
+// The CUDA device of the calling thread, -1 when the runtime cannot say (no run-local words
+// then match).
+int CurrentDevice() {
+    int device = -1;
+    return cudaGetDevice(&device) == cudaSuccess ? device : -1;
+}
+
+// Keep the handle words a call at `site` wrote on `device` (`words`: context ids, slot ids and
+// generations, `lanes` of each, in that order) as its result in execution `run_id`, with
+// `generations`, the device buffer of its generation result.
+void RecordSiteResult(Registry& reg, Site& site, int device, int64_t run_id, int64_t lanes,
+                      const int32_t* words, const void* generations) {
+    auto it = std::find_if(site.results.begin(), site.results.end(),
+                           [device](const SiteResult& r) { return r.device == device; });
+    if (it == site.results.end()) {
+        site.results.emplace_back();
+        it = std::prev(site.results.end());
+    }
+    it->device = device;
+    it->run_id = run_id;
+    it->lanes = lanes;
+    it->buffer = generations;
+    it->sequence = ++reg.result_sequence;
+    it->words.assign(words, words + 3 * lanes);
 }
 
 // Factor: values (nnz,) build or refresh a single slot; values (lanes, nnz) a batch slot. The
@@ -4835,8 +4877,23 @@ void RecordSiteResult(Site& site, int64_t run_id, int64_t lanes, const int32_t* 
 // the word makes the call a data dependency of the operation that produced it. The call's status
 // result becomes the next order word (an invalidation, which has no other result, returns the
 // order word itself, aliased to the operand and untouched).
+// The state of a factor or refactor call (CallState), made when XLA instantiates the call from
+// its site key and analysis id.
+ffi::ErrorOr<std::unique_ptr<CallState>> InstantiateImpl(ffi::Dictionary attrs) {
+    int64_t site = 0;
+    int64_t analysis_id = 0;
+    if (auto err = IntAttr(attrs, "site", true, &site); err.failure()) {
+        return ffi::ErrorOr<std::unique_ptr<CallState>>(err);
+    }
+    if (auto err = IntAttr(attrs, "analysis_id", true, &analysis_id); err.failure()) {
+        return ffi::ErrorOr<std::unique_ptr<CallState>>(err);
+    }
+    return slot_registry::InstantiateCall<Registry>(site, analysis_id);
+}
+
 template <ffi::DataType T>
-ffi::Error FactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyBuffer values,
+ffi::Error FactorImpl(CallState* call, cudaStream_t stream, ffi::RunId run, ffi::Token,
+                      ffi::AnyBuffer values,
                       ffi::Buffer<ffi::S32> lane_token, ffi::Buffer<ffi::S32> context_id,
                       ffi::Buffer<ffi::S32> /*order*/,
                       ffi::Result<ffi::Token>, ffi::ResultBuffer<ffi::S32> out_context,
@@ -4846,6 +4903,7 @@ ffi::Error FactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyB
                       ffi::Dictionary attrs) {
     std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
+    DrainEndedCalls(reg, Forgetter(reg));
     CallAttrs at;
     CONTRACT_TRY(DecodeAttrs(attrs, CallKind::kFactor, &at));
     RawValues raw;
@@ -4892,7 +4950,7 @@ ffi::Error FactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyB
 
     CONTRACT_TRY(CheckContext(reg, context));
     Site* site = nullptr;
-    CONTRACT_TRY(SiteFor(reg, at.site, at.analysis_id, &site));
+    CONTRACT_TRY(SiteFor(reg, at.site, call->call, at.analysis_id, &site));
     CONTRACT_TRY(CheckRaw(*site->analysis, raw));
     Slot* slot = nullptr;
     CONTRACT_TRY(SiteSlot(reg, *site, context, token,
@@ -4932,7 +4990,7 @@ ffi::Error FactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyB
         }
     }
     CONTRACT_TRY(MarkSlotUse(*slot, stream));
-    RecordSiteResult(*site, run.run_id, lanes, words, out_generation->untyped_data());
+    RecordSiteResult(reg, *site, device, run.run_id, lanes, words, out_generation->untyped_data());
     int32_t* targets[4] = {out_context->typed_data(), out_slot->typed_data(),
                            out_generation->typed_data(), out_status->typed_data()};
     return WriteResults(stream, *block, first, lanes, targets, 4,
@@ -5022,7 +5080,8 @@ ffi::Error SolveImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyBu
     }
     const int32_t* run_words =
         stored ? nullptr
-               : RunLocalWords(reg, at, run.run_id, lanes, held_generation.untyped_data());
+               : RunLocalWords(reg, at, run.run_id, device, lanes,
+                               held_generation.untyped_data());
     if (run_words != nullptr) {
         contexts = run_words;
         ids = run_words + lanes;
@@ -5143,7 +5202,8 @@ ffi::Error SolveImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyBu
 // the predicate and the handle, and a lane that asks fills it as an empty handle fills a site's
 // slot; with no lane asking the handle comes back unchanged.
 template <ffi::DataType T>
-ffi::Error RefactorStorageCall(cudaStream_t stream, ffi::RunId run, const CallAttrs& at,
+ffi::Error RefactorStorageCall(const CallState& call, cudaStream_t stream, ffi::RunId run,
+                               const CallAttrs& at,
                                const RawValues& raw, ffi::AnyBuffer& values,
                                ffi::AnyBuffer& held_values, ffi::Buffer<ffi::PRED>& predicate,
                                ffi::Buffer<ffi::S32>& held_context,
@@ -5158,7 +5218,7 @@ ffi::Error RefactorStorageCall(cudaStream_t stream, ffi::RunId run, const CallAt
     Registry& reg = Reg();
     const size_t L = static_cast<size_t>(lanes);
     Site* site = nullptr;
-    CONTRACT_TRY(SiteFor(reg, at.site, at.analysis_id, &site));
+    CONTRACT_TRY(SiteFor(reg, at.site, call.call, at.analysis_id, &site));
     CONTRACT_TRY(CheckRaw(*site->analysis, raw));
     const SlotSpec spec = SpecFor<T>(at.transposed, at.symmetric, at.spd);
     RawValues held_raw = raw;
@@ -5254,7 +5314,7 @@ ffi::Error RefactorStorageCall(cudaStream_t stream, ffi::RunId run, const CallAt
     }
     if (slot != nullptr) slot->trusted_run = run.run_id;
     if (!kept_written) CONTRACT_TRY(CopyKeptValues(kept, asks.data(), lanes, stream));
-    RecordSiteResult(*site, run.run_id, lanes, words, out_generation->untyped_data());
+    RecordSiteResult(reg, *site, device, run.run_id, lanes, words, out_generation->untyped_data());
     if (result_written) return ffi::Error::Success();
     const bool any_source =
         std::any_of(sources.begin(), sources.end(), [](const int32_t* s) { return s != nullptr; });
@@ -5272,7 +5332,8 @@ ffi::Error RefactorStorageCall(cudaStream_t stream, ffi::RunId run, const CallAt
 // not ask keeps its held factor (refactored from the values it holds, under a native vmap whose
 // other lanes ask) and gets the held values copied into the result.
 template <ffi::DataType T>
-ffi::Error RefactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::AnyBuffer values,
+ffi::Error RefactorImpl(CallState* call, cudaStream_t stream, ffi::RunId run, ffi::Token,
+                        ffi::AnyBuffer values,
                         ffi::AnyBuffer held_values, ffi::Buffer<ffi::PRED> predicate,
                         ffi::Buffer<ffi::S32> held_context, ffi::Buffer<ffi::S32> held_slot,
                         ffi::Buffer<ffi::S32> held_generation, ffi::Buffer<ffi::S32> /*order*/,
@@ -5285,6 +5346,7 @@ ffi::Error RefactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::An
                         ffi::Dictionary attrs) {
     std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
+    DrainEndedCalls(reg, Forgetter(reg));
     CallAttrs at;
     CONTRACT_TRY(DecodeAttrs(attrs, CallKind::kRefactor, &at));
     RawValues raw;
@@ -5335,7 +5397,7 @@ ffi::Error RefactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::An
     CONTRACT_TRY(AcquireStaging(reg, device, result_first + 4 * L, &block));
 
     if (at.storage != 0) {
-        return RefactorStorageCall<T>(stream, run, at, raw, values, held_values, predicate,
+        return RefactorStorageCall<T>(*call, stream, run, at, raw, values, held_values, predicate,
                                       held_context, held_slot, held_generation, kept, lanes,
                                       batched, device, *block, handle_first, result_first,
                                       out_context, out_slot, out_generation, out_status);
@@ -5348,8 +5410,8 @@ ffi::Error RefactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::An
     const int32_t* contexts = nullptr;
     const int32_t* ids = nullptr;
     const int32_t* generations = nullptr;
-    if (const int32_t* words =
-            RunLocalWords(reg, at, run.run_id, lanes, held_generation.untyped_data())) {
+    if (const int32_t* words = RunLocalWords(reg, at, run.run_id, device, lanes,
+                                             held_generation.untyped_data())) {
         contexts = words;
         ids = words + lanes;
         generations = words + 2 * lanes;
@@ -5389,7 +5451,7 @@ ffi::Error RefactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::An
     held_generation_value = generations[first];
     const uint8_t* asks = reinterpret_cast<const uint8_t*>(block->host);
     Site* site = nullptr;
-    CONTRACT_TRY(SiteFor(reg, at.site, at.analysis_id, &site));
+    CONTRACT_TRY(SiteFor(reg, at.site, call->call, at.analysis_id, &site));
     CONTRACT_TRY(CheckRaw(*site->analysis, raw));
     const SlotSpec spec = SpecFor<T>(at.transposed, at.symmetric, at.spd);
     const auto check = [&](const Slot& s) -> ffi::Error {
@@ -5428,7 +5490,7 @@ ffi::Error RefactorImpl(cudaStream_t stream, ffi::RunId run, ffi::Token, ffi::An
                                        at.adopt, spec, device, stream, words));
     }
     CONTRACT_TRY(CopyKeptValues(kept, asks, lanes, stream));
-    RecordSiteResult(*site, run.run_id, lanes, words, out_generation->untyped_data());
+    RecordSiteResult(reg, *site, device, run.run_id, lanes, words, out_generation->untyped_data());
     int32_t* targets[4] = {out_context->typed_data(), out_slot->typed_data(),
                            out_generation->typed_data(), out_status->typed_data()};
     const bool any_source =
@@ -5488,8 +5550,8 @@ ffi::Error InvalidateImpl(cudaStream_t stream, ffi::RunId run, ffi::Token,
                 if (found != nullptr) named.push_back(found);
             }
             resolved = true;
-        } else if (const int32_t* words = RunLocalWords(reg, at, run.run_id, lanes,
-                                                         held_generation.untyped_data())) {
+        } else if (const int32_t* words = RunLocalWords(reg, at, run.run_id, CurrentDevice(),
+                                                         lanes, held_generation.untyped_data())) {
             contexts = words;
             ids = words + lanes;
             ++reg.stats.static_dispatches;
@@ -5547,9 +5609,15 @@ ffi::Error InvalidateImpl(cudaStream_t stream, ffi::RunId run, ffi::Token,
 
 }  // namespace cudss_contract
 
+// The factor and refactor handlers take the call's state (CallState), which one instantiate
+// handler makes for both from the call's site and analysis_id attributes.
+XLA_FFI_DEFINE_HANDLER(kCudssContractInstantiate, cudss_contract::InstantiateImpl,
+                       ffi::Ffi::BindInstantiate().Attrs());
+
 #define DIFF_SOUP_CUDSS_CONTRACT_HANDLERS(Suffix, DataType)                                   \
     XLA_FFI_DEFINE_HANDLER(kCudssContractFactor##Suffix, cudss_contract::FactorImpl<DataType>, \
                            ffi::Ffi::Bind()                                                   \
+                               .Ctx<ffi::State<cudss_contract::CallState>>()                  \
                                .Ctx<ffi::PlatformStream<cudaStream_t>>()                      \
                                .Ctx<ffi::RunId>()                                             \
                                .Arg<ffi::Token>()               /* XLA token in */             \
@@ -5581,6 +5649,7 @@ ffi::Error InvalidateImpl(cudaStream_t stream, ffi::RunId run, ffi::Token,
     XLA_FFI_DEFINE_HANDLER(kCudssContractRefactor##Suffix,                                    \
                            cudss_contract::RefactorImpl<DataType>,                            \
                            ffi::Ffi::Bind()                                                   \
+                               .Ctx<ffi::State<cudss_contract::CallState>>()                  \
                                .Ctx<ffi::PlatformStream<cudaStream_t>>()                      \
                                .Ctx<ffi::RunId>()                                             \
                                .Arg<ffi::Token>()               /* XLA token in */             \
@@ -5807,6 +5876,7 @@ int64_t AnalysisCreate(int64_t n, IndexArray csr_offsets, IndexArray csr_columns
         a->batch_layout = static_cast<int>(batch_layout);
         std::lock_guard<std::mutex> lock(Reg().mutex);
         Registry& reg = Reg();
+        DrainEndedCalls(reg, Forgetter(reg));
         a->id = reg.next_analysis++;
         reg.analyses[a->id] = a;
     }
@@ -5937,12 +6007,10 @@ nb::dict AnalysisInfo(int64_t analysis_id) {
     return d;
 }
 
-// Release an analysis: its sites, its slots and batch slots in every context, the contexts that
-// declared its storage keys, its device patterns and the registry's reference.
-void AnalysisRelease(int64_t analysis_id) {
-    nb::gil_scoped_release release;
-    std::lock_guard<std::mutex> lock(Reg().mutex);
-    Registry& reg = Reg();
+// Forget an analysis: its sites, its slots and batch slots in every context, the contexts that
+// declared its storage keys, its device patterns and the registry's reference. Caller holds the
+// mutex, on a thread that may free device memory.
+void Registry::Forget(Registry& reg, int64_t analysis_id) {
     int current = -1;
     cudaGetDevice(&current);
     // Wait for the work queued on every device that holds a slot of the analysis before its
@@ -5973,6 +6041,15 @@ void AnalysisRelease(int64_t analysis_id) {
     (void)cudaGetLastError();
 }
 
+// Release an analysis from Python (its Analysis was collected): forget it (Registry::Forget), or,
+// while a live call of a compiled program holds it, once the last such call is destroyed.
+void AnalysisRelease(int64_t analysis_id) {
+    nb::gil_scoped_release release;
+    std::lock_guard<std::mutex> lock(Reg().mutex);
+    Registry& reg = Reg();
+    slot_registry::ReleaseAnalysis(reg, analysis_id, Forgetter(reg));
+}
+
 void StorageDeclare(int64_t analysis_id, int64_t context_id, int64_t storage) {
     nb::gil_scoped_release release;
     std::lock_guard<std::mutex> lock(Reg().mutex);
@@ -5985,6 +6062,7 @@ void ContextRelease(int64_t context_id) {
     nb::gil_scoped_release release;
     std::lock_guard<std::mutex> lock(Reg().mutex);
     Registry& reg = Reg();
+    DrainEndedCalls(reg, Forgetter(reg));
     const int32_t context = static_cast<int32_t>(context_id);
     int current = -1;
     cudaGetDevice(&current);
@@ -6052,10 +6130,13 @@ nb::dict StatsDict() {
     int64_t live_sites = 0;
     int64_t live_analyses = 0;
     int64_t live_device_analyses = 0;
+    int64_t live_calls = 0;
     {
         nb::gil_scoped_release release;
         std::lock_guard<std::mutex> lock(Reg().mutex);
         Registry& reg = Reg();
+        DrainEndedCalls(reg, Forgetter(reg));
+        live_calls = slot_registry::LiveCalls(reg);
         SettleAll(reg);
         s = reg.stats;
         live_slots = static_cast<int64_t>(reg.slots.size());
@@ -6108,6 +6189,7 @@ nb::dict StatsDict() {
     d["live_sites"] = live_sites;
     d["live_analyses"] = live_analyses;
     d["live_device_analyses"] = live_device_analyses;
+    d["live_calls"] = live_calls;
     return d;
 }
 
@@ -6265,7 +6347,8 @@ static void BindContract(nb::module_& m) {
           "refactorization verdicts settled on the host after the refactorization "
           "(deferred_status_reads), and "
           "the live slots, batch slots, sites, "
-          "analyses and device-resident analyses.");
+          "analyses and device-resident analyses, and the factor and refactor calls of the "
+          "live compiled programs (live_calls).");
     m.def(
         "contract_reset_stats",
         []() {
@@ -6279,43 +6362,55 @@ static void BindContract(nb::module_& m) {
     m.def(
         "contract_handlers",
         []() {
+            const auto stages = [](XLA_FFI_Handler* execute) {
+                nb::dict bundle;
+                bundle["instantiate"] =
+                    nb::capsule(reinterpret_cast<void*>(kCudssContractInstantiate));
+                bundle["execute"] = nb::capsule(reinterpret_cast<void*>(execute));
+                return bundle;
+            };
             nb::dict d;
-            d["diff_soup_cudss_contract_factor_coo_f64"] =
-                nb::capsule(reinterpret_cast<void*>(kCudssContractFactorF64));
-            d["diff_soup_cudss_contract_factor_coo_f32"] =
-                nb::capsule(reinterpret_cast<void*>(kCudssContractFactorF32));
+            d["diff_soup_cudss_contract_factor_coo_f64"] = stages(kCudssContractFactorF64);
+            d["diff_soup_cudss_contract_factor_coo_f32"] = stages(kCudssContractFactorF32);
             d["diff_soup_cudss_contract_solve_coo_f64"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractSolveF64));
             d["diff_soup_cudss_contract_solve_coo_f32"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractSolveF32));
-            d["diff_soup_cudss_contract_refactor_coo_f64"] =
-                nb::capsule(reinterpret_cast<void*>(kCudssContractRefactorF64));
-            d["diff_soup_cudss_contract_refactor_coo_f32"] =
-                nb::capsule(reinterpret_cast<void*>(kCudssContractRefactorF32));
+            d["diff_soup_cudss_contract_refactor_coo_f64"] = stages(kCudssContractRefactorF64);
+            d["diff_soup_cudss_contract_refactor_coo_f32"] = stages(kCudssContractRefactorF32);
             d["diff_soup_cudss_contract_invalidate_f64"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractInvalidateF64));
             d["diff_soup_cudss_contract_invalidate_f32"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractInvalidateF32));
-            d["diff_soup_cudss_contract_factor_coo_c128"] =
-                nb::capsule(reinterpret_cast<void*>(kCudssContractFactorC128));
-            d["diff_soup_cudss_contract_factor_coo_c64"] =
-                nb::capsule(reinterpret_cast<void*>(kCudssContractFactorC64));
+            d["diff_soup_cudss_contract_factor_coo_c128"] = stages(kCudssContractFactorC128);
+            d["diff_soup_cudss_contract_factor_coo_c64"] = stages(kCudssContractFactorC64);
             d["diff_soup_cudss_contract_solve_coo_c128"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractSolveC128));
             d["diff_soup_cudss_contract_solve_coo_c64"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractSolveC64));
-            d["diff_soup_cudss_contract_refactor_coo_c128"] =
-                nb::capsule(reinterpret_cast<void*>(kCudssContractRefactorC128));
-            d["diff_soup_cudss_contract_refactor_coo_c64"] =
-                nb::capsule(reinterpret_cast<void*>(kCudssContractRefactorC64));
+            d["diff_soup_cudss_contract_refactor_coo_c128"] = stages(kCudssContractRefactorC128);
+            d["diff_soup_cudss_contract_refactor_coo_c64"] = stages(kCudssContractRefactorC64);
             d["diff_soup_cudss_contract_invalidate_c128"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractInvalidateC128));
             d["diff_soup_cudss_contract_invalidate_c64"] =
                 nb::capsule(reinterpret_cast<void*>(kCudssContractInvalidateC64));
             return d;
         },
-        "XLA FFI handler capsules of the held-factor handlers by target name, for "
-        "jax.ffi.register_ffi_target on the CUDA platform. The factor, solve and refactor "
+        "XLA FFI handlers of the held-factor handlers by target name, for "
+        "jax.ffi.register_ffi_target on the CUDA platform: a capsule, or for the factor and "
+        "refactor targets a dict of the instantiate and execute stages (register "
+        "contract_call_state_type() first). The factor, solve and refactor "
         "handlers take the values in the coordinate order of the topology (coo) and assemble "
         "them on the device.");
+    m.def(
+        "contract_call_state_type",
+        []() {
+            static const XLA_FFI_TypeInfo info = ffi::MakeTypeInfo<cc::CallState>();
+            nb::dict d;
+            d["type_id"] = nb::capsule(reinterpret_cast<void*>(&cc::CallState::id));
+            d["type_info"] = nb::capsule(const_cast<XLA_FFI_TypeInfo*>(&info));
+            return d;
+        },
+        "The registration of the factor and refactor calls' state type, for "
+        "jax.ffi.register_ffi_type on the CUDA platform before the handlers are registered.");
 }

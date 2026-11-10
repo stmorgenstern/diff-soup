@@ -90,7 +90,12 @@ def mpc_step(
 
     Returns:
         The next carry and the interval's output, the slice of a `ClosedLoop`.
+
+    Raises:
+        ConfigurationError: If the controls are `SignalControls`, whatever `warm_start`.
     """
+    if isinstance(control_problem.controls, SignalControls):
+        raise _no_grid()
     numeric = control_problem.numeric_problem(solver)
     return _step(carry, inputs, control_problem, numeric, solver, plant, estimator, warm_start)
 

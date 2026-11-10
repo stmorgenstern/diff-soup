@@ -15,7 +15,8 @@ How the pieces fit:
   shares that native analysis, whatever its precision rung or its
   ``symmetric``/``spd`` declaration, so the pattern is reordered once and
   stored on the device once; the native analysis is released when the last
-  such ``Analysis`` is collected. The device copies of the pattern are
+  such ``Analysis`` is collected and no compiled program that factors with it
+  exists. The device copies of the pattern are
   made on first use in a [SolveContext][diff_soup.linear.SolveContext] and
   freed with the last context that uses them.
 - The values of a factor or solve call arrive in the topology's coordinate
@@ -278,6 +279,9 @@ _REFACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_REFACTOR_KIND}_{s}" for s in _
 #: token, the values, the held values and the predicate.
 _REFACTOR_HANDLE_OPERANDS = (4, 5, 6)
 
+#: The XLA FFI type of the factor and refactor calls' state (one per call of a compiled program).
+_CALL_STATE_TYPE = "diff_soup_cudss_contract_call_state"
+
 _REGISTRATION_LOCK = threading.Lock()
 _REGISTERED = False
 
@@ -296,9 +300,10 @@ def _rebuild_command() -> str:
 def _native():
     """The loaded cuDSS extension, its contract FFI targets registered with JAX.
 
-    The eight FFI targets of the contract handlers (factor, solve, refactor
-    and invalidate, each at both rungs) are registered once per process, on
-    the first call.
+    The FFI targets of the contract handlers (factor, solve, refactor and
+    invalidate, for each value type) are registered once per process, on the
+    first call, after the type of the state the factor and refactor targets
+    keep for each call of a compiled program.
 
     Returns:
         The ``_native_solver`` extension module.
@@ -334,6 +339,16 @@ def _native():
                 f"The native cuDSS extension provides no handlers for {missing}, which the "
                 f"cuDSS factor contract needs; rebuild it {_rebuild_command()}."
             )
+        state_type = getattr(native_solver, "contract_call_state_type", None)
+        if state_type is not None:  # a module built before the calls had their state has none
+            # XLA refuses a handler whose state type it does not know, and it applies the pending
+            # registrations of a platform handlers first when it makes the platform's client, so
+            # the CUDA client is made before the state type and the handlers are registered.
+            try:
+                jax.devices("cuda")
+            except RuntimeError:  # no CUDA client in this process; nothing can run the handlers
+                pass
+            jax.ffi.register_ffi_type(_CALL_STATE_TYPE, state_type(), platform="CUDA")
         for name in _TARGET_NAMES:
             jax.ffi.register_ffi_target(name, handlers[name], platform="CUDA")
         _REGISTERED = True
@@ -540,7 +555,8 @@ class _CuDSSContractAnalysis:
     on the precision rung or the structure declaration, so every
     [Analysis][diff_soup.linear.Analysis] of one coordinate pattern and set
     of options holds the same record. The native analysis is released when
-    the last record that holds it is collected.
+    the last record that holds it is collected and no compiled program that
+    factors with it exists.
     """
 
     __slots__ = (
@@ -1367,7 +1383,9 @@ def lower_factor(
     The call names its native site by a key computed from the lowered call
     ([lowered_site_key][diff_soup.linear._primitive.lowered_site_key]); the
     handler creates the site on the first call with that key, so two
-    lowerings of one program share their sites and their program text. The
+    lowerings of one program share their sites and their program text, and
+    numbers the calls that carry one key in the live programs, so each call of
+    a function that a program calls several times has a site of its own. The
     values go to the handler in the coordinate order of the topology; it assembles
     them on the device into the CSR values of ``A_bc`` at the rung's
     precision, straight into the slot's value copy, and factors them, for

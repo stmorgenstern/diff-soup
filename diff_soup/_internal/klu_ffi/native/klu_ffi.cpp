@@ -8,14 +8,18 @@
 //     ordering);
 //   * a slot per factor: the KLU numeric factorization, real or complex, and a
 //     copy of the values it was built from;
-//   * a site per lowered factor or refactor call: the slots that call writes
-//     are keyed at the site by the context id the call carries at run time.
-//     A factor call picks its slot by (context, slot token), so lanes
-//     that carry distinct tokens get one slot each, every context gets its
-//     own, and a repeated execution reuses them. A refactor call picks its
-//     slot by (context, the handle it refactors), and refactors in place
-//     when that handle is already one of its own slots, so a loop that
-//     carries a factor keeps one slot.
+//   * a site per lowered factor or refactor call and call number: the slots
+//     that call writes are keyed at the site by the context id the call
+//     carries at run time. A factor call picks its slot by (context, slot
+//     token), so lanes that carry distinct tokens get one slot each, every
+//     context gets its own, and a repeated execution reuses them. A refactor
+//     call picks its slot by (context, the handle it refactors), and
+//     refactors in place when that handle is already one of its own slots,
+//     so a loop that carries a factor keeps one slot. The call number comes
+//     from the call's state (slot_registry.h, CallState): a function that a
+//     program calls k times is lowered once, and its k calls carry one site
+//     key but k call numbers, so each has its slots and factors its values
+//     once.
 //
 // Slots belong to a context (diff_soup.linear.SolveContext): a factor handle
 // is the pair (context id, slot id), every slot records its context, and
@@ -23,8 +27,8 @@
 // released. A call that meets a released context, a slot that does not exist
 // or a slot of another context fails with an error. Solve and refactor calls
 // carry the id of their analysis as the attribute "analysis_id" and fail on
-// a slot built for another analysis. Sites belong to no context and live for
-// the process.
+// a slot built for another analysis. Sites belong to no context and live as
+// long as their analysis, which every live call that names it holds.
 //
 // Every handler takes a fresh XLA token as its first operand and returns one as
 // its first result, and takes the factor's order word as its last operand without
@@ -167,14 +171,18 @@ struct Registry
 
 Registry& Reg() { return slot_registry::Instance<Registry>(); }
 
+using CallState = slot_registry::CallState<Registry>;
 using slot_registry::CheckAnalysis;
 using slot_registry::CheckContext;
 using slot_registry::CheckValues;
 using slot_registry::Doubles;
+using slot_registry::DrainEndedCalls;
 using slot_registry::FindHeld;
+using slot_registry::Forgetter;
 using slot_registry::kComplex;
 using slot_registry::SameValues;
 using slot_registry::SiteFor;
+using slot_registry::SiteOwns;
 using slot_registry::SiteSlot;
 using slot_registry::StorageSlot;
 
@@ -356,8 +364,15 @@ int64_t SlotBytes(const Slot& slot) {
 // Every handler takes the factor's order word as its last buffer operand and never reads it:
 // the word makes the call a data dependency of the operation that produced it, and the call's
 // status result becomes the next order word.
+// The state of a factor or refactor call (CallState), made when XLA instantiates the call.
+ffi::ErrorOr<std::unique_ptr<CallState>> InstantiateImpl(int64_t site_id, int64_t analysis_id,
+                                                         int64_t /*storage*/) {
+    return slot_registry::InstantiateCall<Registry>(site_id, analysis_id);
+}
+
 template <ffi::DataType T>
-ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<T> values,
+ffi::Error FactorImpl(CallState* call, ffi::RunId run, int32_t device, ffi::Token,
+                      ffi::Buffer<T> values,
                       ffi::Buffer<ffi::S32> key,
                       ffi::Buffer<ffi::S32> context_id, ffi::Buffer<ffi::S32> /*order*/,
                       ffi::Result<ffi::Token>,
@@ -368,11 +383,12 @@ ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<T>
     const int64_t token = key.typed_data()[0];
     Registry& reg = Reg();
     std::lock_guard<std::mutex> lock(reg.mutex);
+    DrainEndedCalls(reg, Forgetter(reg));
     if (auto err = CheckContext(reg, context); err.failure()) {
         return err;
     }
     Site* site = nullptr;
-    if (auto err = SiteFor(reg, site_id, analysis_id, &site); err.failure()) {
+    if (auto err = SiteFor(reg, site_id, call->call, analysis_id, &site); err.failure()) {
         return err;
     }
     // A factor of shared storage (the fill of an empty factor that names it) goes to the
@@ -397,7 +413,7 @@ ffi::Error FactorImpl(ffi::RunId run, int32_t device, ffi::Token, ffi::Buffer<T>
 }
 
 template <ffi::DataType T>
-ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
+ffi::Error RefactorImpl(CallState* call, ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
                         ffi::Buffer<ffi::PRED> predicate, ffi::Buffer<ffi::S32> held_context,
                         ffi::Buffer<ffi::S32> held_slot, ffi::Buffer<ffi::S32> /*order*/,
                         ffi::Result<ffi::Token>,
@@ -411,6 +427,7 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
     const int32_t held_id = held_slot.typed_data()[0];
     Registry& reg = Reg();
     std::lock_guard<std::mutex> lock(reg.mutex);
+    DrainEndedCalls(reg, Forgetter(reg));
     Slot* held = nullptr;
     if (auto err = FindHeld(reg, context, held_id, &held); err.failure()) {
         return err;
@@ -429,13 +446,13 @@ ffi::Error RefactorImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
         return ffi::Error::Success();
     }
     Site* site = nullptr;
-    if (auto err = SiteFor(reg, site_id, analysis_id, &site); err.failure()) {
+    if (auto err = SiteFor(reg, site_id, call->call, analysis_id, &site); err.failure()) {
         return err;
     }
-    // In place when the held factor is already this site's or names shared storage; otherwise
-    // the site's slot for that held factor, so other holders of it keep it.
+    // In place when the held factor is already this site's (this call's) or names shared
+    // storage; otherwise the site's slot for that held factor, so other holders of it keep it.
     Slot* slot = held;
-    if (held->site != site_id && storage == 0) {
+    if (!SiteOwns(*site, *held) && storage == 0) {
         if (auto err = SiteSlot(reg, *site, context, held_id, &slot); err.failure()) {
             return err;
         }
@@ -548,10 +565,19 @@ ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
 
 // One binding per element type: the values (and right-hand sides and solution) are F64 for the
 // real handlers and C128 for the complex ones; everything else is the same.
+// The factor and refactor handlers take the call's state (CallState), which the instantiate
+// handler makes; both carry the attributes site, analysis_id and storage.
+XLA_FFI_DEFINE_HANDLER_SYMBOL(kKluInstantiate, InstantiateImpl,
+                              ffi::Ffi::BindInstantiate()
+                                  .Attr<int64_t>("site")
+                                  .Attr<int64_t>("analysis_id")
+                                  .Attr<int64_t>("storage"));
+
 #define DIFFSOUP_KLU_HANDLERS(SUFFIX, TYPE)                                                       \
     XLA_FFI_DEFINE_HANDLER_SYMBOL(                                                                \
         kKluFactor##SUFFIX, FactorImpl<TYPE>,                                                     \
         ffi::Ffi::Bind()                                                                          \
+            .Ctx<ffi::State<CallState>>() /* the call's number and its analysis */                \
             .Ctx<ffi::RunId>()            /* the XLA execution */                                 \
             .Ctx<ffi::DeviceOrdinal>()    /* the device that runs the call: keys shared storage */\
             .Arg<ffi::Token>()            /* XLA token in (fresh per call) */                     \
@@ -569,6 +595,7 @@ ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
     XLA_FFI_DEFINE_HANDLER_SYMBOL(                                                                \
         kKluRefactor##SUFFIX, RefactorImpl<TYPE>,                                                 \
         ffi::Ffi::Bind()                                                                          \
+            .Ctx<ffi::State<CallState>>()  /* the call's number and its analysis */               \
             .Ctx<ffi::RunId>()             /* the XLA execution */                                \
             .Arg<ffi::Token>()             /* XLA token in (fresh per call) */                    \
             .Arg<ffi::Buffer<TYPE>>()      /* values */                                           \
@@ -642,6 +669,7 @@ int64_t AnalysisCreate(int64_t n, IndexArray rows, IndexArray cols, MaskArray ze
         slot_registry::BuildPattern<Registry>(*a, n, nnz, r, c, zeroed.data(), unit_rows.data(),
                                               unit_rows.shape(0));
         std::lock_guard<std::mutex> lock(Reg().mutex);
+        DrainEndedCalls(Reg(), Forgetter(Reg()));
         klu_defaults(&a->common);
         a->common.ordering = static_cast<int>(ordering);
         a->common.btf = btf ? 1 : 0;
@@ -687,10 +715,13 @@ NB_MODULE(_native_klu, m) {
             int64_t live_analyses = 0;
             int64_t live_sites = 0;
             int64_t live_lu_entries = 0;
+            int64_t live_calls = 0;
             {
                 nb::gil_scoped_release release;
                 std::lock_guard<std::mutex> lock(Reg().mutex);
+                DrainEndedCalls(Reg(), Forgetter(Reg()));
                 s = Reg().stats;
+                live_calls = slot_registry::LiveCalls(Reg());
                 live_slots = static_cast<int64_t>(Reg().slots.size());
                 live_analyses = static_cast<int64_t>(Reg().analyses.size());
                 live_sites = static_cast<int64_t>(Reg().sites.size());
@@ -713,13 +744,15 @@ NB_MODULE(_native_klu, m) {
             d["live_analyses"] = live_analyses;
             d["live_sites"] = live_sites;
             d["live_lu_entries"] = live_lu_entries;
+            d["live_calls"] = live_calls;
             return d;
         },
         "Process-wide counters of factorizations (klu_factor), refactorizations "
         "(klu_refactor kept), refactorizations replaced by a factorization, rebuilds started "
         "by a solve, solves, refused and singular requests, calls refused for a released "
-        "context, live objects, and the entries of L and U (diagonals included) over the live "
-        "numeric factorizations.");
+        "context, live objects (slots, analyses, sites, and the factor and refactor calls of "
+        "the live compiled programs), and the entries of L and U (diagonals included) over the "
+        "live numeric factorizations.");
     m.def(
         "reset_stats",
         []() {
@@ -731,16 +764,33 @@ NB_MODULE(_native_klu, m) {
     m.def(
         "registrations",
         []() {
+            const auto stages = [](XLA_FFI_Handler* execute) {
+                nb::dict bundle;
+                bundle["instantiate"] = nb::capsule(reinterpret_cast<void*>(kKluInstantiate));
+                bundle["execute"] = nb::capsule(reinterpret_cast<void*>(execute));
+                return bundle;
+            };
             nb::dict d;
-            d["diffsoup_klu_factor_f64"] = nb::capsule(reinterpret_cast<void*>(kKluFactorF64));
-            d["diffsoup_klu_refactor_f64"] =
-                nb::capsule(reinterpret_cast<void*>(kKluRefactorF64));
+            d["diffsoup_klu_factor_f64"] = stages(kKluFactorF64);
+            d["diffsoup_klu_refactor_f64"] = stages(kKluRefactorF64);
             d["diffsoup_klu_apply_f64"] = nb::capsule(reinterpret_cast<void*>(kKluApplyF64));
-            d["diffsoup_klu_factor_c128"] = nb::capsule(reinterpret_cast<void*>(kKluFactorC128));
-            d["diffsoup_klu_refactor_c128"] =
-                nb::capsule(reinterpret_cast<void*>(kKluRefactorC128));
+            d["diffsoup_klu_factor_c128"] = stages(kKluFactorC128);
+            d["diffsoup_klu_refactor_c128"] = stages(kKluRefactorC128);
             d["diffsoup_klu_apply_c128"] = nb::capsule(reinterpret_cast<void*>(kKluApplyC128));
             return d;
         },
-        "XLA FFI handler capsules by target name, for jax.ffi.register_ffi_target on the CPU.");
+        "XLA FFI handlers by target name, for jax.ffi.register_ffi_target on the CPU: a "
+        "capsule, or for the factor and refactor targets a dict of the instantiate and "
+        "execute stages. Register call_state_type() first.");
+    m.def(
+        "call_state_type",
+        []() {
+            static const XLA_FFI_TypeInfo info = ffi::MakeTypeInfo<CallState>();
+            nb::dict d;
+            d["type_id"] = nb::capsule(reinterpret_cast<void*>(&CallState::id));
+            d["type_info"] = nb::capsule(const_cast<XLA_FFI_TypeInfo*>(&info));
+            return d;
+        },
+        "The registration of the factor and refactor calls' state type, for "
+        "jax.ffi.register_ffi_type on the CPU before the handlers are registered.");
 }

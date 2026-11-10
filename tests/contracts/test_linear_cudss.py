@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -758,6 +759,75 @@ def test_an_analysis_collected_before_its_context_is_released_leaves_no_device_a
         del analysis
         collect(200)
     assert backend.contract_stats()["live_device_analyses"] == live
+
+
+@cudss_only
+def test_each_call_of_a_jitted_factor_keeps_one_slot_and_reads_no_handle():
+    """A jitted factor-and-solve that a program calls three times is lowered once, yet each call
+    keeps a slot of its own, factors once per run and finds its slot without reading a handle;
+    a call in the body of a scan keeps one slot over all its steps."""
+    topology, values = _system()
+    backend = CuDSS()
+    analysis = analyze(topology, backend=backend)
+    with SolveContext("thrice") as ctx:
+        inner = jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), _B)[0])
+        thrice = jax.jit(lambda v: [inner(k * v) for k in (1.0, 2.0, 3.0)])
+        slots = backend.contract_stats()["live_slots"]
+        xs, counts = _steady(backend, thrice, values)
+        slots = backend.contract_stats()["live_slots"] - slots
+
+        def body(total, k):
+            return total + solve(factor(analysis, k * values, ctx=ctx), _B)[0], None
+
+        before = backend.contract_stats()["live_slots"]
+        jax.block_until_ready(
+            jax.jit(lambda: jax.lax.scan(body, 0.0 * _B, jnp.arange(1.0, 5.0))[0])()
+        )
+        loop = backend.contract_stats()["live_slots"] - before
+    work = [counts[key] for key in ("factorizations", "rebuilds", "host_reads")]
+    assert (slots, work, loop) == (3, [3, 0, 0], 1)
+    for k, x in zip((1.0, 2.0, 3.0), xs):
+        np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, k * values), _B), **EXACT)
+
+
+@cudss_only
+def test_a_program_compiled_ahead_of_time_outlives_its_analysis_and_frees_it_with_itself():
+    """A program that analyzes inside its trace, compiled ahead of time, still solves after its
+    Analysis is collected; once the program is collected too, cuDSS holds no slot, site,
+    analysis, device analysis or call of either."""
+    backend = CuDSS()
+    # A size of its own, so that no other test's program holds this pattern's Analysis.
+    topology, values = _system(n=13)
+    b = jnp.linspace(-1.0, 1.0, 13)
+    gauges = ("live_slots", "live_sites", "live_analyses", "live_device_analyses", "live_calls")
+    traced = []
+
+    def collect(first):
+        # analyze keeps the 64 most recent analyses alive: 64 others, then JAX's caches
+        # cleared, leave an Analysis that nothing else holds to the collector.
+        for n in range(first, first + 64):
+            index = np.arange(n, dtype=np.int32)
+            analyze(SparseTopology(rows=index, cols=index, n_dofs=n), backend=backend)
+        jax.clear_caches()
+        gc.collect()
+
+    def run(v, ctx):
+        analysis = analyze(topology, backend=backend)
+        traced.append(weakref.ref(analysis))
+        return solve(factor(analysis, v, ctx=ctx), b)[0]
+
+    collect(100)
+    start = [backend.contract_stats()[key] for key in gauges]
+    with SolveContext("ahead of time") as ctx:
+        program = jax.jit(lambda v: run(v, ctx)).lower(values).compile()
+        collect(200)
+        collected = traced[0]() is None
+        x = program(values)
+        del program
+        collect(300)
+        left = [backend.contract_stats()[key] for key in gauges]
+    assert (collected, left) == (True, start)
+    np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, values), b), **EXACT)
 
 
 @cudss_only

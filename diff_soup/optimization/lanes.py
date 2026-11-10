@@ -50,7 +50,7 @@ def _automatic(mesh: Mesh) -> Mesh:
     return Mesh(mesh.devices, mesh.axis_names, axis_types=(AxisType.Auto,) * len(mesh.axis_names))
 
 
-def map_lanes(fn: Callable, batch: tuple, mesh: Mesh | None) -> PyTree:
+def _map_lanes(fn: Callable, batch: tuple, mesh: Mesh | None) -> PyTree:
     """`vmap(fn)(*batch)`, or with a mesh each device's share of the lanes, gathered once.
 
     `check_vma=False`: the solvers' loops carry values that are the same on every device beside
@@ -73,7 +73,7 @@ def map_lanes(fn: Callable, batch: tuple, mesh: Mesh | None) -> PyTree:
     return mapped(*batch)
 
 
-def placement(layout: Layout | None) -> Mesh | None:
+def _placement(layout: Layout | None) -> Mesh | None:
     """The `"data"` mesh of `layout` with every axis `Auto`, or `None` for one device."""
     mesh = None if layout is None else layout.mesh
     if mesh is None or "data" not in mesh.axis_names:
@@ -81,7 +81,7 @@ def placement(layout: Layout | None) -> Mesh | None:
     return _automatic(mesh)
 
 
-def per_lane(value: ArrayLike | None, count: int) -> Array | None:
+def _per_lane(value: ArrayLike | None, count: int) -> Array | None:
     """`value` broadcast to one entry per lane, or `None`."""
     return None if value is None else jnp.broadcast_to(jnp.asarray(value), (count,))
 
@@ -96,7 +96,7 @@ def _program(solver, problem, batch, mesh):
     def run(x0, args, warm, max_steps, tol):
         return solver.run(problem, x0, args, max_steps=max_steps, warm_start=warm, tol=tol)
 
-    return map_lanes(run, batch, mesh)
+    return _map_lanes(run, batch, mesh)
 
 
 def lanes(
@@ -131,9 +131,9 @@ def lanes(
     Returns:
         `(x, record)`, each batched along the leading axis, as `vmap` of `run` returns them.
     """
-    mesh = placement(layout)
+    mesh = _placement(layout)
     count = int(np.shape(x0_batch)[0])
-    batch = (x0_batch, args_batch, warm_start, per_lane(max_steps, count), per_lane(tol, count))
+    batch = (x0_batch, args_batch, warm_start, _per_lane(max_steps, count), _per_lane(tol, count))
     if mesh is None:
         return _program(solver, problem, batch, None)
     devices = int(mesh.shape["data"])
