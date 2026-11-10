@@ -38,9 +38,9 @@ _LOWER_INVALIDATE = _model_axis.lowering("invalidate")
 class CuDSS(LinearSolver):
     """NVIDIA cuDSS, a sparse direct solver on CUDA GPUs.
 
-    It factors float64 and float32 matrices. `linear="cudss"` selects it with default settings,
-    and `"auto"` picks it on a GPU. `ds.linear.CuDSS` is `None` when the cuDSS extension is
-    not installed.
+    It factors float64 and float32 matrices, real or complex. `linear="cudss"` selects it with
+    default settings, and `"auto"` picks it on a GPU. `ds.linear.CuDSS` is `None` when the
+    cuDSS extension is not installed.
 
     Args:
         reorder: The fill-reducing ordering, `"amd"` or `"metis"`, where `None` takes the
