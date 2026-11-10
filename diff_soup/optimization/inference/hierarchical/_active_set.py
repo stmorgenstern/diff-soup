@@ -94,20 +94,33 @@ def _starting(c: jax.Array, C: jax.Array, x: jax.Array, shape: tuple) -> jax.Arr
     A row is at its boundary within ``sqrt(eps)`` of its size ``|c| + |C| |x|``. A row with
     no column a step moves, or one whose coefficients lie in the span of the group's rows
     taken before it, is left out. ``shape`` is ``(G, P)``; rows are taken in their order
-    within a group, one row of every group at a time.
+    within a group, one row of every group at a time. The test is ``_off_span``'s, on an
+    orthonormal basis of the rows taken so far that grows with each row taken (Gram-Schmidt
+    twice), so the set costs ``P^2 n`` per group and not ``P`` projections of ``P^3``.
     """
     groups, per = shape
     eps = float(np.finfo(np.float64).eps)
     size = jnp.abs(c) + jnp.abs(C) @ jnp.abs(x)
     near = ((c >= -np.sqrt(eps) * size) & jnp.any(C != 0.0, axis=1)).reshape(groups, per)
     rows = C.reshape(groups, per, -1)
+    norms = jnp.linalg.norm(rows, axis=-1)
+    vectors = rows / jnp.where(norms > 0.0, norms, 1.0)[..., None]
     threshold = _threshold(C.dtype)
 
-    def take(position: Any, chosen: jax.Array) -> jax.Array:
-        free = _off_span(rows, chosen, threshold)[:, position]
-        return chosen.at[:, position].set(near[:, position] & free)
+    def take(position: Any, carry: tuple) -> tuple:
+        chosen, basis = carry
+        left = vectors[:, position]
+        for _ in range(2):
+            left = left - jnp.einsum("gp,gpi->gi", jnp.einsum("gpi,gi->gp", basis, left), basis)
+        length = jnp.linalg.norm(left, axis=-1)
+        joins = near[:, position] & (norms[:, position] > 0.0) & (length > threshold)
+        unit = left / jnp.where(length > 0.0, length, 1.0)[:, None]
+        basis = basis.at[:, position].set(jnp.where(joins[:, None], unit, 0.0))
+        return chosen.at[:, position].set(joins), basis
 
-    return jax.lax.fori_loop(0, per, take, jnp.zeros((groups, per), dtype=bool)).reshape(-1)
+    start = (jnp.zeros((groups, per), dtype=bool), jnp.zeros_like(vectors))
+    chosen, _ = jax.lax.fori_loop(0, per, take, start)
+    return chosen.reshape(-1)
 
 
 def active_set(
