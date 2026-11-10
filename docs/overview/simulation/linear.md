@@ -39,6 +39,8 @@ The direct backends factor the iteration matrix and come in both forms.
 - `"superlu"` is SuperLU_MT on the host CPU, a threaded sparse LU on
   float64 values. It is not in the wheels and comes with a
   [source build](../../installation/index.md#install-from-source).
+- `"klu"`, `"superlu"`, and `"cudss"` also factor complex matrices,
+  `complex128` and on cuDSS `complex64`.
 - `"dense"` is the XLA dense LU on CPU and GPU. It holds the LU of the
   assembled matrix and batches natively under `jax.vmap`. On a loaded CPU
   host, above a few hundred unknowns, its LU can stall on OpenBLAS threads
