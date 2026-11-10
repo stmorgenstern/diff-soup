@@ -441,7 +441,7 @@ class _NestedFit(_JointFit):
             attempt=attempt,
             start=False,
             outer_predicted=predicted,
-            noise=_median(loop.noise_dominated_cost_change),
+            noise=float(_median(loop.noise_dominated_cost_change)),
             level=level,
             kept=kept,
         )
@@ -1212,20 +1212,24 @@ class _NestedFit(_JointFit):
             # (8) every member's acceptance, radius and lock, as the joint attempt's
             accepted = active & (rho >= float(inner.eta))
             step_radii = radii.copy()
-            for member in np.flatnonzero(active):
-                radii[member] = _next_radius(
-                    float(radii[member]),
-                    float(rho[member]),
-                    float(scaled_norms[member]),
-                    lock=int(locks[member]),
+            computed = evaluated & passing & ~failed
+            radii = np.where(
+                active,
+                _next_radius(
+                    radii,
+                    rho,
+                    scaled_norms,
+                    lock=locks,
                     radius_max=inner.radius_max,
-                    computed=bool(evaluated and passing[member] and not failed[member]),
-                )
-                if accepted[member]:
-                    if locks[member]:
-                        locks[member] -= 1
-                elif failed[member]:
-                    locks[member] = 2
+                    computed=computed,
+                ),
+                radii,
+            )
+            locks = np.where(
+                active & accepted,
+                np.where(locks > 0, locks - 1, locks),
+                np.where(active & failed, 2, locks),
+            )
             iterations[active] += 1
             work.inner_iterations[active] += 1
             if start:
@@ -1242,55 +1246,48 @@ class _NestedFit(_JointFit):
             # run of noise-dominated rejected trials, as the outer loop's: a trial whose
             # cost was computed extends or ends it, a failed one ends it, one the
             # predicate rejected leaves it; three in a row end its iterations.
-            for member in np.flatnonzero(active):
-                computed = bool(
-                    evaluated
-                    and passing[member]
-                    and not failed[member]
-                    and np.isfinite(trial_costs[member])
+            computed = computed & np.isfinite(trial_costs)
+            noisy = _noise_dominated(
+                evaluated=computed,
+                accepted=accepted,
+                step_radius=step_radii,
+                accepted_radius=accepted_radii,
+                cost=costs,
+                trial_cost=trial_costs,
+                predicted=predicted,
+                relative_to=self.member_scales(costs),
+                limit=noise_limit,
+            )
+            noise_runs = np.where(
+                active & computed,
+                np.where(noisy, noise_runs + 1, 0),
+                np.where(active & failed, 0, noise_runs),
+            )
+            accepted_radii = np.where(active & accepted, step_radii, accepted_radii)
+            # The loop's own step and cost tests, at the member's point after the trial
+            # and at the member's cost threshold.
+            with np.errstate(invalid="ignore"):
+                small_step = step_small(
+                    step_norms, per_member(x), tolerances.step_tol, tested=computed
                 )
-                last = accepted_radii[member]
-                noisy = _noise_dominated(
+                small_cost = cost_small(
+                    accepted=accepted,
                     evaluated=computed,
-                    accepted=bool(accepted[member]),
-                    step_radius=float(step_radii[member]),
-                    accepted_radius=None if np.isnan(last) else float(last),
-                    cost=float(costs[member]),
-                    trial_cost=float(trial_costs[member]),
-                    predicted=float(predicted[member]),
-                    relative_to=float(self.member_scales(costs[member])),
-                    limit=noise_limit,
+                    cost_change=np.abs(trial_costs - costs),
+                    predicted=predicted,
+                    threshold=cost_threshold(costs, tolerances.cost_tol, tolerances.cost_atol),
                 )
-                if computed:
-                    noise_runs[member] = noise_runs[member] + 1 if noisy else 0
-                elif failed[member]:
-                    noise_runs[member] = 0
-                if accepted[member]:
-                    accepted_radii[member] = step_radii[member]
-                # The loop's own step and cost tests, at the member's point after the
-                # trial and at the member's cost threshold.
-                if step_small(
-                    float(step_norms[member]),
-                    x[owners == member],
-                    tolerances.step_tol,
-                    tested=computed,
-                ):
-                    codes[member] = _STEP_TOLERANCE
-                    active[member] = False
-                elif cost_small(
-                    accepted=bool(accepted[member]),
-                    evaluated=computed,
-                    cost_change=float(abs(trial_costs[member] - costs[member])),
-                    predicted=float(predicted[member]),
-                    threshold=cost_threshold(
-                        costs[member], tolerances.cost_tol, tolerances.cost_atol
-                    ),
-                ):
-                    codes[member] = _COST_TOLERANCE
-                    active[member] = False
-                elif noise_runs[member] >= _NOISE_RUN:
-                    codes[member] = _EVALUATION_NOISE
-                    active[member] = False
+            noise_run = noise_runs >= _NOISE_RUN
+            codes = np.where(
+                active & small_step,
+                _STEP_TOLERANCE,
+                np.where(
+                    active & small_cost,
+                    _COST_TOLERANCE,
+                    np.where(active & noise_run, _EVALUATION_NOISE, codes),
+                ),
+            )
+            active = active & ~(small_step | small_cost | noise_run)
             floor = active & (radii <= tiny)
             floored |= floor
             finish(floor, _RADIUS)

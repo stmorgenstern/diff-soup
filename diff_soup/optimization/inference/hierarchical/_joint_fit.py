@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import time
 from collections.abc import Iterable, Mapping
 from numbers import Real
@@ -28,18 +27,30 @@ from diff_soup.optimization.inference.hierarchical import _inequality as inequal
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._constraints import start_on_rows
 from diff_soup.optimization.inference.hierarchical._lane_route import _LABEL, _LaneRoute, _listed
+from diff_soup.optimization.inference.hierarchical._step_program import (
+    PRE_STOPS,
+    Before,
+    Outcome,
+    Previous,
+    Proposal,
+    StepSettings,
+    Trial,
+    Zero,
+    as_host,
+    coordinates,
+    judge_program,
+    no_previous,
+    propose,
+    propose_program,
+)
 from diff_soup.optimization.inference.hierarchical._trust_step import (
     _bounded_gradient,
     _FloorEnd,
-    _full_step,
+    _full_step_decrease,
     _FullStep,
     _GradientFloor,
     _noise_ceiling,
     _noise_trial_limit,
-    _radius_floor,
-    _scale_candidate,
-    _stationarity,
-    _subproblem,
     _trial_point,
     _trial_valid,
 )
@@ -47,27 +58,25 @@ from diff_soup.optimization.inference.hierarchical._verdicts import (
     _failures_text,
     _last_invalid,
     _stalled_message,
-    _stationarity_limit,
     _stop_report,
     _verdict,
-    _within,
 )
 from diff_soup.optimization.inference.hierarchical._work import _record, _Work
 from diff_soup.optimization.solvers._loop import (
     LoopState,
-    _after_attempt,
-    _stop_after,
     loop_tolerances,
-    step_small,
+    stop_name,
 )
 from diff_soup.optimization.solvers._loop_judge import (
+    Window,
     _floor_level,
     _floor_parameter_radius,
     _floor_sigma,
-    _judge,
     _jump_level,
     _median,
     cost_scale,
+    rejection_text,
+    window_entries,
 )
 
 if TYPE_CHECKING:
@@ -379,8 +388,11 @@ class _JointFit:
         message, with its numbers, and so does a fit that converged at the
         jumps of its computed cost.
         """
-        noise_changes, rejected_changes, rejected_decreases = windows
-        noise = _median(noise_changes)
+        noise_changes, rejected_changes, rejected_decreases = (
+            window_entries(window).tolist() if isinstance(window, Window) else list(window)
+            for window in windows
+        )
+        noise = float(_median(noise_changes))
         floor_sigma = 0.0 if floor is None else floor.sigma
         # With a gradient floor, the jumps of the computed cost that every rejected trial
         # met, when they all did, are what the verdict reads beside the measured noise.
@@ -567,8 +579,8 @@ class _JointFit:
                     "member_stationarity": (
                         None if members is None else tuple(float(value) for value in members)
                     ),
-                    "evaluation_noise": _median(loop.noise_dominated_cost_change),
-                    "evaluation_noise_trials": len(loop.noise_dominated_cost_change),
+                    "evaluation_noise": float(_median(loop.noise_dominated_cost_change)),
+                    "evaluation_noise_trials": int(loop.noise_dominated_cost_change.count),
                     "evaluation_noise_ceiling": _noise_ceiling(route),
                     **({} if floor is None else floor.entries),
                     **report,
@@ -598,12 +610,14 @@ class _JointFit:
         verdict reads it.
         """
         samples = loop.gradient_floor_samples
+        count = int(samples.count)
         bound = self.floor.bound(scale)
-        level = _floor_level(samples, bound)
+        level = float(_floor_level(samples, bound))
+        level = None if np.isnan(level) else level
         reported = bound if level is None else level
         source = None
         if bound is not None:
-            source = "a_posteriori" if samples and _median(samples) <= bound else "a_priori"
+            source = "a_posteriori" if count and _median(samples) <= bound else "a_priori"
         radius = _floor_parameter_radius(reported, step.norm, step.length, step.decrease)
         box = None
         if reported is not None and system is not None:
@@ -623,13 +637,120 @@ class _JointFit:
             "gradient_floor_bound": (
                 None if bound is None else float(_floor_sigma(bound, step.norm, relative_to))
             ),
-            "gradient_floor_trials": len(samples),
-            "cost_floor": max(float(cost_tol), 3.0 * _median(loop.noise_dominated_cost_change)),
+            "gradient_floor_trials": count,
+            "cost_floor": max(
+                float(cost_tol), 3.0 * float(_median(loop.noise_dominated_cost_change))
+            ),
             "floor_parameter_radius": None if radius is None else float(radius),
             "floor_parameter_box": None if box is None else float(box),
             "floor_source": source,
         }
         return _FloorEnd(level, float(_floor_sigma(level, step.norm, relative_to)), entries)
+
+    def settings(self, tolerances: tuple, n_constraints: int) -> StepSettings:
+        """The attempt programs' settings for this fit: the solver's options and the tolerances."""
+        solver, route = self.solver, self.route
+        grad_tolerance, step_tol, cost_tol, cost_atol, _ = tolerances
+        dtype = np.dtype(np.asarray(route.problem.x0).dtype)
+        target = solver.target_accepted_steps
+        return StepSettings(
+            fixed=tuple(int(index) for index in route.fixed),
+            grad_test=grad_tolerance is not None and not n_constraints,
+            equality=n_constraints > 0,
+            stationarity_tol=solver.stationarity_tol,
+            cost_tol=float(cost_tol),
+            cost_atol=float(cost_atol),
+            step_tol=float(step_tol),
+            eta=float(solver.eta),
+            radius_max=float(solver.radius_max),
+            relaxed=bool(solver.noise_relaxed_ratio),
+            noise_limit=_noise_trial_limit(solver, route),
+            max_invalid=int(solver.max_consecutive_invalid_trials),
+            target_steps=None if target is None else int(target),
+            max_evaluations=solver.max_evaluations,
+            eps=float(np.finfo(dtype).eps),
+            tiny=float(np.finfo(float).tiny),
+        )
+
+    def before(self, loop: LoopState) -> Before:
+        """The loop at the start of an attempt as the proposing program takes it."""
+        point = np.asarray(loop.point)
+        scale = np.full_like(point, np.nan) if loop.scale is None else np.asarray(loop.scale)
+        threshold = np.nan if loop.grad_threshold is None else loop.grad_threshold
+        return Before(
+            point,
+            scale.astype(point.dtype),
+            np.asarray(loop.cost, dtype=np.float64),
+            np.asarray(loop.radius, dtype=np.float64),
+            np.asarray(threshold, dtype=np.float64),
+            loop.noise_dominated_cost_change,
+            loop.gradient_floor_samples,
+            self.floor.current_terms(),
+        )
+
+    def propose(self, system, loop: LoopState, previous: Previous) -> Proposal:
+        """The attempt's proposal at ``loop.point`` (``_step_program.propose``), as host values.
+
+        One compiled program without inequality rows; under rows the same proposal
+        with the active set's solve at zero damping and trial made on the host.
+        """
+        route, settings = self.route, self.step_settings
+        floor = self.floor.terms()
+        if self.rows is None:
+            proposal = propose_program(
+                system,
+                self.solver.x_scale,
+                route.bounds,
+                floor,
+                self.before(loop),
+                previous,
+                settings=settings,
+            )
+        else:
+            proposal = propose(
+                system,
+                self.solver.x_scale,
+                route.bounds,
+                floor,
+                self.before(loop),
+                as_host(previous),
+                settings=settings,
+                solve=self.rows_solve,
+            )
+        return as_host(proposal)
+
+    def rows_solve(self, system, gradient, coordinates, radius, point, settings, bounds) -> tuple:
+        """``propose``'s ``solve`` under inequality rows: the active set's solves, on the host.
+
+        The solve at zero damping holds the rows the full step would violate
+        (``zero_solve``); the trial is ``rows_trial``'s, made when the proposal asks.
+        """
+        radius = float(radius)
+        empty = self.route.solve_attempt(system, coordinates, radius)
+        zero, held = self.zero_solve(system, point, coordinates, radius, empty)
+        decrease = _full_step_decrease(
+            held, gradient, coordinates.scale, zero, coordinates.addition
+        )
+
+        def trial() -> Trial:
+            fixed = np.asarray(settings.fixed, dtype=np.int64)
+            point_, norm, predicted, multiplier, solves = self.rows_trial(
+                system, point, gradient, coordinates, radius, fixed, bounds, empty
+            )
+            return Trial(point_, norm, predicted, multiplier, solves, False)
+
+        return Zero(np.asarray(zero[0]), decrease), trial
+
+    def judge(self, loop: LoopState, cost: float, outcome: Outcome) -> tuple:
+        """The trial's judgment (``_step_program.judge``), one compiled program, as host values."""
+        return as_host(
+            judge_program(
+                loop.trials(),
+                np.asarray(cost, dtype=np.float64),
+                outcome,
+                settings=self.step_settings,
+            )
+        )
 
     def run(self, state: Mapping | None = None) -> OptResult:
         """Fit from the start point, or continue the fit whose ``state`` is given."""
@@ -663,7 +784,7 @@ class _JointFit:
             work.restore(state)
             work.resume_blocks += 1
         # grad_tol=None tests no gradient: the stationarity number is the test there.
-        grad_tolerance, step_tol, cost_tol, cost_atol, _ = loop_tolerances(
+        tolerances = loop_tolerances(
             dtype,
             grad_tol=solver.grad_tol,
             step_tol=solver.step_tol,
@@ -672,30 +793,17 @@ class _JointFit:
             stationarity_tol=solver.stationarity_tol,
             label=_LABEL,
         )
-        fixed = np.asarray(route.fixed, dtype=np.int64)
+        grad_tolerance, _, cost_tol, _, _ = tolerances
         # With equality or inequality rows the gradient test is off: the projected
         # stationarity number ends the fit.
         n_constraints = int(route.constraint_matrix.shape[0]) + (
             0 if self.rows is None else self.rows.count
         )
+        self.step_settings = self.settings(tolerances, n_constraints)
         route.problem.prepare(modes=self.modes)
         system, lane_costs = self.blocks(x, start=state is None)
         x, system, lane_costs = self.at_start(x, system, lane_costs, fresh=state is None)
         cost = float(system.cost)
-        # Every program the fit runs is compiled here, before the loop: the scale, the
-        # attempt's program (the solve at lambda = 0 and the step of the initial radius,
-        # kept as the first attempt's of a fresh fit), the quadratic, and the solve at
-        # lambda = 0 alone that the end point's numbers take. The regularizer was
-        # evaluated at the point by the system's blocks.
-        gradient, diagonal = route.vectors(system)
-        start = _subproblem(x, gradient, _scale_candidate(system, solver.x_scale, diagonal), bounds)
-        first = route.solve_attempt(system, start, float(solver.radius_init))
-        elimination.level_quadratic(system, np.zeros_like(x))
-        elimination.solve_scaled(system, start.scale, 0.0, start.addition)
-
-        for callback in self.callbacks:
-            callback.on_start(route.n, route.view.n_residuals, solver.max_steps)
-        self.started = time.perf_counter()
         if state is None:
             # A fresh fit's first record holds the retries of the start's request.
             record = self.record(float("nan"), float("nan"), False, x, ())
@@ -704,106 +812,61 @@ class _JointFit:
             )
         else:
             # A resumed fit's first record holds the retries of its first attempt, which
-            # makes its own lambda = 0 solve in the restored scale, as an uninterrupted fit.
-            first = None
+            # makes its own solve at zero damping in the restored scale, as an uninterrupted fit.
             loop = LoopState.restore(
                 state, point=x, cost=cost, scale=np.array(state["scale"], dtype=dtype)
             )
-        # The largest relative predicted decrease of a trial counted as noise-dominated;
-        # None bounds none.
-        noise_limit = _noise_trial_limit(solver, route)
-        start_attempt = loop.attempt
-        attempt = start_attempt
-        for attempt in range(start_attempt, int(solver.max_steps)):
-            gradient, diagonal = route.vectors(system)
-            candidate = _scale_candidate(system, solver.x_scale, diagonal)
-            loop.scale = candidate if loop.scale is None else np.maximum(loop.scale, candidate)
-            grad_norm = float(np.linalg.norm(gradient))
-            # The subproblem's coordinates: the scale, under bounds shaped by the
-            # distance to the sides the gradient points at.
-            coordinates = _subproblem(loop.point, gradient, loop.scale, bounds)
-            stop_gradient = float(np.linalg.norm(_bounded_gradient(gradient, coordinates, bounds)))
-            loop.cost_history.append(loop.cost)
-            loop.grad_history.append(grad_norm)
-            if grad_tolerance is not None:
-                if loop.grad_threshold is None:
-                    loop.grad_threshold = grad_tolerance.threshold(stop_gradient)
-                if not n_constraints and stop_gradient <= loop.grad_threshold:
-                    stop = "gradient_tolerance"
-                    break
-
-            # The solve at lambda = 0 in this attempt's scale gives the stationarity
-            # number of the current point and is the first solve of the step's
-            # multiplier search; one program makes both, with the step of this radius
-            # (a fresh fit's first attempt has them from above).
-            if (
-                attempt == start_attempt
-                and first is not None
-                and first.answers(coordinates.scale, loop.radius, coordinates.addition)
-            ):
-                zero = first
-            else:
-                zero = route.solve_attempt(system, coordinates, loop.radius)
-            empty, held = zero, system
-            if self.rows is not None:
-                # Under inequality rows: the full step with the rows it would violate held.
-                zero, held = self.zero_solve(system, loop.point, coordinates, loop.radius, empty)
-            # Every relative number of the attempt is relative to the cost scale here.
-            relative_to = cost_scale(loop.cost, cost_tol, cost_atol)
-            stationarity = _stationarity(
-                held, gradient, coordinates.scale, zero, relative_to, coordinates.addition
+        if grad_tolerance is not None and loop.grad_threshold is None:
+            # The gradient test's threshold, from the first attempt's gradient in its scale.
+            gradient, _, subproblem = coordinates(
+                system, solver.x_scale, np.asarray(loop.point), self.before(loop).scale, bounds
             )
-            # The model predicts no further decrease the evaluation can show here; a step
-            # the model says raises the cost (the decrease below minus the limit) is not that.
-            if _within(
-                stationarity,
-                _stationarity_limit(
-                    solver.stationarity_tol, cost_tol, _median(loop.noise_dominated_cost_change)
-                ),
-            ):
-                work.solves += 1
-                stop = "stationarity"
+            loop.grad_threshold = grad_tolerance.threshold(
+                float(np.linalg.norm(_bounded_gradient(gradient, subproblem, bounds)))
+            )
+        # Both programs are compiled here, before the loop: the first attempt's proposal is
+        # made, and the judgment once on it, its answer dropped.
+        previous = no_previous(dtype)
+        proposal = self.propose(system, loop, previous)
+        self.judge(loop, loop.cost, self.outcome_of(proposal, loop.radius, False, False, np.inf))
+
+        for callback in self.callbacks:
+            callback.on_start(route.n, route.view.n_residuals, solver.max_steps)
+        self.started = time.perf_counter()
+        start_attempt = loop.attempt
+        attempt = start_attempt - 1
+        made = False
+        stop = None
+        for attempt in range(start_attempt, int(solver.max_steps)):
+            if made:
+                proposal = self.propose(system, loop, previous)
+            if int(proposal.previous_stop):
+                # The attempt before ended the loop, at the point it left.
+                stop = stop_name(proposal.previous_stop)
+                attempt -= 1
                 break
-            # The gradient's accuracy floor here: the median of the floor samples, at
-            # most the bound from the lanes' tolerances and blocks; None before the
-            # first sample, when no rule reads it.
-            bound = self.floor.bound(coordinates.scale)
-            level = _floor_level(loop.gradient_floor_samples, bound)
-            full_norm = float(np.linalg.norm(np.asarray(zero[0])))
-            # The model predicts no further decrease its derivatives resolve here.
-            if level is not None and _within(
-                stationarity, _floor_sigma(level, full_norm, relative_to)
-            ):
-                work.solves += 1
-                stop = "derivative_accuracy"
+            loop.scale = np.asarray(proposal.scale)
+            loop.cost_history.append(loop.cost)
+            loop.grad_history.append(float(proposal.grad_norm))
+            if int(proposal.pre_stop):
+                stop = PRE_STOPS[int(proposal.pre_stop) - 1]
+                if stop != "gradient_tolerance":
+                    work.solves += 1
                 break
-            radius_floor = _radius_floor(level, full_norm, gradient, coordinates.scale)
-            step_radius = loop.radius
-            if self.rows is None:
-                trial, scaled_step_norm, predicted, multiplier, solves = _trial_point(
-                    system,
-                    loop.point,
-                    gradient,
-                    coordinates,
-                    loop.radius,
-                    first=zero,
-                    fixed=fixed,
-                    bounds=bounds,
-                    equality=n_constraints > 0,
+            if bool(proposal.failed):
+                raise ValueError(
+                    "TrustRegion could not bracket a finite Gauss-Newton trust-region step; "
+                    "improve parameter scaling."
                 )
-            else:
-                trial, scaled_step_norm, predicted, multiplier, solves = self.rows_trial(
-                    system, loop.point, gradient, coordinates, loop.radius, fixed, bounds, empty
-                )
-            work.solves += solves
-            step = trial - loop.point
-            step_norm = float(np.linalg.norm(step))
+            work.solves += int(proposal.solves)
+            trial = np.asarray(proposal.trial)
 
             trial_ok = _trial_valid(route.view, trial)
             failures: tuple = ()
             failed_owners = None
             rejection_reason = None
             invalid = False
+            results = None
             if not trial_ok:
                 work.predicate_rejections += 1
                 trial_cost = float("inf")
@@ -835,27 +898,18 @@ class _JointFit:
                 else:
                     trial_cost = route.trial_cost(results, trial)
 
-            predicted_value = float(predicted)
-            rho, accepted, loop.radius, reason = _judge(
-                cost=loop.cost,
-                trial_cost=trial_cost,
-                predicted=predicted_value,
-                valid=trial_ok,
-                invalid=invalid,
-                scaled_norm=scaled_step_norm,
-                radius=loop.radius,
-                lock=loop.growth_lock,
-                noise_window=loop.noise_dominated_cost_change,
-                eta=float(solver.eta),
-                radius_max=solver.radius_max,
-                relaxed=solver.noise_relaxed_ratio,
-                relative_to=cost_scale(loop.cost, cost_tol, cost_atol),
-                radius_floor=radius_floor,
+            predicted = float(proposal.predicted)
+            rho, accepted, radius, reason, after = self.judge(
+                loop,
+                loop.cost,
+                self.outcome_of(proposal, loop.radius, trial_ok, invalid, trial_cost),
             )
+            rho, accepted = float(rho), bool(accepted)
+            loop.radius = float(radius)
             assert_decision(accepted)
-            rejection_reason = rejection_reason or reason
+            rejection_reason = rejection_reason or rejection_text(reason, rho, solver.eta)
 
-            previous_cost = loop.cost
+            level = float(proposal.level)
             if accepted:
                 loop.point = trial
                 loop.accepted += 1
@@ -864,89 +918,82 @@ class _JointFit:
                     system,
                     results,
                     attempt=attempt,
-                    predicted=predicted_value,
-                    level=level,
+                    predicted=predicted,
+                    level=None if np.isnan(level) else level,
                 )
             work.attempted(accepted)
             loop.radius_history.append(loop.radius)
-            after = _after_attempt(
-                loop,
-                accepted=accepted,
-                valid=trial_ok,
-                invalid=invalid,
-                cost=previous_cost,
-                trial_cost=trial_cost,
-                predicted=predicted_value,
-                step_radius=step_radius,
-                cost_tol=cost_tol,
-                cost_atol=cost_atol,
-                noise_limit=noise_limit,
-                scaled_norm=scaled_step_norm,
-                floor_bound=bound,
-            )
-            loop = dataclasses.replace(loop, **after.trials._asdict())
-            loop.record = self.record(rho, float(multiplier), accepted, trial, failures)
+            loop.keep(after.trials)
+            loop.record = self.record(rho, float(proposal.multiplier), accepted, trial, failures)
             loop.attempt = attempt + 1
             info = self.step_info(
                 loop,
                 attempt,
-                grad_norm=grad_norm,
+                grad_norm=float(proposal.grad_norm),
                 accepted=accepted,
-                delta_norm=step_norm,
+                delta_norm=float(proposal.step_norm),
                 rho=rho,
-                lam=float(multiplier),
+                lam=float(proposal.multiplier),
                 rejection_reason=rejection_reason,
                 failed_owners=failed_owners,
                 state=self.state(loop),
-                stationarity=stationarity,
+                stationarity=float(proposal.stationarity),
             )
-            stop = _stop_after(
+            # The stop tests of this attempt run at the start of the next proposal, at the
+            # point it left, with the callbacks' request and the evaluations made; the
+            # budget counts the consistency re-solves and the frozen passes too.
+            previous = Previous(
+                np.True_,
                 after,
-                requested=self.notify(info),
-                max_invalid=int(solver.max_consecutive_invalid_trials),
-                # The step test reads every trial whose cost was computed, at the point
-                # where the acceptance left the fit.
-                step_small=step_small(step_norm, loop.point, step_tol, tested=after.evaluated),
-                accepted_count=loop.accepted,
-                target_steps=solver.target_accepted_steps,
-                # The budget counts the consistency re-solves and the frozen passes too.
-                evaluations=work.evaluations(),
-                max_evaluations=solver.max_evaluations,
+                np.asarray(proposal.step_norm, dtype=after.predicted.dtype),
+                np.asarray(self.notify(info)),
+                np.asarray(work.evaluations(), dtype=np.int64),
+                np.asarray(loop.accepted, dtype=np.int64),
             )
-            if stop is not None:
-                break
+            made = True
         else:
             attempt = max(int(solver.max_steps), start_attempt) - 1
             stop = "max_steps"
+            proposal = self.propose(system, loop, previous)
+            if made and int(proposal.previous_stop):
+                stop = stop_name(proposal.previous_stop)
 
-        gradient, diagonal = elimination.level_vectors(system)
-        grad_norm = float(np.linalg.norm(gradient))
-        # The stationarity number at the end point, in the coordinates the next
-        # attempt would take there.
-        candidate = _scale_candidate(system, solver.x_scale, diagonal)
-        end_scale = candidate if loop.scale is None else np.maximum(loop.scale, candidate)
-        end = _subproblem(loop.point, gradient, end_scale, bounds)
-        projected_grad_norm = float(np.linalg.norm(_bounded_gradient(gradient, end, bounds)))
-        if self.rows is None:
-            end_held = system
-            end_zero = elimination.solve_scaled(system, end.scale, 0.0, end.addition)
-        else:
-            # Under inequality rows: the full step with the rows it would violate held.
-            empty = route.solve_attempt(system, end, loop.radius)
-            end_zero, end_held = self.zero_solve(system, loop.point, end, loop.radius, empty)
-        end_step = _full_step(end_held, gradient, end.scale, end_zero, end.addition)
-        end_relative_to = cost_scale(loop.cost, cost_tol, cost_atol)
-        end_stationarity = end_step.decrease / end_relative_to
+        # The numbers at the end point, in the coordinates the next attempt would take
+        # there: the last proposal's.
+        gradient_norm = float(proposal.grad_norm)
+        end_step = _FullStep(
+            float(proposal.full_norm),
+            float(proposal.full_length),
+            float(proposal.decrease),
+            np.asarray(proposal.scale),
+        )
+        end_stationarity = float(proposal.stationarity)
+        end_relative_to = cost_scale(loop.cost, cost_tol, self.step_settings.cost_atol)
         return self.outcome(
             loop,
             stop,
             attempt=attempt,
             x0=x0,
             cost_tol=cost_tol,
-            grad_norm=grad_norm,
-            projected_grad_norm=projected_grad_norm,
+            grad_norm=gradient_norm,
+            projected_grad_norm=float(proposal.stop_gradient),
             stationarity=end_stationarity,
             floor=self.floor_end(
-                loop, end_step, end.scale, cost_tol, end_relative_to, system=system
+                loop, end_step, end_step.scale, cost_tol, end_relative_to, system=system
             ),
+        )
+
+    def outcome_of(
+        self, proposal: Proposal, radius: float, valid: bool, invalid: bool, trial_cost: float
+    ) -> Outcome:
+        """The judgment's ``Outcome`` of a trial from its proposal, at the step's radius ``radius``."""
+        return Outcome(
+            np.asarray(valid),
+            np.asarray(invalid),
+            np.asarray(trial_cost, dtype=np.float64),
+            np.asarray(proposal.predicted, dtype=np.float64),
+            np.asarray(proposal.scaled_norm, dtype=np.float64),
+            np.asarray(radius, dtype=np.float64),
+            np.asarray(proposal.radius_floor, dtype=np.float64),
+            np.asarray(proposal.bound, dtype=np.float64),
         )
