@@ -83,6 +83,15 @@ def _inexact(x) -> jax.Array:
     return arr.astype(jnp.result_type(float))
 
 
+def _clamp(t, knots: jax.Array) -> jax.Array:
+    """``t`` clamped to ``[knots[0], knots[-1]]``, with the derivative in ``t`` whole on both ends.
+
+    ``jnp.clip`` splits the derivative at a tie between ``t`` and the bound, so on an end
+    knot it would halve the signal's derivative in ``t``.
+    """
+    return jnp.where(t < knots[0], knots[0], jnp.where(t > knots[-1], knots[-1], t))
+
+
 def _horner(coefficients: jax.Array, tau: jax.Array) -> jax.Array:
     """Evaluate a polynomial in ``tau`` from its power-basis coefficients, constant term first.
 
@@ -218,8 +227,13 @@ class PiecewiseLinear(eqx.Module):
         self.values = _inexact(values)
 
     def __call__(self, t) -> jax.Array:
-        """Return the linearly-interpolated value at time ``t``."""
+        """Return the linearly-interpolated value at time ``t``.
+
+        A ``t`` exactly on an interior knot takes the segment starting there, so the
+        derivative in ``t`` on a knot is that segment's slope.
+        """
         n_segments = self.knots.shape[0] - 1
+        t = _clamp(t, self.knots)
         idx = jnp.clip(
             jnp.searchsorted(self.knots, t, side="right") - 1,
             0,
@@ -227,7 +241,8 @@ class PiecewiseLinear(eqx.Module):
         )
         t0 = self.knots[idx]
         t1 = self.knots[idx + 1]
-        frac = jnp.clip((t - t0) / (t1 - t0), 0.0, 1.0)
+        # Within [0, 1] without a clip: t0 <= t <= t1, and rounding keeps the order.
+        frac = (t - t0) / (t1 - t0)
         v0 = self.values[idx]
         v1 = self.values[idx + 1]
         if self.values.ndim > 1:
@@ -294,6 +309,7 @@ class CubicHermite(eqx.Module):
     def __call__(self, t) -> jax.Array:
         """Return the interpolated value at time ``t``."""
         n_segments = self.knots.shape[0] - 1
+        t = _clamp(t, self.knots)
         idx = jnp.clip(
             jnp.searchsorted(self.knots, t, side="left") - 1,
             0,
@@ -302,7 +318,8 @@ class CubicHermite(eqx.Module):
         t0 = self.knots[idx]
         t1 = self.knots[idx + 1]
         dt = t1 - t0
-        s = jnp.clip((t - t0) / dt, 0.0, 1.0)
+        # Within [0, 1] without a clip: t0 <= t <= t1, and rounding keeps the order.
+        s = (t - t0) / dt
 
         v0 = self.values[idx]
         v1 = self.values[idx + 1]
@@ -422,7 +439,7 @@ class BSpline(eqx.Module):
             0,
             n_segments - 1,
         )
-        tau = jnp.clip(t, self.knots[0], self.knots[-1]) - self.knots[idx]
+        tau = _clamp(t, self.knots) - self.knots[idx]
         coefficients = self.polynomials()[idx]
         return _horner(jnp.moveaxis(coefficients, jnp.ndim(tau), 0), tau)
 
