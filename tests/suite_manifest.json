@@ -311,7 +311,7 @@
     },
     {
       "file": "tests/contracts/test_lane_select.py",
-      "feature": "The lane conditional: one conditional unbatched with each branch traced once, each lane's own branch under vmap and nested vmap, derivatives that follow it"
+      "feature": "The lane conditional: each branch traced once, each lane's own branch under vmap and nested vmap, derivatives that follow it"
     },
     {
       "file": "tests/contracts/test_second_order_ad.py",
