@@ -201,6 +201,24 @@ def test_the_host_loop_applies_the_scan_loops_moves(toy, closed_loop):
     np.testing.assert_allclose(host.controls, closed_loop.controls, rtol=0, atol=1e-10)
 
 
+def test_the_closed_loop_differentiates_in_the_limit_under_its_warm_start(toy, closed_loop):
+    """jax.jacfwd of the receding horizon's moves in the charge, under the default warm start
+    that starts each horizon from the last one's solution and record, is the central
+    difference's."""
+
+    def moves(charge):
+        problem = charging(toy, charge=charge)
+        return control.receding_horizon(problem, toy.plant, control.FullState(), 3, solver=IP)
+
+    jacobian = jax.jacfwd(lambda charge: moves(charge).controls)(jnp.asarray(CHARGE))
+    # The moves are affine in the charge (the closed form), so a wide difference is exact up
+    # to the horizon solves' error.
+    step = 0.1
+    differences = (moves(CHARGE + step).controls - moves(CHARGE - step).controls) / (2 * step)
+    # measured 1.8e-8, workstation CPU 2026-11-09, pytest tests/public_api/test_control.py
+    np.testing.assert_allclose(jacobian, differences, rtol=0, atol=1e-6)
+
+
 @pytest.mark.parametrize("kind", ["kalman", "moving_horizon"])
 def test_an_estimator_corrects_a_wrong_belief_from_voltage_measurements(toy, kind):
     """Believing the particles at 1.6 when they are at 2.0, each estimator corrects its mean

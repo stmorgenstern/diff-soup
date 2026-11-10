@@ -25,7 +25,8 @@ recompile), and none of the evaluation logic uses Python control flow that
 would need to trace differently for different inputs — every method is safe
 to wrap in ``jax.vmap`` or differentiate with ``jax.grad`` / ``jax.jacfwd``.
 The [BSpline][diff_soup.optimization.inference.approx.signals.BSpline] is the one
-exception on knots: its knots fix its basis when it is built.
+exception on knots: its knots are static, not a leaf, since they fix its basis when it
+is built.
 When a signal is selected as a fit learnable by name, its ``learnable_paths``
 pick only the coefficient leaves (values / slopes / control points / harmonic
 amplitudes) — the knots and the Fourier period define the basis and are not fit
@@ -43,13 +44,17 @@ The four piecewise bases
 ([PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant],
 [PiecewiseLinear][diff_soup.optimization.inference.approx.signals.PiecewiseLinear],
 [CubicHermite][diff_soup.optimization.inference.approx.signals.CubicHermite],
-[BSpline][diff_soup.optimization.inference.approx.signals.BSpline]) all select
-the active segment the same way: a query
-time that lands exactly on an interior knot is treated as belonging to the
+[BSpline][diff_soup.optimization.inference.approx.signals.BSpline]) clamp a query
+time outside ``[knots[0], knots[-1]]`` to the nearer end. All but
+[PiecewiseLinear][diff_soup.optimization.inference.approx.signals.PiecewiseLinear]
+treat a query time that lands exactly on an interior knot as belonging to the
 segment *to its left*. Concretely, a numerical solver that has just
 integrated a step ending precisely at knot ``t_k`` and then evaluates the
 signal at ``t == t_k`` sees the value the step was actually integrated
 against — the left segment — not the one that is about to start.
+[PiecewiseLinear][diff_soup.optimization.inference.approx.signals.PiecewiseLinear]
+takes the segment to its right; being continuous, it has the same value from either
+side, and its derivative in ``t`` on a knot is the right segment's slope.
 
 Each of them is a polynomial on every segment, and ``polynomials()`` returns
 its exact power-basis coefficients in the time since the segment's start,
@@ -83,6 +88,15 @@ def _inexact(x) -> jax.Array:
     return arr.astype(jnp.result_type(float))
 
 
+def _clamp(t, knots: jax.Array) -> jax.Array:
+    """``t`` clamped to ``[knots[0], knots[-1]]``, with the derivative in ``t`` whole on both ends.
+
+    ``jnp.clip`` splits the derivative at a tie between ``t`` and the bound, so on an end
+    knot it would halve the signal's derivative in ``t``.
+    """
+    return jnp.where(t < knots[0], knots[0], jnp.where(t > knots[-1], knots[-1], t))
+
+
 def _horner(coefficients: jax.Array, tau: jax.Array) -> jax.Array:
     """Evaluate a polynomial in ``tau`` from its power-basis coefficients, constant term first.
 
@@ -103,23 +117,24 @@ def _horner(coefficients: jax.Array, tau: jax.Array) -> jax.Array:
     return coefficients[0] + rising
 
 
-def _clamped_cubic_basis(knots: np.ndarray) -> np.ndarray:
+def _clamped_cubic_band(knots: np.ndarray) -> np.ndarray:
     """The clamped cubic B-spline basis in powers of the time since each segment's start.
 
-    Entry ``[k, j, i]`` is the coefficient of ``tau**j`` in basis function ``i`` on
-    segment ``k``, with ``tau = t - knots[k]``: the Cox–de Boor recursion (de Boor, A
-    Practical Guide to Splines, rev. ed., 2001, ch. IX) carried out on polynomials in
-    ``tau``, over the knot vector with each end repeated four times.
+    Segment ``k`` meets four basis functions, ``k`` to ``k + 3``. Entry ``[k, j, i]`` is the
+    coefficient of ``tau**j`` in basis function ``k + i`` on segment ``k``, with
+    ``tau = t - knots[k]``: the Cox–de Boor recursion (de Boor, A Practical Guide to Splines,
+    rev. ed., 2001, ch. IX) carried out on polynomials in ``tau``, over the knot vector with
+    each end repeated four times.
 
     Args:
         knots: The segment edges, strictly ascending, shape ``(K + 1,)``.
 
     Returns:
-        A NumPy array of shape ``(K, 4, K + 3)``.
+        A NumPy array of shape ``(K, 4, 4)``.
     """
     n_segments = knots.size - 1
     vector = np.concatenate([np.full(3, knots[0]), knots, np.full(3, knots[-1])])
-    basis = np.zeros((n_segments, 4, n_segments + 3))
+    band = np.zeros((n_segments, 4, 4))
     for k in range(n_segments):
         origin = knots[k]
         # Degree 0: the indicator of segment k, which is [vector[k + 3], vector[k + 4]).
@@ -139,8 +154,8 @@ def _clamped_cubic_basis(knots: np.ndarray) -> np.ndarray:
                 raised[i] = poly
             level = raised
         for i, poly in level.items():
-            basis[k, :, i] = poly
-    return basis
+            band[k, :, i - k] = poly
+    return band
 
 
 class PiecewiseConstant(eqx.Module):
@@ -218,8 +233,13 @@ class PiecewiseLinear(eqx.Module):
         self.values = _inexact(values)
 
     def __call__(self, t) -> jax.Array:
-        """Return the linearly-interpolated value at time ``t``."""
+        """Return the linearly-interpolated value at time ``t``.
+
+        A ``t`` exactly on an interior knot takes the segment starting there, so the
+        derivative in ``t`` on a knot is that segment's slope.
+        """
         n_segments = self.knots.shape[0] - 1
+        t = _clamp(t, self.knots)
         idx = jnp.clip(
             jnp.searchsorted(self.knots, t, side="right") - 1,
             0,
@@ -227,7 +247,8 @@ class PiecewiseLinear(eqx.Module):
         )
         t0 = self.knots[idx]
         t1 = self.knots[idx + 1]
-        frac = jnp.clip((t - t0) / (t1 - t0), 0.0, 1.0)
+        # Within [0, 1] without a clip: t0 <= t <= t1, and rounding keeps the order.
+        frac = (t - t0) / (t1 - t0)
         v0 = self.values[idx]
         v1 = self.values[idx + 1]
         if self.values.ndim > 1:
@@ -294,6 +315,7 @@ class CubicHermite(eqx.Module):
     def __call__(self, t) -> jax.Array:
         """Return the interpolated value at time ``t``."""
         n_segments = self.knots.shape[0] - 1
+        t = _clamp(t, self.knots)
         idx = jnp.clip(
             jnp.searchsorted(self.knots, t, side="left") - 1,
             0,
@@ -302,7 +324,8 @@ class CubicHermite(eqx.Module):
         t0 = self.knots[idx]
         t1 = self.knots[idx + 1]
         dt = t1 - t0
-        s = jnp.clip((t - t0) / dt, 0.0, 1.0)
+        # Within [0, 1] without a clip: t0 <= t <= t1, and rounding keeps the order.
+        s = (t - t0) / dt
 
         v0 = self.values[idx]
         v1 = self.values[idx + 1]
@@ -365,28 +388,30 @@ class BSpline(eqx.Module):
     range of its control points: bounds on the control points bound the whole signal.
 
     Attributes:
-        knots: Segment edges, strictly ascending, shape ``(K + 1,)``.
+        knots: Segment edges, strictly ascending, shape ``(K + 1,)``; static, not a leaf.
         control_points: The coefficients, shape ``(K + 3,)`` for a scalar signal or
             ``(K + 3, m)`` for an ``m``-component signal.
 
-    The knots fix the basis when the spline is built. Each segment's polynomial is one
-    matrix, built once with NumPy, applied to the control points, so new knots need a new
-    spline. A query time outside ``[knots[0], knots[-1]]`` clamps to the end value, and a
-    query on an interior knot is evaluated as the end of the left segment, as for
+    The knots fix the basis when the spline is built: each segment's polynomial is one
+    ``4 x 4`` matrix, built once with NumPy, applied to the segment's four control points.
+    The knots are therefore static, and new knots need a new spline. A query time outside
+    ``[knots[0], knots[-1]]`` clamps to the end value, and a query on an interior knot is
+    evaluated as the end of the left segment, as for
     [PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant].
     """
 
-    knots: jax.Array
     control_points: jax.Array
-    _basis: tuple = eqx.field(static=True, repr=False)
+    _knots: tuple = eqx.field(static=True, repr=False)
+    _knot_dtype: str = eqx.field(static=True, repr=False)
+    _band: tuple = eqx.field(static=True, repr=False)
 
     def __init__(self, knots, control_points):
         """Build a clamped cubic B-spline from segment edges and control points.
 
         Raises:
             ValueError: If the knots are traced, are not a strictly ascending
-                one-dimensional array of at least two entries, or the control points do
-                not number two more than the knots.
+                one-dimensional array of at least two finite entries, or the control points
+                do not number two more than the knots.
         """
         if isinstance(knots, jax.core.Tracer):
             raise ValueError(
@@ -394,12 +419,18 @@ class BSpline(eqx.Module):
                 "knots, not traced ones."
             )
         edges = np.asarray(knots, dtype=np.float64)
-        if edges.ndim != 1 or edges.size < 2 or not np.all(np.diff(edges) > 0):
+        if (
+            edges.ndim != 1
+            or edges.size < 2
+            or not np.all(np.isfinite(edges))
+            or not np.all(np.diff(edges) > 0)
+        ):
             raise ValueError(
                 "BSpline knots must be a strictly ascending one-dimensional array of at least "
-                f"two segment edges; got {edges!r}."
+                f"two finite segment edges; got {edges!r}."
             )
-        self.knots = _inexact(knots)
+        self._knots = tuple(float(edge) for edge in edges)
+        self._knot_dtype = str(_inexact(knots).dtype)
         self.control_points = _inexact(control_points)
         if self.control_points.ndim not in (1, 2) or self.control_points.shape[0] != edges.size + 2:
             raise ValueError(
@@ -407,35 +438,40 @@ class BSpline(eqx.Module):
                 f"({edges.size + 2},) or ({edges.size + 2}, m); got shape "
                 f"{self.control_points.shape}."
             )
-        basis = _clamped_cubic_basis(edges)
-        self._basis = tuple(tuple(map(tuple, segment)) for segment in basis.tolist())
+        self._band = tuple(map(tuple, _clamped_cubic_band(edges).reshape(-1, 16).tolist()))
 
-    def _matrix(self) -> jax.Array:
-        """The basis in powers of each segment's time, ``(K, 4, K + 3)``, a compile-time constant."""
-        return jnp.asarray(self._basis, dtype=self.control_points.dtype)
+    @property
+    def knots(self) -> jax.Array:
+        """The segment edges the spline was built on, shape ``(K + 1,)``."""
+        return jnp.asarray(self._knots, dtype=self._knot_dtype)
 
     def __call__(self, t) -> jax.Array:
         """Return the spline's value at time ``t``."""
-        n_segments = self.knots.shape[0] - 1
+        knots = self.knots
+        n_segments = knots.shape[0] - 1
         idx = jnp.clip(
-            jnp.searchsorted(self.knots, t, side="left") - 1,
+            jnp.searchsorted(knots, t, side="left") - 1,
             0,
             n_segments - 1,
         )
-        tau = jnp.clip(t, self.knots[0], self.knots[-1]) - self.knots[idx]
+        tau = _clamp(t, knots) - knots[idx]
         coefficients = self.polynomials()[idx]
         return _horner(jnp.moveaxis(coefficients, jnp.ndim(tau), 0), tau)
 
     def polynomials(self) -> jax.Array:
         """Return each segment's power-basis coefficients in ``tau``, the time since its start.
 
-        The static basis matrix applied to the control points, one matrix product.
+        Each segment's static ``4 x 4`` basis matrix applied to its four control points.
 
         Returns:
             Shape ``(K, 4)``, or ``(K, 4, m)`` for an ``m``-component signal, constant term
             first.
         """
-        return jnp.tensordot(self._matrix(), self.control_points, axes=1)
+        n_segments = len(self._knots) - 1
+        band = jnp.asarray(self._band, dtype=self.control_points.dtype)
+        band = jnp.reshape(band, (n_segments, 4, 4))
+        windows = self.control_points[np.arange(n_segments)[:, None] + np.arange(4)]
+        return jnp.einsum("kji,ki...->kj...", band, windows)
 
     def learnable_paths(self) -> tuple[str, ...]:
         """Return the learnable-leaf path of this signal (``"control_points"``).

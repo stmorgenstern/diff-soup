@@ -15,6 +15,7 @@ from jaxtyping import Array, ArrayLike, Float, Int, PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.control._horizon import sample_times
+from diff_soup.optimization.control.problem import SignalControls, _no_grid
 from diff_soup.optimization.solvers import SolveRecord
 from diff_soup.optimization.solvers.sqp import SQP
 
@@ -134,6 +135,8 @@ def receding_horizon(
             "controls have free durations. Solve the problem with optsolve, or give the receding "
             "horizon PiecewiseConstant controls."
         )
+    if isinstance(control_problem.controls, SignalControls):
+        raise _no_grid()
     durations = control_problem.controls.durations
     if warm_start == "shift" and any(d != durations[0] for d in durations):
         raise ConfigurationError(
@@ -188,12 +191,18 @@ def _step(carry, interval, control_problem, numeric, solver, plant, estimator, w
 
 
 def _solve_horizon(numeric, solver, estimate, start, record, warm_start):
-    """Solve the horizon from the estimate: cold from the problem's start, else warm from `start` and `record`."""
+    """Solve the horizon from the estimate: cold from the problem's start, else warm from `start` and `record`.
+
+    The start and the record carry no derivative into the solution (`CompiledSolver.run`), so
+    their tangents, which the previous horizon's solution hands them, are stopped here.
+    """
     args = (estimate.plant, *numeric.args[1:])
     if record is None or warm_start == "cold":
-        solution, solved = solver.run(numeric, jnp.asarray(numeric.x0), args)
+        start = jax.lax.stop_gradient(jnp.asarray(numeric.x0))
+        solution, solved = solver.run(numeric, start, args)
     else:
-        solution, solved = solver.run(numeric, start, args, warm_start=record)
+        start, warm = jax.lax.stop_gradient((start, record))
+        solution, solved = solver.run(numeric, start, args, warm_start=warm)
     if record is not None:
         # The loop's carry keeps one type; a record holds counts and codes of fixed widths.
         solved = jax.tree.map(lambda new, old: new.astype(old.dtype), solved, record)

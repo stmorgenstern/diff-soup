@@ -122,7 +122,12 @@ def _build(configuration: Configuration) -> Lowered:
 
     def horizon(u, args):
         state, theta, _ = args
+        # `u` in the dtype `solve_schedule` solves in, so the sample times below are summed as
+        # it sums the durations, and a float32 `u` lowers as the float64 one of its values.
+        widest = jax.dtypes.canonicalize_dtype(jnp.float64)
+        u = jnp.asarray(u, jnp.promote_types(jnp.result_type(state), widest))
         schedule = controls.segments(u, modes)
+        positive = jnp.asarray(True)
         if fractions is None:
             t_end, sampled = controls.horizon, jnp.asarray(times)
         else:
@@ -132,6 +137,9 @@ def _build(configuration: Configuration) -> Lowered:
             durations = jax.lax.optimization_barrier(jnp.asarray(schedule.duration))
             schedule = dataclasses.replace(schedule, duration=durations)
             t_end, sampled = sample_times(durations, fractions)
+            # A segment of duration 0 has no time of its own: its samples would be read in the
+            # segment before it, under that segment's mode.
+            positive = jnp.all(durations > 0)
         solution, _ = solve_schedule(
             model,
             configuration.solver,
@@ -148,8 +156,9 @@ def _build(configuration: Configuration) -> Lowered:
         terminal = _sized(configuration.terminal, solution, u, args, n_terminal, "terminal")
         path = _sized(configuration.path, solution, u, args, n_path, "path")
         stacked = jnp.concatenate([value[None], terminal.astype(dtype), path.astype(dtype)])
-        # A failed horizon solve is a rejected trial: every output is NaN.
-        ok = solution.ok & jnp.all(solution.valid_mask)
+        # A failed horizon solve, or a segment of duration 0, is a rejected trial: every
+        # output is NaN.
+        ok = solution.ok & jnp.all(solution.valid_mask) & positive
         return jnp.where(ok, stacked, jnp.nan)
 
     def split(stacked):

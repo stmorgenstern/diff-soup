@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import ClassVar
 
 import equinox as eqx
@@ -16,10 +17,12 @@ from diff_soup.optimization.solvers import _filter, _hessian
 from diff_soup.optimization.solvers._barrier import Bounds
 from diff_soup.optimization.solvers._closures import Closures, evaluate, trial
 from diff_soup.optimization.solvers._core import (
+    EPS_FACTOR,
     ConstrainedSolver,
     CoreState,
     Start,
     core_fields,
+    default_tolerance,
     lagrangian_secant,
     slack_free_error,
 )
@@ -96,7 +99,7 @@ class SQP(ConstrainedSolver):
         tol: The scaled optimality error at which the run ends, by default `max(1e-8, 100 * eps)` for the iterate's dtype: `1e-8` in float64 and `1.2e-5` in float32.
         max_steps: The step budget, `100` by default.
         hessian: `"auto"` (default), `"bfgs"`, `"exact"` or `"gauss-newton"`, as for `InteriorPoint`.
-        qp_tol: The scaled optimality error at which each QP solve ends, by default `max(1e-10, 100 * eps)`: `1e-10` in float64 and `1.2e-5` in float32. A run's `tol` below `tol` lowers it by the same factor.
+        qp_tol: The scaled optimality error at which each QP solve ends, by default `max(1e-10, 100 * eps)`: `1e-10` in float64 and `1.2e-5` in float32. A run's `tol` below `tol` lowers it by the same factor, as a `tol` below its default lowers a `qp_tol` left `None`; neither lowers it below `100 * eps`.
         qp_max_steps: The step budget of each QP solve, `50` by default.
         max_failed_evaluations: Failed trial evaluations in a row before the run ends with `SOLVER_FAILED`, `10` by default.
         kkt: The [KKTSolve][diff_soup.optimization.solvers.KKTSolve] backend, `DenseKKT()` by default.
@@ -119,6 +122,31 @@ class SQP(ConstrainedSolver):
     def _kkt(self) -> KKTSolve:
         """The backend of the implicit derivative's KKT system: `kkt`."""
         return self.kkt
+
+    def _for_dtype(self, dtype: jnp.dtype) -> SQP:
+        """This solver with each tolerance left `None` resolved for an iterate of `dtype`.
+
+        A `qp_tol` left `None` under a `tol` below its default is lowered by the same factor,
+        as a run's `tol` lowers it (`_qp_tolerance`), so the two give one QP tolerance.
+        """
+        if self.qp_tol is not None or self.tol is None:
+            return super()._for_dtype(dtype)
+        qp_tol = default_tolerance(self._default_tolerances["qp_tol"], dtype)
+        ratio = min(1.0, self.tol / default_tolerance(self._default_tolerances["tol"], dtype))
+        floor = EPS_FACTOR * float(jnp.finfo(dtype).eps)
+        return dataclasses.replace(self, qp_tol=min(qp_tol, max(qp_tol * ratio, floor)))
+
+    def _qp_tolerance(self, tol: Float[Array, ""]) -> Float[Array, ""]:
+        """Each QP's tolerance under the run's `tol`: `qp_tol` lowered by `tol` over the solver's `tol`.
+
+        The lowering stops at `EPS_FACTOR * eps`, where the default tolerances stop, so a run
+        at `tol = 0` still solves each QP; a solver whose own `tol` is 0 keeps `qp_tol`.
+        """
+        if self.tol <= 0:
+            return jnp.asarray(self.qp_tol, tol.dtype)
+        floor = EPS_FACTOR * jnp.finfo(tol.dtype).eps
+        lowered = self.qp_tol * jnp.minimum(1.0, tol / self.tol)
+        return jnp.minimum(self.qp_tol, jnp.maximum(lowered, floor))
 
     def _place(self, x0: Float[Array, "n"], bounds: Bounds, warm: bool) -> Float[Array, "n"]:
         """`x0` clipped into its bounds."""
@@ -212,7 +240,7 @@ class SQP(ConstrainedSolver):
             qp_bounds,
             d0,
             qp_args,
-            self.qp_tol * jnp.minimum(1.0, state.tol / self.tol),
+            self._qp_tolerance(state.tol),
             z_lower=jnp.where(qp_bounds.has_lower, 1.0, 0.0).astype(dtype),
             z_upper=jnp.where(qp_bounds.has_upper, 1.0, 0.0).astype(dtype),
         )
