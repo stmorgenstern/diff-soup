@@ -248,6 +248,14 @@ The options, with their defaults:
   the joint vector, `LinearConstraint` and `Gauge` from
   `diff_soup.optimization.inference.statistics.parameters`. A gauge pins a direction
   the data leave free, such as the mean of a spatial field.
+- `inequalities=()` adds inequality constraints on the fitted parameters,
+  as `ds.optimization.inference.InequalityRows`. Its function returns
+  rows that the fit keeps at or below zero. With `level="particle"` it
+  is called as `rows(own, shared, data)` for each particle, with that
+  particle's parameters, the shared parameters, and its entry of
+  `data=`. A step that would cross a row stops at it, so start the fit
+  where the rows hold. The fit ends where the loss cannot decrease
+  without crossing a row, the KKT conditions of the constrained problem.
 - `fixed_indices=()` freezes the joint coordinates at those indices.
 - `callbacks=()` attaches callbacks to the solver
   ([run the fit](fitting.md#run-the-fit)).
