@@ -1292,8 +1292,8 @@ def _secular_search(radius: float, eps: float, tiny: float):
 
     It yields the damping of the next solve and receives ``(z, q_squared)``,
     the problem's scaled step at that damping and its inverse-norm; it returns
-    ``(multiplier, z)``. ``level_secular_step`` runs one for the whole system,
-    ``_lockstep_search`` one per member of a level.
+    ``(multiplier, z)``. ``level_secular_step`` runs one for the whole system;
+    ``_search`` is the same search compiled, for any number of problems at once.
     """
 
     def norm(vector: np.ndarray) -> float:

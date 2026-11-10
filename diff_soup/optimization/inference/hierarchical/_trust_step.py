@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import ArrayLike
@@ -280,6 +281,30 @@ def _trial_valid(view: Any, point: np.ndarray) -> bool:
         return trial_is_valid(view, point)
     except Exception:  # noqa: BLE001 -- a predicate that raises rejects the trial
         return False
+
+
+def _trials_valid(view: Any, points: np.ndarray) -> np.ndarray:
+    """The trial predicate of ``view`` at every row of ``points``, ``(m,)`` bool.
+
+    One program of the predicate vmapped over the rows, built at the first call and kept on
+    ``view``; a predicate that raises there is asked row by row (``_trial_valid``), so a
+    row at which it raises is rejected alone.
+    """
+    checker = getattr(view, "trial_is_valid", None)
+    if checker is None:
+        return np.ones((len(points),), dtype=bool)
+    kept = getattr(view, "__dict__", {}).get("_trials_program")
+    if kept is None or kept[0] is not view:
+        kept = (view, jax.jit(jax.vmap(checker)))
+        if hasattr(view, "__dict__"):
+            view.__dict__["_trials_program"] = kept
+    try:
+        values = np.asarray(jax.device_get(kept[1](jnp.asarray(points))))
+    except Exception:  # noqa: BLE001 -- a predicate that raises rejects its trial alone
+        values = None
+    if values is None or values.shape != (len(points),):
+        return np.asarray([_trial_valid(view, point) for point in points], dtype=bool)
+    return values.astype(bool)
 
 
 def _noise_ceiling(route: Any) -> float | None:

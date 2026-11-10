@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Iterable, Mapping
+import functools
+from collections.abc import Iterable, Mapping
 from numbers import Real
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -12,9 +13,8 @@ import numpy as np
 from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.fitting.result import OptResult, StepInfo
-from diff_soup.optimization.inference.hierarchical import _bounds as box
-from diff_soup.optimization.inference.hierarchical import _inequality as inequality
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical import _polish_program as polish
 from diff_soup.optimization.inference.hierarchical._joint_fit import _JointFit
 from diff_soup.optimization.inference.hierarchical._lane_route import (
     _LABEL,
@@ -23,36 +23,20 @@ from diff_soup.optimization.inference.hierarchical._lane_route import (
 )
 from diff_soup.optimization.inference.hierarchical._level_inner import model_split
 from diff_soup.optimization.inference.hierarchical._level_system import nonfinite_members
+from diff_soup.optimization.inference.hierarchical._step_program import as_host, coordinates
 from diff_soup.optimization.inference.hierarchical._trust_step import (
     _bounded_gradient,
     _noise_trial_limit,
-    _scale_candidate,
-    _subproblem,
     _trial_valid,
+    _trials_valid,
 )
 from diff_soup.optimization.inference.hierarchical._verdicts import (
     NONFINITE_BLOCKS,
     _failures_text,
     _stationarity_limit,
-    _within,
 )
-from diff_soup.optimization.solvers._loop import (
-    _NOISE_RUN,
-    LoopState,
-    _saved_count,
-    cost_small,
-    cost_threshold,
-    loop_tolerances,
-    step_small,
-)
-from diff_soup.optimization.solvers._loop_judge import (
-    _TINY,
-    _gain_ratio,
-    _median,
-    _next_radius,
-    _noise_dominated,
-    cost_scale,
-)
+from diff_soup.optimization.solvers._loop import LoopState, _saved_count, loop_tolerances
+from diff_soup.optimization.solvers._loop_judge import _TINY, _median
 
 if TYPE_CHECKING:
     from diff_soup.optimization.inference.hierarchical.level_solvers import TrustRegion
@@ -62,20 +46,6 @@ if TYPE_CHECKING:
 # The polish
 # ---------------------------------------------------------------------------
 
-
-# Why a member's polish ended at an attempt: the codes of the record's ``inner_stop``.
-_NOT_POLISHED = 0  # no polish: the outer trial was not accepted, or the member holds no data
-_ACCURACY = 1  # its predicted decrease fell to inner_fraction of the outer step's
-_AT_MAX_STEPS = 2  # it made the polish's largest number of iterations
-_STEP_TOLERANCE = 3  # its step test
-_COST_TOLERANCE = 4  # its cost test
-_GRADIENT_TOLERANCE = 5  # its gradient test
-_STATIONARITY = 6  # its stationarity number at most the inner stationarity_tol
-_EVALUATION_NOISE = 7  # three noise-dominated rejected trials in a row
-_RADIUS = 8  # its radius fell to the smallest positive float
-_SKIPPED = 9  # the polish was switched off at this attempt
-_NO_FINITE_STEP = 10  # no finite step inside its radius: its subtree's model is not finite
-_UNSOLVED = 11  # its lanes failed at its polished point after every retreat
 
 # The polish's iterations per member when the nested solver is given no inner solver.
 _DEFAULT_POLISH = 2
@@ -159,12 +129,6 @@ def _spliced(
     )
 
 
-def _member_numbers(decreases: np.ndarray, scales: np.ndarray) -> np.ndarray:
-    """Every member's predicted decrease over its cost scale ``scales``; ``nan`` stays ``nan``."""
-    with np.errstate(all="ignore"):
-        return np.asarray(decreases, dtype=np.float64) / np.asarray(scales, dtype=np.float64)
-
-
 class _NestedFit(_JointFit):
     """The joint fit, its members polished at one level after every accepted step.
 
@@ -227,6 +191,10 @@ class _NestedFit(_JointFit):
         self.trial_lanes: tuple | None = None
         self.member_numbers: np.ndarray | None = None
         self.stepped_from: np.ndarray | None = None
+        # The polish's settings, layout and proposing program, made at its first iteration.
+        self.polish_settings: polish.PolishSettings | None = None
+        self.polish_layout: polish.Layout | None = None
+        self.polish_program: Any = None
 
     def run(self, state: Mapping | None = None) -> OptResult:
         """Fit from the start point, or continue the fit whose ``state`` is given.
@@ -357,7 +325,7 @@ class _NestedFit(_JointFit):
             start=True,
         )
         if limit == 0:
-            polished = polished._replace(codes=np.full_like(polished.codes, _NOT_POLISHED))
+            polished = polished._replace(codes=np.full_like(polished.codes, polish.NOT_POLISHED))
         self.keep(polished)
         self.polished = polished if fresh else None
         return polished.point, polished.system, polished.lane_costs
@@ -480,7 +448,7 @@ class _NestedFit(_JointFit):
         polished = self.polished
         if polished is None:
             entries["inner_iterations"] = np.zeros((count,), dtype=np.int64)
-            entries["inner_stop"] = np.full((count,), _NOT_POLISHED, dtype=np.int64)
+            entries["inner_stop"] = np.full((count,), polish.NOT_POLISHED, dtype=np.int64)
             entries["inner_retreats"] = np.zeros((count,), dtype=np.int64)
         else:
             entries["inner_iterations"] = np.array(polished.iterations, dtype=np.int64)
@@ -596,131 +564,6 @@ class _NestedFit(_JointFit):
                 self.shared_cost(reached), dtype=np.float64
             )
         return entries
-
-    # -- the members' models -----------------------------------------------------
-
-    def member_decrease(
-        self,
-        system: elimination.LevelSystem,
-        scale: ArrayLike,
-        zero: tuple,
-        addition: ArrayLike | None = None,
-    ) -> np.ndarray:
-        """The decrease every member's model predicts for its full step at zero damping.
-
-        ``zero`` is ``inner_solve_scaled(system, scale, cut, addition=addition)``;
-        member ``n``'s full step is its part of ``z / scale``, and its decrease
-        is the one its own model (the scaled matrix carrying ``addition`` on its
-        diagonal) predicts for that step: ``nan`` for a member whose solve is
-        not finite.
-        """
-        z, q_squared = np.asarray(zero[0]), np.asarray(zero[1], dtype=np.float64)
-        with np.errstate(all="ignore"):
-            delta = z / np.asarray(scale, dtype=z.dtype)
-        owners = self.owners
-        below = owners >= 0
-        broken = np.bincount(
-            owners[below],
-            weights=(~np.isfinite(z[below])).astype(np.float64),
-            minlength=len(self.members),
-        )
-        predicted = elimination.inner_predicted(system, delta, self.cut)
-        if addition is not None:
-            predicted -= 0.5 * elimination.inner_added(system, addition, z, self.cut)
-        predicted[(broken > 0) | ~np.isfinite(q_squared)] = np.nan
-        return predicted
-
-    def member_scales(self, costs: ArrayLike) -> float | np.ndarray:
-        """Every member's cost scale ``max(|cost_n|, cost_atol / cost_tol)``, inner tolerances."""
-        tolerances = self.inner_tolerances
-        return cost_scale(costs, tolerances.cost_tol, tolerances.cost_atol)
-
-    def member_full_steps(self, zero: tuple, costs: np.ndarray) -> np.ndarray:
-        """Every member's full-step norm over its cost scale (``member_scales``).
-
-        ``zero`` is every member's solve at zero damping
-        (``inner_solve_scaled``), in the scaled coordinates its radius is
-        measured in. The gradient floor times this number is the member's
-        floor in its stationarity number's units; ``nan`` for a member whose
-        solve is not finite.
-        """
-        z = np.asarray(zero[0], dtype=np.float64)
-        owners = self.owners
-        below = owners >= 0
-        with np.errstate(all="ignore"):
-            norms = np.sqrt(
-                np.bincount(owners[below], weights=z[below] ** 2, minlength=len(self.members))
-            )
-        return norms / self.member_scales(costs)
-
-    def member_quadratic(
-        self, system: elimination.LevelSystem, coordinates: box.Scaling, member: int
-    ) -> Callable[..., float]:
-        """``quadratic_form`` of one member's scaled subtree model, its diagonal addition in it.
-
-        It takes a vector over the member's columns in the coordinates
-        ``z = coordinates.scale * s`` and gives ``z^T (H_z + diag(addition)) z``.
-        """
-        columns = np.flatnonzero(self.owners == member)
-        with np.errstate(all="ignore"):
-            d = 1.0 / coordinates.scale
-        addition = coordinates.addition[columns]
-
-        def quadratic_form(vector: np.ndarray) -> float:
-            full = np.zeros_like(d)
-            with np.errstate(all="ignore"):
-                full[columns] = d[columns] * vector
-                quadratic = elimination.inner_quadratic(system, full, self.cut)[member]
-                return float(quadratic) + float(addition @ (vector * vector))
-
-        return quadratic_form
-
-    def choose_members(
-        self,
-        system: elimination.LevelSystem,
-        x: np.ndarray,
-        gradient: np.ndarray,
-        coordinates: box.Scaling,
-        step: np.ndarray,
-        radii: np.ndarray,
-        active: np.ndarray,
-        predicted: np.ndarray,
-    ) -> tuple:
-        """Every active member's trial step under the box, from its subproblem's solution.
-
-        A member whose ``x + step`` stays in the box keeps its step and its
-        predicted decrease; every other one takes ``_bounds.select_step`` on its
-        scaled subtree model with its radius. Returns ``(step, scaled_step,
-        predicted)`` in joint columns and per member.
-        """
-        lower, upper = self.route.bounds
-        with np.errstate(all="ignore"):
-            d = 1.0 / coordinates.scale
-            scaled = coordinates.scale * step
-        g_h = d * gradient
-        chosen, chosen_scaled = step.copy(), scaled.copy()
-        predicted = np.array(predicted, dtype=np.float64, copy=True)
-        for member in np.flatnonzero(active):
-            columns = np.flatnonzero(self.owners == member)
-            if box.in_bounds(x[columns] + step[columns], lower[columns], upper[columns]):
-                continue
-            reach = max(float(radii[member]), float(np.linalg.norm(scaled[columns])))
-            member_step, member_scaled, value = box.select_step(
-                x[columns],
-                self.member_quadratic(system, coordinates, int(member)),
-                g_h[columns],
-                step[columns],
-                scaled[columns],
-                d[columns],
-                reach,
-                lower[columns],
-                upper[columns],
-                box.step_back_ratio(gradient[columns], coordinates.v[columns]),
-            )
-            chosen[columns] = member_step
-            chosen_scaled[columns] = member_scaled
-            predicted[member] = float(value)
-        return chosen, chosen_scaled, predicted
 
     # -- the polish's requests ---------------------------------------------------
 
@@ -934,7 +777,7 @@ class _NestedFit(_JointFit):
         else of the lanes of ``moved`` (``retreating_blocks``, whose member
         that fails retreats toward ``base``). A member that no retreat solves
         goes back to its coordinates in ``base`` and leaves the polish (its
-        code ``_UNSOLVED`` in ``codes``, cleared in ``active``), and the
+        code ``polish.UNSOLVED`` in ``codes``, cleared in ``active``), and the
         request is made again for the others and for it, so that its lanes are
         evaluated again where it went back to and it keeps no Jacobian of the
         point it left; with no member that moved left, that request covers the
@@ -957,7 +800,7 @@ class _NestedFit(_JointFit):
             if not failures:
                 return reached, lane_costs, system, not every
             unsolved = self.failed_members(failures)
-            codes[unsolved] = _UNSOLVED
+            codes[unsolved] = polish.UNSOLVED
             active[unsolved] = False
             progress = bool(moved[unsolved].any())
             moved[unsolved] = False
@@ -981,6 +824,68 @@ class _NestedFit(_JointFit):
         request, the moved members' gradient at their new point.
         """
         return self.evaluate(self.polish_pass, point, self.member_lanes(members))
+
+    def polish_setup(self) -> None:
+        """The polish's settings, the members' layout and its proposing program, once per fit.
+
+        Made at the first polish iteration, after the fit's first ``blocks`` request has set
+        ``owners``. Without inequality rows the proposing program is shared by every fit;
+        with them it holds the rows and is the fit's own.
+        """
+        if self.polish_settings is not None:
+            return
+        inner, tolerances, route = self.inner, self.inner_tolerances, self.route
+        dtype = np.dtype(np.asarray(route.problem.x0).dtype)
+        self.polish_settings = polish.PolishSettings(
+            level=self.cut,
+            count=len(self.members),
+            fixed=tuple(int(index) for index in route.fixed),
+            grad_test=tolerances.grad_tolerance is not None,
+            step_tol=float(tolerances.step_tol),
+            cost_tol=float(tolerances.cost_tol),
+            cost_atol=float(tolerances.cost_atol),
+            eta=float(inner.eta),
+            radius_max=float(inner.radius_max),
+            relaxed=bool(inner.noise_relaxed_ratio),
+            noise_limit=_noise_trial_limit(inner, route),
+            eps=float(np.finfo(dtype).eps),
+            tiny=float(np.finfo(float).tiny),
+        )
+        owners = np.asarray(self.owners, dtype=np.int64)
+        self.polish_layout = jax.device_put(polish.layout(owners, len(self.members)), route.device)
+        if self.rows is None:
+            self.polish_program = polish.propose_program
+        else:
+            self.polish_program = jax.jit(
+                functools.partial(polish.propose, rows=self.rows, owners=owners),
+                static_argnames=("settings",),
+            )
+
+    def member_thresholds(
+        self,
+        system: elimination.LevelSystem,
+        x: np.ndarray,
+        scale: np.ndarray,
+        thresholds: np.ndarray,
+        held: np.ndarray,
+    ) -> None:
+        """Set the gradient threshold of every member not held that has none, in place.
+
+        From its bounded gradient's norm at ``x`` in the iteration's scale, as the joint
+        fit sets its threshold from its first attempt's gradient.
+        """
+        gradient, _, subproblem = coordinates(
+            system, self.solver.x_scale, x, scale, self.route.bounds
+        )
+        bounded = _bounded_gradient(gradient, subproblem, self.route.bounds)
+        owners = self.owners
+        below = owners >= 0
+        norms = np.sqrt(
+            np.bincount(owners[below], weights=bounded[below] ** 2, minlength=len(self.members))
+        )
+        grad_tolerance = self.inner_tolerances.grad_tolerance
+        for member in np.flatnonzero(np.isnan(thresholds) & ~held):
+            thresholds[member] = grad_tolerance.threshold(norms[member])
 
     def lockstep(
         self,
@@ -1006,16 +911,18 @@ class _NestedFit(_JointFit):
         mode's at ``point`` when no member moved from it. The members start
         with the radii, locks and gradient thresholds the fit carries and make
         at most ``limit`` lockstep iterations; ``limit=0`` reads ``point``
-        alone. An iteration makes one request at the members' combined trial
-        over the lanes of the members it moves (``polish_request``). After a
-        frozen pass the members that moved take its gradient on the kept
-        matrix; after a ``value`` request (or a frozen pass with a failed lane)
-        one ``blocks`` request at their new point over the lanes of the members
-        that moved updates their nodes of the system (``request_blocks``): of
-        every lane when they hold every lane or it is the last iteration. A
-        polish that ends on a system of some lanes' requests makes the
-        ``blocks`` request of every lane where it ended, a member whose lanes
-        fail there retreating toward where the polish started. ``start`` marks the
+        alone. An iteration is two compiled programs (``_polish_program``):
+        one proposes every member's tests and trial, one judges the trials;
+        between them one request at the members' combined trial over the lanes
+        of the members it moves (``polish_request``). After a frozen pass the
+        members that moved take its gradient on the kept matrix; after a
+        ``value`` request (or a frozen pass with a failed lane) one ``blocks``
+        request at their new point over the lanes of the members that moved
+        updates their nodes of the system (``request_blocks``): of every lane
+        when they hold every lane or it is the last iteration. A polish that
+        ends on a system of some lanes' requests makes the ``blocks`` request
+        of every lane where it ended, a member whose lanes fail there
+        retreating toward where the polish started. ``start`` marks the
         start's polish, whose iterations count apart. A member whose lane fails
         at a ``blocks`` request after an iteration retreats along its last
         step (``retreating_blocks``); one that no retreat solves goes back to
@@ -1036,29 +943,28 @@ class _NestedFit(_JointFit):
         ``level`` times its full step's scaled norm over its cost scale
         ``max(|cost_n|, cost_atol / cost_tol)`` under the inner tolerances.
         """
-        solver, inner, route, work = self.solver, self.inner, self.route, self.work
+        solver, route, work = self.solver, self.route, self.work
         tolerances = self.inner_tolerances
+        self.polish_setup()
+        settings, where = self.polish_settings, self.polish_layout
         count = len(self.members)
         x = np.array(point, copy=True)
         lane_costs = np.array(lane_costs, dtype=np.float64, copy=True)
-        scale = None if scale is None else np.array(scale, copy=True)
-        radii = np.array(self.radii, dtype=np.float64, copy=True)
-        locks = np.array(self.locks, dtype=np.int64, copy=True)
+        if scale is None:
+            scale = np.full(x.shape, np.nan, dtype=x.dtype)
+        scale = np.array(scale, dtype=x.dtype, copy=True)
         thresholds = np.array(self.thresholds, dtype=np.float64, copy=True)
         iterations = np.zeros((count,), dtype=np.int64)
         retreats = np.zeros((count,), dtype=np.int64)
-        bounds = route.bounds
-        fixed = np.asarray(route.fixed, dtype=np.int64)
-        tiny = float(np.finfo(float).tiny)
         member_limit = _stationarity_limit(tolerances.stationarity_tol, tolerances.cost_tol, noise)
-        noise_limit = _noise_trial_limit(inner, route)
         accuracy = (
-            None if outer_predicted is None else solver.inner_fraction * float(outer_predicted)
+            np.nan if outer_predicted is None else solver.inner_fraction * float(outer_predicted)
         )
+        floor_level = np.nan if level is None else float(level)
         first_cost = float(system.cost)
         # Where the polish started, and whether the system holds nodes of a request of
         # some lanes only.
-        start = _Point(np.array(point, copy=True), system, lane_costs)
+        start_point = _Point(np.array(point, copy=True), system, lane_costs)
         spliced = kept
         owners = self.owners
         below = owners >= 0
@@ -1066,257 +972,112 @@ class _NestedFit(_JointFit):
         held = np.array(system.held_mask[self.cut], dtype=bool)
         active = ~held
         floored = np.zeros((count,), dtype=bool)
-        codes = np.full((count,), _NOT_POLISHED, dtype=np.int64)
-        # Per member: its noise-dominated rejected trials in a row, and the radius of its
-        # last accepted trial in these iterations (nan before the first).
-        noise_runs = np.zeros((count,), dtype=np.int64)
-        accepted_radii = np.full((count,), np.nan)
-
-        def per_member(values: np.ndarray) -> np.ndarray:
-            return np.sqrt(np.bincount(owners[below], weights=values[below] ** 2, minlength=count))
-
-        def finish(done: np.ndarray, code: int) -> None:
-            codes[done] = code
-            active[done] = False
-
+        state = polish.MemberState(
+            radii=np.array(self.radii, dtype=np.float64, copy=True),
+            locks=np.array(self.locks, dtype=np.int64, copy=True),
+            noise_runs=np.zeros((count,), dtype=np.int64),
+            accepted_radii=np.full((count,), np.nan),
+            codes=np.full((count,), polish.NOT_POLISHED, dtype=np.int64),
+        )
         k = 0
         while True:
-            # (2) the scale; (3) every member's gradient, its threshold, who is done
-            gradient, diagonal = self.route.vectors(system)
-            candidate = _scale_candidate(system, solver.x_scale, diagonal)
-            scale = candidate if scale is None else np.maximum(scale, candidate)
             costs = self.member_costs(lane_costs, x)
-            # Every member's subproblem coordinates; under bounds shaped by the
-            # distance to the sides its gradient points at.
-            coordinates = _subproblem(x, gradient, scale, bounds)
-            # A member's gradient test, when the inner grad_tol is set; without it the
-            # members' stationarity numbers below are their test.
-            if tolerances.grad_tolerance is not None:
-                norms = per_member(_bounded_gradient(gradient, coordinates, bounds))
-                for member in np.flatnonzero(np.isnan(thresholds) & ~held):
-                    thresholds[member] = tolerances.grad_tolerance.threshold(norms[member])
-                finish(active & (norms <= thresholds), _GRADIENT_TOLERANCE)
-            # Every member's solve at zero damping: its predicted decrease and its
-            # stationarity number at the current point, and the first solve of the
-            # active members' searches.
-            # Under inequality rows on the members' own values, every member's solve holds
-            # those its full step would violate; ``first`` is the solve holding none.
-            own = None
-            if self.rows is not None:
-                own = inequality.member_rows(self.rows, system, x, self.cut)
-            if own is None:
-                zero = first = elimination.inner_solve_scaled(
-                    system, coordinates.scale, self.cut, addition=coordinates.addition
+            if tolerances.grad_tolerance is not None and np.any(np.isnan(thresholds) & ~held):
+                self.member_thresholds(system, x, scale, thresholds, held)
+            before = polish.MemberBefore(
+                x,
+                scale,
+                costs,
+                state.radii,
+                thresholds,
+                active,
+                state.codes,
+                np.asarray(floor_level, dtype=np.float64),
+                np.asarray(accuracy, dtype=np.float64),
+                np.asarray(member_limit, dtype=np.float64),
+                np.asarray(k < int(limit)),
+            )
+            proposal = _writable(
+                self.polish_program(
+                    system, solver.x_scale, route.bounds, where, before, settings=settings
                 )
-            else:
-                zero, first, solves = inequality.member_zero(own, system, x, coordinates, self.cut)
-                work.solves += solves - 1
-            decreases = self.member_decrease(system, coordinates.scale, zero, coordinates.addition)
-            stationarity = _member_numbers(decreases, self.member_scales(costs))
-            full_steps = self.member_full_steps(zero, costs)
-            # A member whose model predicts no further decrease the evaluation can
-            # show is done, as one whose gradient is within its threshold, and as
-            # one that has less to gain than inner_fraction of the outer step; once
-            # the gradient floor is measured, so is one whose model predicts no more
-            # than its derivatives resolve.
-            limits = member_limit if level is None else np.fmax(member_limit, level * full_steps)
-            finish(active & _within(stationarity, limits), _STATIONARITY)
-            if accuracy is not None:
-                finish(active & _within(decreases, accuracy), _ACCURACY)
-            # (4) the exit always follows a blocks request at the current point
-            if not active.any() or k == int(limit):
-                # the exit makes no step; its one solve is the one above
+            )
+            scale, active = proposal.scale, proposal.active
+            state = state._replace(codes=proposal.codes)
+            stationarity = proposal.stationarity
+            work.solves += int(proposal.zero_solves)
+            if not bool(proposal.stepped):
+                # the exit makes no step; its one solve is the one at zero damping
                 work.solves += 1
                 break
-            # (5) every active member's step; (6) bounds, fixed coordinates, predicate
-            if own is None:
-                step, predicted, multipliers, solves = elimination.inner_secular_step(
-                    system,
-                    coordinates.scale,
-                    radii,
-                    self.cut,
-                    active,
-                    first=zero,
-                    addition=coordinates.addition,
-                    hold=True,
-                )
-            else:
-                step, predicted, multipliers, solves, held_rows = inequality.member_step(
-                    own, system, x, gradient, coordinates, radii, self.cut, active, first, bounds
-                )
-            work.solves += solves
-            # A member with no finite step inside its radius (its subtree's model is not
-            # finite) ends its polish at its current point; the others go on.
-            finish(active & np.isnan(multipliers), _NO_FINITE_STEP)
+            work.solves += int(proposal.solves)
             if not active.any():
                 break
-            if fixed.size:
-                step[fixed] = 0.0
-            moving = below & active[member_of]
-            trial = x.copy()
-            if bounds is None:
-                trial[moving] = x[moving] + step[moving]
-                scaled = coordinates.scale * step
-            else:
-                # Every member whose step leaves the box takes the best of its step,
-                # the step reflected at the sides it crosses and the Cauchy step, by
-                # its model's value; its trial is kept strictly inside the box.
-                step, scaled, predicted = self.choose_members(
-                    system, x, gradient, coordinates, step, radii, active, predicted
-                )
-                trial[moving] = box.make_strictly_feasible(
-                    x[moving] + step[moving], bounds[0][moving], bounds[1][moving], rstep=0
-                )
-            if own is not None:
-                # A member whose trial crosses an own row it does not hold is scaled back.
-                trial, scaled, predicted = inequality.member_back(
-                    self.rows,
-                    own,
-                    system,
-                    x,
-                    trial,
-                    coordinates,
-                    predicted,
-                    held_rows,
-                    self.cut,
-                    bounds,
-                )
-            step = trial - x
-            step_norms = per_member(step)
-            scaled_norms = per_member(scaled)
-            passing = active.copy()
-            for member in np.flatnonzero(active):
-                single = x.copy()
-                columns = owners == member
-                single[columns] = trial[columns]
-                if not self.valid(single):
-                    passing[member] = False
-                    work.predicate_rejections += 1
+            trial = proposal.trial
+            # The predicate at every member's own trial, the others' values held, and then at
+            # the combined trial of the members it passed.
+            own = below[None, :] & (member_of[None, :] == np.arange(count)[:, None])
+            valid = _trials_valid(route.view, np.where(own, trial[None, :], x[None, :]))
+            passing = active & valid
+            work.predicate_rejections += int(np.sum(active & ~valid))
             combined = x.copy()
             chosen = below & passing[member_of]
             combined[chosen] = trial[chosen]
             if passing.any() and not self.valid(combined):
                 work.predicate_rejections += int(passing.sum())
                 passing[:] = False
-            # (7) one request at the combined trial over the lanes of the members it
-            # moves; a failed lane rejects its member
-            rho = np.full((count,), -np.inf)
+            # One request at the combined trial over the lanes of the members it moves; a
+            # failed lane rejects its member.
             failed = np.zeros((count,), dtype=bool)
             trial_costs = np.full((count,), np.inf)
             evaluated = bool(passing.any())
+            trial_failures: tuple = ()
             if evaluated:
-                before = work.lane_rungs.copy()
+                before_rungs = work.lane_rungs.copy()
                 trial_results = self.polish_request(combined, passing)
                 # A failed lane of weight zero rejects no member's step: logged, ignored.
                 trial_failures, ignored = route.weigh(route.failures(trial_results))
                 work.record(attempt, ignored, inner=True)
-                raised = np.flatnonzero(work.lane_rungs > before)
+                raised = np.flatnonzero(work.lane_rungs > before_rungs)
                 if raised.size:
                     # A lane that moved to a higher rung at the inner trial is solved again
                     # at the current inner point at its new rung, so that its member's gain
                     # ratio compares costs of the same rung.
-                    lane_costs, _ = self.resolve(x, raised, before, lane_costs)
+                    lane_costs, _ = self.resolve(x, raised, before_rungs, lane_costs)
                     costs = self.member_costs(lane_costs, x)
-                for failure in trial_failures:
-                    failed[self.lane_member[route.position[failure.lane]]] = True
+                if trial_failures:
+                    failed[self.failed_members(trial_failures)] = True
                 work.record(attempt, trial_failures, inner=True)
                 trial_costs = self.member_costs(
                     self.lane_costs_of(trial_results, lane_costs), combined
                 )
-                gains = passing & ~failed & (predicted > 0.0)
-                # Every member's gain ratio; relaxed by the noise the outer trials
-                # measured when the inner noise_relaxed_ratio is set.
-                rho[gains] = _gain_ratio(
-                    costs[gains] - trial_costs[gains],
-                    predicted[gains],
-                    noise=noise,
-                    relative_to=self.member_scales(costs[gains]),
-                    relaxed=inner.noise_relaxed_ratio,
-                )
-            # (8) every member's acceptance, radius and lock, as the joint attempt's
-            accepted = active & (rho >= float(inner.eta))
-            step_radii = radii.copy()
-            computed = evaluated & passing & ~failed
-            radii = np.where(
+            outcome = polish.MemberOutcome(
                 active,
-                _next_radius(
-                    radii,
-                    rho,
-                    scaled_norms,
-                    lock=locks,
-                    radius_max=inner.radius_max,
-                    computed=computed,
-                ),
-                radii,
+                passing,
+                failed,
+                np.asarray(evaluated),
+                np.asarray(costs, dtype=np.float64),
+                np.asarray(trial_costs, dtype=np.float64),
+                proposal.predicted,
+                proposal.scaled_norms,
+                proposal.step_norms,
+                x,
+                trial,
+                np.asarray(noise, dtype=np.float64),
             )
-            locks = np.where(
-                active & accepted,
-                np.where(locks > 0, locks - 1, locks),
-                np.where(active & failed, 2, locks),
+            accepted, x, state, after, floor = _writable(
+                polish.judge_program(where, outcome, state, settings=settings)
             )
             iterations[active] += 1
             work.inner_iterations[active] += 1
             if start:
                 work.inner_start_iterations[active] += 1
             work.inner_rejections[active & ~accepted] += 1
-            taken = below & accepted[member_of]
-            previous = x.copy()
-            x[taken] = trial[taken]
-            # A member's step and cost tests read its trial whenever the trial's cost
-            # was computed, accepted or rejected: the step within the step tolerance,
-            # or the cost change and the decrease its model predicted both within the
-            # cost tolerance (for an accepted trial the cost change alone). A trial the
-            # predicate rejected, or whose lanes did not all solve, tests neither. Its
-            # run of noise-dominated rejected trials, as the outer loop's: a trial whose
-            # cost was computed extends or ends it, a failed one ends it, one the
-            # predicate rejected leaves it; three in a row end its iterations.
-            computed = computed & np.isfinite(trial_costs)
-            noisy = _noise_dominated(
-                evaluated=computed,
-                accepted=accepted,
-                step_radius=step_radii,
-                accepted_radius=accepted_radii,
-                cost=costs,
-                trial_cost=trial_costs,
-                predicted=predicted,
-                relative_to=self.member_scales(costs),
-                limit=noise_limit,
-            )
-            noise_runs = np.where(
-                active & computed,
-                np.where(noisy, noise_runs + 1, 0),
-                np.where(active & failed, 0, noise_runs),
-            )
-            accepted_radii = np.where(active & accepted, step_radii, accepted_radii)
-            # The loop's own step and cost tests, at the member's point after the trial
-            # and at the member's cost threshold.
-            with np.errstate(invalid="ignore"):
-                small_step = step_small(
-                    step_norms, per_member(x), tolerances.step_tol, tested=computed
-                )
-                small_cost = cost_small(
-                    accepted=accepted,
-                    evaluated=computed,
-                    cost_change=np.abs(trial_costs - costs),
-                    predicted=predicted,
-                    threshold=cost_threshold(costs, tolerances.cost_tol, tolerances.cost_atol),
-                )
-            noise_run = noise_runs >= _NOISE_RUN
-            codes = np.where(
-                active & small_step,
-                _STEP_TOLERANCE,
-                np.where(
-                    active & small_cost,
-                    _COST_TOLERANCE,
-                    np.where(active & noise_run, _EVALUATION_NOISE, codes),
-                ),
-            )
-            active = active & ~(small_step | small_cost | noise_run)
-            floor = active & (radii <= tiny)
+            previous = outcome.point
+            active = after
             floored |= floor
-            finish(floor, _RADIUS)
             k += 1
-            if not taken.any():
+            if not np.any(below & accepted[member_of]):
                 continue
             if self.polish_pass == "frozen" and not trial_failures:
                 # The frozen pass gave the moved members' gradient at their new point on
@@ -1335,7 +1096,7 @@ class _NestedFit(_JointFit):
             every = k == int(limit) or not active.any() or bool(np.all(accepted[self.lane_member]))
             base = _Point(previous, system, lane_costs)
             x, lane_costs, system, partial = self.settle(
-                x, base, accepted, every, radii, retreats, attempt, codes, active
+                x, base, accepted, every, state.radii, retreats, attempt, state.codes, active
             )
             if partial is not None:
                 spliced = partial
@@ -1344,29 +1105,38 @@ class _NestedFit(_JointFit):
             # levels above the cut the next attempt reads; a member whose lanes fail there
             # retreats toward where the polish started.
             changed = np.bincount(
-                member_of[below], weights=(x != start.point)[below], minlength=count
+                member_of[below], weights=(x != start_point.point)[below], minlength=count
             )
             settled = None
             if not (kept and np.all(changed == 0)):
                 x, lane_costs, system, settled = self.settle(
-                    x, start, changed > 0, True, radii, retreats, attempt, codes, active
+                    x,
+                    start_point,
+                    changed > 0,
+                    True,
+                    state.radii,
+                    retreats,
+                    attempt,
+                    state.codes,
+                    active,
                 )
             if kept and settled is None:
                 # The polish ends where it started, whose system holds an earlier point's
                 # matrix: the joint mode's blocks request there.
                 system, lane_costs = self.blocks(x, start=False)
+        codes = state.codes
         if int(limit) == 0:
-            codes[~held] = _SKIPPED
+            codes[~held] = polish.SKIPPED
         else:
-            codes[active] = _AT_MAX_STEPS
+            codes[active] = polish.AT_MAX_STEPS
             work.inner_unconverged[active | floored] += 1
         return _Polish(
             x,
             system,
             lane_costs,
             scale,
-            radii,
-            locks,
+            state.radii,
+            state.locks,
             thresholds,
             iterations,
             codes,
@@ -1374,3 +1144,8 @@ class _NestedFit(_JointFit):
             stationarity,
             first_cost,
         )
+
+
+def _writable(value: Any) -> Any:
+    """A program's output as host values the polish may change in place: every leaf a copy."""
+    return jax.tree_util.tree_map(lambda leaf: np.array(leaf, copy=True), as_host(value))

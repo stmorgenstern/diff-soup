@@ -249,6 +249,31 @@ def inner_row_multipliers(
     return np.asarray(multipliers, dtype=np.float64)
 
 
+def _member_sums(values, owners, count):
+    """``(count,)``: the sums of ``values`` over every member's columns (traced).
+
+    ``owners`` is ``node_of_columns(system, level)``; a column of no member (``-1``) drops.
+    """
+    owned = owners >= 0
+    return jax.ops.segment_sum(jnp.where(owned, values, 0), jnp.where(owned, owners, 0), count)
+
+
+def _member_norms(values, owners, count):
+    """``(count,)``: the norm of every member's part of ``values`` (traced)."""
+    return jnp.sqrt(_member_sums(values * values, owners, count))
+
+
+def _member_predicted(system, delta, scaled, addition, owners, count, *, level):
+    """The decrease every member's scaled model predicts for its part of ``delta`` (traced).
+
+    ``-(g_n . delta_n + delta_n^T H_n delta_n / 2 + z_n^T diag(addition_n) z_n / 2)``, ``z``
+    the same step in the scaled coordinates (``scaled``).
+    """
+    linear, quadratic = _node_model(system, delta, level=level)
+    added = _member_sums(addition * scaled * scaled, owners, count)
+    return -(linear + 0.5 * quadratic) - 0.5 * added
+
+
 @functools.partial(jax.jit, static_argnames=("level", "eps", "tiny"))
 def _inner_step(system, scale, radii, active, addition, owners, first, *, level, eps, tiny):
     """Every active member's trust-region step on its subtree: one program of the members' searches.
@@ -267,11 +292,10 @@ def _inner_step(system, scale, radii, active, addition, owners, first, *, level,
     member = jnp.where(owned, owners, 0)
 
     def norms(z):
-        return jnp.sqrt(jax.ops.segment_sum(jnp.where(owned, z * z, 0.0), member, count))
+        return _member_norms(z, owners, count)
 
     def finite(z):
-        broken = jnp.where(owned, ~jnp.isfinite(z), False).astype(jnp.int32)
-        return jax.ops.segment_sum(broken, member, count) == 0
+        return _member_sums((~jnp.isfinite(z)).astype(jnp.int32), owners, count) == 0
 
     def solve(damping):
         z, q_squared = _inner_solve(scaled, damping, level=level)
@@ -288,9 +312,7 @@ def _inner_step(system, scale, radii, active, addition, owners, first, *, level,
     z = jnp.where(owned & failed[member], 0.0, z)
     multipliers = jnp.where(failed, jnp.nan, multipliers)
     delta = z / scale
-    linear, quadratic = _node_model(system, delta, level=level)
-    added = jax.ops.segment_sum(jnp.where(owned, addition * z * z, 0.0), member, count)
-    predicted = -(linear + 0.5 * quadratic) - 0.5 * added
+    predicted = _member_predicted(system, delta, z, addition, owners, count, level=level)
     predicted = jnp.where(~active | jnp.isnan(multipliers), 0.0, predicted)
     return delta, predicted, multipliers, jnp.where(jnp.any(active), solves, 0), failed
 
