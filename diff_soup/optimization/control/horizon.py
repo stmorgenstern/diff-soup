@@ -15,6 +15,7 @@ from jaxtyping import Array, ArrayLike, Float, Int, PyTree
 
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.control._horizon import sample_times
+from diff_soup.optimization.control.problem import SignalControls, _no_grid
 from diff_soup.optimization.solvers import SolveRecord
 from diff_soup.optimization.solvers.sqp import SQP
 
@@ -134,6 +135,8 @@ def receding_horizon(
             "controls have free durations. Solve the problem with optsolve, or give the receding "
             "horizon PiecewiseConstant controls."
         )
+    if isinstance(control_problem.controls, SignalControls):
+        raise _no_grid()
     durations = control_problem.controls.durations
     if warm_start == "shift" and any(d != durations[0] for d in durations):
         raise ConfigurationError(
