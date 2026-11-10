@@ -231,14 +231,13 @@ The options, with their defaults:
 - `max_steps=30` bounds the number of steps.
   `target_accepted_steps=None`, when set, ends the run after that many
   accepted steps with the status `ACCEPTED_STEPS`.
-- `nested_at=None` names a level whose members polish their own
-  parameters after every accepted step, the other parameters held.
-  `inner=TrustRegion(max_steps=k)` allows `k` polish iterations per
-  step; with `k=0` the fit makes the steps of `nested_at=None`. The
-  step's trial and every polish iteration solve the experiments without
-  derivatives, and the polish steps on the Jacobians of the point the
-  step left. An accepted step makes one evaluation with derivatives,
-  where its polish ends.
+- `nested_at=None` names a level of the hierarchy, such as `"particle"`.
+  After every accepted step, each member of that level, here each
+  particle, then refits its own parameters with the others held. This
+  refit is the polish. `inner=TrustRegion(max_steps=k)` allows `k`
+  polish iterations per step, two when omitted. The polish reuses the
+  derivatives the step computed and adds only solves without
+  derivatives, so that the fit needs fewer steps.
 - `radius_init=`, `radius_max=`, `eta=`, `grad_tol=`, `step_tol=`,
   `cost_tol=`, and `x_scale=` are the trust-region options of
   `ds.optimization.NewtonTrustRegion` ([Newton trust
@@ -282,6 +281,9 @@ result.experiments["A-potentiostatic"].opt_params
   experiment's parameters in the form `ds.pdesolve` takes through
   `theta=`.
 - `result.params` is the joint decision vector, shared handles first.
+- `result.work["inner_iterations"]` counts the polish iterations of each
+  member of the `nested_at` level, in the order of
+  `result.work["inner_members"]`.
 
 ## Uncertainty across the population
 
