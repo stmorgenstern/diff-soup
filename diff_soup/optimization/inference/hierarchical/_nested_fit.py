@@ -851,7 +851,10 @@ class _NestedFit(_JointFit):
         solver's ``inner_retreats`` times. When the lanes of every member that
         retreated solve, the ``blocks`` request is made again at the
         retreated point; a member whose lane fails there again goes on with
-        the retreats it has left. A retreated point that the trial predicate
+        the retreats it has left. A member keeps its retreated point only when
+        its cost there is at or below its cost at ``anchor``; otherwise it goes
+        back to its coordinates in ``anchor``, where the ``blocks`` request
+        evaluates its lanes again. A retreated point that the trial predicate
         rejects counts as a retreat at which the member's lanes failed.
         ``radii`` and ``retreats`` (the retreats of the attempt, per member)
         are updated in place, and every failure a retreat answers is logged
@@ -871,7 +874,8 @@ class _NestedFit(_JointFit):
         anchor = np.asarray(base.point)
         failing = np.array(point, copy=True)
         point = np.array(point, copy=True)
-        tried = np.zeros((len(self.members),), dtype=np.int64)
+        count = len(self.members)
+        tried = np.zeros((count,), dtype=np.int64)
         while True:
             lane_costs, system, failures = self.request_blocks(point, attempt, base, moved)
             if not failures:
@@ -900,7 +904,17 @@ class _NestedFit(_JointFit):
                 failures, ignored = route.weigh(route.failures(retried))
                 work.record(attempt, ignored, inner=True)
                 unlogged = failures
-                pending = self.failed_members(failures) if failures else pending[:0]
+                failed = self.failed_members(failures) if failures else pending[:0]
+                # A member whose lanes solve at its retreated point keeps it only at a cost
+                # there at or below its cost at the anchor; else it goes back to the anchor.
+                solved = np.isin(np.arange(count), pending) & ~np.isin(np.arange(count), failed)
+                if solved.any():
+                    here = self.member_costs(self.lane_costs_of(retried, base.lane_costs), point)
+                    there = self.member_costs(base.lane_costs, anchor)
+                    worse = solved & ~(here <= there)
+                    back = below & worse[member_of]
+                    point[back] = anchor[back]
+                pending = failed
 
     def settle(
         self,
@@ -921,7 +935,10 @@ class _NestedFit(_JointFit):
         that fails retreats toward ``base``). A member that no retreat solves
         goes back to its coordinates in ``base`` and leaves the polish (its
         code ``_UNSOLVED`` in ``codes``, cleared in ``active``), and the
-        request is made again for the others; with none left, it is ``base``.
+        request is made again for the others and for it, so that its lanes are
+        evaluated again where it went back to and it keeps no Jacobian of the
+        point it left; with no member that moved left, that request covers the
+        members that went back alone, at ``base``.
 
         Returns ``(point, lane_costs, system, partial)``: ``partial`` whether
         the system holds nodes of a request of some lanes only, ``None`` when
@@ -931,10 +948,11 @@ class _NestedFit(_JointFit):
         below = owners >= 0
         member_of = np.maximum(owners, 0)
         moved = np.array(moved, dtype=bool, copy=True)
+        returned = np.zeros_like(moved)
         point = np.array(point, copy=True)
         while True:
             reached, lane_costs, system, failures = self.retreating_blocks(
-                point, base, None if every else moved, radii, retreats, attempt
+                point, base, None if every else moved | returned, radii, retreats, attempt
             )
             if not failures:
                 return reached, lane_costs, system, not every
@@ -943,8 +961,14 @@ class _NestedFit(_JointFit):
             active[unsolved] = False
             progress = bool(moved[unsolved].any())
             moved[unsolved] = False
+            returned[unsolved] = True
             if not progress or not moved.any():
-                return np.array(base.point, copy=True), base.lane_costs, base.system, None
+                start = np.array(base.point, copy=True)
+                lane_costs, system, again = self.request_blocks(start, attempt, base, returned)
+                if again:
+                    self.work.record(attempt, again, inner=True)
+                    return start, base.lane_costs, base.system, None
+                return start, lane_costs, system, True
             point = reached
             back = below & np.isin(member_of, unsolved)
             point[back] = np.asarray(base.point)[back]
