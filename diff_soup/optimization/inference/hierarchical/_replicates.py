@@ -66,7 +66,6 @@ from diff_soup.optimization.inference.hierarchical._verdicts import (
     _verdict,
 )
 from diff_soup.optimization.solvers._loop import (
-    _WINDOW,
     Trials,
     _after_attempt,
     _saved_window,
@@ -74,7 +73,14 @@ from diff_soup.optimization.solvers._loop import (
     loop_tolerances,
     step_small,
 )
-from diff_soup.optimization.solvers._loop_judge import _judge, _median, _next_radius, cost_scale
+from diff_soup.optimization.solvers._loop_judge import (
+    _WINDOW,
+    _judge,
+    _median,
+    _next_radius,
+    cost_scale,
+    window_entries,
+)
 from diff_soup.optimization.solvers._termination import GradientTolerance
 
 # ---------------------------------------------------------------------------------------
@@ -606,7 +612,7 @@ def inherited_noise(fit: Any) -> list:
     """
     state = getattr(fit, "state", None)
     if state is not None and "noise_dominated_cost_change" in state:
-        return _saved_window(state, "noise_dominated_cost_change")
+        return window_entries(_saved_window(state, "noise_dominated_cost_change")).tolist()
     noise = dict(getattr(fit, "info", None) or {}).get("evaluation_noise")
     if noise is not None and np.isfinite(float(noise)) and float(noise) > 0.0:
         return [float(noise)]
@@ -838,7 +844,7 @@ class _Member:
                 attempt.trial_cost = float(
                     self.route.trial_cost(results, attempt.trial, member=self.index)
                 )
-        _, attempt.accepting, attempt.radius, _ = _judge(
+        _, accepting, radius, _ = _judge(
             cost=self.cost,
             trial_cost=attempt.trial_cost,
             predicted=attempt.predicted,
@@ -853,6 +859,7 @@ class _Member:
             relaxed=s.relaxed,
             relative_to=cost_scale(self.cost, s.cost_tol, s.cost_atol),
         )
+        attempt.accepting, attempt.radius = bool(accepting), float(radius)
 
     def settle(self, s: _Settings, results: Any, failures: tuple) -> None:
         """The ``blocks`` evaluation at the point the member accepted.
@@ -875,13 +882,15 @@ class _Member:
             attempt.invalid = True
             attempt.trial_cost = float("inf")
             self.invalid_trials += 1
-            attempt.radius = _next_radius(
-                self.radius,
-                float("-inf"),
-                attempt.scaled_norm,
-                lock=self.lock,
-                radius_max=s.radius_max,
-                computed=False,
+            attempt.radius = float(
+                _next_radius(
+                    self.radius,
+                    float("-inf"),
+                    attempt.scaled_norm,
+                    lock=self.lock,
+                    radius_max=s.radius_max,
+                    computed=False,
+                )
             )
             return
         system = self.route.system(results, attempt.trial, member=self.index)
@@ -929,20 +938,24 @@ class _Member:
             noise_limit=s.noise_limit,
         )
         trials = after.trials
-        self.lock = trials.growth_lock
-        self.rejected_changes = trials.rejected_cost_change
-        self.rejected_decreases = trials.rejected_predicted_decrease
-        self.noise_changes = trials.noise_dominated_cost_change
-        self.accepted_radius = trials.accepted_step_radius
-        self.invalid_run = trials.consecutive_invalid_trials
-        self.noise_run = trials.consecutive_noise_dominated_trials
+        radius = float(trials.accepted_step_radius)
+        self.lock = int(trials.growth_lock)
+        self.rejected_changes = window_entries(trials.rejected_cost_change).tolist()
+        self.rejected_decreases = window_entries(trials.rejected_predicted_decrease).tolist()
+        self.noise_changes = window_entries(trials.noise_dominated_cost_change).tolist()
+        self.accepted_radius = None if np.isnan(radius) else radius
+        self.invalid_run = int(trials.consecutive_invalid_trials)
+        self.noise_run = int(trials.consecutive_noise_dominated_trials)
         # No callback or evaluation budget: the accepted steps end a member at ``steps``,
         # the attempts at ``max_attempts``.
         stop = _stop_after(
             after,
             max_invalid=s.max_invalid,
             step_small=step_small(
-                attempt.step_norm, self.point, s.step_tol, tested=after.evaluated
+                attempt.step_norm,
+                float(np.linalg.norm(self.point)),
+                s.step_tol,
+                tested=after.evaluated,
             ),
             accepted_count=self.accepted,
             target_steps=s.steps,
@@ -1009,7 +1022,7 @@ class _Member:
             verdict, stall = _verdict(
                 stop,
                 sigma=float(sigma),
-                yardstick=max(s.cost_tol, 3.0 * _median(self.noise_changes)),
+                yardstick=max(s.cost_tol, 3.0 * float(_median(self.noise_changes))),
                 lock=self.lock,
             )
             if verdict.converged:

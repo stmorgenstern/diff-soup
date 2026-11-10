@@ -12,6 +12,7 @@ from diff_soup.optimization.inference.fitting.result import (
     TerminationStatus,
 )
 from diff_soup.optimization.inference.hierarchical._lane_route import _Failure, _listed
+from diff_soup.optimization.solvers._loop_judge import _larger, _namespace
 
 NONFINITE_BLOCKS = "nonfinite_blocks_at_finite_cost"
 """The failure kind of a lane whose solve reached a finite cost with non-finite Gauss-Newton blocks."""
@@ -100,19 +101,24 @@ _STOP_STATUS = {
 _ENDED_BY = {"step_tolerance": "the step", "cost_tolerance": "the cost change"}
 
 
-def _stationarity_limit(tolerance: Real | None, cost_tol: float, noise: float) -> float:
-    """``stationarity_tol``, or for ``None`` the yardstick ``max(cost_tol, 3 * noise)``."""
-    return max(float(cost_tol), 3.0 * float(noise)) if tolerance is None else float(tolerance)
+def _stationarity_limit(tolerance: Real | None, cost_tol: float, noise: ArrayLike) -> ArrayLike:
+    """``stationarity_tol``, or for ``None`` the yardstick ``max(cost_tol, 3 * noise)`` (for arrays)."""
+    if tolerance is not None:
+        return float(tolerance)
+    if _namespace(noise) is np and np.ndim(noise) == 0:
+        return max(float(cost_tol), 3.0 * float(noise))
+    return _larger(float(cost_tol), 3.0 * noise)
 
 
 def _within(sigma: ArrayLike, limit: ArrayLike) -> ArrayLike:
     """Whether a predicted decrease ``sigma`` is within ``limit`` of zero, elementwise.
 
     A decrease below ``-limit`` is a step that the model says raises the cost, which is not
-    stationarity; ``nan`` is not within any limit.
+    stationarity; ``nan`` is not within any limit. Written for arrays.
     """
+    xp = _namespace(sigma, limit)
     with np.errstate(invalid="ignore"):
-        return np.abs(sigma) <= limit
+        return xp.abs(sigma) <= limit
 
 
 def _verdict(

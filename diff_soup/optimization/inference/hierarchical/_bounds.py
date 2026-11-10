@@ -1,9 +1,11 @@
 """The bound handling of the trust-region step, after Branch, Coleman and Li.
 
-These host-side functions reproduce the handling of box bounds in SciPy's
+These functions reproduce the handling of box bounds in SciPy's
 ``least_squares`` with ``method="trf"`` (``scipy/optimize/_lsq/common.py`` and
 ``trf.py``), under SciPy's names and with SciPy's semantics, elementwise, with
-infinite sides allowed. One difference: the quadratic model enters as a
+infinite sides allowed. Each is written for arrays: on NumPy values it computes on
+the host, with SciPy's early return and errors; on traced values it computes in the
+program that traces it, every branch a selection (``_loop_judge._namespace``). One difference: the quadratic model enters as a
 callable ``quadratic_form(v) = v^T H_h v`` of a vector ``v`` in the scaled
 coordinates, in place of a dense Jacobian ``J_h`` and a diagonal ``diag_h``
 (``H_h = J_h^T J_h + diag(diag_h)``), because the model of a parameter
@@ -26,12 +28,13 @@ the Cauchy step along ``-g_h``. Iterates are kept strictly inside the box by
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from math import copysign
 from numbers import Real
 from typing import NamedTuple
 
 import numpy as np
 from jaxtyping import ArrayLike
+
+from diff_soup.optimization.solvers._loop_judge import _larger, _namespace, _smaller
 
 
 def CL_scaling_vector(
@@ -55,15 +58,13 @@ def CL_scaling_vector(
     Returns:
         ``(v, dv)``, both of the shape of ``x``.
     """
-    x, g, lb, ub = (np.asarray(value) for value in (x, g, lb, ub))
-    v = np.ones_like(x)
-    dv = np.zeros_like(x)
-    mask = (g < 0) & np.isfinite(ub)
-    v[mask] = ub[mask] - x[mask]
-    dv[mask] = -1
-    mask = (g > 0) & np.isfinite(lb)
-    v[mask] = x[mask] - lb[mask]
-    dv[mask] = 1
+    xp = _namespace(x, g, lb, ub)
+    x, g, lb, ub = (xp.asarray(value) for value in (x, g, lb, ub))
+    upper = (g < 0) & xp.isfinite(ub)
+    lower = (g > 0) & xp.isfinite(lb)
+    with np.errstate(invalid="ignore"):
+        v = xp.where(lower, x - lb, xp.where(upper, ub - x, xp.ones_like(x)))
+    dv = xp.where(lower, 1.0, xp.where(upper, -1.0, 0.0)).astype(x.dtype)
     return v, dv
 
 
@@ -72,7 +73,7 @@ def find_active_constraints(
     lb: ArrayLike | Sequence[Real],
     ub: ArrayLike | Sequence[Real],
     rtol: Real = 1e-10,
-) -> np.ndarray:
+) -> ArrayLike:
     """Which side of the box is active at ``x``, per coordinate.
 
     A side is active when ``x`` is within ``rtol * max(1, |side|)`` of it and
@@ -89,22 +90,18 @@ def find_active_constraints(
         ``(n,)`` integers: 0 where no side is active, -1 where the lower side
         is, 1 where the upper side is.
     """
-    x, lb, ub = (np.asarray(value) for value in (x, lb, ub))
-    active = np.zeros_like(x, dtype=int)
+    xp = _namespace(x, lb, ub)
+    x, lb, ub = (xp.asarray(value) for value in (x, lb, ub))
     if rtol == 0:
-        active[x <= lb] = -1
-        active[x >= ub] = 1
-        return active
+        return xp.where(x >= ub, 1, xp.where(x <= lb, -1, 0))
     with np.errstate(all="ignore"):
         lower_dist = x - lb
         upper_dist = ub - x
-        lower_threshold = rtol * np.maximum(1, np.abs(lb))
-        upper_threshold = rtol * np.maximum(1, np.abs(ub))
-        lower_active = np.isfinite(lb) & (lower_dist <= np.minimum(upper_dist, lower_threshold))
-        upper_active = np.isfinite(ub) & (upper_dist <= np.minimum(lower_dist, upper_threshold))
-    active[lower_active] = -1
-    active[upper_active] = 1
-    return active
+        lower_threshold = rtol * xp.maximum(1, xp.abs(lb))
+        upper_threshold = rtol * xp.maximum(1, xp.abs(ub))
+        lower_active = xp.isfinite(lb) & (lower_dist <= xp.minimum(upper_dist, lower_threshold))
+        upper_active = xp.isfinite(ub) & (upper_dist <= xp.minimum(lower_dist, upper_threshold))
+    return xp.where(upper_active, 1, xp.where(lower_active, -1, 0))
 
 
 def make_strictly_feasible(
@@ -112,7 +109,7 @@ def make_strictly_feasible(
     lb: ArrayLike | Sequence[Real],
     ub: ArrayLike | Sequence[Real],
     rstep: Real = 0,
-) -> np.ndarray:
+) -> ArrayLike:
     """``x`` moved strictly inside the box.
 
     With ``rstep = 0`` a coordinate on a side or beyond it is moved to the next
@@ -129,28 +126,27 @@ def make_strictly_feasible(
     Returns:
         ``(n,)``, a new array.
     """
-    x, lb, ub = (np.asarray(value) for value in (x, lb, ub))
-    x_new = x.copy()
+    xp = _namespace(x, lb, ub)
+    x, lb, ub = (xp.asarray(value) for value in (x, lb, ub))
     active = find_active_constraints(x, lb, ub, rstep)
-    lower_mask = np.equal(active, -1)
-    upper_mask = np.equal(active, 1)
     if rstep == 0:
-        x_new[lower_mask] = np.nextafter(lb[lower_mask], ub[lower_mask])
-        x_new[upper_mask] = np.nextafter(ub[upper_mask], lb[upper_mask])
+        lower, upper = xp.nextafter(lb, ub), xp.nextafter(ub, lb)
     else:
-        x_new[lower_mask] = lb[lower_mask] + rstep * np.maximum(1, np.abs(lb[lower_mask]))
-        x_new[upper_mask] = ub[upper_mask] - rstep * np.maximum(1, np.abs(ub[upper_mask]))
+        lower = lb + rstep * xp.maximum(1, xp.abs(lb))
+        upper = ub - rstep * xp.maximum(1, xp.abs(ub))
+    x_new = xp.where(active == 1, upper, xp.where(active == -1, lower, x)).astype(x.dtype)
     tight_bounds = (x_new < lb) | (x_new > ub)
     with np.errstate(all="ignore"):
-        x_new[tight_bounds] = 0.5 * (lb[tight_bounds] + ub[tight_bounds])
-    return x_new
+        return xp.where(tight_bounds, 0.5 * (lb + ub), x_new).astype(x.dtype)
 
 
 def in_bounds(
     x: ArrayLike | Sequence[Real], lb: ArrayLike | Sequence[Real], ub: ArrayLike | Sequence[Real]
-) -> bool:
+) -> ArrayLike:
     """Whether ``lb <= x <= ub`` holds in every coordinate."""
-    return bool(np.all((np.asarray(x) >= lb) & (np.asarray(x) <= ub)))
+    xp = _namespace(x, lb, ub)
+    inside = xp.all((xp.asarray(x) >= lb) & (xp.asarray(x) <= ub))
+    return bool(inside) if xp is np else inside
 
 
 def step_size_to_bound(
@@ -172,46 +168,47 @@ def step_size_to_bound(
         integers, -1 where the lower side is reached at ``t``, 1 where the
         upper side is, 0 elsewhere.
     """
-    x, s, lb, ub = (np.asarray(value) for value in (x, s, lb, ub))
-    non_zero = np.nonzero(s)
-    s_non_zero = s[non_zero]
-    steps = np.empty_like(x)
-    steps.fill(np.inf)
-    with np.errstate(over="ignore"):
-        steps[non_zero] = np.maximum(
-            (lb - x)[non_zero] / s_non_zero, (ub - x)[non_zero] / s_non_zero
-        )
-    min_step = np.min(steps)
-    return min_step, np.equal(steps, min_step) * np.sign(s).astype(int)
+    xp = _namespace(x, s, lb, ub)
+    x, s, lb, ub = (xp.asarray(value) for value in (x, s, lb, ub))
+    moving = s != 0
+    divisor = xp.where(moving, s, 1)
+    with np.errstate(all="ignore"):
+        steps = xp.where(moving, xp.maximum((lb - x) / divisor, (ub - x) / divisor), xp.inf)
+    min_step = xp.min(steps) if steps.size else xp.asarray(xp.inf, dtype=x.dtype)
+    return min_step, xp.equal(steps, min_step) * xp.sign(s).astype(int)
 
 
 def intersect_trust_region(
-    x: ArrayLike | Sequence[Real], s: ArrayLike | Sequence[Real], Delta: Real
+    x: ArrayLike | Sequence[Real], s: ArrayLike | Sequence[Real], Delta: ArrayLike
 ) -> tuple:
     """The two roots ``t`` of ``||x + t * s|| = Delta``, the negative one first.
 
     Raises:
-        ValueError: If ``s`` is zero or ``x`` is outside the trust region.
+        ValueError: If ``s`` is zero or ``x`` is outside the trust region (on
+            the host; a traced call gives ``nan`` there).
     """
-    x, s = np.asarray(x), np.asarray(s)
-    a = np.dot(s, s)
-    if a == 0:
-        raise ValueError("`s` is zero.")
-    b = np.dot(x, s)
-    c = np.dot(x, x) - Delta**2
-    if c > 0:
-        raise ValueError("`x` is not within the trust region.")
-    d = np.sqrt(b * b - a * c)
-    q = -(b + copysign(d, b))
-    t1 = q / a
-    t2 = c / q
-    if t1 < t2:
-        return t1, t2
-    return t2, t1
+    xp = _namespace(x, s, Delta)
+    x, s = xp.asarray(x), xp.asarray(s)
+    a = xp.dot(s, s)
+    b = xp.dot(x, s)
+    c = xp.dot(x, x) - Delta**2
+    if xp is np:
+        if a == 0:
+            raise ValueError("`s` is zero.")
+        if c > 0:
+            raise ValueError("`x` is not within the trust region.")
+    with np.errstate(all="ignore"):
+        d = xp.sqrt(b * b - a * c)
+        q = -(b + xp.copysign(d, b))
+        t1 = q / a
+        t2 = c / q
+    if xp is np:
+        return (t1, t2) if t1 < t2 else (t2, t1)
+    return xp.where(t1 < t2, t1, t2), xp.where(t1 < t2, t2, t1)
 
 
 def build_quadratic_1d(
-    quadratic_form: Callable[..., Real],
+    quadratic_form: Callable[..., ArrayLike],
     g: ArrayLike | Sequence[Real],
     s: ArrayLike | Sequence[Real],
     s0: ArrayLike | Sequence[Real] | None = None,
@@ -228,57 +225,61 @@ def build_quadratic_1d(
         ``(a, b)`` of ``a t^2 + b t`` without ``s0``, ``(a, b, c)`` of
         ``a t^2 + b t + c`` with it.
     """
-    s = np.asarray(s)
-    curvature = float(quadratic_form(s))
+    xp = _namespace(g, s, s0)
+    s = xp.asarray(s)
+    curvature = xp.asarray(quadratic_form(s))
     a = 0.5 * curvature
-    b = np.dot(g, s)
+    b = xp.dot(g, s)
     if s0 is None:
         return a, b
-    s0 = np.asarray(s0)
-    at_start = float(quadratic_form(s0))
-    b += 0.5 * (float(quadratic_form(s0 + s)) - at_start - curvature)
-    c = 0.5 * at_start + np.dot(g, s0)
+    s0 = xp.asarray(s0)
+    at_start = xp.asarray(quadratic_form(s0))
+    b = b + 0.5 * (xp.asarray(quadratic_form(s0 + s)) - at_start - curvature)
+    c = 0.5 * at_start + xp.dot(g, s0)
     return a, b, c
 
 
-def minimize_quadratic_1d(a: Real, b: Real, lb: Real, ub: Real, c: Real = 0) -> tuple:
+def minimize_quadratic_1d(
+    a: ArrayLike, b: ArrayLike, lb: ArrayLike, ub: ArrayLike, c: ArrayLike = 0
+) -> tuple:
     """The minimum of ``a t^2 + b t + c`` on ``lb <= t <= ub`` (finite ends).
 
     Returns:
         ``(t, y)``, the minimizer and the minimum.
     """
-    t = [lb, ub]
-    if a != 0:
-        extremum = -0.5 * b / a
-        if lb < extremum < ub:
-            t.append(extremum)
-    t = np.asarray(t)
-    y = t * (a * t + b) + c
-    min_index = np.argmin(y)
+    xp = _namespace(a, b, lb, ub, c)
+    with np.errstate(all="ignore"):
+        extremum = -0.5 * b / xp.where(a != 0, a, 1)
+        inside = (a != 0) & (lb < extremum) & (extremum < ub)
+        t = xp.stack([xp.asarray(lb, dtype=float), xp.asarray(ub, dtype=float), extremum])
+        y = t * (a * t + b) + c
+    y = xp.where(xp.asarray([True, True, False]) | inside, y, xp.inf)
+    min_index = xp.argmin(y)
     return t[min_index], y[min_index]
 
 
 def evaluate_quadratic(
-    quadratic_form: Callable[..., Real],
+    quadratic_form: Callable[..., ArrayLike],
     g: ArrayLike | Sequence[Real],
     s: ArrayLike | Sequence[Real],
-) -> float:
+) -> ArrayLike:
     """The model ``0.5 s^T H s + g^T s`` at the step ``s``."""
-    s = np.asarray(s)
-    return 0.5 * float(quadratic_form(s)) + float(np.dot(s, g))
+    xp = _namespace(g, s)
+    s = xp.asarray(s)
+    return 0.5 * xp.asarray(quadratic_form(s)) + xp.dot(s, g)
 
 
 def select_step(
     x: ArrayLike | Sequence[Real],
-    quadratic_form: Callable[..., Real],
+    quadratic_form: Callable[..., ArrayLike],
     g_h: ArrayLike | Sequence[Real],
     p: ArrayLike | Sequence[Real],
     p_h: ArrayLike | Sequence[Real],
     d: ArrayLike | Sequence[Real],
-    Delta: Real,
+    Delta: ArrayLike,
     lb: ArrayLike | Sequence[Real],
     ub: ArrayLike | Sequence[Real],
-    theta: Real,
+    theta: ArrayLike,
 ) -> tuple:
     """The trial step of the trust-region subproblem's solution under the box.
 
@@ -308,92 +309,82 @@ def select_step(
         coordinates, and the decrease the model predicts for it.
 
     Raises:
-        ValueError: If ``||p_h||`` is larger than ``Delta``.
+        ValueError: If ``||p_h||`` is larger than ``Delta`` (on the host).
     """
     with np.errstate(all="ignore"):
         return _candidates(x, quadratic_form, g_h, p, p_h, d, Delta, lb, ub, theta)
 
 
 def _candidates(x, quadratic_form, g_h, p, p_h, d, Delta, lb, ub, theta) -> tuple:
-    """``select_step``'s statements, in SciPy's order."""
-    x, g_h, d = np.asarray(x), np.asarray(g_h), np.asarray(d)
-    p = np.array(p, copy=True)
-    p_h = np.array(p_h, copy=True)
-    if in_bounds(x + p, lb, ub):
-        p_value = evaluate_quadratic(quadratic_form, g_h, p_h)
-        return p, p_h, -p_value
+    """``select_step``'s statements, in SciPy's order; on traced values every branch is taken."""
+    xp = _namespace(x, g_h, p, p_h, d, Delta, theta)
+    x, g_h, d, p, p_h = (xp.asarray(value) for value in (x, g_h, d, p, p_h))
+    inside = in_bounds(x + p, lb, ub)
+    full_value = evaluate_quadratic(quadratic_form, g_h, p_h)
+    if xp is np and inside:
+        return p.copy(), p_h.copy(), -full_value
 
     p_stride, hits = step_size_to_bound(x, p, lb, ub)
 
     # The reflected direction.
-    r_h = np.copy(p_h)
-    r_h[hits.astype(bool)] *= -1
+    r_h = xp.where(hits != 0, -p_h, p_h)
     r = d * r_h
 
     # The step restricted to reach the side.
-    p *= p_stride
-    p_h *= p_stride
-    x_on_bound = x + p
+    p_bound = p * p_stride
+    p_h_bound = p_h * p_stride
+    x_on_bound = x + p_bound
 
     # The reflected direction crosses the box's or the trust region's boundary first.
-    _, to_tr = intersect_trust_region(p_h, r_h, Delta)
+    _, to_tr = intersect_trust_region(p_h_bound, r_h, Delta)
     to_bound, _ = step_size_to_bound(x_on_bound, r, lb, ub)
 
     # The range of the step along the reflected direction, with a margin from the box.
-    r_stride = min(to_bound, to_tr)
-    if r_stride > 0:
-        r_stride_l = (1 - theta) * p_stride / r_stride
-        if r_stride == to_bound:
-            r_stride_u = theta * to_bound
-        else:
-            r_stride_u = to_tr
-    else:
-        r_stride_l = 0
-        r_stride_u = -1
-
-    if r_stride_l <= r_stride_u:
-        a, b, c = build_quadratic_1d(quadratic_form, g_h, r_h, s0=p_h)
-        r_stride, r_value = minimize_quadratic_1d(a, b, r_stride_l, r_stride_u, c=c)
-        r_h *= r_stride
-        r_h += p_h
-        r = r_h * d
-    else:
-        r_value = np.inf
+    r_stride = _smaller(to_bound, to_tr)
+    positive = r_stride > 0
+    r_stride_l = xp.where(positive, (1 - theta) * p_stride / r_stride, 0)
+    r_stride_u = xp.where(positive, xp.where(r_stride == to_bound, theta * to_bound, to_tr), -1)
+    reflected = r_stride_l <= r_stride_u
+    a, b, c = build_quadratic_1d(quadratic_form, g_h, r_h, s0=p_h_bound)
+    t, value = minimize_quadratic_1d(a, b, r_stride_l, r_stride_u, c=c)
+    r_h = xp.where(reflected, r_h * t + p_h_bound, r_h)
+    r = r_h * d
+    r_value = xp.where(reflected, value, xp.inf)
 
     # The shortened step, strictly inside.
-    p *= theta
-    p_h *= theta
-    p_value = evaluate_quadratic(quadratic_form, g_h, p_h)
+    p_short = p_bound * theta
+    p_h_short = p_h_bound * theta
+    p_value = evaluate_quadratic(quadratic_form, g_h, p_h_short)
 
     ag_h = -g_h
     ag = d * ag_h
-    to_tr = Delta / np.linalg.norm(ag_h)
+    to_tr = Delta / xp.linalg.norm(ag_h)
     to_bound, _ = step_size_to_bound(x, ag, lb, ub)
-    if to_bound < to_tr:
-        ag_stride = theta * to_bound
-    else:
-        ag_stride = to_tr
+    ag_stride = xp.where(to_bound < to_tr, theta * to_bound, to_tr)
     a, b = build_quadratic_1d(quadratic_form, g_h, ag_h)
     ag_stride, ag_value = minimize_quadratic_1d(a, b, 0, ag_stride)
     ag_h = ag_h * ag_stride
     ag = ag * ag_stride
 
-    if p_value < r_value and p_value < ag_value:
-        return p, p_h, -p_value
-    if r_value < p_value and r_value < ag_value:
-        return r, r_h, -r_value
-    return ag, ag_h, -ag_value
+    take_p = (p_value < r_value) & (p_value < ag_value)
+    take_r = ~take_p & (r_value < p_value) & (r_value < ag_value)
+    step = xp.where(inside, p, xp.where(take_p, p_short, xp.where(take_r, r, ag)))
+    step_h = xp.where(inside, p_h, xp.where(take_p, p_h_short, xp.where(take_r, r_h, ag_h)))
+    value = xp.where(
+        inside, full_value, xp.where(take_p, p_value, xp.where(take_r, r_value, ag_value))
+    )
+    return step, step_h, -value
 
 
 def shortened_step(
     x: ArrayLike | Sequence[Real],
-    quadratic_form: Callable[..., Real],
+    quadratic_form: Callable[..., ArrayLike],
     g_h: ArrayLike | Sequence[Real],
     p: ArrayLike | Sequence[Real],
     p_h: ArrayLike | Sequence[Real],
     lb: ArrayLike | Sequence[Real],
     ub: ArrayLike | Sequence[Real],
-    theta: Real,
+    theta: ArrayLike,
 ) -> tuple:
     """``select_step``'s first candidate alone: ``p``, or ``p`` shortened to stay inside.
 
@@ -402,24 +393,24 @@ def shortened_step(
     Returns:
         ``(step, step_h, predicted_reduction)`` as ``select_step`` returns them.
     """
-    x = np.asarray(x)
-    p = np.array(p, copy=True)
-    p_h = np.array(p_h, copy=True)
+    xp = _namespace(x, g_h, p, p_h, theta)
+    x, p, p_h = xp.asarray(x), xp.asarray(p), xp.asarray(p_h)
     with np.errstate(all="ignore"):
-        if not in_bounds(x + p, lb, ub):
-            p_stride, _ = step_size_to_bound(x, p, lb, ub)
-            p *= p_stride
-            p_h *= p_stride
-            p *= theta
-            p_h *= theta
+        inside = in_bounds(x + p, lb, ub)
+        p_stride, _ = step_size_to_bound(x, p, lb, ub)
+        p = xp.where(inside, p, (p * p_stride) * theta)
+        p_h = xp.where(inside, p_h, (p_h * p_stride) * theta)
         return p, p_h, -evaluate_quadratic(quadratic_form, g_h, p_h)
 
 
-def step_back_ratio(g: ArrayLike | Sequence[Real], v: ArrayLike | Sequence[Real]) -> float:
+def step_back_ratio(g: ArrayLike | Sequence[Real], v: ArrayLike | Sequence[Real]) -> ArrayLike:
     """``theta = max(0.995, 1 - ||g * v||_inf)``: how close to a side a step may go."""
-    product = np.asarray(g) * np.asarray(v)
-    largest = float(np.max(np.abs(product))) if product.size else 0.0
-    return max(0.995, 1.0 - largest)
+    xp = _namespace(g, v)
+    product = xp.asarray(g) * xp.asarray(v)
+    largest = xp.max(xp.abs(product)) if product.size else 0.0
+    if xp is np:
+        return max(0.995, 1.0 - float(largest))
+    return _larger(0.995, 1.0 - largest)
 
 
 class Scaling(NamedTuple):
@@ -435,11 +426,11 @@ class Scaling(NamedTuple):
         theta: ``max(0.995, 1 - ||g * v||_inf)``.
     """
 
-    v: np.ndarray
-    dv: np.ndarray
-    scale: np.ndarray
-    addition: np.ndarray | None
-    theta: float
+    v: ArrayLike
+    dv: ArrayLike
+    scale: ArrayLike
+    addition: ArrayLike | None
+    theta: ArrayLike
 
 
 def coleman_li_scaling(
@@ -468,16 +459,16 @@ def coleman_li_scaling(
     Returns:
         The [Scaling][diff_soup.optimization.inference.hierarchical._bounds.Scaling].
     """
-    scale = np.asarray(scale)
-    g = np.asarray(g)
+    xp = _namespace(x, g, scale)
+    scale = xp.asarray(scale)
+    g = xp.asarray(g)
     v, dv = CL_scaling_vector(x, g, lb, ub)
     theta = step_back_ratio(g, v)
-    v_hat = v.copy()
     bounded = dv != 0
-    v_hat[bounded] *= scale[bounded]
+    v_hat = xp.where(bounded, v * scale, v)
     with np.errstate(divide="ignore", invalid="ignore"):
-        coordinates = scale / np.sqrt(v_hat)
-        addition = np.where(bounded, g * dv / scale, 0.0).astype(scale.dtype)
+        coordinates = scale / xp.sqrt(v_hat)
+        addition = xp.where(bounded, g * dv / scale, 0.0).astype(scale.dtype)
     return Scaling(v=v, dv=dv, scale=coordinates, addition=addition, theta=theta)
 
 

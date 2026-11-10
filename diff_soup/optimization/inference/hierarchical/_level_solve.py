@@ -422,6 +422,9 @@ def _refined(system, damping, elimination, answer, general):
     elimination, while it exceeds ``eps^0.75`` of its terms and at most
     ``_REFINEMENTS`` times: a direct solve stops at once, a lifted block
     (``_block_factor``) after a few rounds. A non-finite answer is left as it is.
+    Returns ``(step, general_multipliers, members, unrefined)``: ``unrefined`` is true
+    when the rounds ran out before the residual reached its tolerance, so the
+    answer is the lifted block's.
     """
     depth = system.depth
     dtype = system.root.dtype
@@ -503,7 +506,9 @@ def _refined(system, damping, elimination, answer, general):
 
     step, general_mu, members = answer
     state = jax.lax.while_loop(needed, round_, (step, general_mu, tuple(members), jnp.asarray(0)))
-    return state[0], state[1], state[2]
+    _, _, _, error, size = residual(state)
+    unrefined = jnp.isfinite(error) & (error > tolerance**2 * size)
+    return state[0], state[1], state[2], unrefined
 
 
 def _inverse_norm(system: LevelSystem, elimination: _Elimination, step: ArrayLike) -> jax.Array:
@@ -542,13 +547,23 @@ def _inverse_norm(system: LevelSystem, elimination: _Elimination, step: ArrayLik
 def _solve_parts(system, damping):
     """``_solve``'s step and ``q_squared``, and the multipliers of every row the step keeps.
 
+    ``_solve_flagged``'s answer without its flag.
+    """
+    return _solve_flagged(system, damping)[:3]
+
+
+def _solve_flagged(system, damping):
+    """``(step, q_squared, multipliers, unrefined)``: the damped solve, and whether it is unrefined.
+
     The multipliers ``mu`` are those of ``(H + damping I) s + g + A^T mu = 0``
     with ``A (point + s) = constraint_rhs`` on the equality rows and every
     member's rows at their targets (``member_rows``); an inactive row's is
     zero. The members' rows are eliminated with their nodes (``_eliminate``),
     the equality rows ride as right-hand-side columns and are solved last, in
     one small system. ``mu`` is ``(c + sum_l N_l R_l,)``: the equality rows,
-    then the members' rows level by level, member by member.
+    then the members' rows level by level, member by member. ``unrefined`` is
+    true when the refinement of the members' rows ran out of rounds before its
+    tolerance (``_refined``); false without members' rows.
     """
     counts, widths = system.counts, system.widths
     depth = system.depth
@@ -599,8 +614,9 @@ def _solve_parts(system, damping):
         general = (spread, member_spread, gram)
     else:
         general_mu = jnp.zeros((0,), dtype=dtype)
+    unrefined = jnp.asarray(False)
     if system.member_rows is not None:
-        step, general_mu, members = _refined(
+        step, general_mu, members, unrefined = _refined(
             system,
             damping,
             elimination,
@@ -610,7 +626,7 @@ def _solve_parts(system, damping):
     multipliers = jnp.concatenate(
         [general_mu] + [entry.reshape(-1) for entry in members if entry is not None]
     )
-    return step, _inverse_norm(system, elimination, step), multipliers
+    return step, _inverse_norm(system, elimination, step), multipliers, unrefined
 
 
 @jax.jit
@@ -730,54 +746,68 @@ def _all_finite(vector: ArrayLike) -> jax.Array:
 
 
 def _search(
-    solve: Callable[..., tuple[jax.Array, jax.Array]],
+    solve: Callable[..., tuple],
     zero: tuple,
-    radius: Real | ArrayLike,
+    radius: ArrayLike,
     eps: float,
     tiny: float,
+    *,
+    norms: Callable,
+    finite: Callable,
+    member_of: ArrayLike,
+    active: ArrayLike | None = None,
 ) -> tuple:
-    """``_secular_search`` on the device: every branch and limit of the host generator.
+    """``_secular_search`` on the device for ``m`` problems at once: every branch and limit of the host generator.
 
-    ``solve(damping)`` gives ``(z, q_squared)``; ``zero`` is its answer at
-    zero damping. Returns ``(multiplier, z, solves, failed)``: ``solves``
-    counts ``zero`` and every solve made, ``failed`` is true when the bracket
-    found no finite step inside the radius.
+    Problem ``k`` owns the columns where ``member_of`` is ``k`` (``-1``: none);
+    ``norms(z)`` and ``finite(z)`` give every problem's norm of ``z`` and whether
+    its part is finite, ``(m,)``. ``solve(damping)`` takes ``(m,)`` dampings (1
+    for a problem that asks for none) and gives ``(z, q_squared, unrefined)``,
+    ``z`` in joint columns and the others ``(m,)``; ``zero`` is its answer at
+    zero damping. ``radius`` is ``(m,)``; a problem outside ``active`` makes no
+    search and returns a zero step. Every round is one solve of every problem
+    that asks for one. Returns ``(multiplier, z, solves, failed, unrefined)``:
+    ``(m,)`` multipliers, the steps in joint columns, the solves made (``zero``
+    and every round), whether each problem's bracket found no finite step inside
+    its radius, and whether the solve that gave each problem's step is unrefined
+    (``_solve_flagged``). The joint attempt is one problem owning every column.
     """
-    z0, q0 = zero
+    z0, q0, f0 = zero
     dtype = z0.dtype
-    scalar = functools.partial(jnp.asarray, dtype=dtype)
-    radius = scalar(radius)
-    tolerance = scalar(np.sqrt(eps)) * jnp.maximum(scalar(1.0), radius)
-    probe = scalar(np.sqrt(eps))
-    one = scalar(1.0)
-    tiny = scalar(tiny)
-    machine = scalar(float(np.finfo(float).eps))
+    radius = jnp.asarray(radius, dtype=dtype)
+    count = radius.shape[0]
+    member_of = jnp.asarray(member_of)
+    columns = jnp.where(member_of >= 0, member_of, count)
+    tolerance = np.sqrt(eps) * jnp.maximum(1.0, radius)
+    probe = jnp.full((count,), np.sqrt(eps), dtype=dtype)
+    one = jnp.ones((count,), dtype=dtype)
+    zero_value = jnp.zeros((count,), dtype=dtype)
+    tiny = jnp.asarray(tiny, dtype=dtype)
+    machine = jnp.asarray(float(np.finfo(float).eps), dtype=dtype)
 
-    def at_zero(state):
-        n = _norm(state["z"])
-        found = _all_finite(state["z"]) & jnp.isfinite(state["q"]) & (n <= radius)
+    def at_zero(state, n, whole):
+        found = whole & jnp.isfinite(state["q"]) & (n <= radius)
         factor_bound = ~jnp.isfinite(state["q"])
         return {
-            **state,
             "phase": jnp.where(found, _FOUND, jnp.where(factor_bound, _PROBE, _BRACKET)),
-            "multiplier": jnp.zeros((), dtype),
+            "multiplier": zero_value,
             "out": state["z"],
-            "lo": jnp.zeros((), dtype),
+            "out_flag": state["f"],
+            "lo": zero_value,
             "lower_is_factor_bound": factor_bound,
             "hi": one,
             "need": ~found,
             "damping": jnp.where(factor_bound, probe, one),
         }
 
-    def at_probe(state):
-        n = _norm(state["z"])
+    def at_probe(state, n, whole):
         valid = jnp.isfinite(n) & jnp.isfinite(state["q"])
         found = valid & (n <= radius)
         return {
-            **state,
             "phase": jnp.where(found, _FOUND, _BRACKET),
             "multiplier": probe,
             "out": state["z"],
+            "out_flag": state["f"],
             "lo": probe,
             "lower_is_factor_bound": ~valid,
             "hi": one,
@@ -785,29 +815,27 @@ def _search(
             "damping": one,
         }
 
-    def at_bracket(state):
-        n = _norm(state["z"])
+    def at_bracket(state, n, whole):
         valid = jnp.isfinite(n) & jnp.isfinite(state["q"])
         inside = valid & (n <= radius)
         hi = jnp.where(inside, state["hi"], 2.0 * state["hi"] + 1.0)
-        count = state["brackets"] + 1
-        failed = ~inside & (count >= _BRACKETS)
+        brackets = state["brackets"] + 1
+        failed = ~inside & (brackets >= _BRACKETS)
         return {
-            **state,
             "phase": jnp.where(inside, _NEWTON, jnp.where(failed, _FOUND, _BRACKET)),
             "failed": failed,
-            "hi_step": jnp.where(inside, state["z"], state["hi_step"]),
+            "hi_step": jnp.where(spread(inside), state["z"], state["hi_step"]),
+            "hi_flag": jnp.where(inside, state["f"], state["hi_flag"]),
             "current": jnp.where(inside, state["hi"], state["current"]),
             "lo": jnp.where(inside, state["lo"], state["hi"]),
             "lower_is_factor_bound": jnp.where(inside, state["lower_is_factor_bound"], ~valid),
             "hi": hi,
-            "brackets": count,
+            "brackets": brackets,
             "need": ~inside & ~failed,
             "damping": hi,
         }
 
-    def at_newton(state):
-        n = _norm(state["z"])
+    def at_newton(state, n, whole):
         q = state["q"]
         current, lo, hi = state["current"], state["lo"], state["hi"]
         broken = ~jnp.isfinite(n) | ~jnp.isfinite(q)
@@ -823,9 +851,9 @@ def _search(
         current = jnp.where(broken, 0.5 * (lo + hi), stepped)
         more = ~close & (state["newtons"] < _NEWTONS - 1)
         return {
-            **state,
             "phase": jnp.where(more, _NEWTON, _FINAL),
-            "hi_step": jnp.where(inside, state["z"], state["hi_step"]),
+            "hi_step": jnp.where(spread(inside), state["z"], state["hi_step"]),
+            "hi_flag": jnp.where(inside, state["f"], state["hi_flag"]),
             "current": current,
             "lo": lo,
             "hi": hi,
@@ -835,7 +863,7 @@ def _search(
             "damping": current,
         }
 
-    def at_final(state):
+    def at_final(state, n, whole):
         lo, hi = state["lo"], state["hi"]
         nearly = (
             state["lower_is_factor_bound"]
@@ -843,56 +871,84 @@ def _search(
             & ((hi - lo) <= 1e-7 * jnp.maximum(one, jnp.abs(lo)))
         )
         return {
-            **state,
             "phase": jnp.where(nearly, _NEARLY, _FOUND),
             "multiplier": hi,
             "out": state["hi_step"],
+            "out_flag": state["hi_flag"],
             "need": nearly,
             "damping": lo + jnp.maximum(1e-6 * jnp.abs(lo), machine),
         }
 
-    def at_nearly(state):
-        good = _all_finite(state["z"]) & jnp.isfinite(state["q"])
+    def at_nearly(state, n, whole):
+        good = whole & jnp.isfinite(state["q"])
         return {
-            **state,
-            "phase": jnp.asarray(_FOUND),
+            "phase": jnp.full((count,), _FOUND),
             "multiplier": jnp.where(good, state["damping"], state["multiplier"]),
-            "out": jnp.where(good, state["z"], state["out"]),
-            "need": jnp.asarray(False),
+            "out": jnp.where(spread(good), state["z"], state["out"]),
+            "out_flag": jnp.where(good, state["f"], state["out_flag"]),
+            "need": jnp.zeros((count,), dtype=bool),
         }
 
+    def spread(flags):
+        """Per-problem flags on the columns, a column of no problem false."""
+        return jnp.concatenate([flags, jnp.zeros((1,), dtype=bool)])[columns]
+
     branches = (at_zero, at_probe, at_bracket, at_newton, at_final, at_nearly)
+    column_fields = ("z", "out", "hi_step")
 
     def body(state):
-        state = jax.lax.switch(state["phase"], branches, state)
-        z, q = jax.lax.cond(
-            state["need"],
-            lambda: solve(state["damping"]),
-            lambda: (state["z"], state["q"]),
+        n, whole = norms(state["z"]), finite(state["z"])
+        made = [branch(state, n, whole) for branch in branches]
+        phase = state["phase"]
+        chosen = dict(state)
+        for key in made[0].keys() | {key for update in made for key in update}:
+            options = [update.get(key, state[key]) for update in made] + [state[key]]
+            stacked = jnp.stack(options)
+            if key in column_fields:
+                index = jnp.concatenate([phase, jnp.full((1,), _FOUND)])[columns]
+            else:
+                index = phase
+            chosen[key] = jnp.take_along_axis(stacked, index[None], axis=0)[0]
+        chosen["phase"] = chosen["phase"].astype(jnp.int32)
+        need = chosen["need"]
+        z, q, f = jax.lax.cond(
+            jnp.any(need),
+            lambda: solve(jnp.where(need, chosen["damping"], 1.0)),
+            lambda: (chosen["z"], chosen["q"], chosen["f"]),
         )
-        return {**state, "z": z, "q": q, "solves": state["solves"] + state["need"]}
+        return {
+            **chosen,
+            "z": jnp.where(spread(need), z, chosen["z"]),
+            "q": jnp.where(need, q, chosen["q"]),
+            "f": jnp.where(need, f, chosen["f"]),
+            "solves": chosen["solves"] + jnp.any(need),
+        }
 
+    begin = jnp.ones((count,), dtype=bool) if active is None else jnp.asarray(active, dtype=bool)
     zeros = jnp.zeros_like(z0)
     state = {
-        "phase": jnp.asarray(_AT_ZERO),
+        "phase": jnp.where(begin, _AT_ZERO, _FOUND).astype(jnp.int32),
         "z": z0,
-        "q": q0,
-        "damping": jnp.zeros((), dtype),
-        "need": jnp.asarray(False),
-        "lo": jnp.zeros((), dtype),
+        "f": jnp.asarray(f0, dtype=bool),
+        "hi_flag": jnp.zeros((count,), dtype=bool),
+        "out_flag": jnp.zeros((count,), dtype=bool),
+        "q": jnp.asarray(q0, dtype=dtype),
+        "damping": zero_value,
+        "need": jnp.zeros((count,), dtype=bool),
+        "lo": zero_value,
         "hi": one,
         "current": one,
-        "lower_is_factor_bound": jnp.asarray(False),
+        "lower_is_factor_bound": jnp.zeros((count,), dtype=bool),
         "hi_step": zeros,
         "out": zeros,
-        "multiplier": jnp.zeros((), dtype),
-        "brackets": jnp.asarray(0),
-        "newtons": jnp.asarray(0),
-        "solves": jnp.asarray(1),
-        "failed": jnp.asarray(False),
+        "multiplier": zero_value,
+        "brackets": jnp.zeros((count,), dtype=jnp.int32),
+        "newtons": jnp.zeros((count,), dtype=jnp.int32),
+        "solves": jnp.asarray(1, dtype=jnp.int32),
+        "failed": jnp.zeros((count,), dtype=bool),
     }
-    state = jax.lax.while_loop(lambda state: state["phase"] != _FOUND, body, state)
-    return state["multiplier"], state["out"], state["solves"], state["failed"]
+    state = jax.lax.while_loop(lambda state: jnp.any(state["phase"] != _FOUND), body, state)
+    return state["multiplier"], state["out"], state["solves"], state["failed"], state["out_flag"]
 
 
 @functools.partial(jax.jit, static_argnames=("eps", "tiny"))
@@ -907,7 +963,8 @@ def _attempt(system, scale, addition, radius, *, eps, tiny):
     inverse = 1.0 / scale
 
     def solve(damping):
-        return _solve(scaled, damping)
+        step, q_squared, _, unrefined = _solve_flagged(scaled, damping[0])
+        return step, q_squared[None], unrefined[None]
 
     def decrease(z):
         step = inverse * z
@@ -916,10 +973,23 @@ def _attempt(system, scale, addition, radius, *, eps, tiny):
         )
         return -(gradient @ step + 0.5 * quadratic)
 
-    zero = solve(jnp.zeros((), scale.dtype))
-    finite = _all_finite(zero[0]) & jnp.isfinite(zero[1])
+    zero = solve(jnp.zeros((1,), scale.dtype))
+    # A zero-damping solve whose rows' refinement ran out predicts no decrease to test.
+    finite = _all_finite(zero[0]) & jnp.isfinite(zero[1][0]) & ~zero[2][0]
     full = jnp.where(finite, decrease(jnp.where(finite, zero[0], 0.0)), jnp.nan)
-    multiplier, scaled_step, solves, failed = _search(solve, zero, radius, eps, tiny)
+    multiplier, scaled_step, solves, failed, unrefined = _search(
+        solve,
+        zero,
+        jnp.reshape(radius, (1,)),
+        eps,
+        tiny,
+        norms=lambda z: _norm(z)[None],
+        finite=lambda z: _all_finite(z)[None],
+        member_of=np.zeros(scale.shape, dtype=np.int32),
+    )
+    # A step whose solve is unrefined fails as a step the bracket did not find.
+    multiplier, failed = multiplier[0], failed[0] | unrefined[0]
+    zero = (zero[0], zero[1][0])
     return (
         zero[0],
         zero[1],
@@ -1222,8 +1292,8 @@ def _secular_search(radius: float, eps: float, tiny: float):
 
     It yields the damping of the next solve and receives ``(z, q_squared)``,
     the problem's scaled step at that damping and its inverse-norm; it returns
-    ``(multiplier, z)``. ``level_secular_step`` runs one for the whole system,
-    ``_lockstep_search`` one per member of a level.
+    ``(multiplier, z)``. ``level_secular_step`` runs one for the whole system;
+    ``_search`` is the same search compiled, for any number of problems at once.
     """
 
     def norm(vector: np.ndarray) -> float:

@@ -16,7 +16,7 @@ level, the values above it held. There is no barrier, no new solver and no deriv
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 import equinox as eqx
 import jax
@@ -26,7 +26,14 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
-from diff_soup.optimization.inference.hierarchical._active_set import active_solve, slack
+from diff_soup.optimization.inference.hierarchical._active_set import active_set, slack
+from diff_soup.optimization.inference.hierarchical._level_inner import (
+    _inner_multipliers,
+    _inner_solve,
+    _inner_step,
+    _member_predicted,
+)
+from diff_soup.optimization.inference.hierarchical._level_solve import _scaled
 from diff_soup.optimization.inference.hierarchical._level_system import _offsets
 
 #: The bisections of the scale-back of a trial that violates a row.
@@ -148,6 +155,16 @@ class RowSet:
             count += len(members) * rows
         self.count = count
         self.kept: tuple | None = None
+        self.programs: dict = {}
+
+    def program(self, name: Any, make: Callable) -> Any:
+        """The compiled program ``name`` that holds these rows, made by ``make()`` at its first use and kept.
+
+        Fits that share the set (``row_set``) share its programs.
+        """
+        if name not in self.programs:
+            self.programs[name] = make()
+        return self.programs[name]
 
     def __call__(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """``(c, C)`` at ``x``: the rows ``(R,)`` and their Jacobian ``(R, n)``, fixed columns zero.
@@ -193,6 +210,27 @@ class RowSet:
         return self(x)[0]
 
 
+def row_set(specs: tuple, route: Any, cut: int | None = None) -> RowSet:
+    """``RowSet(specs, route, cut)``, built once per lowered study and kept on its joint view.
+
+    Fits of one study under the same ``InequalityRows`` objects, cut level and fixed
+    coordinates share the set, and with it the compiled programs kept on it
+    (``RowSet.program``); a copy of the view builds its own.
+    """
+    view = route.view
+    store = getattr(view, "__dict__", None)
+    key = (int(route.n), cut, np.asarray(route.fixed, dtype=np.int64).tobytes())
+    kept = () if store is None else store.get("_row_sets", ())
+    for owner, kept_specs, kept_key, made in kept:
+        same = len(kept_specs) == len(specs) and all(a is b for a, b in zip(kept_specs, specs))
+        if owner is view and kept_key == key and same:
+            return made
+    made = RowSet(specs, route, cut)
+    if store is not None:
+        store["_row_sets"] = tuple(kept) + ((view, tuple(specs), key, made),)
+    return made
+
+
 def _shared_rows(rows: Callable) -> Callable:
     def evaluate(shared, data):
         value = jnp.ravel(jnp.asarray(rows(shared, data)))
@@ -213,16 +251,6 @@ def _member_rows(rows: Callable) -> Callable:
     return evaluate
 
 
-def frozen(system: elimination.LevelSystem) -> np.ndarray:
-    """``(n,)``: the coordinates a step of ``system`` never moves, fixed or of a held node."""
-    mask = np.array(system.fixed_mask, dtype=bool)
-    offsets = _offsets(system.counts, system.widths)
-    for level in range(1, system.depth + 1):
-        held = np.asarray(system.held_mask[level], dtype=bool)
-        mask[offsets[level] : offsets[level + 1]] |= np.repeat(held, system.widths[level])
-    return mask
-
-
 def _general_rows(rows: RowSet, system: elimination.LevelSystem) -> np.ndarray:
     """The rows of no member, in order: those read the shared values only, or a level of no width."""
     general = np.ones((rows.count,), dtype=bool)
@@ -237,21 +265,121 @@ def _member_levels(rows: RowSet, system: elimination.LevelSystem) -> tuple:
     return tuple(level for level in sorted(rows.levels) if system.widths[level])
 
 
-def _place(
-    rows: RowSet,
-    system: elimination.LevelSystem,
-    c: np.ndarray,
-    C: np.ndarray,
-    active: np.ndarray,
-    level: int,
-) -> elimination.MemberRows:
+# ---------------------------------------------------------------------------
+# The rows inside a compiled program
+# ---------------------------------------------------------------------------
+
+
+def frozen_columns(system: elimination.LevelSystem) -> jax.Array:
+    """``(n,)``: the coordinates a step of ``system`` never moves, fixed or of a held node."""
+    held = [jnp.zeros((system.widths[0],), dtype=bool)] + [
+        jnp.repeat(jnp.asarray(system.held_mask[level], dtype=bool), system.widths[level])
+        for level in range(1, system.depth + 1)
+    ]
+    return jnp.asarray(system.fixed_mask, dtype=bool) | jnp.concatenate(held)
+
+
+def traced_rows(rows: RowSet, x: jax.Array, jacobian: bool = True) -> tuple:
+    """``(c, C)`` at a traced ``x``, as ``RowSet.__call__`` gives them on the host (``C`` ``None`` without ``jacobian``)."""
+    shared = x[: rows.shared]
+    values, jacobians = [], []
+    for program, columns, data in rows.blocks:
+        if columns is None:
+            c, d_shared = program(shared, data)
+            values.append(c)
+            if jacobian:
+                block = jnp.zeros((c.shape[0], rows.n), dtype=x.dtype)
+                jacobians.append(block.at[:, : rows.shared].set(d_shared))
+            continue
+        c, d_own, d_shared = program(x[columns], shared, data)
+        members, count = c.shape
+        values.append(c.reshape(-1))
+        if jacobian:
+            block = jnp.zeros((members, count, rows.n), dtype=x.dtype)
+            block = block.at[:, :, : rows.shared].set(d_shared)
+            block = block.at[
+                np.arange(members)[:, None, None],
+                np.arange(count)[None, :, None],
+                np.asarray(columns)[:, None, :],
+            ].set(d_own)
+            jacobians.append(block.reshape(members * count, rows.n))
+    c = jnp.concatenate(values) if values else jnp.zeros((0,), dtype=x.dtype)
+    if not jacobian:
+        return c, None
+    C = jnp.concatenate(jacobians) if jacobians else jnp.zeros((0, rows.n), dtype=x.dtype)
+    if rows.fixed.size:
+        C = C.at[:, rows.fixed].set(0.0)
+    return c, C
+
+
+class Placed(NamedTuple):
+    """Every row of a ``RowSet`` placed in a traced system at a fixed shape, all inactive.
+
+    ``template`` is the system holding every row placed,
+    ``keep`` ``(R,)`` the rows with a column a step moves, the only ones ever kept, and
+    ``general`` the static positions of the rows of no member among ``rows``.
+    """
+
+    template: elimination.LevelSystem
+    keep: jax.Array
+    general: np.ndarray
+
+
+def place_rows(
+    rows: RowSet, system: elimination.LevelSystem, x: jax.Array, c: jax.Array, C: jax.Array
+) -> Placed:
+    """Every row of ``rows`` placed in ``system`` at a fixed shape for a compiled program, none active.
+
+    A member's rows ride at its node (``member_rows``, its ``MemberRows`` with every row's
+    coefficients on its own columns and its ancestors'), the others among the equality rows;
+    row ``i`` reads ``C_i (x + s) = C_i x - c_i``, the step on which its linearization at ``x``
+    is zero. ``C`` has the columns a step never moves set to zero; a row with no column left
+    is never kept. Flip the rows kept with ``hold_rows``; one program solves every active
+    set.
+    """
+    dtype = system.root.dtype
+    keep = jnp.any(C != 0.0, axis=1)
+    member_rows: list = [None] * (system.depth + 1)
+    for level in _member_levels(rows, system):
+        member_rows[level] = _place_traced(rows, system, c, C, level)
+    general = _general_rows(rows, system)
+    fields: dict = {}
+    if general.size:
+        count = int(np.shape(system.constraint_matrix)[0])
+        kept = (
+            jnp.ones((count,), dtype=bool)
+            if system.constraint_active is None
+            else jnp.asarray(system.constraint_active, dtype=bool)
+        )
+        fields = {
+            "constraint_matrix": jnp.concatenate(
+                [system.constraint_matrix, C[general].astype(dtype)]
+            ),
+            "constraint_rhs": jnp.concatenate(
+                [system.constraint_rhs, (C[general] @ x - c[general]).astype(dtype)]
+            ),
+            "constraint_active": jnp.concatenate([kept, jnp.zeros((general.size,), dtype=bool)]),
+        }
+    placed = tuple(member_rows) if any(entry is not None for entry in member_rows) else None
+    names = ("member_rows",) + tuple(fields)
+    values = (placed,) + tuple(fields.values())
+    template = eqx.tree_at(
+        lambda s: tuple(getattr(s, name) for name in names),
+        system,
+        values,
+        is_leaf=lambda leaf: leaf is None,
+    )
+    return Placed(template, keep, general)
+
+
+def _place_traced(rows: RowSet, system, c: jax.Array, C: jax.Array, level: int):
     """The members' rows of ``level`` as ``MemberRows``: their coefficients from ``C`` per node, target ``-c``.
 
     Row ``i`` holds ``C_i s = -c_i``, the step on which its linearization at the point of
     ``c`` and ``C`` is zero; ``C`` is read on each member's own columns and on those of its
-    ancestors. Host arrays of the system's dtype.
+    ancestors. Every row is inactive.
     """
-    dtype = np.dtype(system.root.dtype)
+    dtype = system.root.dtype
     positions, columns = rows.levels[level]
     count, per = positions.shape
     offsets = _offsets(system.counts, system.widths)
@@ -259,8 +387,8 @@ def _place(
     nodes = np.arange(count)[:, None, None]
     numbers = np.arange(per)[None, :, None]
 
-    def read(read_columns: np.ndarray) -> np.ndarray:
-        return np.transpose(block[nodes, numbers, read_columns[:, None, :]], (0, 2, 1)).astype(
+    def read(read_columns) -> jax.Array:
+        return jnp.transpose(block[nodes, numbers, read_columns[:, None, :]], (0, 2, 1)).astype(
             dtype
         )
 
@@ -270,162 +398,104 @@ def _place(
         if at == 0:
             node_columns = np.broadcast_to(np.arange(width), (count, width))
         else:
-            ancestor = np.asarray(system.ancestors[level][at], dtype=np.int64)
-            node_columns = offsets[at] + ancestor[:, None] * width + np.arange(width)[None, :]
+            ancestor = jnp.asarray(system.ancestors[level][at])
+            node_columns = offsets[at] + ancestor[:, None] * width + jnp.arange(width)[None, :]
         above.append(read(node_columns))
     return elimination.MemberRows(
         coefficients=read(columns),
         above=tuple(above),
         target=(-c[positions]).astype(dtype),
-        active=np.asarray(active, dtype=bool)[positions],
+        active=jnp.zeros((count, per), dtype=bool),
     )
 
 
-def _holding(
-    system: elimination.LevelSystem, member_rows: tuple, **fields
-) -> elimination.LevelSystem:
-    """``system`` with ``member_rows`` (one entry per level) and any other ``fields``, on its device."""
-    placed = system.point
-    device = placed.sharding if placed.committed else None
-    names = ("member_rows",) + tuple(fields)
-    values = (member_rows,) + tuple(fields.values())
+def hold_rows(rows: RowSet, placed: Placed, active: jax.Array) -> elimination.LevelSystem:
+    """The placed system with the rows ``active`` (among those with a column a step moves) kept."""
+    on = active & placed.keep
+    template = placed.template
+    member_rows = template.member_rows
+    if member_rows is not None:
+        member_rows = tuple(
+            None if entry is None else entry._replace(active=on[rows.levels[level][0]])
+            for level, entry in enumerate(member_rows)
+        )
+    if not placed.general.size:
+        return eqx.tree_at(
+            lambda s: s.member_rows, template, member_rows, is_leaf=lambda leaf: leaf is None
+        )
+    count = int(np.shape(template.constraint_matrix)[0]) - placed.general.size
+    flags = jnp.concatenate([template.constraint_active[:count], on[placed.general]])
     return eqx.tree_at(
-        lambda s: tuple(getattr(s, name) for name in names),
-        system,
-        jax.device_put(values, device),
+        lambda s: (s.member_rows, s.constraint_active),
+        template,
+        (member_rows, flags),
         is_leaf=lambda leaf: leaf is None,
     )
 
 
-def with_rows(
-    rows: RowSet,
-    system: elimination.LevelSystem,
-    x: np.ndarray,
-    c: np.ndarray,
-    C: np.ndarray,
-    active: np.ndarray,
-) -> elimination.LevelSystem:
-    """``system`` holding every row of ``rows``, the ``active`` ones kept at their boundary.
-
-    Row ``i`` reads ``C_i (x + s) = C_i x - c_i``, the step ``s`` on which its
-    linearization at ``x`` is zero, its columns that the step never moves set to zero; a
-    row with no column left is never kept. A member's rows ride at its node
-    (``member_rows``), the others among the equality rows. ``system`` itself when no row
-    is kept.
-    """
-    C = np.where(frozen(system)[None, :], 0.0, C)
-    active = np.asarray(active, dtype=bool) & np.any(C != 0.0, axis=1)
-    if not active.any():
-        return system
-    dtype = np.dtype(system.root.dtype)
-    member_rows: list = [None] * (system.depth + 1)
-    for level in _member_levels(rows, system):
-        member_rows[level] = _place(rows, system, c, C, active, level)
-    general = _general_rows(rows, system)
-    if not general.size:
-        return _holding(system, tuple(member_rows))
-    count = int(np.shape(system.constraint_matrix)[0])
-    kept = (
-        np.ones((count,), dtype=bool)
-        if system.constraint_active is None
-        else np.asarray(system.constraint_active, dtype=bool)
-    )
-    matrix = np.concatenate(
-        [np.asarray(system.constraint_matrix, dtype=dtype), C[general].astype(dtype)]
-    )
-    rhs = np.concatenate(
-        [
-            np.asarray(system.constraint_rhs, dtype=dtype),
-            (C[general] @ x - c[general]).astype(dtype),
-        ]
-    )
-    return _holding(
-        system,
-        tuple(member_rows) if any(entry is not None for entry in member_rows) else None,
-        constraint_matrix=matrix,
-        constraint_rhs=rhs,
-        constraint_active=np.concatenate([kept, active[general]]),
-    )
-
-
-def held_multipliers(
-    rows: RowSet,
-    system: elimination.LevelSystem,
-    held: elimination.LevelSystem,
-    coordinates: box.Scaling,
-    damping: float,
-) -> np.ndarray:
-    """``(R,)``: the multipliers of the rows ``held`` keeps (``with_rows``), zero on the others.
-
-    They are those of ``held``'s damped solve in the subproblem's ``coordinates``, in the
-    order of ``rows``; ``held`` is ``system`` itself when it keeps no row.
-    """
-    if held is system:
-        return np.zeros((rows.count,))
-    flat = elimination.row_multipliers(held, coordinates.scale, damping, coordinates.addition)
-    multipliers = np.zeros((rows.count,))
-    start, stop = int(system.constraint_matrix.shape[0]), int(held.constraint_matrix.shape[0])
-    multipliers[_general_rows(rows, system)] = flat[start:stop]
+def rows_multipliers(rows: RowSet, system, placed: Placed, flat: jax.Array) -> jax.Array:
+    """``(R,)``: the held system's flat multipliers in the order of ``rows``, zero on a row not kept."""
+    multipliers = jnp.zeros((rows.count,), dtype=flat.dtype)
+    start = int(np.shape(system.constraint_matrix)[0])
+    stop = start + placed.general.size
+    if placed.general.size:
+        multipliers = multipliers.at[placed.general].set(flat[start:stop])
     for level in _member_levels(rows, system):
         positions = rows.levels[level][0].reshape(-1)
-        multipliers[positions] = flat[stop : stop + positions.size]
+        multipliers = multipliers.at[positions].set(flat[stop : stop + positions.size])
         stop += positions.size
     return multipliers
 
 
-def _fractions(
-    values: Callable, c0: np.ndarray, watched: np.ndarray, groups: np.ndarray, count: int
-) -> np.ndarray:
+def traced_fractions(values: Callable, c0, watched, group_of: np.ndarray, count: int):
     """Per group, the largest fraction of its step keeping its watched rows within ``max(c0, 0)``.
 
     ``values(fractions)`` gives the rows at the point moved by every group's fraction of
-    its step; ``groups[i]`` is the group of row ``i``, which reads its group's fraction
+    its step; ``group_of[i]`` is the group of row ``i``, which reads its group's fraction
     alone. A bisection of every group at once, the rows being nonlinear: a group whose step
     crosses a row is scaled back to that row's boundary.
     """
-    limit = np.maximum(c0, 0.0) + slack(c0, np.zeros((c0.size, 1)), np.zeros((1,)))
+    limit = jnp.maximum(c0, 0.0) + slack(c0, jnp.zeros((c0.size, 1)), jnp.zeros((1,)))
 
-    def broken(fractions: np.ndarray) -> np.ndarray:
+    def broken(fractions):
         crossed = watched & ~(values(fractions) <= limit)
-        return np.bincount(groups[crossed], minlength=count) > 0
+        return jnp.zeros((count,), dtype=bool).at[group_of].max(crossed)
 
-    high = np.ones((count,))
-    low = np.where(broken(high), 0.0, 1.0)
-    if np.all(low == 1.0):
-        return low
-    for _ in range(_STEP_BACK_BISECTIONS):
-        middle = np.where(low < 1.0, 0.5 * (low + high), 1.0)
-        bad = broken(middle)
-        high = np.where(bad, middle, high)
-        low = np.where(bad, low, middle)
+    high = jnp.ones((count,), dtype=c0.dtype)
+    low = jnp.where(broken(high), 0.0, 1.0).astype(c0.dtype)
+
+    def bisect(pair):
+        def halve(_, pair):
+            low, high = pair
+            middle = jnp.where(low < 1.0, 0.5 * (low + high), 1.0)
+            bad = broken(middle)
+            return jnp.where(bad, low, middle), jnp.where(bad, middle, high)
+
+        return jax.lax.fori_loop(0, _STEP_BACK_BISECTIONS, halve, pair)
+
+    low, _ = jax.lax.cond(jnp.all(low == 1.0), lambda pair: pair, bisect, (low, high))
     return low
 
 
-def step_back(rows: RowSet, x: np.ndarray, step: np.ndarray, active: np.ndarray) -> float:
-    """The largest fraction of ``step`` at which no inactive row is worse than ``max(c(x), 0)``.
+def traced_step_back(rows: RowSet, x, step, active):
+    """The largest fraction of ``step`` at which no row outside ``active`` is worse than ``max(c(x), 0)``.
 
     1 when the full step keeps those rows. An active row, held at its boundary by the
     step's linearization, keeps the step's second-order residual, which the next step's
-    projection takes back.
+    projection takes back. A bisection in the compiled program.
     """
-    c0 = rows.values(x)
-    fraction = _fractions(
-        lambda t: rows.values(x + float(t[0]) * step),
+    c0 = traced_rows(rows, x, jacobian=False)[0]
+    fraction = traced_fractions(
+        lambda t: traced_rows(rows, x + t[0] * step, jacobian=False)[0],
         c0,
-        ~np.asarray(active, dtype=bool),
-        np.zeros(c0.shape, dtype=np.int64),
+        ~active,
+        np.zeros((rows.count,), dtype=np.int64),
         1,
     )
-    return float(fraction[0])
+    return fraction[0]
 
 
-def onto_rows(
-    rows: RowSet,
-    x: np.ndarray,
-    scale: np.ndarray,
-    moving: np.ndarray,
-    bounds: tuple | None = None,
-) -> np.ndarray:
+def traced_onto_rows(rows: RowSet, x, scale, moving, bounds=None):
     """``x`` moved back onto the rows it violates beyond their slack, the coordinates ``moving`` alone.
 
     A step that holds a curved row on its linearization leaves it by the square of the
@@ -433,267 +503,274 @@ def onto_rows(
     in the metric ``D = diag(scale)`` of the step, takes the trial back to their boundary,
     a few times at most. A row the coordinates ``moving`` do not reach is left as it is.
     Under ``bounds`` a coordinate the projection takes out of the box is put back strictly
-    inside it and held, and the projection goes on with the others.
+    inside it and held, and the projection goes on with the others. The projection solves
+    ``(A A^T) mu = c`` on the violated rows at a fixed shape (a row not violated takes the
+    identity's row), in the dtype of ``x``, as every solve of the step.
     """
-    x = np.array(x, dtype=np.float64, copy=True)
-    moving = np.array(moving, dtype=bool, copy=True)
-    left = _RESTORE_ITERATIONS
-    while left:
-        left -= 1
-        c, C = rows(x)
-        with np.errstate(all="ignore"):
-            A = np.where(moving[None, :], C, 0.0) / scale[None, :]
-        A = np.where(np.isfinite(A), A, 0.0)
-        reached = np.any(A != 0.0, axis=1)
-        violated = reached & (c > slack(c, np.zeros((c.size, 1)), np.zeros((1,))))
-        if not violated.any():
-            break
-        A = A[violated]
-        multipliers = np.asarray(jnp.linalg.solve(A @ A.T, c[violated]))
-        with np.errstate(all="ignore"):
-            x = x - np.where(moving, (A.T @ multipliers) / scale, 0.0)
-        if bounds is None:
-            continue
-        lower, upper = bounds
-        out = moving & ~((x > lower) & (x < upper))
-        if out.any():
-            x = np.where(out, box.make_strictly_feasible(x, lower, upper, rstep=0), x)
-            moving &= ~out
-            left = _RESTORE_ITERATIONS
+    zeros_rows = jnp.zeros((rows.count, 1), dtype=x.dtype)
+
+    def body(state):
+        x, moving, left, _ = state
+        c, C = traced_rows(rows, x)
+        A = jnp.where(moving[None, :], C, 0.0) / scale[None, :]
+        A = jnp.where(jnp.isfinite(A), A, 0.0)
+        reached = jnp.any(A != 0.0, axis=1)
+        violated = reached & (c > slack(c, zeros_rows, jnp.zeros((1,), dtype=x.dtype)))
+        A = A * violated[:, None]
+        gram = A @ A.T + jnp.diag(jnp.where(violated, 0.0, 1.0).astype(x.dtype))
+        mu = jnp.linalg.solve(gram, jnp.where(violated, c, 0.0))
+        moved = x - jnp.where(moving, (A.T @ mu) / scale, 0.0)
+        left_next = left - 1
+        moving_next = moving
+        if bounds is not None:
+            lower, upper = bounds
+            out = moving & ~((moved > lower) & (moved < upper))
+            moved = jnp.where(out, box.make_strictly_feasible(moved, lower, upper, rstep=0), moved)
+            moving_next = moving & ~out
+            left_next = jnp.where(jnp.any(out), _RESTORE_ITERATIONS, left_next)
+        stop = ~jnp.any(violated)
+        return (
+            jnp.where(stop, x, moved),
+            jnp.where(stop, moving, moving_next),
+            jnp.where(stop, left, left_next),
+            stop,
+        )
+
+    state = (
+        x,
+        jnp.asarray(moving, dtype=bool),
+        jnp.asarray(_RESTORE_ITERATIONS),
+        jnp.asarray(False),
+    )
+    x, _, _, _ = jax.lax.while_loop(lambda state: (state[2] > 0) & ~state[3], body, state)
     return x
 
 
 # ---------------------------------------------------------------------------
-# A member's own rows in the polish
+# A member's own rows in the polish, in a compiled program
 # ---------------------------------------------------------------------------
 
 
-def member_rows(
-    rows: RowSet, system: elimination.LevelSystem, x: np.ndarray, level: int
-) -> tuple | None:
-    """The rows of the members of ``level`` on their own values at ``x``, the values above held.
+class MemberRowSet(NamedTuple):
+    """The rows of the members of a level on their own values at a point, placed for the polish.
 
-    Returns ``(c, C, placed)``: the rows ``(N R,)`` and their Jacobian ``(N R, n)`` member
-    by member, with the columns a step never moves set to zero, and the rows as the
-    system holds them (``_place``, every row active); ``None`` when the level has no rows.
+    ``c`` ``(N P,)`` and ``C`` ``(N P, n)`` are the rows and their Jacobian member by
+    member, ``C`` zero on the columns a step never moves and on those above the level,
+    which the polish holds; ``template`` is the system holding every row at its member's
+    node, none active; ``keep`` ``(N P,)`` the rows that read a column of their member a
+    step moves, the only ones ever held.
+    """
+
+    c: jax.Array
+    C: jax.Array
+    template: elimination.LevelSystem
+    keep: jax.Array
+
+
+class _MemberZero(NamedTuple):
+    step: jax.Array
+    z: jax.Array
+    q_squared: jax.Array
+    solves: jax.Array
+    failed: jax.Array
+
+
+class _MemberStep(NamedTuple):
+    step: jax.Array
+    predicted: jax.Array
+    multipliers: jax.Array
+    solves: jax.Array
+    failed: jax.Array
+
+
+def member_row_set(
+    rows: RowSet, system: elimination.LevelSystem, x: jax.Array, level: int, owners: np.ndarray
+) -> MemberRowSet | None:
+    """The rows of the members of ``level`` on their own values at ``x``; ``None`` when the level has none.
+
+    ``owners`` is ``node_of_columns(system, level)``, static. Every row is placed at its
+    member's node at a fixed shape (``_place_traced``), so one program solves every active
+    set; the levels' other rows are not held by the polish.
     """
     if level not in rows.levels or not system.widths[level]:
         return None
     positions = rows.levels[level][0]
-    c, C = rows(x)
-    C = np.where(frozen(system)[None, :], 0.0, C)
-    placed = _place(rows, system, c, C, np.ones(c.shape, dtype=bool), level)
     count, per = positions.shape
-    return c[positions].reshape(-1), C[positions].reshape(count * per, -1), placed
+    c, C = traced_rows(rows, x)
+    C = jnp.where(frozen_columns(system)[None, :], 0.0, C)
+    entry = _place_traced(rows, system, c, C, level)
+    member_rows: list = [None] * (system.depth + 1)
+    member_rows[level] = entry
+    template = eqx.tree_at(
+        lambda s: s.member_rows, system, tuple(member_rows), is_leaf=lambda leaf: leaf is None
+    )
+    own = jnp.where(jnp.asarray(owners >= 0)[None, :], C[positions].reshape(count * per, -1), 0.0)
+    keep = jnp.any(entry.coefficients != 0.0, axis=1).reshape(-1)
+    return MemberRowSet(c[positions].reshape(-1), own, template, keep)
 
 
-def _held(own: tuple, system: elimination.LevelSystem, level: int, active: np.ndarray):
-    """``system`` holding the members' rows of ``own`` with ``active`` kept, or ``None`` when none is.
-
-    A member's polish keeps a row only where it reads the member's own values.
-    """
-    _, _, placed = own
-    count, _, per = placed.coefficients.shape
-    on = np.asarray(active).reshape(count, per) & np.any(placed.coefficients != 0.0, axis=1)
-    if not on.any():
-        return None
-    member_rows = [None] * (system.depth + 1)
-    member_rows[level] = placed._replace(active=on)
-    return _holding(system, tuple(member_rows))
+def _hold_members(own: MemberRowSet, level: int, active: jax.Array) -> elimination.LevelSystem:
+    """The placed system with the members' rows ``active`` (among those ``own.keep``) held."""
+    entry = own.template.member_rows[level]
+    member_rows = list(own.template.member_rows)
+    member_rows[level] = entry._replace(active=(active & own.keep).reshape(entry.active.shape))
+    return eqx.tree_at(
+        lambda s: s.member_rows, own.template, tuple(member_rows), is_leaf=lambda leaf: leaf is None
+    )
 
 
-def _groups(own: tuple, system: elimination.LevelSystem, level: int) -> tuple:
-    """``active_solve``'s rows and groups for the members' polish: one group per member.
-
-    Returns ``(c, C, groups)``, ``C`` zero on the columns above ``level``, which the polish
-    holds.
-    """
-    c, C, placed = own
-    count, _, per = placed.coefficients.shape
-    owners = elimination.node_of_columns(system, level)
+def _addition_of(coordinates: box.Scaling) -> jax.Array:
     return (
-        c,
-        np.where((owners >= 0)[None, :], C, 0.0),
-        (np.repeat(np.arange(count), per), owners, count),
+        jnp.zeros_like(coordinates.scale) if coordinates.addition is None else coordinates.addition
     )
 
 
-def _member_multipliers(
-    own: tuple, system, coordinates: box.Scaling, level: int, active: np.ndarray, damping
-) -> np.ndarray:
-    """Every member's multipliers of its held rows at its damped solve, zero on the others."""
-    held = _held(own, system, level, active)
-    if held is None:
-        return np.zeros(own[0].shape)
-    multipliers = elimination.inner_row_multipliers(
-        held,
-        coordinates.scale,
-        np.nan_to_num(np.asarray(damping, dtype=np.float64)),
-        level,
-        addition=coordinates.addition,
-    )
-    return multipliers.reshape(-1)
+def member_zero(
+    own: MemberRowSet, coordinates: box.Scaling, x: jax.Array, level: int, owners: np.ndarray
+) -> tuple:
+    """Every member's solve at zero damping under its own rows, by the active-set method.
 
-
-def _open_columns(system, level: int, settled: np.ndarray) -> np.ndarray:
-    """``(n,)``: the columns of the members whose active set did not settle."""
-    owners = elimination.node_of_columns(system, level)
-    return (owners >= 0) & ~settled[np.maximum(owners, 0)]
-
-
-def member_zero(own: tuple, system, x: np.ndarray, coordinates: box.Scaling, level: int) -> tuple:
-    """Every member's solve at zero damping under its own rows, by ``active_solve``.
-
-    Returns ``(zero, first, solves)``: the solve ``(z, q_squared)``, the solve with no row
-    held (the first solve of the members' searches), and the solves made. A member whose
-    active set did not settle has ``q_squared`` ``nan``: its model's decrease is not known.
+    Every member is a group of the method (``active_set``), its rows read its own
+    columns alone. Returns ``(zero, first, solves)``: the solve ``(z, q_squared)``, the
+    solve with no row held (the first solve of the members' searches), and the solves made
+    beyond that one. A member whose active set did not settle has the method's last
+    iterate as its ``z`` and ``q_squared`` ``nan``: its model's decrease is not known.
     """
-    c, C, groups = _groups(own, system, level)
-    scale, addition = coordinates.scale, coordinates.addition
-    count = own[2].coefficients.shape[0]
-    made = [0]
+    scale, addition = coordinates.scale, _addition_of(coordinates)
+    count, _, per = own.template.member_rows[level].coefficients.shape
+    damping = jnp.zeros((count,), dtype=scale.dtype)
 
     def solve(active):
-        held = _held(own, system, level, active)
-        zero = elimination.inner_solve_scaled(
-            system if held is None else held, scale, level, addition=addition
-        )
-        with np.errstate(all="ignore"):
-            return zero[0] / scale, zero
+        held = _scaled(_hold_members(own, level, active), scale, addition)
+        z, q_squared = _inner_solve(held, damping, level=level)
+        return _MemberZero(z / scale, z, q_squared, jnp.asarray(1), jnp.asarray(False))
 
     def multipliers(active, answer):
-        made[0] += 1
-        return _member_multipliers(own, system, coordinates, level, active, np.zeros((count,)))
+        held = _scaled(_hold_members(own, level, active), scale, addition)
+        return _inner_multipliers(held, damping, level=level).reshape(-1)
 
-    first = solve(np.zeros(c.shape, dtype=bool))
-    found = active_solve(solve, multipliers, c, C, x, first, groups)
-    z, q_squared = (np.array(part, dtype=np.float64) for part in found.answer[1])
-    if not found.settled.all():
-        z = np.where(_open_columns(system, level, found.settled), scale * found.step, z)
-        q_squared = np.where(found.settled, q_squared, np.nan)
-    return (z, q_squared), first[1], found.solves + 1 + made[0]
-
-
-def member_predicted(system, step: np.ndarray, coordinates: box.Scaling, level: int) -> np.ndarray:
-    """The decrease every member's scaled model predicts for its part of ``step``."""
-    predicted = elimination.inner_predicted(system, step, level)
-    if coordinates.addition is not None:
-        predicted -= 0.5 * elimination.inner_added(
-            system, coordinates.addition, coordinates.scale * step, level
-        )
-    return predicted
+    first = solve(jnp.zeros((count * per,), dtype=bool))
+    found = active_set(
+        solve, multipliers, own.c, own.C, x, first, shape=(count, per), columns=owners
+    )
+    unsettled = jnp.asarray(owners >= 0) & ~found.settled[np.maximum(owners, 0)]
+    z = jnp.where(unsettled, scale * found.step, found.answer.z)
+    q_squared = jnp.where(found.settled, found.answer.q_squared, jnp.nan)
+    return (z, q_squared), (first.z, first.q_squared), found.solves
 
 
 def member_step(
-    own: tuple,
-    system,
-    x: np.ndarray,
-    gradient: np.ndarray,
+    own: MemberRowSet,
+    system: elimination.LevelSystem,
     coordinates: box.Scaling,
-    radii: np.ndarray,
-    level: int,
-    members: np.ndarray,
+    x: jax.Array,
+    radii: jax.Array,
+    members: jax.Array,
     first: tuple,
-    bounds: tuple | None,
+    level: int,
+    owners: np.ndarray,
+    *,
+    eps: float,
+    tiny: float,
 ) -> tuple:
-    """``inner_secular_step`` under every member's own rows by ``active_solve``, and the rows held.
+    """The members' trust-region steps under their own rows, by the active-set method.
 
-    A member whose active set does not settle takes the method's last iterate, a descent
-    step inside its radius that keeps its rows. A member that holds a row and leaves the box
-    takes its step shortened to stay inside, which keeps the rows, as the joint step under
-    equality rows does. Returns ``(step, predicted, multipliers, solves, active)``.
+    Every round solves every member's step with its held rows (``_inner_step``); a round
+    with no row held starts its searches from ``first``, the solve holding none. A member
+    whose active set does not settle takes the method's last iterate, a descent step inside
+    its radius that keeps its rows, its predicted decrease the model's. Returns ``(step,
+    predicted, multipliers, solves, active, holding)``: ``active`` the rows held and
+    ``holding`` the members ``members`` that hold one.
     """
-    c, C, groups = _groups(own, system, level)
-    scale, addition = coordinates.scale, coordinates.addition
-    made = [0]
+    scale, addition = coordinates.scale, _addition_of(coordinates)
+    count, _, per = own.template.member_rows[level].coefficients.shape
+    damping = jnp.zeros((count,), dtype=scale.dtype)
+    traced_owners = jnp.asarray(owners)
 
     def solve(active):
-        held = _held(own, system, level, active)
-        answer = elimination.inner_secular_step(
-            system if held is None else held,
+        held = _hold_members(own, level, active)
+        start = jax.lax.cond(
+            jnp.any(active & own.keep),
+            lambda: _inner_solve(_scaled(held, scale, addition), damping, level=level),
+            lambda: tuple(first),
+        )
+        delta, predicted, multipliers, solves, _ = _inner_step(
+            held,
             scale,
             radii,
-            level,
             members,
-            first=first if held is None else None,
-            addition=addition,
-            hold=True,
+            addition,
+            traced_owners,
+            start,
+            level=level,
+            eps=eps,
+            tiny=tiny,
         )
-        made[0] += answer[3]
-        return answer
+        return _MemberStep(delta, predicted, multipliers, solves, jnp.asarray(False))
 
     def multipliers(active, answer):
-        made[0] += 1
-        return _member_multipliers(own, system, coordinates, level, active, answer[2])
+        held = _scaled(_hold_members(own, level, active), scale, addition)
+        return _inner_multipliers(held, jnp.nan_to_num(answer.multipliers), level=level).reshape(-1)
 
-    found = active_solve(solve, multipliers, c, C, x, None, groups)
-    active = found.active
-    step, predicted, multipliers, _ = found.answer
-    if not found.settled.all():
-        step = np.where(_open_columns(system, level, found.settled), found.step, step)
-        predicted = np.where(
-            found.settled, predicted, member_predicted(system, step, coordinates, level)
-        )
-        predicted[~members | np.isnan(multipliers)] = 0.0
-    holding = np.any(active.reshape(len(radii), -1), axis=1) & members
-    if bounds is None or not holding.any():
-        return step, predicted, multipliers, made[0], active
-    owners = elimination.node_of_columns(system, level)
-    for member in np.flatnonzero(holding):
-        columns = np.flatnonzero(owners == member)
-        lower, upper = bounds[0][columns], bounds[1][columns]
-        if box.in_bounds(x[columns] + step[columns], lower, upper):
-            continue
-        stride, _ = box.step_size_to_bound(x[columns], step[columns], lower, upper)
-        theta = box.step_back_ratio(gradient[columns], coordinates.v[columns])
-        step[columns] *= stride * theta
-    predicted = np.where(holding, member_predicted(system, step, coordinates, level), predicted)
-    return step, predicted, multipliers, made[0], active
+    found = active_set(
+        solve, multipliers, own.c, own.C, x, None, shape=(count, per), columns=owners
+    )
+    unsettled = jnp.asarray(owners >= 0) & ~found.settled[np.maximum(owners, 0)]
+    step = jnp.where(unsettled, found.step, found.answer.step)
+    multipliers_ = found.answer.multipliers
+    model = _member_predicted(
+        system, step, scale * step, addition, traced_owners, count, level=level
+    )
+    predicted = jnp.where(found.settled, found.answer.predicted, model)
+    predicted = jnp.where(~members | jnp.isnan(multipliers_), 0.0, predicted)
+    holding = jnp.any(found.active.reshape(count, per), axis=1) & members
+    return step, predicted, multipliers_, found.solves, found.active, holding
 
 
 def member_back(
     rows: RowSet,
-    own: tuple,
-    system,
-    x: np.ndarray,
-    trial: np.ndarray,
+    own: MemberRowSet,
+    system: elimination.LevelSystem,
+    x: jax.Array,
+    trial: jax.Array,
     coordinates: box.Scaling,
-    predicted: np.ndarray,
-    active: np.ndarray,
+    predicted: jax.Array,
+    active: jax.Array,
     level: int,
+    owners: np.ndarray,
     bounds: tuple | None,
 ) -> tuple:
     """Every member's trial scaled back to the boundary of an inactive own row it crosses.
 
-    The trial is then moved back onto the own rows it violates (``onto_rows``), each
-    member's coordinates alone, and kept strictly inside ``bounds`` as the joint trial
-    is. Returns ``(trial, scaled, predicted)``: the trial, its step
-    in the subproblem's coordinates before that move, and every member's predicted
-    decrease, the model's for that step.
+    The trial is then moved back onto the own rows it violates (``traced_onto_rows``),
+    each member's coordinates alone, and kept strictly inside ``bounds`` as the joint
+    trial is. Returns ``(trial, scaled, predicted)``: the trial, its step in the
+    subproblem's coordinates before that move, and every member's predicted decrease,
+    the model's for that step.
     """
-    positions, _ = rows.levels[level]
+    positions = rows.levels[level][0]
     count, per = positions.shape
-    step = trial - x
-    owners = elimination.node_of_columns(system, level)
+    scale, addition = coordinates.scale, _addition_of(coordinates)
+    owned = jnp.asarray(owners >= 0)
     member_of = np.maximum(owners, 0)
-    below = owners >= 0
+    step = trial - x
 
-    def values(fractions: np.ndarray) -> np.ndarray:
-        moved = x + np.where(below, fractions[member_of], 0.0) * step
-        return rows.values(moved)[positions].reshape(-1)
+    def values(fractions):
+        moved = x + jnp.where(owned, fractions[member_of], 0.0) * step
+        return traced_rows(rows, moved, jacobian=False)[0][positions].reshape(-1)
 
-    groups = np.repeat(np.arange(count), per)
-    fractions = _fractions(values, own[0], ~np.asarray(active, dtype=bool), groups, count)
-    shorter = fractions < 1.0
-    if shorter.any():
-        step = np.where(below, fractions[member_of], 1.0) * step
-        predicted = np.where(shorter, member_predicted(system, step, coordinates, level), predicted)
-    moving = below & (step != 0.0) & ~frozen(system)
-    trial = onto_rows(rows, x + step, coordinates.scale, moving, bounds)
+    fractions = traced_fractions(values, own.c, ~active, np.repeat(np.arange(count), per), count)
+    step = jnp.where(owned, fractions[member_of], 1.0) * step
+    model = _member_predicted(
+        system, step, scale * step, addition, jnp.asarray(owners), count, level=level
+    )
+    predicted = jnp.where(fractions < 1.0, model, predicted)
+    moving = owned & (step != 0.0) & ~frozen_columns(system)
+    moved = traced_onto_rows(rows, x + step, scale, moving, bounds)
     if bounds is not None:
-        inside = box.make_strictly_feasible(trial, bounds[0], bounds[1], rstep=0)
-        trial = np.where(moving, inside, trial)
-    return trial, coordinates.scale * step, predicted
+        inside = box.make_strictly_feasible(moved, bounds[0], bounds[1], rstep=0)
+        moved = jnp.where(moving, inside, moved)
+    return moved, scale * step, predicted
 
 
 __all__ = ["InequalityRows"]

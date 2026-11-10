@@ -17,13 +17,15 @@ from diff_soup.optimization.inference.hierarchical._level_solve import (
     _lower_solve,
     _node_sum,
     _row_block,
-    _secular_search,
+    _scaled,
+    _search,
     _split,
     _upper_solve,
     scaled_system,
 )
 from diff_soup.optimization.inference.hierarchical._level_system import (
     LevelSystem,
+    _addition,
     _dtype,
     _offsets,
     node_of_columns,
@@ -247,77 +249,72 @@ def inner_row_multipliers(
     return np.asarray(multipliers, dtype=np.float64)
 
 
-def _lockstep_search(
-    scaled: LevelSystem,
-    level: int,
-    radii: ArrayLike,
-    active: ArrayLike,
-    first: tuple[ArrayLike, ArrayLike] | None,
-    *,
-    hold: bool = False,
-) -> tuple:
-    """The multiplier searches of the active members of ``level`` on a scaled system.
+def _member_sums(values, owners, count):
+    """``(count,)``: the sums of ``values`` over every member's columns (traced).
 
-    Every active member runs ``_secular_search`` with its own radius on its
-    subtree of ``scaled``, the coordinates above ``level`` held. The members
-    search in lockstep: every round is one damped solve of all subtrees at
-    once, each with its own damping. ``first`` is an optional
-    ``(z, q_squared)`` of the solve at zero damping, already made; it answers
-    every search's first request and counts as one solve. With ``hold``, a
-    member whose search finds no finite step inside its radius takes a zero
-    step and a ``nan`` multiplier instead of raising. Every solve keeps the
-    members' rows of ``scaled`` at ``level``.
-
-    Returns:
-        ``(multipliers, scaled_step, solves)``: the multipliers
-        ``(N_level,)``, the scaled steps ``(n,)`` in joint columns (zero above
-        ``level`` and on inactive members), and the number of solves made.
+    ``owners`` is ``node_of_columns(system, level)``; a column of no member (``-1``) drops.
     """
-    dtype = _dtype(scaled)
-    owners = node_of_columns(scaled, level)
-    count = scaled.counts[level - 1]
-    columns = [np.flatnonzero(owners == member) for member in range(count)]
-    eps = float(np.finfo(dtype).eps)
-    tiny = float(np.finfo(float).tiny)
-    searches = {
-        int(member): _secular_search(float(radii[member]), eps, tiny)
-        for member in np.flatnonzero(active)
-    }
-    requests = {member: next(search) for member, search in searches.items()}
-    multipliers = np.zeros((count,), dtype=np.float64)
-    scaled_step = np.zeros((owners.shape[0],), dtype=dtype)
-    solves = 0
+    owned = owners >= 0
+    return jax.ops.segment_sum(jnp.where(owned, values, 0), jnp.where(owned, owners, 0), count)
 
-    def answer(requests: dict, step: np.ndarray, q_squared: np.ndarray) -> dict:
-        """Send every requesting member its solve; the requests of the next round."""
-        following = {}
-        for member in requests:
-            try:
-                following[member] = searches[member].send(
-                    (step[columns[member]], float(q_squared[member]))
-                )
-            except StopIteration as found:
-                multiplier, member_step = found.value
-                multipliers[member] = multiplier
-                scaled_step[columns[member]] = member_step
-            except ValueError:
-                if not hold:
-                    raise
-                multipliers[member] = np.nan
-        return following
 
-    if first is not None and requests:
-        # Every search asks for zero damping first; the solve already made answers it.
-        solves += 1
-        requests = answer(requests, np.asarray(first[0]), np.asarray(first[1]))
-    while requests:
-        damping = np.ones((count,), dtype=dtype)
-        for member, value in requests.items():
-            damping[member] = value
-        step, q_squared = _inner_solve(scaled, damping, level=level)
-        solves += 1
-        requests = answer(requests, np.asarray(step), np.asarray(q_squared))
-    return multipliers, scaled_step, solves
+def _member_norms(values, owners, count):
+    """``(count,)``: the norm of every member's part of ``values`` (traced)."""
+    return jnp.sqrt(_member_sums(values * values, owners, count))
+
+
+def _member_predicted(system, delta, scaled, addition, owners, count, *, level):
+    """The decrease every member's scaled model predicts for its part of ``delta`` (traced).
+
+    ``-(g_n . delta_n + delta_n^T H_n delta_n / 2 + z_n^T diag(addition_n) z_n / 2)``, ``z``
+    the same step in the scaled coordinates (``scaled``).
+    """
+    linear, quadratic = _node_model(system, delta, level=level)
+    added = _member_sums(addition * scaled * scaled, owners, count)
+    return -(linear + 0.5 * quadratic) - 0.5 * added
+
+
+@functools.partial(jax.jit, static_argnames=("level", "eps", "tiny"))
+def _inner_step(system, scale, radii, active, addition, owners, first, *, level, eps, tiny):
+    """Every active member's trust-region step on its subtree: one program of the members' searches.
+
+    ``owners`` is ``node_of_columns(system, level)``; ``first`` the members' solve at
+    zero damping in these coordinates, or ``None`` to make it. Every member runs the
+    device search of ``_level_solve._search`` with its own radius, all in lockstep, one
+    damped solve of every subtree per round. Returns ``(delta, predicted, multipliers,
+    solves, failed)``: a member whose search finds no finite step inside its radius has
+    a zero step, a zero predicted decrease and a ``nan`` multiplier, and is ``failed``.
+    """
+    count = system.counts[level - 1]
+    dtype = system.root.dtype
+    scaled = _scaled(system, scale, addition)
+    owned = owners >= 0
+    member = jnp.where(owned, owners, 0)
+
+    def norms(z):
+        return _member_norms(z, owners, count)
+
+    def finite(z):
+        return _member_sums((~jnp.isfinite(z)).astype(jnp.int32), owners, count) == 0
+
+    def solve(damping):
+        z, q_squared = _inner_solve(scaled, damping, level=level)
+        return z, q_squared, jnp.zeros((count,), dtype=bool)
+
+    if first is None:
+        zero = solve(jnp.zeros((count,), dtype=dtype))
+    else:
+        zero = (first[0], first[1], jnp.zeros((count,), dtype=bool))
+    multipliers, z, solves, failed, _ = _search(
+        solve, zero, radii, eps, tiny, norms=norms, finite=finite, member_of=owners, active=active
+    )
+    failed = failed & active
+    z = jnp.where(owned & failed[member], 0.0, z)
+    multipliers = jnp.where(failed, jnp.nan, multipliers)
+    delta = z / scale
+    predicted = _member_predicted(system, delta, z, addition, owners, count, level=level)
+    predicted = jnp.where(~active | jnp.isnan(multipliers), 0.0, predicted)
+    return delta, predicted, multipliers, jnp.where(jnp.any(active), solves, 0), failed
 
 
 def inner_secular_step(
@@ -337,7 +334,7 @@ def inner_secular_step(
     with its own radius in the scaled norm ``||scale * s_n||``, the
     coordinates above ``level`` held. The members search in lockstep: every
     round is one damped solve of all subtrees at once, each with its own
-    multiplier.
+    multiplier. One compiled program (``_inner_step``).
 
     Args:
         system: The system.
@@ -368,24 +365,32 @@ def inner_secular_step(
     dtype = _dtype(system)
     level = int(level)
     scale = np.asarray(scale, dtype=dtype)
-    radii = np.asarray(radii, dtype=np.float64)
-    active = np.asarray(active, dtype=bool)
-    scaled = scaled_system(system, scale, addition)
-    multipliers, scaled_step, solves = _lockstep_search(
-        scaled,
-        level,
-        radii,
-        active,
-        first,
-        hold=hold,
+    first = None if first is None else tuple(jnp.asarray(part, dtype=dtype) for part in first)
+    delta, predicted, multipliers, solves, failed = jax.device_get(
+        _inner_step(
+            system,
+            scale,
+            np.asarray(radii, dtype=dtype),
+            np.asarray(active, dtype=bool),
+            _addition(system, addition),
+            node_of_columns(system, level),
+            first,
+            level=level,
+            eps=float(np.finfo(dtype).eps),
+            tiny=float(np.finfo(float).tiny),
+        )
     )
-    with np.errstate(all="ignore"):
-        delta = scaled_step / scale
-    predicted = inner_predicted(system, delta, level)
-    if addition is not None:
-        predicted -= 0.5 * inner_added(system, addition, scaled_step, level)
-    predicted[~active | np.isnan(multipliers)] = 0.0
-    return delta, predicted, multipliers, solves
+    if not hold and np.any(failed):
+        raise ValueError(
+            "TrustRegion could not bracket a finite Gauss-Newton trust-region step; improve "
+            "parameter scaling."
+        )
+    return (
+        np.array(delta),
+        np.asarray(predicted, dtype=np.float64),
+        np.asarray(multipliers, dtype=np.float64),
+        int(solves),
+    )
 
 
 def inner_predicted(

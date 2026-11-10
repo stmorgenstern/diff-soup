@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import types
 from collections.abc import Callable
 from typing import Any
@@ -221,6 +222,26 @@ def _resolve_handle_regularization(regularization: Any, schema: ParameterSchema)
     )
 
 
+def _prior_penalty(blocks: tuple, x: Array) -> Array:
+    """Half the squared norm of every prior block's rows at ``x``, summed in block order (traced).
+
+    The one definition of the priors' cost: the MAP objective and the structured
+    regularizer's penalty trace it.
+    """
+    total = jnp.zeros((), dtype=x.dtype)
+    for columns, prior in blocks:
+        total = total + half_sum_of_squares(prior.residual(x[columns]))
+    return total
+
+
+def _log_prior(blocks: tuple, x: Array) -> Array:
+    """The normalized prior log density at ``x``: every prior block's, summed in block order (traced)."""
+    total = jnp.zeros((), dtype=x.dtype)
+    for columns, prior in blocks:
+        total = total + prior.log_prob(x[columns])
+    return total
+
+
 @dataclasses.dataclass(frozen=True)
 class _StructuredPriorRegularizer:
     """Expose independent MAP prior rows with their exact column ownership.
@@ -252,9 +273,7 @@ class _StructuredPriorRegularizer:
 
     def _penalty(self, x: Array) -> Array:
         """Half the squared norm of the rows of ``extra`` and of every prior block (traced)."""
-        return self.extra.penalty(x) + sum(
-            half_sum_of_squares(prior.residual(x[columns])) for columns, prior in self.blocks
-        )
+        return self.extra.penalty(x) + _prior_penalty(self.blocks, x)
 
     def _rows_program(self) -> tuple[Callable, list]:
         """``(program, columns)``: the jitted rows and Jacobians of every block, and their columns.
@@ -459,12 +478,15 @@ class EstimationProblem(AbstractOptimizationProblem):
         return valid
 
     def _prior_objective(self, x: ArrayLike) -> Array:
-        """Return the MAP prior penalty represented by the compiled prior rows."""
-        x = jnp.asarray(x)
-        total = jnp.zeros((), dtype=x.dtype)
-        for columns, prior in self._prior_blocks:
-            total = total + half_sum_of_squares(prior.residual(x[columns]))
-        return total
+        """Return the MAP prior penalty represented by the compiled prior rows.
+
+        One jitted program of ``_prior_penalty``, built once and kept on this problem.
+        """
+        kept = self.__dict__.get("_prior_program")
+        if kept is None or kept[0] is not self:
+            kept = (self, jax.jit(functools.partial(_prior_penalty, self._prior_blocks)))
+            self.__dict__["_prior_program"] = kept
+        return kept[1](jnp.asarray(x))
 
     @property
     def x0(self) -> np.ndarray:
@@ -625,8 +647,17 @@ class EstimationProblem(AbstractOptimizationProblem):
         predicate travels with it. A study of one experiment has no joint
         problem: its view is a copy of this problem whose regularizer carries
         the prior rows with their columns, and whose ``n_residuals`` counts
-        the data rows.
+        the data rows. The view is built once and kept on this problem, so
+        every fit of it shares the view and the programs kept on the view.
         """
+        kept = self.__dict__.get("_kept_joint_view")
+        if kept is None or kept[0] is not self:
+            kept = (self, self._joint_view())
+            self.__dict__["_kept_joint_view"] = kept
+        return kept[1]
+
+    def _joint_view(self) -> EstimationProblem | JointInferenceProblem:
+        """``joint_view``, built."""
         structured = isinstance(self.objective, MAP) or not isinstance(self.regularization, NoReg)
         with_start = getattr(self._inference_problem, "with_start", None)
         if not callable(with_start):
@@ -742,12 +773,15 @@ class EstimationProblem(AbstractOptimizationProblem):
         return self._prior_precision(jnp.asarray(x))
 
     def log_prior(self, x: ArrayLike) -> Array:
-        """Normalized physical-coordinate prior log density for a MAP problem."""
-        x = jnp.asarray(x, dtype=self._x0.dtype)
-        total = jnp.zeros((), dtype=x.dtype)
-        for columns, prior in self._prior_blocks:
-            total = total + prior.log_prob(x[columns])
-        return total
+        """Normalized physical-coordinate prior log density for a MAP problem.
+
+        One jitted program of ``_log_prior``, built once and kept on this problem.
+        """
+        kept = self.__dict__.get("_log_prior_program")
+        if kept is None or kept[0] is not self:
+            kept = (self, jax.jit(functools.partial(_log_prior, self._prior_blocks)))
+            self.__dict__["_log_prior_program"] = kept
+        return kept[1](jnp.asarray(x, dtype=self._x0.dtype))
 
     def finalize_opt_result(self, result: OptResult, *, optimizer: Any) -> OptResult:
         """Attach handle-based schema and normalized statistical provenance."""

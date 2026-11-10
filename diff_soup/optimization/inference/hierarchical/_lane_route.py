@@ -32,7 +32,11 @@ from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bou
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._bounds import Scaling
 from diff_soup.optimization.inference.hierarchical._constraints import _constraint_rows
-from diff_soup.optimization.inference.hierarchical._level_system import regularizer_block_members
+from diff_soup.optimization.inference.hierarchical._level_system import (
+    regularizer_block_costs,
+    regularizer_block_members,
+    regularizer_cost,
+)
 
 _LABEL = "TrustRegion"
 
@@ -232,6 +236,16 @@ def _route_tables(
     return tables, members
 
 
+def _refuse_block_count(weights: tuple | None, count: int) -> None:
+    """Refuse a regularizer that declares ``count`` blocks where its ``weights`` name another number."""
+    if weights is not None and count != len(weights):
+        raise ValueError(
+            f"the regularizer's block_rows(x) declares {count} blocks at this point "
+            f"and {len(weights)} where its weights were attributed; a regularizer declares "
+            "the same blocks at every point."
+        )
+
+
 def _member_row(results: Any, member: int) -> int:
     """The row of population member ``member`` in ``results``."""
     rows = np.flatnonzero(np.asarray(results.members) == int(member))
@@ -268,9 +282,6 @@ class _LaneRoute:
     layout: elimination.LevelLayout | None = None
     # The level tables of subsets of the planned lanes, by their ids in canonical order.
     subset_tables: dict | None = None
-    # The jitted programs of the regularizer's blocks: the route and the block weights they
-    # were built for, and the programs by name (``programs``).
-    compiled: tuple | None = None
 
     def __init__(self, solver: Any, problem: Any):
         lowered = _lowered(solver, problem)
@@ -736,59 +747,43 @@ class _LaneRoute:
         return jax.device_put(sums, self.device)
 
     def programs(self) -> dict:
-        """The route's jitted programs of the regularizer's blocks, by name.
+        """The jitted programs of the regularizer's blocks under the route's block weights, by name.
 
-        Built for this route and its block weights: a copy, or a route weighed
-        again, builds its own.
+        They read the view's regularizer and the block weights alone, so they are
+        kept on the view, one set per block weights: every fit (and every
+        weighted copy) of one lowered study shares them.
         """
-        kept = self.compiled
-        if kept is None or kept[0] is not self or kept[1] != self.block_weights:
-            kept = self.compiled = (self, self.block_weights, {})
-        return kept[2]
+        view = self.view
+        kept = view.__dict__.get("_regularizer_programs")
+        if kept is None or kept[0] is not view:
+            kept = (view, {})
+            view.__dict__["_regularizer_programs"] = kept
+        return kept[1].setdefault(self.block_weights, {})
 
     def refuse_block_count(self, count: int) -> None:
         """Refuse a regularizer that declares ``count`` blocks where its weights name another number."""
-        weights = self.block_weights
-        if weights is not None and count != len(weights):
-            raise ValueError(
-                f"the regularizer's block_rows(x) declares {count} blocks at this point "
-                f"and {len(weights)} where its weights were attributed; a regularizer declares "
-                "the same blocks at every point."
-            )
+        _refuse_block_count(self.block_weights, count)
 
     def block_costs(self, point: np.ndarray) -> tuple:
         """``(columns, costs)``: every regularizer block's columns and its ``0.5 |r_b|^2`` at ``point``.
 
-        Unweighted, in the order of ``view.regularization.block_rows``, from one
-        jitted program; ``costs`` is a host array.
+        Unweighted, in the order of ``view.regularization.block_rows``
+        (``regularizer_block_costs``); ``costs`` is a host array.
         """
-        programs = self.programs()
-        if "costs" not in programs:
-            regularizer = self.view.regularization
-            columns: list = []
-
-            def costs(x: jax.Array) -> jax.Array:
-                declared = tuple(regularizer.block_rows(x))
-                columns[:] = [tuple(int(column) for column in item[0]) for item in declared]
-                rows = [jnp.ravel(item[1]) for item in declared]
-                if not rows:
-                    return jnp.zeros((0,), dtype=x.dtype)
-                return jnp.stack([0.5 * (row @ row) for row in rows])
-
-            programs["costs"] = (jax.jit(costs), columns)
-        program, columns = programs["costs"]
-        values = np.asarray(program(jax.device_put(point, self.device)))
+        columns, values = regularizer_block_costs(
+            self.view.regularization, jax.device_put(point, self.device)
+        )
         self.refuse_block_count(len(columns))
-        return tuple(columns), values
+        return columns, values
 
     def penalty(self, point: np.ndarray) -> float:
-        """The regularizer's cost at ``point``: every block's ``0.5 |r_b|^2`` times its weight."""
-        regularizer = self.view.regularization
-        if self.block_weights is None:
-            return float(regularizer.penalty(jax.device_put(point, self.device)))
-        _, costs = self.block_costs(point)
-        weights = np.asarray(self.block_weights, dtype=np.float64)
-        return float(np.sum(np.where(weights == 0.0, 0.0, weights * costs)))
+        """The regularizer's cost at ``point``: every block's ``0.5 |r_b|^2`` times its weight.
+
+        ``regularizer_cost``, the definition the level system's cost reads too.
+        """
+        return regularizer_cost(
+            self.view.regularization, jax.device_put(point, self.device), self.block_weights
+        )
 
     def penalty_gradient(self, point: np.ndarray) -> np.ndarray:
         """The gradient of ``penalty`` at ``point``: every block's ``J_b^T r_b`` times its weight.
@@ -806,7 +801,7 @@ class _LaneRoute:
                 if int(np.size(regularizer.residual(x))) == 0:
                     return gradient
                 declared = tuple(regularizer.block_rows(x))
-                self.refuse_block_count(len(declared))
+                _refuse_block_count(weights, len(declared))
                 for weight, (columns, residual, jacobian) in zip(
                     (1.0,) * len(declared) if weights is None else weights, declared
                 ):

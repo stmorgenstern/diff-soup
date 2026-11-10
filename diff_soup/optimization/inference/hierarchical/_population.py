@@ -57,6 +57,23 @@ _MODES = ("value", "blocks")
 _WORK = ("lane_ids", "lane_rungs", "lane_first_steps")
 
 
+def refuse_inequality_fit(fit: Any) -> None:
+    """Refuse a ``fit`` made under inequality rows for a population stepped by the default solver.
+
+    The default solver steps the members without inequality rows, so they would leave them.
+
+    Raises:
+        ConfigurationError: If ``fit.info`` records inequality rows.
+    """
+    rows = int(dict(getattr(fit, "info", None) or {}).get("inequality_rows") or 0)
+    if rows:
+        raise ConfigurationError(
+            f"fit= was made under {rows} inequality row(s) (TrustRegion(inequalities=...)); "
+            "the default solver= steps the population's members without inequality rows and "
+            "would leave them, so bootstrap a fit made with inequalities=()."
+        )
+
+
 def _fit_binding(
     study: Any,
     fit: Any,
@@ -78,13 +95,15 @@ def _fit_binding(
 
     Raises:
         ConfigurationError: If ``weight_priors`` is not ``True`` or ``False``,
-            ``over`` is not the top level, or ``solver`` is not a
-            ``TrustRegion`` in the joint mode without weights and inequality rows.
+            ``over`` is not the top level, ``solver`` is not a ``TrustRegion``
+            in the joint mode without weights and inequality rows, or
+            ``solver`` is ``None`` and ``fit`` was made under inequality rows.
         ValueError: If ``fit`` holds no rung for a lane of the study.
     """
     if weight_priors is not True and weight_priors is not False:
         raise ConfigurationError(f"weight_priors must be True or False; got {weight_priors!r}.")
     if solver is None:
+        refuse_inequality_fit(fit)
         solver = TrustRegion()
     if not isinstance(solver, TrustRegion):
         raise ConfigurationError(

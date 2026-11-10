@@ -1,8 +1,9 @@
 """The tolerances a trust-region loop tests, the state it carries, and the rules of an attempt.
 
 The rules of one attempt: its gain ratio, acceptance and next radius; the growth
-lock, the windows and the runs after it; the tests that end the loop. All of them
-take and return plain numbers and host arrays, whatever objective the loop minimizes.
+lock, the windows and the runs after it; the tests that end the loop. Every rule is
+written for arrays (``_loop_judge._namespace``): a host loop calls it on NumPy
+values, a compiled program on traced ones, a polish on every member at once.
 
 Every relative number the rules read is relative to the cost scale
 ``max(|cost|, cost_atol / cost_tol)`` (``cost_scale``): the cost itself, never
@@ -31,7 +32,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from numbers import Real
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 from jaxtyping import ArrayLike
@@ -39,10 +40,17 @@ from jaxtyping import ArrayLike
 from diff_soup._distributed import local_value
 from diff_soup.optimization._abc import OptimizationProblem
 from diff_soup.optimization.solvers._loop_judge import (
+    Window,
     _floor_sample,
+    _larger,
     _median,
+    _missing,
+    _namespace,
     _noise_dominated,
+    as_window,
     cost_scale,
+    window_entries,
+    window_push,
 )
 from diff_soup.optimization.solvers._termination import (
     DEFAULT_COST_ATOL,
@@ -92,15 +100,15 @@ def loop_tolerances(
     )
 
 
-def _saved_window(state: Mapping | None, key: str) -> list:
+def _saved_window(state: Mapping | None, key: str) -> Window:
     """A window of rejected trials kept in a saved state; empty when the state has none."""
     if state is None:
-        return []
+        return as_window([])
     try:
         values = state[key]
     except (KeyError, TypeError):
-        return []
-    return [float(value) for value in np.ravel(np.asarray(values, dtype=np.float64))]
+        return as_window([])
+    return as_window(np.ravel(np.asarray(values, dtype=np.float64)))
 
 
 def _saved_value(state: Mapping | None, key: str) -> int | float | str | None:
@@ -130,10 +138,10 @@ class LoopState:
 
     ``attempt`` counts the attempts made. ``scale``, ``grad_threshold`` and
     ``accepted_step_radius`` are ``None`` until the first attempt, gradient
-    test and accepted step set them. The windows hold the last rejected and
-    noise-dominated trials' changes of the objective (and the rejected ones'
-    predicted decreases) relative to the cost scale at the attempt
-    (``cost_scale``); the runs count
+    test and accepted step set them. The windows (``Window``) hold the last
+    rejected and noise-dominated trials' changes of the objective (and the
+    rejected ones' predicted decreases) relative to the cost scale at the attempt
+    (``cost_scale``), saved as the arrays of their entries; the runs count
     invalid and noise-dominated rejected trials in a row.
     ``gradient_floor_samples`` is the window of the last floor samples
     (``_floor_sample``), in cost per unit of scaled step length; it is empty
@@ -152,13 +160,13 @@ class LoopState:
     cost_history: list = dataclasses.field(default_factory=list)
     grad_history: list = dataclasses.field(default_factory=list)
     radius_history: list
-    rejected_cost_change: list = dataclasses.field(default_factory=list)
-    rejected_predicted_decrease: list = dataclasses.field(default_factory=list)
-    noise_dominated_cost_change: list = dataclasses.field(default_factory=list)
+    rejected_cost_change: Window = dataclasses.field(default_factory=lambda: as_window([]))
+    rejected_predicted_decrease: Window = dataclasses.field(default_factory=lambda: as_window([]))
+    noise_dominated_cost_change: Window = dataclasses.field(default_factory=lambda: as_window([]))
     accepted_step_radius: Real | None = None
     consecutive_invalid_trials: int = 0
     consecutive_noise_dominated_trials: int = 0
-    gradient_floor_samples: list = dataclasses.field(default_factory=list)
+    gradient_floor_samples: Window = dataclasses.field(default_factory=lambda: as_window([]))
     record: dict
 
     @classmethod
@@ -212,65 +220,111 @@ class LoopState:
     def entries(self) -> dict:
         """The saved form: each field as a new host array under its name, the record's last.
 
-        A field annotated ``int`` is saved as ``int64``, every other as
-        ``float64`` (``None`` as ``nan``); the record's entries as
-        ``record.<name>``.
+        A field annotated ``int`` is saved as ``int64``, a window as the
+        ``float64`` array of its entries, every other as ``float64`` (``None``
+        as ``nan``); the record's entries as ``record.<name>``.
         """
-        entries = {
-            field.name: np.array(
-                getattr(self, field.name),
+        entries = {}
+        for field in dataclasses.fields(self):
+            if field.name == "record":
+                continue
+            value = getattr(self, field.name)
+            if isinstance(value, Window):
+                entries[field.name] = np.array(window_entries(value), dtype=np.float64)
+                continue
+            entries[field.name] = np.array(
+                np.nan if value is None else value,
                 dtype=np.int64 if field.type in ("int", int) else np.float64,
             )
-            for field in dataclasses.fields(self)
-            if field.name != "record"
-        }
         entries.update({f"record.{key}": value for key, value in self.record.items()})
         return entries
 
+    def trials(self) -> Trials:
+        """What the loop keeps of its trials, as the arrays a compiled program takes."""
+        return Trials(
+            np.asarray(self.growth_lock, dtype=np.int64),
+            self.rejected_cost_change,
+            self.rejected_predicted_decrease,
+            self.noise_dominated_cost_change,
+            np.asarray(_missing(self.accepted_step_radius), dtype=np.float64),
+            np.asarray(self.consecutive_invalid_trials, dtype=np.int64),
+            np.asarray(self.consecutive_noise_dominated_trials, dtype=np.int64),
+            self.gradient_floor_samples,
+        )
 
-# The number of rejected trials whose cost change and predicted decrease a fit keeps,
-# for the report of a fit that ends at max_steps; also the number of noise-dominated
-# rejected trials whose cost changes give the evaluation noise the fit reports.
-_WINDOW = 10
+    def keep(self, trials: Trials) -> None:
+        """Take the trials kept after an attempt, as host values (``None`` for no accepted step)."""
+        radius = float(np.asarray(trials.accepted_step_radius))
+        self.growth_lock = int(np.asarray(trials.growth_lock))
+        self.rejected_cost_change = _host_window(trials.rejected_cost_change)
+        self.rejected_predicted_decrease = _host_window(trials.rejected_predicted_decrease)
+        self.noise_dominated_cost_change = _host_window(trials.noise_dominated_cost_change)
+        self.accepted_step_radius = None if np.isnan(radius) else radius
+        self.consecutive_invalid_trials = int(np.asarray(trials.consecutive_invalid_trials))
+        self.consecutive_noise_dominated_trials = int(
+            np.asarray(trials.consecutive_noise_dominated_trials)
+        )
+        self.gradient_floor_samples = _host_window(trials.gradient_floor_samples)
+
+
+def _host_window(window: Any) -> Window:
+    """A window as host arrays."""
+    window = as_window(window)
+    return Window(np.asarray(window.values), np.asarray(window.count))
+
 
 # The number of noise-dominated rejected trials in a row that ends a loop: the model's
 # predictions at that radius are below the noise of the cost's evaluation.
 _NOISE_RUN = 3
 
 
-def cost_threshold(cost: float, cost_tol: float, cost_atol: float) -> float:
+def cost_threshold(cost: ArrayLike, cost_tol: float, cost_atol: float) -> ArrayLike:
     """The largest cost change the cost test accepts at ``cost``: ``max(cost_tol * |cost|, cost_atol)``.
 
     Relative to the cost itself, so where a fit stops does not depend on the
     units of its residual rows; ``cost_atol`` is the absolute floor.
     """
-    return max(float(cost_tol) * abs(float(cost)), float(cost_atol))
+    xp = _namespace(cost)
+    if xp is np and np.ndim(cost) == 0:
+        return max(float(cost_tol) * abs(float(cost)), float(cost_atol))
+    return _larger(float(cost_tol) * xp.abs(cost), float(cost_atol))
 
 
 def cost_small(
-    *, accepted: bool, evaluated: bool, cost_change: float, predicted: float, threshold: float
-) -> bool:
+    *,
+    accepted: ArrayLike,
+    evaluated: ArrayLike,
+    cost_change: ArrayLike,
+    predicted: ArrayLike,
+    threshold: ArrayLike,
+) -> ArrayLike:
     """The cost test of a trial: whether it ends its loop at the cost threshold ``threshold``.
 
     An ``accepted`` trial whose cost changed by at most ``threshold`` ends it,
     and so does an ``evaluated`` one (its cost computed, accepted or rejected)
     whose cost change and ``predicted`` decrease both are at most it.
     """
-    return bool(
-        (accepted and cost_change <= threshold)
-        or (evaluated and cost_change <= threshold and predicted <= threshold)
-    )
+    xp = _namespace(accepted, evaluated, cost_change, predicted, threshold)
+    with np.errstate(invalid="ignore"):
+        within = cost_change <= threshold
+        return (xp.asarray(accepted) & within) | (
+            xp.asarray(evaluated) & within & (predicted <= threshold)
+        )
 
 
-def step_small(step_norm: float, point: ArrayLike, step_tol: float, *, tested: bool = True) -> bool:
-    """The step test of a trial: ``tested`` and ``step_norm <= step_tol * (1 + ||point||)``.
+def step_small(
+    step_norm: ArrayLike, point_norm: ArrayLike, step_tol: float, *, tested: ArrayLike = True
+) -> ArrayLike:
+    """The step test of a trial: ``tested`` and ``step_norm <= step_tol * (1 + point_norm)``.
 
-    ``point`` is the point the loop holds after the trial; ``tested`` says
-    whether the trial takes the test at all (a loop tests a trial whose cost
-    was computed, or one the predicate passed when the test comes before the
-    evaluation).
+    ``point_norm`` is the norm of the point the loop holds after the trial;
+    ``tested`` says whether the trial takes the test at all (a loop tests a
+    trial whose cost was computed, or one the predicate passed when the test
+    comes before the evaluation).
     """
-    return bool(tested and step_norm <= step_tol * (1.0 + float(np.linalg.norm(point))))
+    xp = _namespace(step_norm, point_norm, tested)
+    with np.errstate(invalid="ignore"):
+        return xp.asarray(tested) & (step_norm <= step_tol * (1.0 + point_norm))
 
 
 def trial_valid(problem: OptimizationProblem, point: ArrayLike) -> bool:
@@ -290,47 +344,49 @@ def trial_valid(problem: OptimizationProblem, point: ArrayLike) -> bool:
 class Trials(NamedTuple):
     """What a loop keeps of its trials, under the names of ``LoopState``'s fields.
 
-    ``gradient_floor_samples`` may be left out by a loop that keeps no floor
-    samples; it then holds the empty list every such instance shares, which
-    nothing modifies in place, as each update of a window builds a new list.
+    The windows are ``Window`` values (a sequence of entries is taken as one);
+    ``accepted_step_radius`` is ``None`` or ``nan`` before the first accepted
+    step. ``gradient_floor_samples`` may be left out by a loop that keeps no
+    floor samples; it then holds an empty window, which nothing modifies in
+    place, as each update of a window builds a new one.
     """
 
-    growth_lock: int
-    rejected_cost_change: list
-    rejected_predicted_decrease: list
-    noise_dominated_cost_change: list
-    accepted_step_radius: Real | None
-    consecutive_invalid_trials: int
-    consecutive_noise_dominated_trials: int
-    gradient_floor_samples: list = []
+    growth_lock: ArrayLike
+    rejected_cost_change: Window
+    rejected_predicted_decrease: Window
+    noise_dominated_cost_change: Window
+    accepted_step_radius: ArrayLike | None
+    consecutive_invalid_trials: ArrayLike
+    consecutive_noise_dominated_trials: ArrayLike
+    gradient_floor_samples: Window = as_window([])
 
 
 class AfterAttempt(NamedTuple):
     """The trials kept after an attempt, and what the stop tests read of the attempt."""
 
     trials: Trials
-    accepted: bool
-    evaluated: bool
-    predicted: float
-    cost_change: float
-    cost_threshold: float
+    accepted: ArrayLike
+    evaluated: ArrayLike
+    predicted: ArrayLike
+    cost_change: ArrayLike
+    cost_threshold: ArrayLike
 
 
 def _after_attempt(
     trials: Trials | LoopState,
     *,
-    accepted: bool,
-    valid: bool,
-    invalid: bool,
-    cost: float,
-    trial_cost: float,
-    predicted: float,
-    step_radius: float,
+    accepted: ArrayLike,
+    valid: ArrayLike,
+    invalid: ArrayLike,
+    cost: ArrayLike,
+    trial_cost: ArrayLike,
+    predicted: ArrayLike,
+    step_radius: ArrayLike,
     cost_tol: float,
     cost_atol: float,
     noise_limit: Real | None,
-    scaled_norm: float = 0.0,
-    floor_bound: Real | None = None,
+    scaled_norm: ArrayLike = 0.0,
+    floor_bound: ArrayLike | None = None,
 ) -> AfterAttempt:
     """The growth lock, the windows and the runs after an attempt made at objective ``cost``.
 
@@ -347,111 +403,196 @@ def _after_attempt(
     With ``floor_bound``, the bound on the gradient's error per unit of scaled
     step length, the trial, of scaled step norm ``scaled_norm``, enters the
     window of floor samples when ``_floor_sample`` admits it, judged against
-    the evaluation noise measured before this attempt. ``None`` adds no sample.
+    the evaluation noise measured before this attempt. ``None`` or ``nan``
+    adds no sample.
 
     The cost test reads ``cost_threshold(cost, cost_tol, cost_atol)``, returned
     as ``AfterAttempt.cost_threshold``.
     """
-    lock = trials.growth_lock
-    if accepted:
-        if lock:
-            lock -= 1
-    elif invalid:
-        lock = 2
-    evaluated = bool(valid and not invalid and np.isfinite(trial_cost))
-    cost_change = abs(trial_cost - cost)
+    if isinstance(trials, LoopState):
+        trials = trials.trials()
+    changes = as_window(trials.rejected_cost_change)
+    decreases = as_window(trials.rejected_predicted_decrease)
+    noise = as_window(trials.noise_dominated_cost_change)
+    samples = as_window(trials.gradient_floor_samples)
+    accepted_radius = _missing(trials.accepted_step_radius)
+    xp = _namespace(
+        accepted,
+        valid,
+        invalid,
+        cost,
+        trial_cost,
+        predicted,
+        step_radius,
+        scaled_norm,
+        floor_bound,
+        changes,
+        noise,
+        samples,
+        accepted_radius,
+        trials.growth_lock,
+    )
+    accepted, valid, invalid = xp.asarray(accepted), xp.asarray(valid), xp.asarray(invalid)
+    lock = xp.asarray(trials.growth_lock)
+    lock = xp.where(accepted, xp.where(lock > 0, lock - 1, lock), xp.where(invalid, 2, lock))
+    evaluated = valid & ~invalid & xp.isfinite(trial_cost)
+    with np.errstate(invalid="ignore"):
+        cost_change = xp.abs(trial_cost - cost)
     relative_to = cost_scale(cost, cost_tol, cost_atol)
-    changes, decreases = trials.rejected_cost_change, trials.rejected_predicted_decrease
-    if evaluated and not accepted:
-        changes = (changes + [cost_change / relative_to])[-_WINDOW:]
-        decreases = (decreases + [predicted / relative_to])[-_WINDOW:]
-    samples = trials.gradient_floor_samples
-    if floor_bound is not None:
-        sample = _floor_sample(
-            evaluated=evaluated,
-            accepted=accepted,
-            step_radius=step_radius,
-            accepted_radius=trials.accepted_step_radius,
-            cost=cost,
-            trial_cost=trial_cost,
-            predicted=predicted,
-            scaled_norm=scaled_norm,
-            noise=_median(trials.noise_dominated_cost_change),
-            relative_to=relative_to,
-            bound=floor_bound,
-        )
-        if sample is not None:
-            samples = [*samples, sample][-_WINDOW:]
+    rejected = evaluated & ~accepted
+    with np.errstate(all="ignore"):
+        relative_change = cost_change / relative_to
+        relative_predicted = predicted / relative_to
+    sample = _floor_sample(
+        evaluated=evaluated,
+        accepted=accepted,
+        step_radius=step_radius,
+        accepted_radius=accepted_radius,
+        cost=cost,
+        trial_cost=trial_cost,
+        predicted=predicted,
+        scaled_norm=scaled_norm,
+        noise=_median(noise),
+        relative_to=relative_to,
+        bound=floor_bound,
+    )
     noisy = _noise_dominated(
         evaluated=evaluated,
         accepted=accepted,
         step_radius=step_radius,
-        accepted_radius=trials.accepted_step_radius,
+        accepted_radius=accepted_radius,
         cost=cost,
         trial_cost=trial_cost,
         predicted=predicted,
         relative_to=relative_to,
         limit=noise_limit,
     )
-    noise = trials.noise_dominated_cost_change
-    if noisy:
-        noise = (noise + [cost_change / relative_to])[-_WINDOW:]
-    invalid_run = trials.consecutive_invalid_trials
-    noise_run = trials.consecutive_noise_dominated_trials
-    if evaluated:
-        invalid_run = 0
-        noise_run = noise_run + 1 if noisy else 0
-    elif invalid:
-        invalid_run += 1
-        noise_run = 0
-    radius = step_radius if accepted else trials.accepted_step_radius
-    kept = Trials(lock, changes, decreases, noise, radius, invalid_run, noise_run, samples)
+    invalid_run = xp.asarray(trials.consecutive_invalid_trials)
+    noise_run = xp.asarray(trials.consecutive_noise_dominated_trials)
+    kept = Trials(
+        lock,
+        window_push(changes, relative_change, rejected),
+        window_push(decreases, relative_predicted, rejected),
+        window_push(noise, relative_change, noisy),
+        xp.where(accepted, step_radius, accepted_radius),
+        xp.where(evaluated, 0, xp.where(invalid, invalid_run + 1, invalid_run)),
+        xp.where(evaluated, xp.where(noisy, noise_run + 1, 0), xp.where(invalid, 0, noise_run)),
+        window_push(samples, sample, ~xp.isnan(sample)),
+    )
     threshold = cost_threshold(cost, cost_tol, cost_atol)
     return AfterAttempt(kept, accepted, evaluated, predicted, cost_change, threshold)
+
+
+# The number of noise-dominated rejected trials in a row that ends a loop: the model's
+# predictions at that radius are below the noise of the cost's evaluation.
+_NOISE_RUN = 3
+
+# The events that end a loop after an attempt, in the order they are tested; a code is an
+# event's position plus one, 0 for none. ``"target"`` is the loop's ``target_stop``.
+STOP_EVENTS = (
+    "callback",
+    "invalid_trials",
+    "evaluation_noise",
+    "step_tolerance",
+    "cost_tolerance",
+    "target",
+    "max_evaluations",
+)
+
+
+def stop_code(
+    after: AfterAttempt,
+    *,
+    max_invalid: int,
+    step_small: ArrayLike,
+    accepted_count: ArrayLike,
+    target_steps: Real | None,
+    requested: ArrayLike = False,
+    evaluations: ArrayLike = 0,
+    max_evaluations: Real | None = None,
+) -> ArrayLike:
+    """The code of the event that ends a trust-region loop after an attempt, 0 to go on.
+
+    In this order (``STOP_EVENTS``): ``"callback"`` when ``requested``;
+    ``"invalid_trials"`` at ``max_invalid`` invalid trials in a row;
+    ``"evaluation_noise"`` at three noise-dominated ones; ``"step_tolerance"``
+    when ``step_small`` (the loop's ``step_small`` test of the trial);
+    ``"cost_tolerance"`` when ``cost_small`` at the attempt's cost threshold;
+    ``"target"`` at the accepted trial that brings ``accepted_count`` to
+    ``target_steps``; ``"max_evaluations"`` when ``evaluations`` reach
+    ``max_evaluations``. ``None`` limits test nothing.
+    """
+    trials = after.trials
+    xp = _namespace(
+        after.accepted,
+        after.evaluated,
+        after.cost_change,
+        trials.consecutive_invalid_trials,
+        step_small,
+        accepted_count,
+        requested,
+        evaluations,
+    )
+    small_cost = cost_small(
+        accepted=after.accepted,
+        evaluated=after.evaluated,
+        cost_change=after.cost_change,
+        predicted=after.predicted,
+        threshold=after.cost_threshold,
+    )
+    target = xp.asarray(False)
+    if target_steps is not None:
+        target = xp.asarray(after.accepted) & (accepted_count >= int(target_steps))
+    budget = xp.asarray(False)
+    if max_evaluations is not None:
+        budget = xp.asarray(evaluations >= max_evaluations)
+    events = (
+        xp.asarray(requested),
+        xp.asarray(trials.consecutive_invalid_trials) >= max_invalid,
+        xp.asarray(trials.consecutive_noise_dominated_trials) >= _NOISE_RUN,
+        xp.asarray(step_small),
+        small_cost,
+        target,
+        budget,
+    )
+    code = xp.zeros(xp.shape(events[1]), dtype=np.int64)
+    for position in range(len(events) - 1, -1, -1):
+        code = xp.where(events[position], position + 1, code)
+    return code
+
+
+def stop_name(code: ArrayLike, target_stop: str = "accepted_steps") -> str | None:
+    """The event of a stop ``code`` (``None`` for 0), ``"target"`` named ``target_stop``."""
+    code = int(np.asarray(code))
+    if code == 0:
+        return None
+    name = STOP_EVENTS[code - 1]
+    return target_stop if name == "target" else name
 
 
 def _stop_after(
     after: AfterAttempt,
     *,
     max_invalid: int,
-    step_small: bool,
-    accepted_count: int,
+    step_small: ArrayLike,
+    accepted_count: ArrayLike,
     target_steps: Real | None,
     target_stop: str = "accepted_steps",
-    requested: bool = False,
-    evaluations: int = 0,
+    requested: ArrayLike = False,
+    evaluations: ArrayLike = 0,
     max_evaluations: Real | None = None,
 ) -> str | None:
-    """The event that ends a trust-region loop after an attempt, or ``None`` to go on.
-
-    In this order: ``"callback"`` when ``requested``; ``"invalid_trials"`` at
-    ``max_invalid`` invalid trials in a row; ``"evaluation_noise"`` at three
-    noise-dominated ones; ``"step_tolerance"`` when ``step_small`` (the
-    loop's ``step_small`` test of the trial); ``"cost_tolerance"`` when
-    ``cost_small`` at the attempt's cost threshold; ``target_stop`` at the
-    accepted trial that brings
-    ``accepted_count`` to ``target_steps``; ``"max_evaluations"`` when
-    ``evaluations`` reach ``max_evaluations``. ``None`` limits test nothing.
-    """
-    trials = after.trials
-    if requested:
-        return "callback"
-    if trials.consecutive_invalid_trials >= max_invalid:
-        return "invalid_trials"
-    if trials.consecutive_noise_dominated_trials >= _NOISE_RUN:
-        return "evaluation_noise"
-    if step_small:
-        return "step_tolerance"
-    if cost_small(
-        accepted=after.accepted,
-        evaluated=after.evaluated,
-        cost_change=after.cost_change,
-        predicted=after.predicted,
-        threshold=after.cost_threshold,
-    ):
-        return "cost_tolerance"
-    if after.accepted and target_steps is not None and accepted_count >= int(target_steps):
-        return target_stop
-    if max_evaluations is not None and evaluations >= max_evaluations:
-        return "max_evaluations"
-    return None
+    """``stop_code``'s event by name, on the host: ``None`` to go on."""
+    return stop_name(
+        stop_code(
+            after,
+            max_invalid=max_invalid,
+            step_small=step_small,
+            accepted_count=accepted_count,
+            target_steps=target_steps,
+            requested=requested,
+            evaluations=evaluations,
+            max_evaluations=max_evaluations,
+        ),
+        target_stop,
+    )

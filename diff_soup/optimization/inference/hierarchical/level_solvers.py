@@ -91,9 +91,9 @@ class TrustRegion(OptSolver):
         x_scale: The parameter scaling, `HessianScale()` when `None`, `JacScale()` or a `ConstantScale`, with `JacScale` refused under `hessian="true"`.
         weights: One weight per member of the first level, or a `(level, weights)` pair, multiplying each member's share of the objective.
         weight_priors: If `True`, the weights also multiply each member's prior and regularization terms.
-        constraints: Linear equality constraints on the joint parameter vector, as `LinearConstraint` objects.
+        constraints: Linear equality constraints on the joint parameter vector, as a `LinearConstraint` or a sequence of them.
         inequalities: Rows kept at or below zero, as [InequalityRows][diff_soup.optimization.inference.InequalityRows] or a sequence of them.
-        gauges: [Gauge][diff_soup.optimization.inference.Gauge] constraints that pin directions the data leave free.
+        gauges: [Gauge][diff_soup.optimization.inference.Gauge] constraints that pin directions the data leave free, as a `Gauge` or a sequence of them.
         fixed_indices: The indices of the joint parameter vector held at their starting values.
         callbacks: Callbacks run together with those passed to `ds.optimization.optsolve`.
     """
@@ -320,11 +320,15 @@ class TrustRegion(OptSolver):
         self.x_scale = x_scale
         self.weights = weights
         self.weight_priors = bool(weight_priors)
-        self.constraints = tuple(constraints)
+        from diff_soup.optimization.inference.statistics.parameters import Gauge, LinearConstraint
+
+        self.constraints = (
+            (constraints,) if isinstance(constraints, LinearConstraint) else tuple(constraints)
+        )
         self.inequalities = (
             (inequalities,) if isinstance(inequalities, InequalityRows) else tuple(inequalities)
         )
-        self.gauges = tuple(gauges)
+        self.gauges = (gauges,) if isinstance(gauges, Gauge) else tuple(gauges)
         self.fixed_indices = tuple(fixed_indices)
         self.callbacks = tuple(callbacks)
 

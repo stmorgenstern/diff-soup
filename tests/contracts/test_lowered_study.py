@@ -782,6 +782,119 @@ def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_in_the
         small_fit(lowered, inf.TrustRegion(max_steps=6, nested_at="cell"))
 
 
+def _banded_toy(name, band, hump=None):
+    """The linear two-owner toy of ``_linear_toy`` (m = (3, 2, 1.1)) on one model per owner:
+    cell-a's lanes have infinite sensitivities at a finite cost while its source lies in ``band``,
+    and with ``hump`` a narrow rise of its cost there; cell-b's lanes are the plain toy's."""
+    import jax.numpy as jnp
+
+    from diff_soup.domains import cartesian_grid_1d
+    from tests.support.inference import TIMES, solver
+
+    scale, m, times = 0.02, np.array([3.0, 2.0, 1.1]), jnp.asarray(TIMES)
+
+    def a(t):
+        return scale / jnp.sqrt(5.0) * jnp.ones_like(t)
+
+    def b(t):
+        return scale * (-0.9 / jnp.sqrt(5.0) + jnp.sqrt(0.19) * (4.0 * t - 2.0) / jnp.sqrt(10.0))
+
+    def observed(q, banded):
+        value = q.p.rate * a(q.t) + q.p.source * b(q.t)
+        if not banded:
+            return value
+        if hump is not None:
+            value = value + 3.0 * scale * jnp.exp(-(((q.p.source - hump) / 0.05) ** 2))
+        inside = (q.p.source > band[0]) & (q.p.source < band[1])
+        # sqrt(0) adds nothing to the value and an infinite derivative inside the band
+        return value + jnp.where(inside, jnp.sqrt(value - jax.lax.stop_gradient(value)), 0.0)
+
+    experiments, handles = [], []
+    for i, owner in enumerate(("cell-a", "cell-b")):
+        spec = ds.problem(f"{name}_{owner}")
+        spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+        handles.append(
+            (
+                spec.param("rate", value=0.9, learnable=True),
+                spec.param("source", value=0.0, learnable=True),
+            )
+        )
+        spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+        spec.equation(writes="u", reads=("u",))(lambda q: -0.5 * q.u)
+        spec.observe.scalar(name="exact", fn=lambda q, banded=i == 0: observed(q, banded))
+        values = m[0] * a(times) + m[1 + i] * b(times)
+        measurement = inf.Measurement(
+            "exact", times=times, values=values, observe="exact", likelihood=inf.Gaussian(scale)
+        )
+        experiments.append(
+            inf.Experiment(
+                model=spec.build(),
+                solver=solver(),
+                t_span=(0.0, 1.0),
+                initial_state=spec.assemble_state({}),
+                measurements=(measurement,),
+                id=owner,
+            )
+        )
+    rate, source = handles[0]
+    parameters = ds.ParameterSet(shared=(rate,), varying={"cell": (source,)})
+    study = inf.Study(
+        tuple(experiments),
+        parameters=parameters,
+        clusters={"cell": ("cell-a", "cell-b")},
+        independent=True,
+    )
+    # cell-b starts at its minimum for the start rate 2: only cell-a moves in the start polish
+    return ds.lower(study).with_start(np.array([2.0, 0.5, 0.2]))
+
+
+def test_a_member_whose_retreat_raises_its_cost_goes_back_to_where_its_polish_started():
+    """cell-a's start polish reaches its minimum 1.1 for the start rate, inside the band, and
+    retreats halfway, to the hump at 0.8, where its cost is above its start's: it goes back to its
+    start 0.5 rather than keep the retreated point."""
+    lowered = _banded_toy("retreat_hump_toy", band=(1.0, 1.2), hump=0.8)
+    solver = inf.TrustRegion(
+        max_steps=0, nested_at="cell", inner_start_iterations=1, radius_init=100.0
+    )
+    fit = small_fit(lowered, solver)
+    assert int(fit.work["inner_retreats"][0]) == 1
+    assert float(fit.params[1]) == 0.5
+
+
+def test_a_member_that_goes_back_to_its_start_takes_its_next_step_on_the_jacobian_there():
+    """cell-a's start polish and each of its retreats land inside the band, so it goes back to its
+    start; it is evaluated again there, and at every later attempt every member's stationarity
+    number is finite, as its Jacobian of the abandoned point would not make it."""
+    records = _Records()
+    lowered = _banded_toy("retreat_band_toy", band=(0.55, 1.2))
+    solver = inf.TrustRegion(
+        max_steps=3, nested_at="cell", inner_start_iterations=1, radius_init=100.0
+    )
+    fit = small_fit(lowered, solver, callbacks=(records,))
+    assert int(fit.work["inner_retreats"][0]) == 3
+    numbers = np.array([info.member_stationarity for info, _ in records.steps], dtype=float)
+    assert numbers.size and np.all(np.isfinite(numbers))
+
+
+def test_trust_region_takes_a_bare_constraint_or_gauge_as_a_sequence_of_one():
+    """constraints= and gauges= take one LinearConstraint or Gauge as a sequence of one."""
+    from diff_soup.optimization.inference.statistics import LinearConstraint
+
+    row, gauge = LinearConstraint({"rate": 1.0}, rhs=1.0), inf.Gauge.pin("rate", 1.0)
+    solver = inf.TrustRegion(constraints=row, gauges=gauge)
+    assert (solver.constraints, solver.gauges) == ((row,), (gauge,))
+
+
+def test_bootstrap_with_its_default_solver_refuses_a_fit_made_under_inequality_rows(lowered):
+    """The replicates of the default solver step without inequality rows, so a bootstrap of a fit
+    made under them with solver=None is refused, naming inequalities=."""
+    _, study, _ = lowered
+    rows = inf.InequalityRows(lambda own, w, d: own[:1] - 0.02, level="cell")
+    fit = small_fit(study, inf.TrustRegion(max_steps=30, inequalities=(rows,)))
+    with pytest.raises(ds.ConfigurationError, match="inequalities"):
+        inf.bootstrap(study, fit, replicates=2, key=jax.random.key(3), steps=1)
+
+
 @pytest.mark.parametrize(
     ("stop", "sigma", "weights", "status"),
     [
