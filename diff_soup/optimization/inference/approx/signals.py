@@ -113,23 +113,24 @@ def _horner(coefficients: jax.Array, tau: jax.Array) -> jax.Array:
     return coefficients[0] + rising
 
 
-def _clamped_cubic_basis(knots: np.ndarray) -> np.ndarray:
+def _clamped_cubic_band(knots: np.ndarray) -> np.ndarray:
     """The clamped cubic B-spline basis in powers of the time since each segment's start.
 
-    Entry ``[k, j, i]`` is the coefficient of ``tau**j`` in basis function ``i`` on
-    segment ``k``, with ``tau = t - knots[k]``: the Cox–de Boor recursion (de Boor, A
-    Practical Guide to Splines, rev. ed., 2001, ch. IX) carried out on polynomials in
-    ``tau``, over the knot vector with each end repeated four times.
+    Segment ``k`` meets four basis functions, ``k`` to ``k + 3``. Entry ``[k, j, i]`` is the
+    coefficient of ``tau**j`` in basis function ``k + i`` on segment ``k``, with
+    ``tau = t - knots[k]``: the Cox–de Boor recursion (de Boor, A Practical Guide to Splines,
+    rev. ed., 2001, ch. IX) carried out on polynomials in ``tau``, over the knot vector with
+    each end repeated four times.
 
     Args:
         knots: The segment edges, strictly ascending, shape ``(K + 1,)``.
 
     Returns:
-        A NumPy array of shape ``(K, 4, K + 3)``.
+        A NumPy array of shape ``(K, 4, 4)``.
     """
     n_segments = knots.size - 1
     vector = np.concatenate([np.full(3, knots[0]), knots, np.full(3, knots[-1])])
-    basis = np.zeros((n_segments, 4, n_segments + 3))
+    band = np.zeros((n_segments, 4, 4))
     for k in range(n_segments):
         origin = knots[k]
         # Degree 0: the indicator of segment k, which is [vector[k + 3], vector[k + 4]).
@@ -149,8 +150,8 @@ def _clamped_cubic_basis(knots: np.ndarray) -> np.ndarray:
                 raised[i] = poly
             level = raised
         for i, poly in level.items():
-            basis[k, :, i] = poly
-    return basis
+            band[k, :, i - k] = poly
+    return band
 
 
 class PiecewiseConstant(eqx.Module):
@@ -388,8 +389,8 @@ class BSpline(eqx.Module):
             ``(K + 3, m)`` for an ``m``-component signal.
 
     The knots fix the basis when the spline is built: each segment's polynomial is one
-    matrix, built once with NumPy, applied to the control points. The knots are therefore
-    static, and new knots need a new spline. A query time outside ``[knots[0], knots[-1]]`` clamps to the end value, and a
+    ``4 x 4`` matrix, built once with NumPy, applied to the segment's four control points.
+    The knots are therefore static, and new knots need a new spline. A query time outside ``[knots[0], knots[-1]]`` clamps to the end value, and a
     query on an interior knot is evaluated as the end of the left segment, as for
     [PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant].
     """
@@ -397,7 +398,7 @@ class BSpline(eqx.Module):
     control_points: jax.Array
     _knots: tuple = eqx.field(static=True)
     _knot_dtype: str = eqx.field(static=True)
-    _basis: tuple = eqx.field(static=True, repr=False)
+    _band: tuple = eqx.field(static=True, repr=False)
 
     def __init__(self, knots, control_points):
         """Build a clamped cubic B-spline from segment edges and control points.
@@ -427,17 +428,12 @@ class BSpline(eqx.Module):
                 f"({edges.size + 2},) or ({edges.size + 2}, m); got shape "
                 f"{self.control_points.shape}."
             )
-        basis = _clamped_cubic_basis(edges)
-        self._basis = tuple(tuple(map(tuple, segment)) for segment in basis.tolist())
+        self._band = tuple(map(tuple, _clamped_cubic_band(edges).reshape(-1, 16).tolist()))
 
     @property
     def knots(self) -> jax.Array:
         """The segment edges the spline was built on, shape ``(K + 1,)``."""
         return jnp.asarray(self._knots, dtype=self._knot_dtype)
-
-    def _matrix(self) -> jax.Array:
-        """The basis in powers of each segment's time, ``(K, 4, K + 3)``, a compile-time constant."""
-        return jnp.asarray(self._basis, dtype=self.control_points.dtype)
 
     def __call__(self, t) -> jax.Array:
         """Return the spline's value at time ``t``."""
@@ -455,13 +451,17 @@ class BSpline(eqx.Module):
     def polynomials(self) -> jax.Array:
         """Return each segment's power-basis coefficients in ``tau``, the time since its start.
 
-        The static basis matrix applied to the control points, one matrix product.
+        Each segment's static ``4 x 4`` basis matrix applied to its four control points.
 
         Returns:
             Shape ``(K, 4)``, or ``(K, 4, m)`` for an ``m``-component signal, constant term
             first.
         """
-        return jnp.tensordot(self._matrix(), self.control_points, axes=1)
+        n_segments = len(self._knots) - 1
+        band = jnp.asarray(self._band, dtype=self.control_points.dtype)
+        band = jnp.reshape(band, (n_segments, 4, 4))
+        windows = self.control_points[np.arange(n_segments)[:, None] + np.arange(4)]
+        return jnp.einsum("kji,ki...->kj...", band, windows)
 
     def learnable_paths(self) -> tuple[str, ...]:
         """Return the learnable-leaf path of this signal (``"control_points"``).
