@@ -34,6 +34,7 @@ from diff_soup.optimization.inference.hierarchical._verdicts import (
     NONFINITE_BLOCKS,
     _failures_text,
     _stationarity_limit,
+    _within,
 )
 from diff_soup.optimization.solvers._loop import (
     _NOISE_RUN,
@@ -188,10 +189,6 @@ class _NestedFit(_JointFit):
     a polish in which no member iterates does too.
     """
 
-    # Whether the polish's request at its trial is a frozen pass when the lanes run that
-    # mode; False makes it a value request (for measurements).
-    frozen_polish = True
-
     def __init__(self, solver: TrustRegion, route: _LaneRoute, callbacks: tuple):
         super().__init__(solver, route, callbacks)
         self.inner = solver if solver.inner is None else solver.inner
@@ -202,7 +199,7 @@ class _NestedFit(_JointFit):
         # makes an iteration and the lanes run that mode; else value, whose moved members a
         # blocks request then reads.
         polishing = self.polish_steps > 0 or int(solver.inner_start_iterations) > 0
-        frozen = self.frozen_polish and polishing and route.problem._offers("frozen")
+        frozen = polishing and route.problem._offers("frozen")
         self.polish_pass = "frozen" if frozen else "value"
         if frozen:
             # Every blocks request keeps its lanes' Jacobians, which the frozen pass reads;
@@ -1092,7 +1089,7 @@ class _NestedFit(_JointFit):
                     system, coordinates.scale, self.cut, addition=coordinates.addition
                 )
             else:
-                zero, first, solves = inequality.member_zero(own, system, coordinates, self.cut)
+                zero, first, solves = inequality.member_zero(own, system, x, coordinates, self.cut)
                 work.solves += solves - 1
             decreases = self.member_decrease(system, coordinates.scale, zero, coordinates.addition)
             stationarity = _member_numbers(decreases, self.member_scales(costs))
@@ -1103,9 +1100,9 @@ class _NestedFit(_JointFit):
             # the gradient floor is measured, so is one whose model predicts no more
             # than its derivatives resolve.
             limits = member_limit if level is None else np.fmax(member_limit, level * full_steps)
-            finish(active & (stationarity <= limits), _STATIONARITY)
+            finish(active & _within(stationarity, limits), _STATIONARITY)
             if accuracy is not None:
-                finish(active & (decreases <= accuracy), _ACCURACY)
+                finish(active & _within(decreases, accuracy), _ACCURACY)
             # (4) the exit always follows a blocks request at the current point
             if not active.any() or k == int(limit):
                 # the exit makes no step; its one solve is the one above
@@ -1153,7 +1150,16 @@ class _NestedFit(_JointFit):
             if own is not None:
                 # A member whose trial crosses an own row it does not hold is scaled back.
                 trial, scaled, predicted = inequality.member_back(
-                    self.rows, own, system, x, trial, coordinates, predicted, held_rows, self.cut
+                    self.rows,
+                    own,
+                    system,
+                    x,
+                    trial,
+                    coordinates,
+                    predicted,
+                    held_rows,
+                    self.cut,
+                    bounds,
                 )
             step = trial - x
             step_norms = per_member(step)

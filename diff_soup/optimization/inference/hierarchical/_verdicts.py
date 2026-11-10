@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from numbers import Real
 
 import numpy as np
+from jaxtyping import ArrayLike
 
 from diff_soup.optimization.inference.fitting.result import (
     TerminationStatus,
@@ -104,6 +105,16 @@ def _stationarity_limit(tolerance: Real | None, cost_tol: float, noise: float) -
     return max(float(cost_tol), 3.0 * float(noise)) if tolerance is None else float(tolerance)
 
 
+def _within(sigma: ArrayLike, limit: ArrayLike) -> ArrayLike:
+    """Whether a predicted decrease ``sigma`` is within ``limit`` of zero, elementwise.
+
+    A decrease below ``-limit`` is a step that the model says raises the cost, which is not
+    stationarity; ``nan`` is not within any limit.
+    """
+    with np.errstate(invalid="ignore"):
+        return np.abs(sigma) <= limit
+
+
 def _verdict(
     stop: str,
     *,
@@ -118,11 +129,11 @@ def _verdict(
 
     A step test, a cost test or a run of noise-dominated trials ends the fit
     converged only at a point where the model predicts no more than the
-    evaluation can show (``sigma <= yardstick``) and no invalid trial shrank
+    evaluation can show (``|sigma| <= yardstick``, ``_within``) and no invalid trial shrank
     the radius (the growth lock is 0). Failing that, when the gradient floor
     is known (``floor_known``: a small rejected trial measured it), the
     growth lock is 0 and the model predicts no more than the gradient's error
-    along its full step could take back (``sigma <= floor_sigma``), the fit
+    along its full step could take back (``|sigma| <= floor_sigma``), the fit
     converged to the accuracy of its derivatives. Failing that, a step test
     or a cost test ends the fit converged, with its own status, when every
     rejected trial in the window met a jump of the computed cost
@@ -137,17 +148,17 @@ def _verdict(
     if stop not in ("step_tolerance", "cost_tolerance", "evaluation_noise"):
         status = _STOP_STATUS[stop]
         return status, ("invalid_trials" if status is TerminationStatus.STALLED else None)
-    if lock == 0 and sigma <= yardstick:
+    if lock == 0 and _within(sigma, yardstick):
         if stop == "step_tolerance":
             return TerminationStatus.STEP_TOL, None
         return TerminationStatus.COST_TOL, None
-    if lock == 0 and floor_known and sigma <= floor_sigma:
+    if lock == 0 and floor_known and _within(sigma, floor_sigma):
         return TerminationStatus.DERIVATIVE_ACCURACY, None
     if (
         stop != "evaluation_noise"
         and lock == 0
         and jump_yardstick is not None
-        and sigma <= jump_yardstick
+        and _within(sigma, jump_yardstick)
     ):
         if stop == "step_tolerance":
             return TerminationStatus.STEP_TOL, None

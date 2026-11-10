@@ -119,13 +119,16 @@ class StepInfo:
     ``max(|cost|, cost_atol / cost_tol)``: the cost itself, never below the
     cost at which ``cost_tol`` reaches ``cost_atol``. It does not depend on
     the scale of the cost or the units of the parameters, and it is near zero
-    at a stationary point; ``nan`` when the model's matrix is singular there.
+    at a stationary point; ``nan`` when the model's matrix is singular there,
+    or when the active set of the step under inequality rows did not settle.
     ``member_stationarity`` holds the same number for every member of the cut
     level of a nested fit, each from its own subtree and relative to its own
-    cost scale, in member order. Both are ``None`` for solvers
-    that do not report them. For ``TrustRegion`` on the lanes of a lowered
-    study, ``residual_evals`` is the number of ``blocks`` and ``value``
-    requests so far, the count its ``max_evaluations`` budgets.
+    cost scale, in member order; after a polish iteration on a ``frozen``
+    pass it reads the matrix of the last ``blocks`` request with the gradient
+    of that pass. Both are ``None`` for solvers that do not report them. For
+    ``TrustRegion`` on the lanes of a lowered study, ``residual_evals`` is the
+    number of ``blocks``, ``value`` and ``frozen`` requests so far, the count
+    its ``max_evaluations`` budgets.
     """
 
     step: int
@@ -170,7 +173,13 @@ class StepInfo:
 
 @dataclass(frozen=True)
 class EvalCounts:
-    """Cumulative evaluation counts."""
+    """Cumulative evaluation counts.
+
+    For ``TrustRegion`` on the lanes of a lowered study, ``residual_evals`` counts
+    its ``blocks``, ``value`` and ``frozen`` requests, and ``pde_solves`` is that
+    count times the study's lanes: a request of some lanes counts as one of every
+    lane.
+    """
 
     residual_evals: int = 0
     jacobian_evals: int = 0
@@ -297,11 +306,15 @@ class TrustRegionReport(eqx.Module):
             the Gauss-Newton model predicts for its full step (the step at
             zero damping, with no trust-region limit), over ``c``; near zero
             at a stationary point, ``nan`` when the model's matrix is
-            singular there. In the nested mode it is the full system's
-            number. ``None`` when the solver does not report it.
+            singular there or when the active set of the step under
+            inequality rows did not settle. In the nested mode it is the full
+            system's number. ``None`` when the solver does not report it.
         member_stationarity: The same number for every member of the cut
             level of a nested fit, each from its own subtree and relative to
-            its own cost scale, in member order; ``None`` in the joint mode.
+            its own cost scale, in member order; after a polish iteration on
+            a ``frozen`` pass it reads the matrix of the last ``blocks``
+            request with the gradient of that pass. ``None`` in the joint
+            mode.
         evaluation_noise: The noise of the cost's evaluation (not the
             data's) measured from the fit's own rejected trials: the median,
             relative to ``c``, of the cost changes of up to ten of the latest

@@ -48,8 +48,7 @@ class MemberRows(NamedTuple):
     active: ArrayLike
 
 
-@functools.partial(jax.jit, static_argnames=("level",))
-def _inner_solve(system, damping, rows=None, *, level):
+def _inner_parts(system, damping, rows, level):
     """Every member of ``level`` solves its own subtree with its own damping.
 
     The member's subtree (its block and every level below it) is eliminated
@@ -60,8 +59,10 @@ def _inner_solve(system, damping, rows=None, *, level):
     coefficients ride as extra right-hand-side columns, and the step is
     projected onto them as ``_solve`` projects onto the equality rows.
     ``q_n^2 = s_n^T (H_n + damping_n I)^-1 s_n`` comes from the same factors.
-    Returns the steps in joint columns (zero above ``level``) and ``q^2`` per
-    member.
+    Returns the steps in joint columns (zero above ``level``), ``q^2`` per
+    member, and every member's multipliers of its rows ``(N_level, R)``, those
+    of ``(H_n + damping_n I) s_n + g_n + C_n^T mu_n = 0`` (zero on an inactive
+    row; ``R`` is 0 without rows).
     """
     counts, widths = system.counts, system.widths
     depth = system.depth
@@ -152,6 +153,7 @@ def _inner_solve(system, damping, rows=None, *, level):
             steps[at] = steps[at][..., 0] - jnp.einsum("nik,nk->ni", steps[at][..., 1:], own)
     else:
         steps = steps[:level] + [entry[..., 0] for entry in steps[level:]]
+        multipliers = jnp.zeros((counts[level - 1], 0), dtype=dtype)
     halves: list = [None] * (depth + 1)
     q_squared = jnp.zeros((counts[level - 1],), dtype=dtype)
     for at in range(depth, level - 1, -1):
@@ -170,7 +172,20 @@ def _inner_solve(system, damping, rows=None, *, level):
         [jnp.zeros((offsets[level],), dtype=dtype)]
         + [steps[at].reshape(-1) for at in range(level, depth + 1)]
     )
+    return step, q_squared, multipliers
+
+
+@functools.partial(jax.jit, static_argnames=("level",))
+def _inner_solve(system, damping, rows=None, *, level):
+    """``_inner_parts``'s steps and ``q^2``."""
+    step, q_squared, _ = _inner_parts(system, damping, rows, level)
     return step, q_squared
+
+
+@functools.partial(jax.jit, static_argnames=("level",))
+def _inner_multipliers(system, damping, rows, *, level):
+    """``_inner_parts``'s multipliers."""
+    return _inner_parts(system, damping, rows, level)[2]
 
 
 @functools.partial(jax.jit, static_argnames=("level",))
@@ -260,6 +275,34 @@ def inner_solve_scaled(
     held = _scaled_rows(system, rows, scale, int(level))
     step, q_squared = _inner_solve(scaled, np.zeros((count,), dtype=dtype), held, level=int(level))
     return np.asarray(step), np.asarray(q_squared)
+
+
+def inner_row_multipliers(
+    system: LevelSystem,
+    scale: ArrayLike | Sequence[Real],
+    damping: ArrayLike,
+    level: int,
+    rows: MemberRows,
+    *,
+    addition: ArrayLike | Sequence | None = None,
+) -> np.ndarray:
+    """Every member's multipliers of its active ``rows`` at its damped solve in ``z = scale * s``.
+
+    The solve is ``inner_solve_scaled``'s with member ``n`` damped by ``damping[n]``; a
+    member's row is kept by its model only where its multiplier is at least zero. An
+    inactive row's multiplier is zero.
+
+    Returns:
+        ``(N_level, R)`` on the host.
+    """
+    dtype = _dtype(system)
+    scale = np.asarray(scale, dtype=dtype)
+    scaled = scaled_system(system, scale, addition)
+    held = _scaled_rows(system, rows, scale, int(level))
+    multipliers = _inner_multipliers(
+        scaled, np.asarray(damping, dtype=dtype), held, level=int(level)
+    )
+    return np.asarray(multipliers, dtype=np.float64)
 
 
 def _lockstep_search(
@@ -512,6 +555,7 @@ def inner_programs(system: LevelSystem, level: int) -> None:
 __all__ = [
     "MemberRows",
     "inner_added",
+    "inner_row_multipliers",
     "inner_predicted",
     "inner_programs",
     "inner_quadratic",

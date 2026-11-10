@@ -24,6 +24,7 @@ from diff_soup.linear import (
     SolveStatus,
     SparseTopology,
     SuperLU,
+    after,
     analyze,
     empty_factor,
     factor,
@@ -268,6 +269,32 @@ def test_a_tangent_through_twice_refactored_shared_storage_equals_one_through_it
         shared, own = program("shared"), program(None)
     for got, expected in zip(shared, own):
         np.testing.assert_allclose(got, expected, **EXACT)
+
+
+@pytest.mark.requires_superlu
+def test_superlu_solves_a_real_factor_after_a_complex_refactor_of_its_storage_in_one_program():
+    """A real and a complex factor name one shared storage; in one execution a complex refactor
+    of the storage and then a real solve: the solve factors its own real values afresh rather
+    than solving with the complex factor the storage now holds."""
+    topology = _pattern()
+    real = _values(topology, seed=60)
+    complex_ = _values(topology, seed=61) * (1.0 - 0.5j)
+    analysis = analyze(topology, backend=SuperLU())
+    with SolveContext() as ctx:
+        held_real = empty_factor(analysis, ctx=ctx, dtype=np.float64, storage="kinds")
+        held_complex = empty_factor(analysis, ctx=ctx, dtype=np.complex128, storage="kinds")
+        held_real = refactor(held_real, real, True)
+        held_complex = refactor(held_complex, complex_, True)
+
+        @jax.jit
+        def complex_then_real(held_real, held_complex, values):
+            held_complex = refactor(held_complex, values, True)
+            return solve(after(held_real, held_complex), _B)[0]
+
+        x = complex_then_real(held_real, held_complex, 1.5 * complex_)
+    # measured 1.4e-16 componentwise relative to NumPy, workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_linear_host.py -k complex_refactor
+    np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, real), _B), **EXACT)
 
 
 @pytest.mark.parametrize("name", HOSTS)

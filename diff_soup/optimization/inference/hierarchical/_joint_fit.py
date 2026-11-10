@@ -22,9 +22,11 @@ from diff_soup.optimization.inference.fitting.result import (
     TerminationStatus,
     TrustRegionReport,
 )
+from diff_soup.optimization.inference.hierarchical import _active_set as active_set
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _inequality as inequality
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._constraints import start_on_rows
 from diff_soup.optimization.inference.hierarchical._lane_route import _LABEL, _LaneRoute, _listed
 from diff_soup.optimization.inference.hierarchical._trust_step import (
     _bounded_gradient,
@@ -48,6 +50,7 @@ from diff_soup.optimization.inference.hierarchical._verdicts import (
     _stationarity_limit,
     _stop_report,
     _verdict,
+    _within,
 )
 from diff_soup.optimization.inference.hierarchical._work import _record, _Work
 from diff_soup.optimization.solvers._loop import (
@@ -114,14 +117,21 @@ class _JointFit:
 
         return solve
 
+    def held_rows(self, system, point) -> tuple:
+        """The rows and their Jacobian at ``point``, zero on the columns a step of ``system`` never moves."""
+        c, C = self.rows(point)
+        return c, np.where(inequality.frozen(system)[None, :], 0.0, C)
+
     def zero_solve(self, system, point, coordinates, radius, empty) -> tuple:
-        """The solve at zero damping under the inequality rows its full step would violate.
+        """The solve at zero damping under the inequality rows, by the active-set method.
 
         ``empty`` is the attempt with no row held. Returns ``(zero, held)``: the attempt
-        whose ``z`` is that solve, and the system holding those rows at their boundary
-        (``system`` itself when none is).
+        whose ``z`` is that solve, and the system holding the rows of its active set at their
+        boundary (``system`` itself when none is). When the active set does not settle,
+        ``zero`` is ``(z, nan)`` with the method's last iterate: the model's decrease is
+        then not known, and no stationarity test reads it.
         """
-        c, C = self.rows(point)
+        c, C = self.held_rows(system, point)
         attempts = self.held_attempt(system, point, coordinates, radius)
 
         def solve(active):
@@ -130,23 +140,39 @@ class _JointFit:
             with np.errstate(all="ignore"):
                 return attempt.z / coordinates.scale, attempt, held
 
+        def multipliers(active, answer):
+            self.work.solves += 1
+            return inequality.held_multipliers(system, answer[2], coordinates, 0.0, len(c))
+
         with np.errstate(all="ignore"):
             first = (empty.z / coordinates.scale, empty, system)
-        _, (_, zero, held), _ = inequality.active_solve(solve, c, C, first=first)
+        found = active_set.active_solve(solve, multipliers, c, C, point, first)
+        _, zero, held = found.answer
+        if not found.settled.all():
+            zero = (coordinates.scale * found.step, float("nan"))
         return zero, held
 
-    def rows_trial(self, system, point, gradient, coordinates, radius, fixed, bounds, empty):
-        """``_trial_point``'s trial under the inequality rows.
+    def decrease(self, system, gradient, coordinates, step) -> float:
+        """The decrease the attempt's scaled model predicts for ``step``."""
+        scaled = coordinates.scale * step
+        quadratic = elimination.level_quadratic(system, step)
+        if coordinates.addition is not None:
+            quadratic += float(np.asarray(coordinates.addition) @ (scaled * scaled))
+        return -(float(gradient @ step) + 0.5 * quadratic)
 
-        ``empty`` is the attempt with no row held. The step of each round holds the rows
-        the last one's trial violated at their boundary; a trial that crosses another row
-        beyond its slack is scaled back along its step to that row's boundary, and its
-        predicted decrease is the model's for the shorter step. The trial is then moved
-        back onto the rows it violates, as a step on a curved row's linearization leaves
-        it (``onto_rows``). Returns ``_trial_point``'s ``(trial, norm, predicted,
-        multiplier, solves)``, ``solves`` those of every round.
+    def rows_trial(self, system, point, gradient, coordinates, radius, fixed, bounds, empty):
+        """``_trial_point``'s trial under the inequality rows, by the active-set method.
+
+        ``empty`` is the attempt with no row held. Every round's step is ``_trial_point``'s
+        on the system holding the working set; a step that does not settle its set is the
+        method's last iterate, its predicted decrease the model's. A trial that crosses
+        another row beyond its slack, as the rows are nonlinear, is scaled back along its
+        step to that row's boundary, and its predicted decrease is the model's for the
+        shorter step. The trial is then moved back onto the rows it violates, as a step on
+        a curved row's linearization leaves it (``onto_rows``). Returns ``_trial_point``'s
+        ``(trial, norm, predicted, multiplier, solves)``, ``solves`` those of every round.
         """
-        c, C = self.rows(point)
+        c, C = self.held_rows(system, point)
         attempts = self.held_attempt(system, point, coordinates, radius)
         solves = []
 
@@ -163,23 +189,28 @@ class _JointFit:
                 equality=int(held.constraint_matrix.shape[0]) > 0,
             )
             solves.append(answer[4])
-            return answer[0] - point, *answer[1:4]
+            return answer[0] - point, *answer[1:4], held
 
-        active, answer, _ = inequality.active_solve(
-            lambda active: trial(*attempts(active)), c, C, first=trial(empty, system)
+        def multipliers(active, answer):
+            solves.append(1)
+            return inequality.held_multipliers(system, answer[4], coordinates, answer[3], len(c))
+
+        found = active_set.active_solve(
+            lambda active: trial(*attempts(active)), multipliers, c, C, point, trial(empty, system)
         )
-        step, norm, predicted, multiplier = answer
+        active = found.active
+        step, norm, predicted, multiplier, _ = found.answer
+        if not found.settled.all():
+            step = found.step
+            norm = float(np.linalg.norm(coordinates.scale * step))
+            predicted = self.decrease(system, gradient, coordinates, step)
         fraction = inequality.step_back(self.rows, point, step, active)
         if fraction < 1.0:
             step = fraction * step
             norm = fraction * norm
-            scaled = coordinates.scale * step
-            quadratic = elimination.level_quadratic(system, step)
-            if coordinates.addition is not None:
-                quadratic += float(np.asarray(coordinates.addition) @ (scaled * scaled))
-            predicted = -(float(gradient @ step) + 0.5 * quadratic)
+            predicted = self.decrease(system, gradient, coordinates, step)
         trial = inequality.onto_rows(
-            self.rows, point + step, coordinates.scale, ~inequality.frozen(system)
+            self.rows, point + step, coordinates.scale, ~inequality.frozen(system), bounds
         )
         if bounds is not None:
             trial = box.make_strictly_feasible(trial, bounds[0], bounds[1], rstep=0)
@@ -612,11 +643,14 @@ class _JointFit:
                 # Iterates stay strictly inside the box: a start on or beyond a side
                 # moves to the next float inside it.
                 x = box.make_strictly_feasible(x, bounds[0], bounds[1], rstep=0)
+            # The steps keep the equality rows from a point on them: a start off them moves
+            # onto them first.
+            x = start_on_rows(x, route.constraint_matrix, route.constraint_rhs, route.fixed, bounds)
             if not trial_is_valid(route.view, x):
                 raise ValueError("TrustRegion initial point failed the trial predicate.")
             if self.rows is not None:
                 c = self.rows.values(x)
-                if np.any(c > inequality.tolerance(c, np.zeros((c.size, 1)), np.zeros((1,)))):
+                if np.any(c > active_set.slack(c, np.zeros((c.size, 1)), np.zeros((1,)))):
                     raise ValueError(
                         "TrustRegion keeps its inequality rows at or below zero from a start where "
                         f"they hold, and rows {np.flatnonzero(c > 0).tolist()} are above zero at "
@@ -719,9 +753,13 @@ class _JointFit:
             stationarity = _stationarity(
                 held, gradient, coordinates.scale, zero, relative_to, coordinates.addition
             )
-            # The model predicts no further decrease the evaluation can show here.
-            if stationarity <= _stationarity_limit(
-                solver.stationarity_tol, cost_tol, _median(loop.noise_dominated_cost_change)
+            # The model predicts no further decrease the evaluation can show here; a step
+            # the model says raises the cost (the decrease below minus the limit) is not that.
+            if _within(
+                stationarity,
+                _stationarity_limit(
+                    solver.stationarity_tol, cost_tol, _median(loop.noise_dominated_cost_change)
+                ),
             ):
                 work.solves += 1
                 stop = "stationarity"
@@ -733,7 +771,9 @@ class _JointFit:
             level = _floor_level(loop.gradient_floor_samples, bound)
             full_norm = float(np.linalg.norm(np.asarray(zero[0])))
             # The model predicts no further decrease its derivatives resolve here.
-            if level is not None and stationarity <= _floor_sigma(level, full_norm, relative_to):
+            if level is not None and _within(
+                stationarity, _floor_sigma(level, full_norm, relative_to)
+            ):
                 work.solves += 1
                 stop = "derivative_accuracy"
                 break

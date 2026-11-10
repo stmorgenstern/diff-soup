@@ -7,6 +7,7 @@ lanes takes them.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import jax
@@ -165,3 +166,55 @@ def _constraint_rows(
     if not lowered_rows:
         return jnp.zeros((0, joint.n_params), dtype=dtype), jnp.zeros((0,), dtype=dtype)
     return jnp.stack(lowered_rows), jnp.stack(lowered_rhs)
+
+
+def start_on_rows(
+    x: np.ndarray,
+    matrix: np.ndarray,
+    rhs: np.ndarray,
+    fixed: Sequence[int],
+    bounds: tuple | None,
+) -> np.ndarray:
+    """A start moved onto the equality rows ``matrix @ x = rhs`` when it is off them.
+
+    A start within rounding of every row is returned as it is. Otherwise it moves by the
+    least change of its free coordinates (those not in ``fixed``) that puts it on the rows,
+    ``x - A_f^+ (A x - rhs)`` with ``A_f`` the rows on the free coordinates: the trust region
+    keeps the rows at every step from a point on them, and a step from a point off them that
+    raises the cost would not be taken.
+
+    Raises:
+        ValueError: If no change of the free coordinates puts the start on the rows, or the
+            moved start leaves the inside of ``bounds``.
+    """
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if not matrix.shape[0]:
+        return x
+    rhs = np.asarray(rhs, dtype=np.float64)
+    eps = float(np.finfo(np.float64).eps)
+
+    def off(point: np.ndarray) -> np.ndarray:
+        size = np.abs(matrix) @ np.abs(point) + np.abs(rhs)
+        return np.abs(matrix @ point - rhs) > 256.0 * eps * size + float(np.finfo(float).tiny)
+
+    if not off(x).any():
+        return x
+    free = matrix.copy()
+    free[:, np.asarray(fixed, dtype=np.int64)] = 0.0
+    # On the host in float64, whatever JAX's precision, as the rows' test is.
+    move, *_ = np.linalg.lstsq(free, matrix @ x - rhs, rcond=None)
+    moved = np.asarray(x - move, dtype=np.asarray(x).dtype)
+    missed = off(moved)
+    if missed.any():
+        raise ValueError(
+            "TrustRegion keeps its equality rows (constraints= and gauges=) from a start on "
+            f"them; rows {np.flatnonzero(missed).tolist()} are off at the start and no change "
+            "of the free coordinates puts it on every row. Start on the rows."
+        )
+    if bounds is not None and not np.all((moved > bounds[0]) & (moved < bounds[1])):
+        raise ValueError(
+            "TrustRegion keeps its equality rows (constraints= and gauges=) from a start on "
+            "them; the start is off the rows, and moved onto them it leaves the bounds. Start "
+            "on the rows inside the bounds."
+        )
+    return moved

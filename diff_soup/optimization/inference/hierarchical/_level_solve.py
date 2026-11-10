@@ -127,8 +127,12 @@ def _fold(
     return root, root_rhs, diagonal, cross, level_rhs, factors, couplings, solved
 
 
-@jax.jit
-def _solve(system, damping):
+def _solve_parts(system, damping):
+    """``_solve``'s step and ``q_squared``, and the multipliers of the equality rows, ``(c,)``.
+
+    The multipliers ``mu`` are those of ``(H + damping I) s + g + A^T mu = 0`` with
+    ``A (point + s) = constraint_rhs``; an inactive row's is zero.
+    """
     counts, widths = system.counts, system.widths
     depth = system.depth
     g = widths[0]
@@ -183,6 +187,8 @@ def _solve(system, damping):
             residual = jnp.where(on, residual, 0.0)
         multipliers = jnp.linalg.solve(gram, residual)
         step = step - spread @ multipliers
+    else:
+        multipliers = jnp.zeros((0,), dtype=dtype)
     parts = _split(system, step)
     halves: list = [None] * (depth + 1)
     q_squared = jnp.zeros((), dtype=dtype)
@@ -206,6 +212,12 @@ def _solve(system, damping):
             right = right - _node_sum(system, carried, deeper, 0)
         top_half = jax.scipy.linalg.solve_triangular(root_factor, right, lower=True)
         q_squared = q_squared + top_half @ top_half
+    return step, q_squared, multipliers
+
+
+@jax.jit
+def _solve(system, damping):
+    step, q_squared, _ = _solve_parts(system, damping)
     return step, q_squared
 
 
@@ -245,6 +257,11 @@ def _scaled(system, scale, addition):
         point=scale * system.point,
         constraint_matrix=system.constraint_matrix * inverse[None, :],
     )
+
+
+@jax.jit
+def _scaled_multipliers(system, scale, addition, damping):
+    return _solve_parts(_scaled(system, scale, addition), damping)[2]
 
 
 @jax.jit
@@ -561,6 +578,32 @@ def solve_scaled(
     return np.asarray(step), float(q_squared)
 
 
+def row_multipliers(
+    system: LevelSystem,
+    scale: ArrayLike | Sequence[Real],
+    damping: Real | ArrayLike,
+    addition: ArrayLike | Sequence | None = None,
+) -> np.ndarray:
+    """The multipliers of the system's equality rows at ``solve_scaled``'s solve, on the host.
+
+    Row ``i``'s multiplier ``mu_i`` is that of ``(H~ + damping I) z + g~ + A~^T mu = 0`` in the
+    scaled coordinates, which is that of the unscaled rows: a row held at a side of an
+    inequality is kept by the step's model only where its multiplier is at least zero. An
+    inactive row's is zero.
+
+    Returns:
+        ``(c,)``, one per row of ``system.constraint_matrix``.
+    """
+    dtype = _dtype(system)
+    multipliers = _scaled_multipliers(
+        system,
+        np.asarray(scale, dtype=dtype),
+        _addition(system, addition),
+        np.asarray(damping, dtype=dtype),
+    )
+    return np.asarray(multipliers, dtype=np.float64)
+
+
 def level_quadratic(system: LevelSystem, delta: ArrayLike | Sequence[Real]) -> float:
     """``delta^T H delta`` from the blocks, without a dense matrix.
 
@@ -845,6 +888,7 @@ __all__ = [
     "level_quadratic",
     "level_secular_step",
     "level_vectors",
+    "row_multipliers",
     "scaled_system",
     "solve_damped",
     "solve_scaled",

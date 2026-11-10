@@ -216,8 +216,8 @@ class _Block:
         kind: The signal's class name, for the repr.
     """
 
-    structure: Any
-    constants: tuple
+    structure: Any = dataclasses.field(repr=False)
+    constants: tuple = dataclasses.field(repr=False)
     coefficients: tuple
     mode: str
     scale: float
@@ -228,13 +228,26 @@ class _Block:
 
     @classmethod
     def of(cls, index: int, block: Any) -> _Block:
-        """Read block `index`, a `(signal, mode, scale)` triple, refusing what cannot lower exactly."""
+        """Read block `index`, a `(signal, mode, scale)` triple, refusing what cannot lower exactly.
+
+        A `_Block` already read, as `dataclasses.replace` passes back, is returned as it is.
+        """
+        if isinstance(block, _Block):
+            return block
         if not isinstance(block, tuple) or len(block) != 3:
             raise ConfigurationError(
                 f"SignalControls block {index} must be a (signal, mode, scale) tuple; got {block!r}."
             )
         signal, mode, scale = block
         kind = type(signal).__name__
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            scale = math.nan
+        if not math.isfinite(scale):
+            raise ConfigurationError(
+                f"SignalControls block {index}: the scale must be a finite number; got {block[2]!r}."
+            )
         if mode not in operating_mode_names():
             raise ConfigurationError(
                 f"SignalControls block {index} drives the mode {mode!r}; the operational modes "
@@ -253,19 +266,32 @@ class _Block:
             )
         knots = np.asarray(knots, dtype=np.float64)
         lengths = np.diff(knots)
-        if knots.ndim != 1 or lengths.size < 1 or not np.all(lengths > 0):
+        if (
+            knots.ndim != 1
+            or lengths.size < 1
+            or not np.all(np.isfinite(knots))
+            or not np.all(lengths > 0)
+        ):
             raise ConfigurationError(
-                f"SignalControls block {index}: the {kind}'s knots must ascend strictly; got {knots}."
+                f"SignalControls block {index}: the {kind}'s knots must be finite and ascend "
+                f"strictly; got {knots}."
             )
-        shape = jax.eval_shape(signal.polynomials).shape
+        flat, structure = jax.tree_util.tree_flatten_with_path(signal)
+        names = [_dotted(path) for path, _ in flat]
+        try:
+            shape = jax.eval_shape(signal.polynomials).shape
+        except (TypeError, ValueError) as error:
+            leaves = ", ".join(f"{name} {np.shape(leaf)}" for name, (_, leaf) in zip(names, flat))
+            raise ConfigurationError(
+                f"SignalControls block {index}: the {kind} on {knots.size} knots, {lengths.size} "
+                f"segments, has leaves of shapes {leaves}, from which polynomials() fails: {error}"
+            ) from error
         if len(shape) != 2 or shape[0] != lengths.size:
             raise ConfigurationError(
                 f"SignalControls block {index}: a block's {kind} has one component, polynomials of "
                 f"shape ({lengths.size}, degree + 1); got {shape}."
             )
         paths = tuple(str(path) for path in signal.learnable_paths())
-        flat, structure = jax.tree_util.tree_flatten_with_path(signal)
-        names = [_dotted(path) for path, _ in flat]
         missing = [path for path in paths if path not in names]
         if not paths or missing:
             raise ConfigurationError(
@@ -288,7 +314,7 @@ class _Block:
             constants=tuple(constants),
             coefficients=coefficients,
             mode=mode,
-            scale=float(scale),
+            scale=scale,
             lengths=tuple(float(length) for length in lengths),
             span=float(knots[-1] - knots[0]),
             degree=shape[1] - 1,
@@ -346,7 +372,7 @@ class SignalControls(AbstractControls):
 
     Args:
         blocks: The blocks in time order, each `(signal, mode, scale)`: a signal of one component, the operational row it drives (`"current"`, `"voltage"`, `"power"` or `"resistance"`), and the factor from the signal to the row's target.
-        carry_step: As `ds.Schedule(carry_step=)`: `None` continues the integrator across the knots of a block, where the target is continuous, and starts it afresh where the mode changes. `False` starts every segment afresh.
+        carry_step: As `ds.Schedule(carry_step=)`: `None` continues the integrator from one segment to the next wherever the mode stays the same, across the knots of a block and from a block to the next of the same mode, and starts it afresh where the mode changes. `False` starts every segment afresh.
         free_durations: Whether each block's duration is an entry of the decision vector, one per block after every coefficient. A block of duration `D` runs its signal with the knots stretched from their span to `D`. Keep each duration positive through `bounds`.
     """
 
@@ -474,37 +500,22 @@ class SignalControls(AbstractControls):
         return arrays
 
 
-def _static_times(times: Any) -> tuple[float, ...] | None:
-    """Save times as Python floats, static and hashable; a traced value is refused."""
-    if times is None:
-        return None
-    if isinstance(times, jax.core.Tracer):
-        raise ConfigurationError(
-            "ControlProblem save_times are static: give concrete times, not traced ones."
-        )
-    return tuple(float(t) for t in np.asarray(times, dtype=np.float64).ravel())
+def _static(name: str) -> Callable[[Any], tuple[float, ...] | None]:
+    """The converter of the field `name` to static, hashable Python floats; a tracer is refused."""
+
+    def convert(values: Any) -> tuple[float, ...] | None:
+        if values is None:
+            return None
+        if isinstance(values, jax.core.Tracer):
+            raise ConfigurationError(
+                f"ControlProblem {name} is static: give concrete values, not traced ones."
+            )
+        return tuple(float(value) for value in np.asarray(values, dtype=np.float64).ravel())
+
+    return convert
 
 
-def _static_fractions(fractions: Any) -> tuple[float, ...] | None:
-    """Save fractions as Python floats, static and hashable; a traced value is refused."""
-    if fractions is None:
-        return None
-    if isinstance(fractions, jax.core.Tracer):
-        raise ConfigurationError(
-            "ControlProblem save_fractions are static: give concrete fractions, not traced ones."
-        )
-    return tuple(float(f) for f in np.asarray(fractions, dtype=np.float64).ravel())
-
-
-def _static_start(start: Any) -> tuple[float, ...] | None:
-    """The first guess as Python floats, static; a traced value is refused."""
-    if start is None:
-        return None
-    if isinstance(start, jax.core.Tracer):
-        raise ConfigurationError(
-            "ControlProblem start is static: give a concrete first guess, not a traced one."
-        )
-    return tuple(float(value) for value in np.asarray(start, dtype=np.float64).ravel())
+_static_times = _static("save_times")
 
 
 class ControlProblem(AbstractOptimizationProblem, eqx.Module):
@@ -551,12 +562,14 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         static=True, default=None, converter=_static_times
     )
     save_fractions: tuple[float, ...] | None = eqx.field(
-        static=True, default=None, converter=_static_fractions
+        static=True, default=None, converter=_static("save_fractions")
     )
     initial_state: Float[ArrayLike, "*batch n_states"] | None = None
     theta: PyTree = None
     limits: PyTree = None
-    start: tuple[float, ...] | None = eqx.field(static=True, default=None, converter=_static_start)
+    start: tuple[float, ...] | None = eqx.field(
+        static=True, default=None, converter=_static("start")
+    )
     solver: JIDA | JBDF | JNDF | None = eqx.field(static=True, default=None)
     adjoint: AbstractAdjoint | None = eqx.field(static=True, default=None)
     layout: Layout | None = eqx.field(static=True, default=None)

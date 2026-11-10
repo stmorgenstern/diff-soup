@@ -18,7 +18,7 @@ A gradient runs the checkpointed forward pass and one replay, as equinox's rule 
 the bit. Reverse over reverse transposes the third product, so a Hessian-vector product by
 `jax.grad` of `jax.grad` costs what forward over reverse does. Forward over reverse runs the
 forward pass, the first product and the third as separate passes, so it costs about twice what
-it does under equinox's rule (measured on batjax's small cell), which is why
+it does under equinox's rule (measured on a small battery cell), which is why
 `CheckpointAdjoint(reverse_over_reverse=True)` selects this rule and the default does not. A
 third derivative raises.
 """

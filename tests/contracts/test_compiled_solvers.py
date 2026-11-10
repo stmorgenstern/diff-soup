@@ -1,9 +1,9 @@
 """Compiled constrained solvers: solutions in vmap lanes, each Hessian mode, the implicit
 derivative in args and in the bounds, its reverse form and the adjoint that selects it, the
 refusal of a tangent on a derivative-free input, a coordinate equal bounds fix, its Gauss-Newton
-form, a forward-only residual under forward-over-forward, a runtime budget and tolerance, and how a run
-ends: degenerate, infeasible, out of steps, diverged, a failed subproblem, restoration, failed
-evaluations, float32."""
+form, a forward-only residual under forward-over-forward, a runtime budget and tolerance, SQP at a
+zero tolerance, and how a run ends: degenerate, infeasible, out of steps, diverged, a failed
+subproblem, restoration, failed evaluations, float32."""
 
 from __future__ import annotations
 
@@ -533,3 +533,17 @@ def test_a_runtime_tolerance_below_the_default_ends_as_the_solver_field_does(sol
     _, static = dataclasses.replace(default, **fields).run(problem, problem.x0, a)
     assert int(runtime.status) == int(static.status) == TerminationStatus.KKT_TOL
     assert int(runtime.steps) == int(static.steps)
+
+
+@pytest.mark.parametrize("where", ["field", "run"])
+def test_sqp_at_a_zero_tolerance_runs_to_its_step_budget_at_the_solution(where):
+    """`SQP(tol=0.0)` and `run(tol=0.0)` solve every QP and end `MAX_STEPS` at the solution."""
+    toy = TOYS["inequality"]
+    problem, a = toy.problem, toy.args_batch[0]
+    if where == "field":
+        x, record = SQP(hessian="exact", tol=0.0, max_steps=5).run(problem, problem.x0, a)
+    else:
+        x, record = SQP(hessian="exact", max_steps=5).run(problem, problem.x0, a, tol=0.0)
+    assert int(record.status) == TerminationStatus.MAX_STEPS and int(record.steps) == 5
+    # measured 5.3e-15 (both), workstation CPU 2026-11-09, pytest tests/contracts/test_compiled_solvers.py
+    assert float(jnp.max(jnp.abs(x - toy.solution(a)[0]))) < _SOLUTION

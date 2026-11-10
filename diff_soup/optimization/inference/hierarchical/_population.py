@@ -79,7 +79,7 @@ def _fit_binding(
     Raises:
         ConfigurationError: If ``weight_priors`` is not ``True`` or ``False``,
             ``over`` is not the top level, or ``solver`` is not a
-            ``TrustRegion`` in the joint mode without weights.
+            ``TrustRegion`` in the joint mode without weights and inequality rows.
         ValueError: If ``fit`` holds no rung for a lane of the study.
     """
     if weight_priors is not True and weight_priors is not False:
@@ -100,6 +100,11 @@ def _fit_binding(
         raise ConfigurationError(
             "solver= carries weights=; every population member is weighed by the weights "
             "given with it, so give a TrustRegion with weights=None."
+        )
+    if solver.inequalities:
+        raise ConfigurationError(
+            "solver= carries inequalities=; the population's members step without inequality "
+            "rows and would leave them, so give a TrustRegion with inequalities=()."
         )
     work = getattr(fit, "work", None)
     if work is None or any(key not in work for key in _WORK):
