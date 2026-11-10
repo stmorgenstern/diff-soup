@@ -44,13 +44,17 @@ The four piecewise bases
 ([PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant],
 [PiecewiseLinear][diff_soup.optimization.inference.approx.signals.PiecewiseLinear],
 [CubicHermite][diff_soup.optimization.inference.approx.signals.CubicHermite],
-[BSpline][diff_soup.optimization.inference.approx.signals.BSpline]) all select
-the active segment the same way: a query
-time that lands exactly on an interior knot is treated as belonging to the
+[BSpline][diff_soup.optimization.inference.approx.signals.BSpline]) clamp a query
+time outside ``[knots[0], knots[-1]]`` to the nearer end. All but
+[PiecewiseLinear][diff_soup.optimization.inference.approx.signals.PiecewiseLinear]
+treat a query time that lands exactly on an interior knot as belonging to the
 segment *to its left*. Concretely, a numerical solver that has just
 integrated a step ending precisely at knot ``t_k`` and then evaluates the
 signal at ``t == t_k`` sees the value the step was actually integrated
 against — the left segment — not the one that is about to start.
+[PiecewiseLinear][diff_soup.optimization.inference.approx.signals.PiecewiseLinear]
+takes the segment to its right; being continuous, it has the same value from either
+side, and its derivative in ``t`` on a knot is the right segment's slope.
 
 Each of them is a polynomial on every segment, and ``polynomials()`` returns
 its exact power-basis coefficients in the time since the segment's start,
@@ -390,14 +394,15 @@ class BSpline(eqx.Module):
 
     The knots fix the basis when the spline is built: each segment's polynomial is one
     ``4 x 4`` matrix, built once with NumPy, applied to the segment's four control points.
-    The knots are therefore static, and new knots need a new spline. A query time outside ``[knots[0], knots[-1]]`` clamps to the end value, and a
-    query on an interior knot is evaluated as the end of the left segment, as for
+    The knots are therefore static, and new knots need a new spline. A query time outside
+    ``[knots[0], knots[-1]]`` clamps to the end value, and a query on an interior knot is
+    evaluated as the end of the left segment, as for
     [PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant].
     """
 
     control_points: jax.Array
-    _knots: tuple = eqx.field(static=True)
-    _knot_dtype: str = eqx.field(static=True)
+    _knots: tuple = eqx.field(static=True, repr=False)
+    _knot_dtype: str = eqx.field(static=True, repr=False)
     _band: tuple = eqx.field(static=True, repr=False)
 
     def __init__(self, knots, control_points):

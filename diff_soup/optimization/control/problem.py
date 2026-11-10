@@ -216,8 +216,8 @@ class _Block:
         kind: The signal's class name, for the repr.
     """
 
-    structure: Any
-    constants: tuple
+    structure: Any = dataclasses.field(repr=False)
+    constants: tuple = dataclasses.field(repr=False)
     coefficients: tuple
     mode: str
     scale: float
@@ -372,7 +372,7 @@ class SignalControls(AbstractControls):
 
     Args:
         blocks: The blocks in time order, each `(signal, mode, scale)`: a signal of one component, the operational row it drives (`"current"`, `"voltage"`, `"power"` or `"resistance"`), and the factor from the signal to the row's target.
-        carry_step: As `ds.Schedule(carry_step=)`: `None` continues the integrator across the knots of a block, where the target is continuous, and starts it afresh where the mode changes. `False` starts every segment afresh.
+        carry_step: As `ds.Schedule(carry_step=)`: `None` continues the integrator from one segment to the next wherever the mode stays the same, across the knots of a block and from a block to the next of the same mode, and starts it afresh where the mode changes. `False` starts every segment afresh.
         free_durations: Whether each block's duration is an entry of the decision vector, one per block after every coefficient. A block of duration `D` runs its signal with the knots stretched from their span to `D`. Keep each duration positive through `bounds`.
     """
 
@@ -500,37 +500,22 @@ class SignalControls(AbstractControls):
         return arrays
 
 
-def _static_times(times: Any) -> tuple[float, ...] | None:
-    """Save times as Python floats, static and hashable; a traced value is refused."""
-    if times is None:
-        return None
-    if isinstance(times, jax.core.Tracer):
-        raise ConfigurationError(
-            "ControlProblem save_times are static: give concrete times, not traced ones."
-        )
-    return tuple(float(t) for t in np.asarray(times, dtype=np.float64).ravel())
+def _static(name: str) -> Callable[[Any], tuple[float, ...] | None]:
+    """The converter of the field `name` to static, hashable Python floats; a tracer is refused."""
+
+    def convert(values: Any) -> tuple[float, ...] | None:
+        if values is None:
+            return None
+        if isinstance(values, jax.core.Tracer):
+            raise ConfigurationError(
+                f"ControlProblem {name} is static: give concrete values, not traced ones."
+            )
+        return tuple(float(value) for value in np.asarray(values, dtype=np.float64).ravel())
+
+    return convert
 
 
-def _static_fractions(fractions: Any) -> tuple[float, ...] | None:
-    """Save fractions as Python floats, static and hashable; a traced value is refused."""
-    if fractions is None:
-        return None
-    if isinstance(fractions, jax.core.Tracer):
-        raise ConfigurationError(
-            "ControlProblem save_fractions are static: give concrete fractions, not traced ones."
-        )
-    return tuple(float(f) for f in np.asarray(fractions, dtype=np.float64).ravel())
-
-
-def _static_start(start: Any) -> tuple[float, ...] | None:
-    """The first guess as Python floats, static; a traced value is refused."""
-    if start is None:
-        return None
-    if isinstance(start, jax.core.Tracer):
-        raise ConfigurationError(
-            "ControlProblem start is static: give a concrete first guess, not a traced one."
-        )
-    return tuple(float(value) for value in np.asarray(start, dtype=np.float64).ravel())
+_static_times = _static("save_times")
 
 
 class ControlProblem(AbstractOptimizationProblem, eqx.Module):
@@ -577,12 +562,14 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         static=True, default=None, converter=_static_times
     )
     save_fractions: tuple[float, ...] | None = eqx.field(
-        static=True, default=None, converter=_static_fractions
+        static=True, default=None, converter=_static("save_fractions")
     )
     initial_state: Float[ArrayLike, "*batch n_states"] | None = None
     theta: PyTree = None
     limits: PyTree = None
-    start: tuple[float, ...] | None = eqx.field(static=True, default=None, converter=_static_start)
+    start: tuple[float, ...] | None = eqx.field(
+        static=True, default=None, converter=_static("start")
+    )
     solver: JIDA | JBDF | JNDF | None = eqx.field(static=True, default=None)
     adjoint: AbstractAdjoint | None = eqx.field(static=True, default=None)
     layout: Layout | None = eqx.field(static=True, default=None)
