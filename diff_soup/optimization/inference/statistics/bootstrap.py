@@ -125,9 +125,8 @@ def bootstrap(
             one-step estimate, or `"refit"` to refit each replicate to convergence.
         weight_priors: Whether each member's prior and regularization terms take the member's
             weight.
-        solver: The `TrustRegion` the replicates step with, which must not set `weights=`,
-            `nested_at=` or `inequalities=`, or `None` for `TrustRegion(stationarity_tol=1e-8)`,
-            which refuses a fit made under inequality rows.
+        solver: The `TrustRegion` the replicates step with, without `weights=`, `nested_at=`
+            or `inequalities=`, or `None` for `TrustRegion(stationarity_tol=1e-8)`.
         max_attempts: The step attempts allowed per replicate, or `None` for the solver's
             `max_steps` under `"refit"` and `4 * steps` otherwise.
         require_converged: Whether to refuse a fit that did not converge.
@@ -150,6 +149,7 @@ def bootstrap(
         TypeError: If `problem` is not a lowered study or `fit` is not an `OptResult`.
         ValueError: If the fit is of another study, did not converge under
             `require_converged=True`, or the top level has fewer than three members.
+        ConfigurationError: If `solver` is `None` and the fit was made under `inequalities=`.
     """
     from diff_soup._errors import ConfigurationError
     from diff_soup.optimization.inference import LoweredStudy
