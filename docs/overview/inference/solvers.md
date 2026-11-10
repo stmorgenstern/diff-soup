@@ -2,7 +2,7 @@
 
 This page provides an overview of the optimizers behind
 `ds.optimization.optsolve`: the native Newton and quasi-Newton solvers, the
-hierarchical trust-region solver, the Optax wrapper, and custom solvers. The examples reuse the recipe, data, and inference problem of
+hierarchical trust-region solver, the Optax wrapper, the constrained solvers, and custom solvers. The examples reuse the recipe, data, and inference problem of
 [fitting parameters](fitting.md#the-least-squares-problem):
 
 ```python
@@ -267,6 +267,40 @@ result.params   # array([3. , 1.3])
 - `bounds=(lb, ub)` bounds the fitted values.
 - `is_valid=` is a check a trial point must pass before the function is
   evaluated there.
+
+## Constrained solvers
+
+`ds.optimization.Constraints` declares equality and inequality
+constraints on a problem, and `ds.optimization.InteriorPoint`, `SQP`,
+and `AugmentedLagrangian` solve it. Here the exponential fit of the
+previous section is held to \(x_0 x_1 \le 3\):
+
+```python
+constraints = ds.optimization.Constraints(
+    inequality=lambda x, args: x[0] * x[1] - 3.0, n_inequality=1)
+result = ds.optimization.optsolve(
+    problem.with_constraints(constraints), ds.optimization.InteriorPoint())
+result.params   # array([2.7236, 1.1015]), on the constraint
+```
+
+- `equality=` returns rows held at zero and `inequality=` rows held at
+  or below zero, with `n_equality=` and `n_inequality=` their counts.
+- Each function takes the fitted values and `args`, the extra inputs
+  passed to the problem as `args=`.
+- An `InferenceProblem` takes the same object as `constraints=`. Its
+  functions read the fitted values by parameter, as in `values[D]`.
+- `InteriorPoint()` is the recommended solver. `SQP()` takes fewer
+  steps from a warm start, and `AugmentedLagrangian()` is the fallback
+  for degenerate constraints. The other solvers refuse a problem with
+  constraints.
+- `tol=None` is the optimality error at which a run ends, `1e-8` under
+  float64, and `max_steps=` is the step budget. A converged run ends
+  with `KKT_TOL`.
+- `result.info["record"]` holds the multipliers and the constraint
+  violation at the solution.
+- `solver.run(problem, x0, args)` runs the same solve as a function
+  that composes with `jax.jit`, `jax.vmap`, and `jax.grad`
+  ([constrained solvers](../../reference/optimization/solvers.md)).
 
 ## Custom solvers
 
