@@ -803,10 +803,9 @@ def _clear_analyses() -> None:
     No library code path calls it. The one-equation programs of eager calls
     are dropped with the memo, and an analysis made again with equal content
     gets a native analysis of its own. A jitted program compiled against a
-    dropped analysis is not dropped: it still names the dropped native
-    analysis, which is freed with its factors in every context once the
-    dropped ``Analysis`` is collected. Call it only where no such program
-    runs afterwards.
+    dropped analysis is not dropped: it holds the dropped native analysis,
+    which is freed with its factors in every context once the dropped
+    ``Analysis`` and every such program are collected.
     """
     with _ANALYSES_LOCK:
         _ANALYSES.clear()
@@ -844,10 +843,9 @@ def analyze(
     anything is traced.
 
     On KLU, SuperLU and cuDSS the `Analysis` owns the backend's native analysis, and collecting
-    it frees that and every factor built from it, in every `SolveContext`. A `Factor` holds its
-    `Analysis`, but a compiled program may not: keep the `Analysis` while a program that factors
-    with it can still run, for example one compiled ahead of time or one that calls `analyze`
-    inside its trace. Once it is collected, that program's factor calls raise.
+    it frees that and every factor built from it, in every `SolveContext`, once no compiled
+    program that factors with it exists. A program compiled ahead of time, or one that calls
+    `analyze` inside its trace, keeps running after its `Analysis` is collected.
 
     Args:
         topology: The `SparseTopology` of the matrix.
