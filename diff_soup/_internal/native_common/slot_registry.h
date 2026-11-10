@@ -26,7 +26,7 @@
 //     };
 // Its slots derive from SlotBase, its sites are or derive from SiteBase, and its Stats has the
 // counter released_context_errors. Every function that takes a registry expects the caller to
-// hold its mutex, except the Python-facing ones (AnalysisRelease, SiteCreate, ContextRelease,
+// hold its mutex, except the Python-facing ones (AnalysisRelease, ContextRelease,
 // ResidentBytes), which release the GIL and take it.
 
 #pragma once
@@ -99,7 +99,6 @@ struct RegistryBase {
     std::unordered_set<int32_t> released_contexts;
     int64_t next_analysis = 1;
     int32_t next_slot = 1;
-    int64_t next_site = 1;  // ids of sites made by SiteCreate
     StatsT stats;
 };
 
@@ -202,7 +201,7 @@ ffi::Error CheckAnalysis(const R&, const typename R::SlotType& slot, int64_t ana
 
 // The site of a lowered factor or refactor call: the site under `key`, created on the first call
 // that carries the key, on the call's analysis. A site key is a deterministic hash of the lowered
-// call, so two lowerings of one program share their sites, or an id SiteCreate made.
+// call, so two lowerings of one program share their sites.
 template <class R>
 ffi::Error SiteFor(R& reg, int64_t key, int64_t analysis_id, typename R::SiteType** out) {
     using SiteT = typename R::SiteType;
@@ -527,29 +526,6 @@ void AnalysisRelease(int64_t id) {
     R& reg = Instance<R>();
     std::lock_guard<std::mutex> lock(reg.mutex);
     ForgetAnalysis(reg, id, [](auto&) {});
-}
-
-// Create a site on an analysis with an id of its own and return the id.
-template <class R>
-int64_t SiteCreate(int64_t analysis_id) {
-    using SiteT = typename R::SiteType;
-    nb::gil_scoped_release release;
-    R& reg = Instance<R>();
-    std::lock_guard<std::mutex> lock(reg.mutex);
-    auto it = reg.analyses.find(analysis_id);
-    if (it == reg.analyses.end()) {
-        throw std::invalid_argument(std::string(R::kName) + " analysis " +
-                                    std::to_string(analysis_id) +
-                                    " does not exist in this process; analyse the pattern "
-                                    "again.");
-    }
-    while (reg.sites.count(reg.next_site) != 0) ++reg.next_site;
-    auto site = std::make_unique<SiteT>();
-    site->id = reg.next_site++;
-    site->analysis = it->second;
-    const int64_t id = site->id;
-    reg.sites.emplace(id, std::move(site));
-    return id;
 }
 
 // Free every slot of a host context and record the context as released.

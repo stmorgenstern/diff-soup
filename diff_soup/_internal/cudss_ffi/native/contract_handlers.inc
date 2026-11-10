@@ -109,8 +109,8 @@
 // Static dispatch: a call whose identity is a constant of the compiled program receives it as
 // attributes and finds its slot on the host, without reading an operand. A factor with
 // static_context and static_lane keys its slot by them. A solve, refactor or invalidate whose
-// handle the program states to be the result of one of its factor or refactor calls (the last
-// site of its static_path) takes the handle words that call wrote, exactly as it would read
+// handle the program states to be the result of one of its factor or refactor calls (the site
+// its static_path names) takes the handle words that call wrote, exactly as it would read
 // them back from the device, when the site's latest words are those of this very handle: written
 // in the same execution of the program (XLA's run id tells executions apart) into the device
 // buffer the call reads its handle from. Anything else is a miss, and the call reads its handle
@@ -1142,24 +1142,24 @@ struct CallAttrs {
     bool transpose = false;  // a solve with the transpose of the handle's matrix
     bool adopt = false;  // refactor in place in the held slot, whichever site owns it
     int64_t analysis_id = 0;
-    int64_t static_context = -1;  // -1: read the context id
-    int64_t static_lane = -1;     // -1: read the lane token
-    // The sites of the factor and refactor calls the handle went through, the producing call's
-    // last; empty: read the handle.
-    std::vector<int64_t> static_path;
+    int64_t static_context = -1;  // a factor's context id; -1: read it
+    int64_t static_lane = -1;     // a factor's lane token; -1: read it
+    // The site of the factor or refactor call whose result is the handle (the last entry of the
+    // static_path attribute); 0: read the handle.
+    int64_t producer = 0;
     int64_t storage = 0;           // shared-storage key of the factor, 0 for none
     int64_t storage_context = -1;  // the factor's context id when it is a program constant
 
-    // Whether the context id and lane token are constants of the program.
+    // Whether a factor's context id and lane token are constants of the program.
     bool StaticKey() const {
         return static_context >= 0 && static_context <= std::numeric_limits<int32_t>::max() &&
                static_lane != -1 && static_lane >= std::numeric_limits<int32_t>::min() &&
                static_lane <= std::numeric_limits<int32_t>::max();
     }
 
-    // Whether the program states that the handle is the result of the call at the last site of
-    // the path (in the same execution).
-    bool RunLocalPath() const { return !static_path.empty(); }
+    // Whether the program states that the handle is the result of the call at the producing
+    // site (in the same execution).
+    bool RunLocalPath() const { return producer > 0; }
 };
 
 ffi::Error AttrMissing(const char* name, const char* type) {
@@ -1189,20 +1189,21 @@ ffi::Error BoolAttr(const ffi::Dictionary& attrs, const char* name, bool* out) {
     return ffi::Error::Success();
 }
 
-ffi::Error PathAttr(const ffi::Dictionary& attrs, const char* name, std::vector<int64_t>* out) {
-    out->clear();
+// The last entry of an integer array attribute (0 when it is absent or empty).
+ffi::Error LastOfPathAttr(const ffi::Dictionary& attrs, const char* name, int64_t* out) {
+    *out = 0;
     if (!attrs.contains(name)) return ffi::Error::Success();
     {
         ffi::ErrorOr<ffi::Span<const int64_t>> path = attrs.get<ffi::Span<const int64_t>>(name);
         if (path.has_value()) {
-            out->assign(path->begin(), path->end());
+            if (path->size() != 0) *out = path->back();
             return ffi::Error::Success();
         }
     }
     {
         ffi::ErrorOr<ffi::Span<const int32_t>> path = attrs.get<ffi::Span<const int32_t>>(name);
         if (path.has_value()) {
-            out->assign(path->begin(), path->end());
+            if (path->size() != 0) *out = path->back();
             return ffi::Error::Success();
         }
     }
@@ -1221,16 +1222,18 @@ ffi::Error DecodeAttrs(const ffi::Dictionary& attrs, CallKind kind, CallAttrs* o
         CONTRACT_TRY(BoolAttr(attrs, "symmetric", &out->symmetric));
         CONTRACT_TRY(BoolAttr(attrs, "spd", &out->spd));
     }
+    if (kind == CallKind::kFactor) {
+        CONTRACT_TRY(IntAttr(attrs, "static_context", false, &out->static_context));
+        CONTRACT_TRY(IntAttr(attrs, "static_lane", false, &out->static_lane));
+    }
     if (kind == CallKind::kSolve) {
         CONTRACT_TRY(BoolAttr(attrs, "transpose", &out->transpose));
     }
     if (kind == CallKind::kRefactor) {
         CONTRACT_TRY(BoolAttr(attrs, "adopt", &out->adopt));
     }
-    CONTRACT_TRY(IntAttr(attrs, "static_context", false, &out->static_context));
-    CONTRACT_TRY(IntAttr(attrs, "static_lane", false, &out->static_lane));
     if (kind != CallKind::kFactor) {
-        CONTRACT_TRY(PathAttr(attrs, "static_path", &out->static_path));
+        CONTRACT_TRY(LastOfPathAttr(attrs, "static_path", &out->producer));
         CONTRACT_TRY(IntAttr(attrs, "storage", false, &out->storage));
         CONTRACT_TRY(IntAttr(attrs, "storage_context", false, &out->storage_context));
     }
@@ -4796,7 +4799,7 @@ ffi::Error RawOperand(const ffi::AnyBuffer& values, const char* what, RawValues*
 }
 
 // The handle words of a call whose program states that its handle is the result of the call at
-// the last site of its static path: the words that call wrote (context ids, slot ids,
+// its producing site: the words that call wrote (context ids, slot ids,
 // generations, `lanes` of each) when the site's latest call ran in this very execution
 // (`run_id`) and wrote its generations into `generations`, the call's own generation operand;
 // null otherwise (a miss: the call reads its handle). The execution's identity comes from XLA,
@@ -4805,9 +4808,7 @@ ffi::Error RawOperand(const ffi::AnyBuffer& values, const char* what, RawValues*
 const int32_t* RunLocalWords(Registry& reg, const CallAttrs& at, int64_t run_id, int64_t lanes,
                              const void* generations) {
     if (!at.RunLocalPath()) return nullptr;
-    const int64_t id = at.static_path.back();
-    if (id <= 0) return nullptr;
-    Site* site = FindSite(reg, id);
+    Site* site = FindSite(reg, at.producer);
     if (site == nullptr || site->result_run_id != run_id || site->result_lanes != lanes ||
         site->result_buffer != generations) {
         return nullptr;
@@ -6209,12 +6210,6 @@ static void BindContract(nb::module_& m) {
             return cc::Reg().batch_tile_lanes;
         },
         "The cap on lanes per batch tile set by contract_set_batch_tile_lanes (0 for none).");
-    m.def("contract_site_create", &slot_registry::SiteCreate<cc::Registry>,
-          nb::arg("analysis_id"),
-          "Create a factor site on an analysis with an id of its own (a lowered call names its "
-          "site by a key computed from the call, and the site is created on the first call "
-          "that carries it); its slots are keyed by the context id and lane token (or held "
-          "slot) each execution carries. Returns the site id.");
     m.def("contract_storage_declare", &cc::StorageDeclare, nb::arg("analysis_id"),
           nb::arg("context_id"), nb::arg("storage"),
           "Record that a factor of the given context names the shared storage `storage` (the "
@@ -6247,7 +6242,7 @@ static void BindContract(nb::module_& m) {
           "host blocks of hybrid-memory factors pinned (pinned_blocks_allocated) and handed "
           "out again from returned blocks (pinned_blocks_reused), single factors and batch tiles "
           "configured to store a float64 factor downcast to float32 (downcast_configurations), "
-          "factorizations in which cuDSS perturbed a pivot, sides analysed again because a "
+          "sides analysed again because a "
           "factorization of other values than their analysis's ended singular (reanalyses), "
           "handler calls that found their slot from their attributes (static_dispatches), "
           "refactor calls that read their predicate, invalidate calls, numeric phases and "

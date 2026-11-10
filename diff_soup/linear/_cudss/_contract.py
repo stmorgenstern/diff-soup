@@ -66,8 +66,8 @@ two ways:
   jitted function factors in a context it closes over) passes
   ``static_context`` and ``static_lane``. A solve, refactor or invalidation
   whose handle is the direct result of a factor or refactor call of the
-  program passes ``static_path`` ([handle_path][]), whose last site is
-  that producing call's; the handler then takes the handle words the
+  program passes ``static_path`` ([handle_path][]), which holds that
+  producing call's site alone; the handler then takes the handle words the
   producing call wrote, when they are this handle's: written in the same
   execution of the program into the buffer the call reads its handle
   from. Otherwise (another execution, or another call of the same site in
@@ -1192,24 +1192,13 @@ def _identity_attributes(context: Optional[int], lane: Optional[int]) -> dict[st
 
 
 def _path_attributes(resolved: Optional[tuple]) -> dict[str, Any]:
-    """``static_path``, ``static_context`` and ``static_lane`` for a call that consumes a handle.
+    """``static_path`` for a call that consumes a handle: its producing call's site alone.
 
-    An empty path with ``-1`` for both means the handler reads the handle; a
-    path with ``-1`` for both names the producing call whose result words
-    the handler takes in the same execution.
+    The handler takes the result words of that call in the same execution
+    when they are this handle's; an empty path means it reads the handle.
     """
-    if resolved is None:
-        return {
-            "static_path": np.zeros((0,), np.int64),
-            "static_context": np.int64(-1),
-            "static_lane": np.int64(-1),
-        }
-    path, context, lane = resolved
-    return {
-        "static_path": np.asarray(path, np.int64),
-        "static_context": np.int64(context),
-        "static_lane": np.int64(lane),
-    }
+    path = () if resolved is None else resolved[0][-1:]
+    return {"static_path": np.asarray(path, np.int64)}
 
 
 def _storage_attributes(storage: Optional[str], context: Any) -> dict[str, np.int64]:
@@ -1454,11 +1443,10 @@ def lower_apply(
     passes values ``(lanes, nnz)``, handle leaves ``(lanes,)`` and ``b`` of
     shape ``(lanes, n)`` or ``(lanes, nrhs, n)``, lane ``k`` solving with
     lane ``k`` of the batch slot. When the handle resolves by the rule of
-    [handle_path][], the call carries ``static_path``, ``static_context``
-    and ``static_lane``, and the handler takes the handle words of its
-    producing call in place of a read when they are this handle's (see the
-    module's "Static dispatch"); otherwise they are an empty path and
-    ``-1``.
+    [handle_path][], the call carries ``static_path``, the producing call's
+    site, and the handler takes the handle words of that call in place of a
+    read when they are this handle's (see the module's "Static dispatch");
+    otherwise the path is empty.
 
     A solve with ``transpose=False`` of a factor that names shared storage
     (``storage``) carries the storage's key and, when the program states it,
@@ -1561,10 +1549,10 @@ def lower_refactor(
     is refactored, a lane that asks from the values the call carries for it
     and a lane that does not from the values its slot already holds. When
     the held handle resolves by the rule of [handle_path][], the call
-    carries ``static_path``, ``static_context`` and ``static_lane``, and the
-    handler takes the handle words of its producing call in place of a read
-    when they are this handle's; otherwise they are an empty path and
-    ``-1``. The predicate is always read back to the host.
+    carries ``static_path``, the producing call's site, and the handler
+    takes the handle words of that call in place of a read when they are
+    this handle's; otherwise the path is empty. The predicate is always read
+    back to the host.
 
     The call receives ``values`` and ``held_values`` in the coordinate order
     of the topology and the predicate before the handle; the handler
@@ -1646,8 +1634,8 @@ def lower_invalidate(
     refactors it from the values that solve carries. The context id the
     handle carries is the one used; the separate ``context_id`` operand is
     not passed on. When the handle resolves by the rule of [handle_path][],
-    the call carries ``static_path``, ``static_context`` and
-    ``static_lane``; otherwise an empty path and ``-1``. A factor that names
+    the call carries ``static_path``, the producing call's site; otherwise
+    the path is empty. A factor that names
     shared storage (``storage``) invalidates that storage, found from its
     key as a solve finds it.
 
