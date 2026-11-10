@@ -723,8 +723,8 @@ def test_the_handlers_dispatch_statically_where_a_program_states_its_factor():
 
 @cudss_only
 def test_a_function_called_twice_in_one_program_solves_each_call_with_its_own_factor():
-    """A jitted factor-and-solve called twice in one program is lowered once, so its two factor
-    calls share one site and one slot; each solve still applies its own call's factor."""
+    """A jitted factor-and-solve called twice in one program is lowered once, yet each of its
+    two factor calls keeps its own slot, and each solve applies its own call's factor."""
     topology, values = _system()
     analysis = analyze(topology, backend=CuDSS())
     with SolveContext("twice") as ctx:
