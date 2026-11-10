@@ -946,3 +946,57 @@ def test_a_replicate_without_a_step_is_kept_where_it_needs_none(stop, sigma, wei
     _Member.end(member, settings, stop, sigma=sigma)
     assert member.status == status
     assert member.reason == (None if status == "converged" else "no_step")
+
+
+def test_a_solve_under_members_rows_equal_on_own_values_is_the_dense_kkt_solve(frozen):
+    """A damped solve under a member's two rows equal on its own values (its block of rows is
+    singular; the rows differ on the shared value) gives the step, inverse-norm and multipliers of
+    the dense constrained system."""
+    import dataclasses
+
+    route, point, blocks = frozen
+    system = route.system(blocks, point)
+    rows = elimination.MemberRows(
+        coefficients=jax.numpy.asarray([[[1.0, 1.0]], [[0.0, 1.0]]]),
+        above=(jax.numpy.asarray([[[0.5, -0.3]], [[1.0, 0.2]]]),),
+        target=jax.numpy.asarray([[0.01, -0.02], [0.03, 0.0]]),
+        active=jax.numpy.asarray([[True, True], [False, False]]),
+    )
+    held = dataclasses.replace(system, member_rows=(None, rows) + (None,) * (system.depth - 1))
+    damping = 0.3
+    step, q_squared = elimination.solve_damped(held, damping)
+    multipliers = elimination.row_multipliers(held, np.ones(3), damping)
+    matrix, gradient = elimination.level_dense(system)
+    matrix = matrix + damping * np.eye(3)
+    # Joint columns: the shared rate, then each owner's source; member 0's two rows.
+    rows_dense = np.asarray([[0.5, 1.0, 0.0], [-0.3, 1.0, 0.0]])
+    kkt = np.block([[matrix, rows_dense.T], [rows_dense, np.zeros((2, 2))]])
+    solution = np.linalg.solve(kkt, np.concatenate([-gradient, [0.01, -0.02]]))
+    expected = np.concatenate([solution[:3], step @ np.linalg.solve(matrix, step) * np.ones(1)])
+    ours = np.concatenate([np.asarray(step), [float(q_squared)]])
+    # measured 4.9e-14 relative on the step and q^2 and 4.8e-15 on the multipliers (the lifted
+    # block refined to eps^0.75), workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k members_rows
+    np.testing.assert_allclose(ours, expected, rtol=1e-9, atol=0.0)
+    # measured as above
+    np.testing.assert_allclose(multipliers[:2], solution[3:], rtol=1e-9, atol=0.0)
+
+
+def test_a_frozen_request_of_one_owner_runs_its_calls_only_on_lanes_cut_by_member():
+    """On lanes cut by member (a nested fit's, on a CPU) a frozen request of one owner runs one
+    call of its one lane, and gives the gradient a request of every lane gives on that lane; on a
+    GPU the lanes stay whole and the request runs the bucket's call."""
+    from diff_soup.optimization.inference.engine._batched import cut_by_member
+
+    study = ds.lower(_two_owners("cut_decay"), objective=inf.MAP())
+    route = _LaneRoute(inf.TrustRegion(), study)
+    cut = cut_by_member(route.problem._lanes, {lane: n for n, lane in enumerate(route.ids)})
+    route.problem.prepare(modes=("value", "frozen"))
+    point = np.asarray(study.x0, dtype=np.float64)
+    route.evaluate("blocks", point)
+    moved = point + np.asarray([0.02, -0.03, 0.01])
+    every = route.evaluate("frozen", moved)
+    one = route.evaluate("frozen", moved, lanes=route.ids[1:])
+    assert tuple(one.batches[0]) == ((1, 1, 1) if cut else (1, 2, 1))
+    # measured 0.0, workstation CPU 2026-11-09, pytest tests/contracts/test_lowered_study.py -k cut_by_member
+    np.testing.assert_allclose(one.gradient[0, 0], every.gradient[0, 1], rtol=1e-12, atol=0.0)

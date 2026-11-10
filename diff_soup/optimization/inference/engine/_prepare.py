@@ -49,6 +49,7 @@ from diff_soup.optimization.inference.engine._batched import (
     ProgramKey,
     _first_call,
     _lane_leaves,
+    _slot,
     placement,
 )
 from diff_soup.optimization.inference.engine._batched import prepare as _prepare_programs
@@ -560,7 +561,7 @@ def _kept_jacobians(lanes: BatchedLanes, entry: BucketLanes, key: ProgramKey) ->
     """
     if key.mode != "frozen":
         return ()
-    blocks = lanes.programs.get((entry.bucket.index, "blocks"))
+    blocks = lanes.programs.get(_slot(lanes, entry.bucket.index, "blocks"))
     if blocks is None or blocks.key.mode != KEEPING_BLOCKS:
         raise RuntimeError(
             f"the frozen program of bucket {entry.bucket.index} is compiled after the blocks "

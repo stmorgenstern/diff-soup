@@ -17,6 +17,12 @@ slowest lane; units of similar step counts in one call waste the least. The
 first evaluation knows no step count and runs in canonical order. No call is
 made smaller to reduce the spread.
 
+Lanes whose calls are cut by member (a nested fit's lanes, each with its
+member at the level the fit is nested at) fill calls of their own member only:
+the units are grouped by member, in that order within each group, and each
+group fills its own calls ([cut_groups][diff_soup.optimization.inference.engine._order.cut_groups]),
+so a request for some members runs only their calls.
+
 The step counts are kept in a [StepMemory][diff_soup.optimization.inference.engine._order.StepMemory]
 per series of evaluations: every fit of a lowered study keeps its own, so a
 fit's first evaluation runs in canonical order whatever the study evaluated
@@ -131,6 +137,32 @@ def cut(count: int, width: int) -> tuple:
     return tuple(calls)
 
 
+def cut_groups(groups: np.ndarray, width: int) -> tuple:
+    """The calls of a program whose calls each hold units of one group, ``width`` at a time.
+
+    Args:
+        groups: Per unit, in the order the units fill the calls, its group;
+            the units of a group are consecutive.
+        width: ``W``, the units one call evaluates.
+
+    Returns:
+        Per call, ``(positions, own)`` as [cut][diff_soup.optimization.inference.engine._order.cut]
+        gives them; the last call of every group can have ``own < width``.
+    """
+    calls: list = []
+    for start, end in group_runs(groups):
+        calls.extend((positions + start, own) for positions, own in cut(end - start, width))
+    return tuple(calls)
+
+
+def group_runs(groups: np.ndarray) -> list:
+    """``(start, end)`` of every run of equal consecutive entries of ``groups``."""
+    groups = np.asarray(groups)
+    starts = np.flatnonzero(np.concatenate(([True], groups[1:] != groups[:-1])))
+    ends = np.append(starts[1:], groups.shape[0])
+    return [(int(start), int(end)) for start, end in zip(starts, ends)]
+
+
 class StepMemory:
     """The trial steps every unit of every bucket took when it was last evaluated.
 
@@ -172,4 +204,12 @@ class StepMemory:
         table[members, positions] = np.asarray(steps, dtype=np.int64)
 
 
-__all__ = ["UNKNOWN_STEPS", "StepMemory", "canonical_lanes", "cut", "unit_order"]
+__all__ = [
+    "UNKNOWN_STEPS",
+    "StepMemory",
+    "canonical_lanes",
+    "cut",
+    "cut_groups",
+    "group_runs",
+    "unit_order",
+]
