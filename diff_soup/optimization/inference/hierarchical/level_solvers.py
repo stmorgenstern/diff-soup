@@ -69,7 +69,7 @@ class TrustRegion(OptSolver):
     Args:
         hessian: `"gauss-newton"` steps on the Gauss-Newton curvature, `"true"` on the exact Hessian.
         nested_at: A level of the study's hierarchy whose members polish, each refitting its own parameters with the others held after every accepted step.
-        inner: A `TrustRegion` without `nested_at` whose budget and tolerances the polish uses, or `None` for two iterations per member; with `max_steps=0` the fit makes the steps of `nested_at=None`.
+        inner: A `TrustRegion` without `nested_at` whose budget and tolerances the polish uses, `None` for two iterations per member, and `max_steps=0` for no polish.
         radius_init: The initial trust radius, in scaled parameter units.
         radius_max: The largest trust radius.
         eta: The ratio of achieved to predicted decrease a step must reach to be accepted.
@@ -86,7 +86,7 @@ class TrustRegion(OptSolver):
         max_evaluations: The budget of objective evaluations, which ends the fit as `MAX_STEPS`.
         inner_start_iterations: The number of polish iterations at the start point, before the first step.
         inner_fraction: A member's polish ends when its predicted decrease falls to this fraction of the accepted step's.
-        inner_retreats: How many times a member whose solve fails at its polished point halves its polish step before its polish ends where its lanes solved.
+        inner_retreats: How many times a member whose solve fails at its polished point halves its polish step before its polish ends where its experiments solved.
         target_accepted_steps: Ends the fit as `ACCEPTED_STEPS` after this many accepted steps.
         x_scale: The parameter scaling, `HessianScale()` when `None`, `JacScale()` or a `ConstantScale`, with `JacScale` refused under `hessian="true"`.
         weights: One weight per member of the first level, or a `(level, weights)` pair, multiplying each member's share of the objective.
