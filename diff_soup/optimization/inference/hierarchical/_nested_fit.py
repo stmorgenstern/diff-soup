@@ -11,6 +11,7 @@ import jax
 import numpy as np
 from jaxtyping import ArrayLike
 
+from diff_soup.optimization.inference.engine._batched import cut_by_member
 from diff_soup.optimization.inference.fitting.result import OptResult, StepInfo
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _inequality as inequality
@@ -208,6 +209,10 @@ class _NestedFit(_JointFit):
         self.cut = route.names.index(solver.nested_at) + 1
         self.members = tuple(route.members[self.cut - 1])
         self.lane_member = np.asarray(route.nodes[:, self.cut - 1], dtype=np.int64)
+        if frozen and getattr(route.problem, "_lanes", None) is not None:
+            # On a CPU every call of the blocks and frozen programs holds one member's lanes,
+            # so a frozen request of the polish runs the calls of the members still in it only.
+            cut_by_member(route.problem._lanes, dict(zip(route.ids, self.lane_member.tolist())))
         # The member of the cut level of every joint column; set by the fit's first ``blocks``.
         self.owners: np.ndarray | None = None
         regularizer = route.view.regularization

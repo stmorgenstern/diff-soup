@@ -44,7 +44,11 @@ each unit's from its last ``blocks`` result that solved, a failed unit keeping t
 before. A ``frozen`` request runs the
 kept calls that hold its units, in their own layout, each with its kept
 Jacobians; a unit without one is refused. A study that did not prepare the
-``frozen`` mode keeps nothing.
+``frozen`` mode keeps nothing. On a CPU a nested fit's lanes know each lane's
+member at the level the fit is nested at ([cut_by_member][diff_soup.optimization.inference.engine._batched.cut_by_member]):
+their ``blocks`` and ``frozen`` programs are compiled at the width of the
+bucket's largest member and their calls hold one member each, so a ``frozen``
+request for some members runs only those members' calls.
 
 ``Results.batches`` records, per bucket, the units of the first pass, the width
 of the program and the calls made. A call of a program that raises (a device
@@ -87,9 +91,11 @@ from diff_soup.optimization.inference.engine._order import (
     StepMemory,
     canonical_lanes,
     cut,
+    cut_groups,
+    group_runs,
     unit_order,
 )
-from diff_soup.optimization.inference.engine._plan import Bucket, Plan
+from diff_soup.optimization.inference.engine._plan import Bucket, Plan, n_padded
 from diff_soup.optimization.inference.engine._reducers import TreeTables, tree_tables
 from diff_soup.optimization.inference.engine._request import Request
 from diff_soup.optimization.inference.engine._result import (
@@ -242,9 +248,13 @@ class BatchedLanes:
             [KeptJacobians][diff_soup.optimization.inference.engine._kept.KeptJacobians]
             of its units' last ``blocks`` results, once the ``frozen`` mode is
             prepared.
+        member_of: Per bucket index, the member of each of its lanes (in the
+            order of ``bucket.lanes``) when its calls are cut by member
+            ([cut_by_member][diff_soup.optimization.inference.engine._batched.cut_by_member]);
+            empty otherwise.
 
-    ``memory``, ``resident`` and ``kept`` are what one series of evaluations
-    learns; [with_own_state][diff_soup.optimization.inference.engine._batched.with_own_state]
+    ``memory``, ``resident``, ``kept`` and ``member_of`` belong to one series
+    of evaluations; [with_own_state][diff_soup.optimization.inference.engine._batched.with_own_state]
     gives lanes that share everything else and start them afresh, as every fit
     of a lowered study does.
     """
@@ -261,6 +271,7 @@ class BatchedLanes:
     memory: StepMemory = dataclasses.field(default_factory=StepMemory, repr=False)
     resident: dict = dataclasses.field(default_factory=dict, repr=False)
     kept: dict = dataclasses.field(default_factory=dict, repr=False)
+    member_of: dict = dataclasses.field(default_factory=dict, repr=False)
 
 
 def batched_lanes(plan: Plan, joint: Any) -> BatchedLanes:
@@ -387,9 +398,9 @@ def with_own_state(lanes: BatchedLanes) -> BatchedLanes:
     The plan, the host numbers of the lanes and the programs are those of
     ``lanes``, shared: a program ``prepare`` compiles through either is held
     by both. The step memory starts empty, so the first evaluation runs its
-    units in canonical order, and no input or Jacobian is kept on the device
-    yet; what evaluations through the returned lanes learn never reaches
-    ``lanes``, and the other way round.
+    units in canonical order, no input or Jacobian is kept on the device yet,
+    and no call is cut by member; what evaluations through the returned lanes
+    learn never reaches ``lanes``, and the other way round.
 
     Args:
         lanes: The lanes of the study.
@@ -398,7 +409,76 @@ def with_own_state(lanes: BatchedLanes) -> BatchedLanes:
         The [BatchedLanes][diff_soup.optimization.inference.engine._batched.BatchedLanes]
         sharing the programs of ``lanes``.
     """
-    return dataclasses.replace(lanes, memory=StepMemory(), resident={}, kept={})
+    return dataclasses.replace(lanes, memory=StepMemory(), resident={}, kept={}, member_of={})
+
+
+def cut_by_member(lanes: BatchedLanes, members: Mapping) -> bool:
+    """Cut the ``blocks`` and ``frozen`` calls of ``lanes`` at the boundaries of ``members``, on a CPU.
+
+    From then on every bucket's ``blocks`` and ``frozen`` programs are compiled
+    at the width that holds its largest member's lanes (padded to the mesh's
+    devices, at most the bucket's width), and every call of theirs holds the
+    lanes of one member: a ``frozen`` request for some members runs only their
+    kept calls. The other modes are unchanged. A fit nested at a level does
+    this to its own lanes (``with_own_state``) before it prepares them.
+
+    Lanes on a GPU stay whole: a call there costs about as much at one member's
+    width as at the bucket's, so many narrow calls take longer than one wide
+    call. On batjax's 12-cell cohort (one lane per cell, one bucket of 16
+    slots) a ``blocks`` request took 15.0 s whole and 8.1 s cut on the CPU, and
+    4.4 s whole and 19.0 s cut on the GPU; a ``frozen`` call of one cell took
+    0.93 s on the GPU against 2.1 s for the whole bucket (ours, 2026-11-09).
+
+    Args:
+        lanes: The lanes, changed in place.
+        members: Every planned lane's id to its member, an integer.
+
+    Returns:
+        Whether the calls are cut: ``False`` on a GPU.
+    """
+    device = lanes.plan.device
+    platform = device.platform if device is not None else jax.default_backend()
+    if platform != "cpu":
+        return False
+    for entry in lanes.buckets:
+        lanes.member_of[int(entry.bucket.index)] = np.asarray(
+            [int(members[lane]) for lane in entry.bucket.lanes], dtype=np.int64
+        )
+    return True
+
+
+def lane_members(lanes: BatchedLanes) -> dict | None:
+    """Every lane's member when ``lanes`` are cut by member (``cut_by_member``), else ``None``."""
+    if not lanes.member_of:
+        return None
+    return {
+        lane: int(member)
+        for entry in lanes.buckets
+        for lane, member in zip(entry.bucket.lanes, lanes.member_of[int(entry.bucket.index)])
+    }
+
+
+#: The modes whose calls ``cut_by_member`` cuts at the members' boundaries.
+_MEMBER_MODES = ("blocks", "frozen")
+
+
+def _width(lanes: BatchedLanes, bucket: Bucket, mode: str) -> int:
+    """The units one call of the bucket's program evaluates in ``mode``."""
+    member_of = lanes.member_of.get(int(bucket.index))
+    if member_of is None or mode not in _MEMBER_MODES:
+        return int(bucket.chunk[mode].width)
+    largest = int(np.bincount(member_of).max(initial=1))
+    return min(n_padded(largest, lanes.plan.devices), int(bucket.chunk[mode].width))
+
+
+def _slot(lanes: BatchedLanes, index: int, mode: str) -> tuple:
+    """The key of the bucket's program in ``mode`` among ``lanes.programs``.
+
+    A program cut by member is held beside the bucket's own, by its width.
+    """
+    if index in lanes.member_of and mode in _MEMBER_MODES:
+        return (index, mode, _width(lanes, lanes.buckets[index].bucket, mode))
+    return (index, mode)
 
 
 def lane_metadata(plan: Plan, joint: Any) -> BatchedLanes:
@@ -620,15 +700,16 @@ def prepare(
         bucket = entry.bucket
         if chosen is not None and int(bucket.index) not in chosen:
             continue
-        keep = keeping or (bucket.index, "frozen") in lanes.programs
+        keep = keeping or _slot(lanes, bucket.index, "frozen") in lanes.programs
         for mode in modes:
             program_mode = KEEPING_BLOCKS if keep and mode == "blocks" else mode
-            held = lanes.programs.get((bucket.index, mode))
+            slot = _slot(lanes, bucket.index, mode)
+            held = lanes.programs.get(slot)
             if held is not None and held.key.mode == program_mode:
                 prepared.append(PreparedProgram(bucket.index, mode, held, True))
                 continue
             key = ProgramKey(
-                bucket.full_identity, program_mode, int(bucket.chunk[mode].width), lanes.plan.mesh
+                bucket.full_identity, program_mode, _width(lanes, bucket, mode), lanes.plan.mesh
             )
             program = _PROGRAMS.get(key)
             reused = program is not None
@@ -641,7 +722,7 @@ def prepare(
                     "program, and its lane inputs have other shapes than that program's; lanes "
                     "of one identity have to carry inputs of equal shapes."
                 )
-            lanes.programs[(bucket.index, mode)] = program
+            lanes.programs[slot] = program
             prepared.append(PreparedProgram(bucket.index, mode, program, reused))
     return tuple(prepared)
 
@@ -777,7 +858,7 @@ def _check_programs(lanes: BatchedLanes, mode: str, touched: list) -> None:
                 f"bucket {bucket.index} (identity {bucket.identity}) has no {mode} mode: "
                 f"{_without(mode)}; request one of {tuple(bucket.chunk)}."
             )
-        if (index, mode) not in lanes.programs:
+        if _slot(lanes, index, mode) not in lanes.programs:
             raise ValueError(
                 f"the {mode} mode of bucket {bucket.index} (identity {bucket.identity}) is not "
                 f"compiled, and an evaluation compiles nothing; call prepare(modes=({mode!r},)) "
@@ -827,7 +908,9 @@ def _run_bucket(
     [KeptCall][diff_soup.optimization.inference.engine._kept.KeptCall] with its count of
     own units, its Jacobians left on the device, its units named by ``keys``
     (one per entry of ``members``; ``None`` takes ``members``), and which of its
-    own units solved.
+    own units solved. Lanes cut by member (``cut_by_member``) fill the calls of
+    their ``blocks`` program member by member, each member of each entry of
+    ``members`` in calls of its own.
 
     Returns:
         ``(outputs, seconds, batch, kept)``: ``kept`` holds ``(call, own, solved)``
@@ -839,10 +922,11 @@ def _run_bucket(
             the width, and is raised from the original error.
     """
     entry = lanes.buckets[index]
-    program = lanes.programs[(index, mode)]
+    program = lanes.programs[_slot(lanes, index, mode)]
     keeping = program.key.mode == KEEPING_BLOCKS
     device = placement(lanes.plan)
     width = int(program.key.chunk)
+    member_of = lanes.member_of.get(index) if mode in _MEMBER_MODES else None
     # Canonical units: members ascending, then lanes by experiment index.
     unit_row = np.repeat(np.arange(members.shape[0], dtype=np.int64), positions.shape[0])
     unit_lane = np.tile(np.arange(positions.shape[0], dtype=np.int64), members.shape[0])
@@ -852,8 +936,19 @@ def _run_bucket(
     count = int(unit_row.shape[0])
     steps = lanes.memory.steps(index, members[unit_row], positions[unit_lane])
     order = unit_order(priority[unit_lane], steps)
-    # On a mesh, each call's units are dealt to its devices by their last step counts.
-    order = order[device_order(steps[order], width, lanes.plan.devices)]
+    if member_of is None:
+        # On a mesh, each call's units are dealt to its devices by their last step counts.
+        order = order[device_order(steps[order], width, lanes.plan.devices)]
+        calls = cut(count, width)
+    else:
+        # Every member of every entry of ``members`` fills calls of its own, its units in
+        # that order and dealt to the devices within each call.
+        group = unit_row * (int(member_of.max()) + 1) + member_of[positions[unit_lane]]
+        order = order[np.argsort(group[order], kind="stable")]
+        for first, last in group_runs(group[order]):
+            dealt = device_order(steps[order[first:last]], width, lanes.plan.devices)
+            order[first:last] = order[first:last][dealt]
+        calls = cut_groups(group[order], width)
     row, lane = unit_row[order], unit_lane[order]
     narrow = points.astype(entry.dtype)[row[:, None], entry.gather[positions[lane]]]
     configured = entry.leaves[entry.dt0_leaf]
@@ -862,7 +957,6 @@ def _run_bucket(
     previous = lanes.resident.get(index, {})
     resident, pending, kept = {}, [], []
     start = time.perf_counter()
-    calls = cut(count, width)
     try:
         for call, own in calls:
             chosen = positions[lane[call]]
@@ -963,7 +1057,7 @@ def _run_frozen(
         BackendError: As ``_run_bucket``.
     """
     entry = lanes.buckets[index]
-    program = lanes.programs[(index, "frozen")]
+    program = lanes.programs[_slot(lanes, index, "frozen")]
     device = placement(lanes.plan)
     width = int(program.key.chunk)
     unit_row = np.repeat(np.arange(members.shape[0], dtype=np.int64), positions.shape[0])
@@ -1337,7 +1431,9 @@ __all__ = [
     "PreparedProgram",
     "ProgramKey",
     "batched_lanes",
+    "cut_by_member",
     "evaluate",
+    "lane_members",
     "lane_metadata",
     "placement",
     "prepare",

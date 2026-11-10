@@ -37,7 +37,10 @@ study's own lanes, and each process evaluates through its lanes of that fit,
 which share the study's programs and inputs on the host and start their own
 state empty. A process keeps the study's state and the state of the fit it
 evaluated last; the first evaluation of another fit releases the one before,
-and the end of the run releases both.
+and the end of the run releases both. A fit whose calls are cut by member
+([cut_by_member][diff_soup.optimization.inference.engine._batched.cut_by_member])
+sends every lane's member with its prepares and evaluations, and every process
+cuts its lanes of that fit alike.
 
 A prepare compiles every process's programs for the requested modes in two
 phases: first each program by the lowest process that holds its bucket, with
@@ -321,7 +324,7 @@ class Cluster:
             return {"error": (type(error).__name__, str(error)), "lane_ids": ()}, ()
 
     def _local_evaluate(self, header: Mapping, points: np.ndarray) -> tuple:
-        shard = self.shard(header["cut"], header.get("fit"))
+        shard = self._cut_shard(header)
         chosen = tuple(header["chosen"])
         columns = [c for c, lane in enumerate(chosen) if lane in self.mine]
         units = header["units"]
@@ -387,15 +390,24 @@ class Cluster:
                 )
         return reply, arrays
 
+    def _cut_shard(self, header: Mapping) -> Shard:
+        """The shard of a request's header, its lanes cut by the members the header gives."""
+        shard = self.shard(header["cut"], header.get("fit"))
+        members = header.get("members")
+        if members is not None and shard.lanes is not None and not shard.lanes.member_of:
+            _batched.cut_by_member(shard.lanes, members)
+        return shard
+
     def local_prepare(self, header: Mapping, phase: str) -> tuple:
         """This process's programs of one phase: ``(records, refusals)``.
 
         Phase ``"A"`` compiles the programs of the buckets this process is the
         compiling process of, with writes to the persistent cache on; phase
         ``"B"`` the others, with writes off. A program over the memory budget is
-        refused, the others still compiled.
+        refused, the others still compiled. A fit cut by member compiles through
+        its own lanes, which share the study's programs.
         """
-        shard = self.shard(header["cut"])
+        shard = self._cut_shard(header)
         if shard.lanes is None:
             return (), ()
         assignment = header["assignment"]
@@ -673,6 +685,7 @@ class Coordinator(Cluster):
                 None if bases is None else bases[rows],
                 None if present is None else present[rows],
                 members[rows],
+                _batched.lane_members(lanes),
             )
             parts.append((int(rows.shape[0]), replies))
         return _results(mode, chosen, members, bucket_of, parts, present, tables)
@@ -691,11 +704,13 @@ class Coordinator(Cluster):
         bases: np.ndarray | None,
         present: np.ndarray | None,
         keys: np.ndarray,
+        lane_members: dict | None = None,
     ) -> list:
         """Every process's reply for one group of members, in rank order.
 
         ``keys`` are the members' numbers in the request, by which every
-        process keeps their Jacobians for the ``frozen`` mode.
+        process keeps their Jacobians for the ``frozen`` mode; ``lane_members``
+        is every lane's member of a fit cut by member, or ``None``.
         """
         points = np.ascontiguousarray(points)
         header = {
@@ -709,6 +724,7 @@ class Coordinator(Cluster):
             "first_steps": bases,
             "units": present,
             "member_keys": np.asarray(keys, dtype=np.int64),
+            "members": lane_members,
             "retry": (tuple(retry[0]), tuple(float(f) for f in retry[1])),
             "points_shape": points.shape,
             "points_dtype": points.dtype.str,
@@ -774,6 +790,8 @@ class Coordinator(Cluster):
         header = {
             "message": "PREPARE",
             "cut": cut,
+            "fit": self._fit_token(lanes),
+            "members": _batched.lane_members(lanes),
             "modes": modes,
             "budget_share": None,
             "assignment": assignment,
@@ -794,13 +812,14 @@ class Coordinator(Cluster):
         position = {mode: index for index, mode in enumerate(modes)}
         records.sort(key=lambda record: (record.bucket, position[record.mode], record.rank))
         for bucket in lanes.plan.buckets:
-            keep = "frozen" in modes or (int(bucket.index), "frozen") in lanes.programs
+            index = int(bucket.index)
+            keep = "frozen" in modes or _batched._slot(lanes, index, "frozen") in lanes.programs
             for mode in modes:
                 program_mode = KEEPING_BLOCKS if keep and mode == "blocks" else mode
                 key = _batched.ProgramKey(
-                    bucket.full_identity, program_mode, int(bucket.chunk[mode].width)
+                    bucket.full_identity, program_mode, _batched._width(lanes, bucket, mode)
                 )
-                lanes.programs[(int(bucket.index), mode)] = Remote(key)
+                lanes.programs[_batched._slot(lanes, index, mode)] = Remote(key)
         stages = dict(setup)
         for record in records:
             if record.cache == preparing.REUSED:
