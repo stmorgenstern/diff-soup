@@ -500,21 +500,26 @@ def _regularizer_plan(
         places.append((tuple(where), weight))
         if weight != 0.0:
             touched.update(nodes)
+    shapes, routes = _regularizer_routes(tuple(places), counts, widths)
+    weights = tuple(weight for _, weight in places)
     plan = _RegularizerPlan(
         frozenset(touched),
-        jax.jit(
-            functools.partial(_regularizer_sums, provider, tuple(places), counts, widths, dtype)
-        ),
+        jax.jit(functools.partial(_regularizer_sums, provider, weights, shapes, routes, dtype)),
     )
     kept[1][key] = plan
     return plan
 
 
-def _regularizer_sums(provider, places, counts, widths, dtype, x) -> tuple:
-    """``extra``: every block's weighted curvature and slope summed per node (traced).
+def _regularizer_routes(places: tuple, counts: tuple, widths: tuple) -> tuple:
+    """Where every block's weighted curvature and slope go in ``extra``, built once on the host.
 
-    ``places`` holds per block its ``(level, node, position)`` per column and its
-    weight; each destination array takes one scatter-add of all its terms.
+    ``places`` holds per block its ``(level, node, position)`` per column and its weight.
+    The program flattens the blocks of nonzero weight in their order, each as its
+    curvature ``(w, w)`` row by row and then its slope ``(w,)``. Returns ``(shapes,
+    routes)``: every destination array's shape, and per destination that receives terms
+    ``(name, source, target)``: the terms' positions in the flat vector and their indices
+    in the destination, in the order block, row, column. A column pair of two levels goes
+    to the cross block of the deeper one; the pair the other way round is not stored.
     """
     depth = len(counts)
     g = int(widths[0])
@@ -524,8 +529,63 @@ def _regularizer_sums(provider, places, counts, widths, dtype, x) -> tuple:
         shapes[("gradient", level)] = (counts[level - 1], widths[level])
         for above in range(level):
             shapes[("cross", level, above)] = (counts[level - 1], widths[level], widths[above])
-    terms: dict = {name: ([], []) for name in shapes}
-    for (where, weight), (_, residual, jacobian) in zip(places, provider(x)):
+    sources: dict = {name: [] for name in shapes}
+    targets: dict = {name: [] for name in shapes}
+    offset = 0
+    for where, weight in places:
+        width = len(where)
+        if weight == 0.0 or width == 0:
+            # A block without columns has a curvature and a slope of size zero in the flat vector.
+            continue
+        level, node, position = (np.asarray(axis, dtype=np.int64) for axis in zip(*where))
+        rows = np.repeat(np.arange(width), width)
+        columns = np.tile(np.arange(width), width)
+        curvature = offset + rows * width + columns
+        slope = offset + width * width + np.arange(width)
+        for name in shapes:
+            if name[0] == "root_gradient":
+                take = level == 0
+                source, target = slope[take], (position[take],)
+            elif name[0] == "gradient":
+                take = level == name[1]
+                source, target = slope[take], (node[take], position[take])
+            else:
+                if name[0] == "root":
+                    take = (level[rows] == 0) & (level[columns] == 0)
+                elif name[0] == "diagonal":
+                    take = (level[rows] == name[1]) & (level[columns] == name[1])
+                else:
+                    take = (level[rows] == name[1]) & (level[columns] == name[2])
+                i, j = rows[take], columns[take]
+                source = curvature[take]
+                target = (position[i], position[j])
+                if name[0] != "root":
+                    target = (node[i],) + target
+            if source.size:
+                sources[name].append(source)
+                targets[name].append(target)
+        offset += width * width + width
+    routes = tuple(
+        (
+            name,
+            np.concatenate(sources[name]),
+            tuple(np.concatenate(axis) for axis in zip(*targets[name])),
+        )
+        for name in shapes
+        if sources[name]
+    )
+    return shapes, routes
+
+
+def _regularizer_sums(provider, weights, shapes, routes, dtype, x) -> tuple:
+    """``extra``: every block's weighted curvature and slope summed per node (traced).
+
+    Per block of nonzero weight one ``J^T J`` and one ``J^T r``; then one flat vector of
+    them all, and per destination array one gather of its terms and one scatter-add
+    (``_regularizer_routes``), so the program's size does not grow with a block's width.
+    """
+    pieces = []
+    for weight, (_, residual, jacobian) in zip(weights, provider(x)):
         if weight == 0.0:
             continue
         residual = jnp.ravel(jnp.asarray(residual, dtype=dtype))
@@ -535,33 +595,12 @@ def _regularizer_sums(provider, places, counts, widths, dtype, x) -> tuple:
         if weight is not None:
             curvature = weight * curvature
             slope = weight * slope
-        for i, (level_i, node_i, position_i) in enumerate(where):
-            if level_i == 0:
-                name, index = ("root_gradient",), (position_i,)
-            else:
-                name, index = ("gradient", level_i), (node_i, position_i)
-            terms[name][0].append(index)
-            terms[name][1].append(slope[i])
-            for j, (level_j, _, position_j) in enumerate(where):
-                if level_i == level_j:
-                    if level_i == 0:
-                        name, index = ("root",), (position_i, position_j)
-                    else:
-                        name, index = ("diagonal", level_i), (node_i, position_i, position_j)
-                elif level_i > level_j:
-                    name, index = ("cross", level_i, level_j), (node_i, position_i, position_j)
-                else:
-                    continue
-                terms[name][0].append(index)
-                terms[name][1].append(curvature[i, j])
-    arrays = {}
-    for name, shape in shapes.items():
-        array = jnp.zeros(shape, dtype=dtype)
-        indices, values = terms[name]
-        if indices:
-            columns = tuple(np.asarray(axis, dtype=np.int64) for axis in zip(*indices))
-            array = array.at[columns].add(jnp.stack(values))
-        arrays[name] = array
+        pieces.extend((curvature.reshape(-1), slope))
+    flat = jnp.concatenate(pieces) if pieces else jnp.zeros((0,), dtype=dtype)
+    arrays = {name: jnp.zeros(shape, dtype=dtype) for name, shape in shapes.items()}
+    for name, source, target in routes:
+        arrays[name] = arrays[name].at[target].add(flat[source])
+    depth = sum(1 for name in shapes if name[0] == "diagonal")
     diagonal = (None,) + tuple(arrays[("diagonal", level)] for level in range(1, depth + 1))
     cross = (None,) + tuple(
         tuple(arrays[("cross", level, above)] for above in range(level))

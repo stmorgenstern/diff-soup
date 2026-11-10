@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import shard_map
 from jax.sharding import NamedSharding, PartitionSpec
-from jaxtyping import PyTree
+from jaxtyping import ArrayLike, PyTree
 
 from diff_soup._layout import Layout
 from diff_soup.optimization.inference.engine._plan import n_padded
@@ -130,7 +130,7 @@ def reduce_child_lsq(
     inputs: PyTree,
     active: jax.Array,
     layout: Optional[Layout],
-    columns: Optional[jax.Array] = None,
+    columns: Optional[ArrayLike] = None,
     *,
     order: Optional[jax.Array] = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:

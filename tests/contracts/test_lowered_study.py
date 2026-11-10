@@ -11,6 +11,7 @@ chain of host-driven solves.
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -19,6 +20,7 @@ from diff_soup.optimization import inference as inf
 from diff_soup.optimization.inference.engine._kernel import _solve
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._lane_route import _LaneRoute
+from diff_soup.optimization.inference.hierarchical._level_system import _offsets, _regularizer_plan
 from diff_soup.optimization.inference.hierarchical._trust_step import (
     _full_step_decrease,
     _scale_candidate,
@@ -26,6 +28,7 @@ from diff_soup.optimization.inference.hierarchical._trust_step import (
     _trial_point,
 )
 from tests.support.inference import CELLS, decay_recipe, decay_study, small_fit
+from tests.support.programs import equations
 
 
 @pytest.fixture(scope="module")
@@ -1000,3 +1003,28 @@ def test_a_frozen_request_of_one_owner_runs_its_calls_only_on_lanes_cut_by_membe
     assert tuple(one.batches[0]) == ((1, 1, 1) if cut else (1, 2, 1))
     # measured 0.0, workstation CPU 2026-11-09, pytest tests/contracts/test_lowered_study.py -k cut_by_member
     np.testing.assert_allclose(one.gradient[0, 0], every.gradient[0, 1], rtol=1e-12, atol=0.0)
+
+
+def _regularizer_program_size(width):
+    """The operations of the level system's regularizer program for one dense block of ``width``."""
+    counts, widths = (2,), (2, width)
+    offsets = _offsets(counts, widths)
+    columns = tuple(range(offsets[1], offsets[1] + width))
+    matrix = jnp.eye(width) + 0.5
+
+    class Regularizer:
+        def residual(self, x):
+            return matrix @ x[np.asarray(columns)]
+
+        def block_rows(self, x):
+            return [(columns, self.residual(x), matrix)]
+
+    x = jnp.ones((offsets[-1],))
+    layout = (counts, widths, offsets, (None, (None,)), np.float64)
+    plan = _regularizer_plan(Regularizer(), np.asarray(x), *layout, None, None, None, None)
+    return len(equations(jax.make_jaxpr(plan.program)(x)))
+
+
+def test_a_regularizer_block_of_any_width_lowers_to_the_same_number_of_operations():
+    """A prior block over a member's 64 values traces as many operations as one over 8."""
+    assert _regularizer_program_size(64) == _regularizer_program_size(8)
