@@ -392,8 +392,7 @@ signal carries a trailing axis of size \(m\) on its values.
 The four piecewise signals are polynomials on every segment.
 `polynomials()` returns their coefficients in the time since each
 segment's start, shape `(K, degree + 1)` with the constant term first.
-This is how a signal drives a schedule exactly as a control
-([control signals](../modeling/controls.md#control-signals)).
+This is how a signal drives a schedule exactly as a control.
 
 For example, to fit a forcing term that steps once at \(t = 0.05\):
 

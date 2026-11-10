@@ -195,8 +195,6 @@ def member_decay(q, m):
 - A member equation closure takes two arguments, the access object `q`
   and the member view `m`, with `m.<name>` the member's entry of a
   per-member parameter array and `m.member_index` its index.
-  `q.p.<name>` and `q.fn.<name>` read the problem's declared
-  parameters and functions, as in a component equation.
 - `params` holds the per-member parameter arrays (each of shape
   `(count,)`, or a shared scalar). They are the family's
   differentiable and vmappable leaves, so a fit can learn them.
