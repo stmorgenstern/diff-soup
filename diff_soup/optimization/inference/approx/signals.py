@@ -25,7 +25,8 @@ recompile), and none of the evaluation logic uses Python control flow that
 would need to trace differently for different inputs — every method is safe
 to wrap in ``jax.vmap`` or differentiate with ``jax.grad`` / ``jax.jacfwd``.
 The [BSpline][diff_soup.optimization.inference.approx.signals.BSpline] is the one
-exception on knots: its knots fix its basis when it is built.
+exception on knots: its knots are static, not a leaf, since they fix its basis when it
+is built.
 When a signal is selected as a fit learnable by name, its ``learnable_paths``
 pick only the coefficient leaves (values / slopes / control points / harmonic
 amplitudes) — the knots and the Fourier period define the basis and are not fit
@@ -382,19 +383,20 @@ class BSpline(eqx.Module):
     range of its control points: bounds on the control points bound the whole signal.
 
     Attributes:
-        knots: Segment edges, strictly ascending, shape ``(K + 1,)``.
+        knots: Segment edges, strictly ascending, shape ``(K + 1,)``; static, not a leaf.
         control_points: The coefficients, shape ``(K + 3,)`` for a scalar signal or
             ``(K + 3, m)`` for an ``m``-component signal.
 
-    The knots fix the basis when the spline is built. Each segment's polynomial is one
-    matrix, built once with NumPy, applied to the control points, so new knots need a new
-    spline. A query time outside ``[knots[0], knots[-1]]`` clamps to the end value, and a
+    The knots fix the basis when the spline is built: each segment's polynomial is one
+    matrix, built once with NumPy, applied to the control points. The knots are therefore
+    static, and new knots need a new spline. A query time outside ``[knots[0], knots[-1]]`` clamps to the end value, and a
     query on an interior knot is evaluated as the end of the left segment, as for
     [PiecewiseConstant][diff_soup.optimization.inference.approx.signals.PiecewiseConstant].
     """
 
-    knots: jax.Array
     control_points: jax.Array
+    _knots: tuple = eqx.field(static=True)
+    _knot_dtype: str = eqx.field(static=True)
     _basis: tuple = eqx.field(static=True, repr=False)
 
     def __init__(self, knots, control_points):
@@ -416,7 +418,8 @@ class BSpline(eqx.Module):
                 "BSpline knots must be a strictly ascending one-dimensional array of at least "
                 f"two segment edges; got {edges!r}."
             )
-        self.knots = _inexact(knots)
+        self._knots = tuple(float(edge) for edge in edges)
+        self._knot_dtype = str(_inexact(knots).dtype)
         self.control_points = _inexact(control_points)
         if self.control_points.ndim not in (1, 2) or self.control_points.shape[0] != edges.size + 2:
             raise ValueError(
@@ -427,19 +430,25 @@ class BSpline(eqx.Module):
         basis = _clamped_cubic_basis(edges)
         self._basis = tuple(tuple(map(tuple, segment)) for segment in basis.tolist())
 
+    @property
+    def knots(self) -> jax.Array:
+        """The segment edges the spline was built on, shape ``(K + 1,)``."""
+        return jnp.asarray(self._knots, dtype=self._knot_dtype)
+
     def _matrix(self) -> jax.Array:
         """The basis in powers of each segment's time, ``(K, 4, K + 3)``, a compile-time constant."""
         return jnp.asarray(self._basis, dtype=self.control_points.dtype)
 
     def __call__(self, t) -> jax.Array:
         """Return the spline's value at time ``t``."""
-        n_segments = self.knots.shape[0] - 1
+        knots = self.knots
+        n_segments = knots.shape[0] - 1
         idx = jnp.clip(
-            jnp.searchsorted(self.knots, t, side="left") - 1,
+            jnp.searchsorted(knots, t, side="left") - 1,
             0,
             n_segments - 1,
         )
-        tau = _clamp(t, self.knots) - self.knots[idx]
+        tau = _clamp(t, knots) - knots[idx]
         coefficients = self.polynomials()[idx]
         return _horner(jnp.moveaxis(coefficients, jnp.ndim(tau), 0), tau)
 
