@@ -144,13 +144,14 @@ def _choose(
     radius: ArrayLike,
     bounds: tuple,
     *,
-    equality: bool,
+    equality: ArrayLike,
 ) -> tuple:
     """The trial step under the box, from the subproblem's solution ``step``.
 
     ``_bounds.select_step`` on the scaled model of ``system`` with its diagonal
     addition; with equality rows only its first candidate, the step shortened
-    to stay inside, which keeps the rows. Returns ``(step, scaled_step,
+    to stay inside, which keeps the rows. ``equality`` may be traced (whether
+    the step holds rows decided in the program). Returns ``(step, scaled_step,
     predicted)``. Written for arrays.
     """
     xp = _namespace(x, gradient, step, radius, coordinates.scale)
@@ -161,16 +162,24 @@ def _choose(
     quadratic_form = _model_form(system, d, addition)
     g_h = d * gradient
     lower, upper = bounds
-    if equality:
+    static = isinstance(equality, (bool, np.bool_))
+    if static and equality:
         return box.shortened_step(
             x, quadratic_form, g_h, step, scaled_step, lower, upper, coordinates.theta
         )
     reach = _larger(radius, xp.linalg.norm(scaled_step))
     if xp is np:
         reach = float(reach)
-    return box.select_step(
+    chosen = box.select_step(
         x, quadratic_form, g_h, step, scaled_step, d, reach, lower, upper, coordinates.theta
     )
+    if static:
+        return chosen
+    # Whether the step holds rows is known in the program only: both candidates, one taken.
+    shortened = box.shortened_step(
+        x, quadratic_form, g_h, step, scaled_step, lower, upper, coordinates.theta
+    )
+    return tuple(xp.where(equality, a, b) for a, b in zip(shortened, chosen))
 
 
 def _trial_from(
@@ -184,7 +193,7 @@ def _trial_from(
     *,
     fixed: ArrayLike | tuple,
     bounds: tuple[ArrayLike, ArrayLike] | None,
-    equality: bool,
+    equality: ArrayLike,
 ) -> tuple:
     """The trial of the subproblem's step ``proposed``, of predicted decrease ``predicted``.
 
