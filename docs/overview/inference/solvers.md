@@ -299,8 +299,7 @@ result.params   # array([2.7236, 1.1015]), on the constraint
 - `result.info["record"]` holds the multipliers and the constraint
   violation at the solution.
 - `solver.run(problem, x0, args)` runs the same solve as a function
-  that composes with `jax.jit`, `jax.vmap`, and `jax.grad`
-  (constrained solvers).
+  that composes with `jax.jit`, `jax.vmap`, and `jax.grad`.
 
 ## Custom solvers
 
