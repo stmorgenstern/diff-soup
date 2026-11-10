@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from typing import Any, NamedTuple
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jaxtyping import ArrayLike
 
@@ -267,6 +268,9 @@ class _LaneRoute:
     layout: elimination.LevelLayout | None = None
     # The level tables of subsets of the planned lanes, by their ids in canonical order.
     subset_tables: dict | None = None
+    # The jitted programs of the regularizer's blocks: the route and the block weights they
+    # were built for, and the programs by name (``programs``).
+    compiled: tuple | None = None
 
     def __init__(self, solver: Any, problem: Any):
         lowered = _lowered(solver, problem)
@@ -731,55 +735,92 @@ class _LaneRoute:
         sums = weigh_levels(self.tables, member_row(results.levels, row), self.weights)
         return jax.device_put(sums, self.device)
 
+    def programs(self) -> dict:
+        """The route's jitted programs of the regularizer's blocks, by name.
+
+        Built for this route and its block weights: a copy, or a route weighed
+        again, builds its own.
+        """
+        kept = self.compiled
+        if kept is None or kept[0] is not self or kept[1] != self.block_weights:
+            kept = self.compiled = (self, self.block_weights, {})
+        return kept[2]
+
+    def refuse_block_count(self, count: int) -> None:
+        """Refuse a regularizer that declares ``count`` blocks where its weights name another number."""
+        weights = self.block_weights
+        if weights is not None and count != len(weights):
+            raise ValueError(
+                f"the regularizer's block_rows(x) declares {count} blocks at this point "
+                f"and {len(weights)} where its weights were attributed; a regularizer declares "
+                "the same blocks at every point."
+            )
+
+    def block_costs(self, point: np.ndarray) -> tuple:
+        """``(columns, costs)``: every regularizer block's columns and its ``0.5 |r_b|^2`` at ``point``.
+
+        Unweighted, in the order of ``view.regularization.block_rows``, from one
+        jitted program; ``costs`` is a host array.
+        """
+        programs = self.programs()
+        if "costs" not in programs:
+            regularizer = self.view.regularization
+            columns: list = []
+
+            def costs(x: jax.Array) -> jax.Array:
+                declared = tuple(regularizer.block_rows(x))
+                columns[:] = [tuple(int(column) for column in item[0]) for item in declared]
+                rows = [jnp.ravel(item[1]) for item in declared]
+                if not rows:
+                    return jnp.zeros((0,), dtype=x.dtype)
+                return jnp.stack([0.5 * (row @ row) for row in rows])
+
+            programs["costs"] = (jax.jit(costs), columns)
+        program, columns = programs["costs"]
+        values = np.asarray(program(jax.device_put(point, self.device)))
+        self.refuse_block_count(len(columns))
+        return tuple(columns), values
+
     def penalty(self, point: np.ndarray) -> float:
         """The regularizer's cost at ``point``: every block's ``0.5 |r_b|^2`` times its weight."""
         regularizer = self.view.regularization
         if self.block_weights is None:
             return float(regularizer.penalty(jax.device_put(point, self.device)))
-        declared = tuple(regularizer.block_rows(jax.device_put(point, self.device)))
-        if len(declared) != len(self.block_weights):
-            raise ValueError(
-                f"the regularizer's block_rows(x) declares {len(declared)} blocks at this point "
-                f"and {len(self.block_weights)} where its weights were attributed; a regularizer "
-                "declares the same blocks at every point."
-            )
-        dtype = np.asarray(point).dtype
-        total = 0.0
-        for weight, (_, residual, _) in zip(self.block_weights, declared):
-            if weight == 0.0:
-                continue
-            residual = np.ravel(np.asarray(residual, dtype=dtype))
-            total += weight * (0.5 * float(residual @ residual))
-        return total
+        _, costs = self.block_costs(point)
+        weights = np.asarray(self.block_weights, dtype=np.float64)
+        return float(np.sum(np.where(weights == 0.0, 0.0, weights * costs)))
 
     def penalty_gradient(self, point: np.ndarray) -> np.ndarray:
         """The gradient of ``penalty`` at ``point``: every block's ``J_b^T r_b`` times its weight.
 
         Each block of ``view.regularization.block_rows`` adds its slope to the
-        joint columns it addresses; a regularizer without rows gives zeros.
+        joint columns it addresses, in one jitted program; a regularizer without
+        rows gives zeros.
         """
+        programs = self.programs()
+        if "gradient" not in programs:
+            regularizer, weights = self.view.regularization, self.block_weights
+
+            def slope(x: jax.Array) -> jax.Array:
+                gradient = jnp.zeros(x.shape, dtype=x.dtype)
+                if int(np.size(regularizer.residual(x))) == 0:
+                    return gradient
+                declared = tuple(regularizer.block_rows(x))
+                self.refuse_block_count(len(declared))
+                for weight, (columns, residual, jacobian) in zip(
+                    (1.0,) * len(declared) if weights is None else weights, declared
+                ):
+                    if weight == 0.0:
+                        continue
+                    residual = jnp.ravel(jnp.asarray(residual, dtype=x.dtype))
+                    jacobian = jnp.asarray(jacobian, dtype=x.dtype).reshape(residual.size, -1)
+                    at = np.asarray(columns, dtype=np.int64)
+                    gradient = gradient.at[at].add(weight * (jacobian.T @ residual))
+                return gradient
+
+            programs["gradient"] = jax.jit(slope)
         point = np.asarray(point)
-        gradient = np.zeros(point.shape, dtype=point.dtype)
-        regularizer = self.view.regularization
-        if int(np.size(regularizer.residual(jax.device_put(point, self.device)))) == 0:
-            return gradient
-        declared = tuple(regularizer.block_rows(jax.device_put(point, self.device)))
-        weights = self.block_weights
-        if weights is None:
-            weights = (1.0,) * len(declared)
-        elif len(declared) != len(weights):
-            raise ValueError(
-                f"the regularizer's block_rows(x) declares {len(declared)} blocks at this point "
-                f"and {len(weights)} where its weights were attributed; a regularizer declares "
-                "the same blocks at every point."
-            )
-        for weight, (columns, residual, jacobian) in zip(weights, declared):
-            if weight == 0.0:
-                continue
-            residual = np.ravel(np.asarray(residual, dtype=gradient.dtype))
-            jacobian = np.asarray(jacobian, dtype=gradient.dtype).reshape(residual.size, -1)
-            gradient[np.asarray(columns, dtype=np.int64)] += weight * (jacobian.T @ residual)
-        return gradient
+        return np.array(programs["gradient"](jax.device_put(point, self.device)), dtype=point.dtype)
 
     def trial_cost(self, results: Any, point: np.ndarray, *, member: int = 0) -> float:
         """The weighted lane costs of a ``value`` evaluation and the regularizer at ``point``.
