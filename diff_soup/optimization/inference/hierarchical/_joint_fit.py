@@ -116,6 +116,127 @@ class _TrialAnswer(NamedTuple):
     failed: jax.Array
 
 
+def _rows_solve(rows, system, gradient, coordinates, radius, point, settings, bounds) -> tuple:
+    """``propose``'s ``solve`` under the inequality rows ``rows`` (a ``RowSet``), traced.
+
+    The rows are evaluated and linearized at ``point`` and placed in the system
+    once, at a fixed shape (``place_rows``); every round of the active-set method
+    (``_active_set.active_set``) flips which of them the system holds. The solve
+    at zero damping holds the rows its full step would violate; when that set
+    does not settle, ``z`` is the method's last iterate and the decrease ``nan``.
+    The trial is the active set's step on the attempt program, with a step that
+    holds a row taking the shortened candidate under the box; a step that does
+    not settle its set is the method's last iterate, its predicted decrease the
+    model's. A trial that crosses another row beyond its slack, as the rows are
+    nonlinear, is scaled back along its step to that row's boundary
+    (``traced_step_back``), and then moved back onto the rows it violates
+    (``traced_onto_rows``) and kept strictly inside the box.
+    """
+    c, C = inequality.traced_rows(rows, point)
+    frozen = inequality.frozen_columns(system)
+    C = jnp.where(frozen[None, :], 0.0, C)
+    placed = inequality.place_rows(rows, system, point, c, C)
+    scale = coordinates.scale
+    addition = jnp.zeros_like(scale) if coordinates.addition is None else coordinates.addition
+    radius = jnp.asarray(radius, dtype=scale.dtype)
+    none = jnp.zeros((rows.count,), dtype=bool)
+    shape, columns = (1, rows.count), np.zeros((point.shape[0],), dtype=np.int64)
+    held_equality = int(np.shape(system.constraint_matrix)[0]) > 0
+
+    def attempt(active):
+        held = inequality.hold_rows(rows, placed, active)
+        return _attempt(held, scale, addition, radius, eps=settings.eps, tiny=settings.tiny), held
+
+    def multipliers(damping: Callable) -> Callable:
+        def at(active, answer):
+            held = inequality.hold_rows(rows, placed, active)
+            flat = _scaled_multipliers(held, scale, addition, damping(answer))
+            return inequality.rows_multipliers(rows, system, placed, flat)
+
+        return at
+
+    def zero(active) -> _ZeroAnswer:
+        out, _ = attempt(active)
+        return _ZeroAnswer(out[0] / scale, out[0], out[2], out[6], jnp.asarray(False))
+
+    found = active_set.active_set(
+        zero,
+        multipliers(lambda answer: jnp.zeros((), scale.dtype)),
+        c,
+        C,
+        point,
+        zero(none),
+        shape=shape,
+        columns=columns,
+    )
+    settled = jnp.all(found.settled)
+    z = jnp.where(settled, found.answer.z, scale * found.step)
+    decrease = jnp.where(settled, found.answer.decrease, jnp.nan)
+
+    def trial(active) -> _TrialAnswer:
+        out, held = attempt(active)
+        point_, norm, predicted = _trial_from(
+            held,
+            point,
+            gradient,
+            coordinates,
+            radius,
+            out[3],
+            out[4],
+            fixed=settings.fixed,
+            bounds=bounds,
+            equality=held_equality | jnp.any(active & placed.keep),
+        )
+        return _TrialAnswer(point_ - point, norm, predicted, out[5], out[6], out[7])
+
+    def make() -> Trial:
+        first = trial(none)
+        path = active_set.active_set(
+            trial,
+            multipliers(lambda answer: answer.multiplier),
+            c,
+            C,
+            point,
+            first,
+            shape=shape,
+            columns=columns,
+        )
+        settled = jnp.all(path.settled)
+        step = jnp.where(settled, path.answer.step, path.step)
+        norm = jnp.where(settled, path.answer.norm, jnp.linalg.norm(scale * step))
+        model = _model_decrease(system, gradient, coordinates, step)
+        predicted = jnp.where(settled, path.answer.predicted, model)
+        fraction = inequality.traced_step_back(rows, point, step, path.active)
+        shorter = fraction < 1.0
+        step = jnp.where(shorter, fraction * step, step)
+        norm = jnp.where(shorter, fraction * norm, norm)
+        predicted = jnp.where(
+            shorter, _model_decrease(system, gradient, coordinates, step), predicted
+        )
+        moved = inequality.traced_onto_rows(rows, point + step, scale, ~frozen, bounds)
+        if bounds is not None:
+            moved = box.make_strictly_feasible(moved, bounds[0], bounds[1], rstep=0)
+        return Trial(
+            moved,
+            norm,
+            predicted,
+            path.answer.multiplier,
+            found.solves + first.solves + path.solves,
+            first.failed | path.answer.failed,
+        )
+
+    return Zero(z, decrease), make
+
+
+def _model_decrease(system, gradient, coordinates, step) -> jax.Array:
+    """The decrease the attempt's scaled model predicts for ``step`` (traced)."""
+    scaled = coordinates.scale * step
+    quadratic = _quadratic(system, step)
+    if coordinates.addition is not None:
+        quadratic = quadratic + coordinates.addition @ (scaled * scaled)
+    return -(gradient @ step + 0.5 * quadratic)
+
+
 class _JointFit:
     """One trust region over every coordinate of the levels."""
 
@@ -138,133 +259,8 @@ class _JointFit:
         # The inequality rows kept at or below zero, or None.
         cut = None if solver.nested_at is None else route.names.index(solver.nested_at) + 1
         self.rows = (
-            inequality.RowSet(solver.inequalities, route, cut) if solver.inequalities else None
+            inequality.row_set(solver.inequalities, route, cut) if solver.inequalities else None
         )
-        # The proposing program under the rows, built at the first attempt.
-        self.rows_program = None
-
-    def rows_solve(self, system, gradient, coordinates, radius, point, settings, bounds) -> tuple:
-        """``propose``'s ``solve`` under inequality rows, traced: the active set's solves.
-
-        The rows are evaluated and linearized at ``point`` and placed in the system
-        once, at a fixed shape (``place_rows``); every round of the active-set method
-        (``_active_set.active_set``) flips which of them the system holds. The solve
-        at zero damping holds the rows its full step would violate; when that set
-        does not settle, ``z`` is the method's last iterate and the decrease ``nan``.
-        The trial is the active set's step on the attempt program, with a step that
-        holds a row taking the shortened candidate under the box; a step that does
-        not settle its set is the method's last iterate, its predicted decrease the
-        model's. A trial that crosses another row beyond its slack, as the rows are
-        nonlinear, is scaled back along its step to that row's boundary
-        (``traced_step_back``), and then moved back onto the rows it violates
-        (``traced_onto_rows``) and kept strictly inside the box.
-        """
-        rows = self.rows
-        c, C = inequality.traced_rows(rows, point)
-        frozen = inequality.frozen_columns(system)
-        C = jnp.where(frozen[None, :], 0.0, C)
-        placed = inequality.place_rows(rows, system, point, c, C)
-        scale = coordinates.scale
-        addition = jnp.zeros_like(scale) if coordinates.addition is None else coordinates.addition
-        radius = jnp.asarray(radius, dtype=scale.dtype)
-        none = jnp.zeros((rows.count,), dtype=bool)
-        shape, columns = (1, rows.count), np.zeros((point.shape[0],), dtype=np.int64)
-        held_equality = int(np.shape(system.constraint_matrix)[0]) > 0
-
-        def attempt(active):
-            held = inequality.hold_rows(rows, placed, active)
-            return _attempt(
-                held, scale, addition, radius, eps=settings.eps, tiny=settings.tiny
-            ), held
-
-        def multipliers(damping: Callable) -> Callable:
-            def at(active, answer):
-                held = inequality.hold_rows(rows, placed, active)
-                flat = _scaled_multipliers(held, scale, addition, damping(answer))
-                return inequality.rows_multipliers(rows, system, placed, flat)
-
-            return at
-
-        def zero(active) -> _ZeroAnswer:
-            out, _ = attempt(active)
-            return _ZeroAnswer(out[0] / scale, out[0], out[2], out[6], jnp.asarray(False))
-
-        found = active_set.active_set(
-            zero,
-            multipliers(lambda answer: jnp.zeros((), scale.dtype)),
-            c,
-            C,
-            point,
-            zero(none),
-            shape=shape,
-            columns=columns,
-        )
-        settled = jnp.all(found.settled)
-        z = jnp.where(settled, found.answer.z, scale * found.step)
-        decrease = jnp.where(settled, found.answer.decrease, jnp.nan)
-
-        def trial(active) -> _TrialAnswer:
-            out, held = attempt(active)
-            point_, norm, predicted = _trial_from(
-                held,
-                point,
-                gradient,
-                coordinates,
-                radius,
-                out[3],
-                out[4],
-                fixed=settings.fixed,
-                bounds=bounds,
-                equality=held_equality | jnp.any(active & placed.keep),
-            )
-            return _TrialAnswer(point_ - point, norm, predicted, out[5], out[6], out[7])
-
-        def make() -> Trial:
-            first = trial(none)
-            path = active_set.active_set(
-                trial,
-                multipliers(lambda answer: answer.multiplier),
-                c,
-                C,
-                point,
-                first,
-                shape=shape,
-                columns=columns,
-            )
-            settled = jnp.all(path.settled)
-            step = jnp.where(settled, path.answer.step, path.step)
-            norm = jnp.where(settled, path.answer.norm, jnp.linalg.norm(scale * step))
-            model = self.model_decrease(system, gradient, coordinates, step)
-            predicted = jnp.where(settled, path.answer.predicted, model)
-            fraction = inequality.traced_step_back(rows, point, step, path.active)
-            shorter = fraction < 1.0
-            step = jnp.where(shorter, fraction * step, step)
-            norm = jnp.where(shorter, fraction * norm, norm)
-            predicted = jnp.where(
-                shorter, self.model_decrease(system, gradient, coordinates, step), predicted
-            )
-            moved = inequality.traced_onto_rows(rows, point + step, scale, ~frozen, bounds)
-            if bounds is not None:
-                moved = box.make_strictly_feasible(moved, bounds[0], bounds[1], rstep=0)
-            return Trial(
-                moved,
-                norm,
-                predicted,
-                path.answer.multiplier,
-                found.solves + first.solves + path.solves,
-                first.failed | path.answer.failed,
-            )
-
-        return Zero(z, decrease), make
-
-    @staticmethod
-    def model_decrease(system, gradient, coordinates, step) -> jax.Array:
-        """The decrease the attempt's scaled model predicts for ``step`` (traced)."""
-        scaled = coordinates.scale * step
-        quadratic = _quadratic(system, step)
-        if coordinates.addition is not None:
-            quadratic = quadratic + coordinates.addition @ (scaled * scaled)
-        return -(gradient @ step + 0.5 * quadratic)
 
     def evaluate(self, mode: str, point: np.ndarray, lanes: Iterable[str] | None = None) -> Any:
         """One request at ``point``, every lane (or ``lanes``) at the rung it holds.
@@ -734,7 +730,7 @@ class _JointFit:
         """The attempt's proposal at ``loop.point`` (``_step_program.propose``), as host values.
 
         One compiled program; under inequality rows it holds the active set's
-        solves (``rows_solve``) and is compiled once per fit.
+        solves (``_rows_solve``), kept on the rows (``RowSet.program``).
         """
         route, settings = self.route, self.step_settings
         floor = self.floor.terms()
@@ -749,13 +745,15 @@ class _JointFit:
                 settings=settings,
             )
         else:
-            if self.rows_program is None:
-                # One program per fit: the rows' functions are the fit's own.
-                self.rows_program = jax.jit(
-                    functools.partial(propose, solve=self.rows_solve),
+            rows = self.rows
+            program = rows.program(
+                "joint",
+                lambda: jax.jit(
+                    functools.partial(propose, solve=functools.partial(_rows_solve, rows)),
                     static_argnames=("settings",),
-                )
-            proposal = self.rows_program(
+                ),
+            )
+            proposal = program(
                 system,
                 self.solver.x_scale,
                 route.bounds,

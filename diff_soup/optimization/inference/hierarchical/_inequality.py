@@ -155,6 +155,16 @@ class RowSet:
             count += len(members) * rows
         self.count = count
         self.kept: tuple | None = None
+        self.programs: dict = {}
+
+    def program(self, name: Any, make: Callable) -> Any:
+        """The compiled program ``name`` that holds these rows, made by ``make()`` at its first use and kept.
+
+        Fits that share the set (``row_set``) share its programs.
+        """
+        if name not in self.programs:
+            self.programs[name] = make()
+        return self.programs[name]
 
     def __call__(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """``(c, C)`` at ``x``: the rows ``(R,)`` and their Jacobian ``(R, n)``, fixed columns zero.
@@ -198,6 +208,27 @@ class RowSet:
     def values(self, x: np.ndarray) -> np.ndarray:
         """The rows at ``x``, ``(R,)``."""
         return self(x)[0]
+
+
+def row_set(specs: tuple, route: Any, cut: int | None = None) -> RowSet:
+    """``RowSet(specs, route, cut)``, built once per lowered study and kept on its joint view.
+
+    Fits of one study under the same ``InequalityRows`` objects, cut level and fixed
+    coordinates share the set, and with it the compiled programs kept on it
+    (``RowSet.program``); a copy of the view builds its own.
+    """
+    view = route.view
+    store = getattr(view, "__dict__", None)
+    key = (int(route.n), cut, np.asarray(route.fixed, dtype=np.int64).tobytes())
+    kept = () if store is None else store.get("_row_sets", ())
+    for owner, kept_specs, kept_key, made in kept:
+        same = len(kept_specs) == len(specs) and all(a is b for a, b in zip(kept_specs, specs))
+        if owner is view and kept_key == key and same:
+            return made
+    made = RowSet(specs, route, cut)
+    if store is not None:
+        store["_row_sets"] = tuple(kept) + ((view, tuple(specs), key, made),)
+    return made
 
 
 def _shared_rows(rows: Callable) -> Callable:

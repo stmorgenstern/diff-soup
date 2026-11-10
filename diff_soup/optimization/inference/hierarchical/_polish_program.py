@@ -12,7 +12,7 @@ host makes the trial's request, turns failures into records and re-solves the la
 whose rung rose; after them it makes the requests for the moved members' matrices.
 
 Both are compiled once per system shape and settings with ``jax.jit``; under inequality
-rows the proposing program is the fit's own, as it holds the rows.
+rows the proposing program holds the rows and is kept on them (``RowSet.program``).
 """
 
 from __future__ import annotations

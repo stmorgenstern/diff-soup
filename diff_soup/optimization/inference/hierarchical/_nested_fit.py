@@ -830,7 +830,8 @@ class _NestedFit(_JointFit):
 
         Made at the first polish iteration, after the fit's first ``blocks`` request has set
         ``owners``. Without inequality rows the proposing program is shared by every fit;
-        with them it holds the rows and is the fit's own.
+        with them it holds the rows and is kept on them (``RowSet.program``), shared by the
+        fits of one study under the same rows.
         """
         if self.polish_settings is not None:
             return
@@ -856,9 +857,13 @@ class _NestedFit(_JointFit):
         if self.rows is None:
             self.polish_program = polish.propose_program
         else:
-            self.polish_program = jax.jit(
-                functools.partial(polish.propose, rows=self.rows, owners=owners),
-                static_argnames=("settings",),
+            rows = self.rows
+            self.polish_program = rows.program(
+                ("polish", self.cut, owners.tobytes()),
+                lambda: jax.jit(
+                    functools.partial(polish.propose, rows=rows, owners=owners),
+                    static_argnames=("settings",),
+                ),
             )
 
     def member_thresholds(
