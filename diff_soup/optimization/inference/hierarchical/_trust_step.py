@@ -83,21 +83,6 @@ class _FullStep(NamedTuple):
     scale: ArrayLike
 
 
-def _full_step(
-    system: elimination.LevelSystem,
-    gradient: np.ndarray,
-    scale: ArrayLike,
-    zero: tuple,
-    addition: ArrayLike | None = None,
-) -> _FullStep:
-    """The full step of ``zero``, the solve at zero damping, with ``_full_step_decrease``'s decrease."""
-    z = np.asarray(zero[0])
-    with np.errstate(all="ignore"):
-        length = float(np.linalg.norm(z / np.asarray(scale, dtype=z.dtype)))
-    decrease = _full_step_decrease(system, gradient, scale, zero, addition)
-    return _FullStep(float(np.linalg.norm(z)), length, decrease, scale)
-
-
 def _subproblem(
     x: ArrayLike,
     gradient: ArrayLike,
