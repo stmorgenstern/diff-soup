@@ -43,8 +43,9 @@ class InequalityRows(eqx.Module):
     fitted vector's order, and `data` the member's entry of `data`. Without `level` the rows
     are `rows(shared, data)`. Each call returns the same number of rows.
 
-    Each step holds the rows it would cross at their boundary, and a trial that crosses a
-    row is moved back to it, so the fit stays where the rows hold. Start it there.
+    Each step holds at their boundary the rows it would cross, and releases a held row the
+    fit gains by leaving; a trial that crosses a row is moved back to it, so the fit stays
+    where the rows hold. Start it there.
 
     Args:
         rows: The rows, a JAX function of the values, each kept at or below zero.

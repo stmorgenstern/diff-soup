@@ -201,6 +201,7 @@ def start_on_rows(
         return x
     free = matrix.copy()
     free[:, np.asarray(fixed, dtype=np.int64)] = 0.0
+    # On the host in float64, whatever JAX's precision, as the rows' test is.
     move, *_ = np.linalg.lstsq(free, matrix @ x - rhs, rcond=None)
     moved = np.asarray(x - move, dtype=np.asarray(x).dtype)
     missed = off(moved)

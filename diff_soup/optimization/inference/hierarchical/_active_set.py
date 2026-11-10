@@ -5,10 +5,12 @@ working set starts with the rows at their boundary, a linearly independent set o
 round solves the step with the working set held at its boundary (``solve``). A step that
 crosses a row outside the set moves the iterate along it to the first such row, which joins
 the set; a step that crosses none becomes the iterate, and a held row whose multiplier is
-negative leaves the set, as the model then gains by moving off it. The set is settled when the
-step crosses no row and no held multiplier is negative: the step is then the solution of the
-linearized problem (Nocedal and Wright, Numerical Optimization, 2nd ed., Algorithm 16.3). On a
-convex model the iterate never raises the model, so a step taken before the set settles is
+negative leaves the set, as the model then gains by moving off it. A row in the span of the
+held rows never joins: its linearized value is constant on their boundary, so it is crossed by
+rounding only, and holding it too would make the projection singular. The set is settled when
+the step crosses no row and no held multiplier is negative: the step is then the solution of
+the linearized problem (Nocedal and Wright, Numerical Optimization, 2nd ed., Algorithm 16.3).
+On a convex model the iterate never raises the model, so a step taken before the set settles is
 still a descent step.
 
 Rows fall into independent groups (one per member in the polish, one for the joint step):
@@ -26,8 +28,8 @@ import numpy as np
 #: The rounds of the method beyond twice the rows of the largest group (ours): each round adds
 #: or releases one row per group, and a set settles within about one round per row.
 _EXTRA_ROUNDS = 4
-#: Rows whose coefficients, normalized, keep less than this norm off the span of the rows
-#: already in the starting set are dependent on them and left out of it (ours).
+#: A row whose coefficients, normalized, keep less than this norm off the span of the held rows
+#: is dependent on them, and never joins the set (ours).
 _DEPENDENT = 1e-8
 
 
@@ -57,10 +59,17 @@ def slack(c: np.ndarray, C: np.ndarray, step: np.ndarray) -> np.ndarray:
 
 
 def _independent(C: np.ndarray, held: np.ndarray, row: int) -> bool:
-    """Whether row ``row`` of ``C`` keeps a part off the span of the rows ``held``, normalized."""
-    vector = C[row] / np.linalg.norm(C[row])
+    """Whether row ``row`` of ``C`` keeps a part off the span of the rows ``held``.
+
+    The rows are compared on the columns any of them reads (a member's rows read a few),
+    the row normalized.
+    """
+    columns = np.flatnonzero(np.any(C[np.append(held, row)] != 0.0, axis=0))
+    vector = C[row, columns] / np.linalg.norm(C[row, columns])
     if held.size:
-        basis, _ = np.linalg.qr(C[held].T)
+        # On the host in float64, whatever JAX's precision: a float32 basis would leave a
+        # dependent row a part of its rounding, above the threshold.
+        basis, _ = np.linalg.qr(C[np.ix_(held, columns)].T)
         vector = vector - basis @ (basis.T @ vector)
     return float(np.linalg.norm(vector)) > _DEPENDENT
 
