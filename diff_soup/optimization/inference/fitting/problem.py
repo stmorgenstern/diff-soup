@@ -789,6 +789,9 @@ class LoweredStudy(InferenceProblem):
     ) -> PrepareReport:
         """Compile the study's solves before the first evaluation.
 
+        A fit with `TrustRegion(nested_at=...)` also runs the `"frozen"` mode. Compile it ahead
+        with `modes=("value", "blocks", "frozen")`.
+
         Args:
             modes: The evaluation modes to compile, such as `"value"`, `"gradient"` or `"blocks"`, or `None` for the default set.
             **options: Not accepted.
