@@ -136,7 +136,7 @@ the [inference](../inference/identifiability.md) layer.
 
 Second-order compositions work on the native engines, and the solve's
 `adjoint=` selects the composition. The Hessian of the loss computes
-three ways, and the fit layer reaches the same compositions through
+four ways, and the fit layer reaches the same compositions through
 `ds.optimization.inference.InferenceProblem.loss_grad_hessian_fn(composition=)`, which
 `ds.optimization.NewtonTrustRegion` and the observed information use
 ([optimization solvers](../inference/solvers.md)). Forward over reverse,
@@ -172,7 +172,20 @@ def loss(theta):
 H = jax.jacrev(jax.jacfwd(loss))(theta)
 ```
 
-Reverse over reverse is unsupported and raises.
+Reverse over reverse runs with `reverse_over_reverse=True` on the
+adjoint:
+
+```python
+def loss(theta):
+    sol = ds.pdesolve(problem, solver, (0.0, 0.1), y0, theta=theta,
+                      adjoint=ds.CheckpointAdjoint(reverse_over_reverse=True))
+    return sol.ys[-1].sum()
+
+H = jax.jacrev(jax.grad(loss))(theta)
+```
+
+The setting is off by default, since forward over reverse costs about
+twice as much under it. Without it, reverse over reverse raises.
 
 The interaction of reduced-precision policies with first- and
 second-order differentiation is covered in [precision](precision.md).
