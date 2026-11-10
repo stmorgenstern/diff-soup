@@ -210,6 +210,8 @@ class _NestedFit(_JointFit):
         self.lane_member = np.asarray(route.nodes[:, self.cut - 1], dtype=np.int64)
         # The member of the cut level of every joint column; set by the fit's first ``blocks``.
         self.owners: np.ndarray | None = None
+        # The member of the cut level of every regularizer block; set at its first cost.
+        self.block_members: np.ndarray | None = None
         regularizer = route.view.regularization
         rows = regularizer.residual(jax.device_put(route.problem.x0, route.device))
         self.regularized = int(np.shape(rows)[0]) > 0
@@ -517,45 +519,39 @@ class _NestedFit(_JointFit):
         costs = np.bincount(self.lane_member, weights=lanes, minlength=len(self.members))
         if not self.regularized:
             return costs
-        regularizer = self.route.view.regularization
+        member, blocks = self.block_split(point)
         weights = self.route.block_weights
-        declared = tuple(regularizer.block_rows(jax.device_put(point, self.route.device)))
-        if weights is not None and len(declared) != len(weights):
-            raise ValueError(
-                f"the regularizer's block_rows(x) declares {len(declared)} blocks at this point "
-                f"and {len(weights)} where its weights were attributed; a regularizer declares "
-                "the same blocks at every point."
-            )
-        for index, (columns, residual, _) in enumerate(declared):
-            members = self.owners[np.asarray(columns, dtype=np.int64)]
-            below = members[members >= 0]
-            if below.size:
-                weight = None if weights is None else float(weights[index])
-                if weight == 0.0:
-                    continue
-                residual = np.ravel(np.asarray(residual, dtype=np.float64))
-                if weight is None:
-                    costs[int(below[0])] += 0.5 * float(residual @ residual)
-                else:
-                    costs[int(below[0])] += weight * (0.5 * float(residual @ residual))
-        return costs
+        if weights is not None:
+            weights = np.asarray(weights, dtype=np.float64)
+            blocks = np.where(weights == 0.0, 0.0, weights * blocks)
+        owned = member >= 0
+        return costs + np.bincount(member[owned], weights=blocks[owned], minlength=costs.size)
 
     def shared_cost(self, point: np.ndarray) -> float:
         """The regularizer rows of no member: the blocks on coordinates above the cut level only."""
         if not self.regularized:
             return 0.0
-        regularizer = self.route.view.regularization
+        member, blocks = self.block_split(point)
         weights = self.route.block_weights
-        declared = tuple(regularizer.block_rows(jax.device_put(point, self.route.device)))
-        total = 0.0
-        for index, (columns, residual, _) in enumerate(declared):
-            members = self.owners[np.asarray(columns, dtype=np.int64)]
-            if members[members >= 0].size:
-                continue
-            residual = np.ravel(np.asarray(residual, dtype=np.float64))
-            weight = 1.0 if weights is None else float(weights[index])
-            total += weight * (0.5 * float(residual @ residual))
-        return total
+        if weights is not None:
+            blocks = np.asarray(weights, dtype=np.float64) * blocks
+        return float(np.sum(blocks[member < 0]))
+
+    def block_split(self, point: np.ndarray) -> tuple:
+        """``(member, costs)``: every regularizer block's member of the cut level and its cost.
+
+        A block's member is that of the first of its columns below the cut
+        level, ``-1`` for a block on coordinates above it only; its cost the
+        unweighted ``0.5 |r_b|^2`` at ``point`` (``_LaneRoute.block_costs``).
+        """
+        columns, costs = self.route.block_costs(point)
+        if self.block_members is None or len(self.block_members) != len(columns):
+            members = [self.owners[np.asarray(item, dtype=np.int64)] for item in columns]
+            self.block_members = np.asarray(
+                [int(item[item >= 0][0]) if np.any(item >= 0) else -1 for item in members],
+                dtype=np.int64,
+            )
+        return self.block_members, np.asarray(costs, dtype=np.float64)
 
     def owner_split(self, accepted: bool, trial: np.ndarray, failures: tuple) -> dict:
         """The attempt's cost split by member of the cut level, read off without changing the fit.
