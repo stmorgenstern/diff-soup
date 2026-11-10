@@ -209,6 +209,102 @@ def test_inequality_rows_end_the_joint_fit_at_the_interior_point_solution():
     assert np.all(weights > 0.0)
 
 
+# The linear toy's matrix: its cost is 0.5 (z - m)^T H (z - m) in z = (rate, source_a, source_b).
+_TOY_H = np.array([[2.0, -0.9, -0.9], [-0.9, 1.0, 0.0], [-0.9, 0.0, 1.0]])
+
+
+def _linear_toy(name, m):
+    """Two owners whose lanes observe rate * a(t) + source * b(t) exactly, a and b orthonormal
+    under the likelihood up to the coupling -0.9, so the cost is the closed form above."""
+    import jax.numpy as jnp
+
+    from diff_soup.domains import cartesian_grid_1d
+    from tests.support.inference import TIMES, solver
+
+    scale = 0.02
+
+    def a(t):
+        return scale / jnp.sqrt(5.0) * jnp.ones_like(t)
+
+    def b(t):
+        return scale * (-0.9 / jnp.sqrt(5.0) + jnp.sqrt(0.19) * (4.0 * t - 2.0) / jnp.sqrt(10.0))
+
+    spec = ds.problem(name)
+    spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+    rate = spec.param("rate", value=0.9, learnable=True)
+    source = spec.param("source", value=0.0, learnable=True)
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    spec.equation(writes="u", reads=("u",))(lambda q: -0.5 * q.u)
+    spec.observe.scalar(name="exact", fn=lambda q: q.p.rate * a(q.t) + q.p.source * b(q.t))
+    model, times = spec.build(), jnp.asarray(TIMES)
+    experiments = tuple(
+        inf.Experiment(
+            model=model,
+            solver=solver(),
+            t_span=(0.0, 1.0),
+            initial_state=spec.assemble_state({}),
+            measurements=(
+                inf.Measurement(
+                    "exact",
+                    times=times,
+                    values=m[0] * a(times) + m[1 + i] * b(times),
+                    observe="exact",
+                    likelihood=inf.Gaussian(scale=scale),
+                ),
+            ),
+            id=owner,
+        )
+        for i, owner in enumerate(("cell-a", "cell-b"))
+    )
+    parameters = ds.ParameterSet(shared=(rate,), varying={"cell": (source,)})
+    clusters = {"cell": ("cell-a", "cell-b")}
+    return ds.lower(
+        inf.Study(experiments, parameters=parameters, clusters=clusters, independent=True)
+    )
+
+
+@pytest.mark.parametrize("nested_at", [None, "cell"])
+def test_inequality_rows_end_the_fit_at_the_closed_form_constrained_minimum(nested_at):
+    """One row per owner on its own value, source <= 1: from a start whose full step crosses both
+    rows, the joint and the nested fit end at the constrained minimum, where cell-a's row holds
+    with a positive multiplier and cell-b's row, held by the first step, is released."""
+    import jax.numpy as jnp
+
+    m = np.array([3.0, 2.0, 1.1])
+    limits = {"cell-a": jnp.asarray(1.0), "cell-b": jnp.asarray(1.0)}
+    rows = inf.InequalityRows(lambda own, w, d: own[:1] - d, level="cell", data=limits)
+    optimizer = inf.TrustRegion(
+        max_steps=40, radius_init=100.0, inequalities=(rows,), nested_at=nested_at
+    )
+    start = np.array([2.0, 0.5, 0.5])
+    fit = small_fit(_linear_toy("rows_minimum_toy", m).with_start(start), optimizer)
+    # The minimum with source_a = 1 held: the rate and source_b rows of H (z - m) vanish.
+    free = [0, 2]
+    reduced = _TOY_H[np.ix_(free, free)]
+    rest = m[free] - np.linalg.solve(reduced, _TOY_H[free, 1] * (1.0 - m[1]))
+    expected = np.array([rest[0], 1.0, rest[1]])
+    # measured 4.4e-16 worst difference, joint and nested (0.58 and 0.26 before the active-set
+    # method), workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_lowered_study.py -k closed_form
+    np.testing.assert_allclose(fit.params, expected, rtol=0.0, atol=1e-10)
+
+
+def test_a_start_off_the_equality_rows_moves_onto_them_and_ends_at_the_constrained_minimum():
+    """With the row rate = 1 and the start at the unconstrained minimum, off the row by 2, the fit
+    does not return the start: it ends at the minimum on the row."""
+    from diff_soup.optimization.inference.statistics import LinearConstraint
+
+    m = np.array([3.0, 1.1, 0.0])
+    row = LinearConstraint({"rate": 1.0}, rhs=1.0)
+    optimizer = inf.TrustRegion(max_steps=40, radius_init=100.0, constraints=(row,))
+    fit = small_fit(_linear_toy("equality_start_toy", m).with_start(m), optimizer)
+    # The minimum with rate = 1: each source moves by -H[source, rate] (1 - m_rate) / H[s, s].
+    expected = np.array([1.0, m[1] + 0.9 * (1.0 - m[0]), m[2] + 0.9 * (1.0 - m[0])])
+    # measured 4.4e-16 worst difference (2.0 when the start was returned), workstation CPU
+    # 2026-11-09, pytest tests/contracts/test_lowered_study.py -k equality_rows
+    np.testing.assert_allclose(fit.params, expected, rtol=0.0, atol=1e-10)
+
+
 class _StopAtSecondAttempt(inf.Callback):
     def __init__(self):
         self.attempts = 0
@@ -298,6 +394,15 @@ def test_the_one_step_bootstrap_sandwich_sums_the_members_influence(lowered, joi
     # measured 0.0 difference on a 4.5e-4 entry, CPU VM 2026-10-22,
     # pytest tests/contracts/test_lowered_study.py
     np.testing.assert_allclose(boot.one_step.sandwich, shared.T @ shared, rtol=1e-12)
+
+
+def test_bootstrap_refuses_a_solver_with_inequality_rows(lowered, joint_fit):
+    """The replicates step without inequality rows, so a solver= that carries them is refused."""
+    _, study, _ = lowered
+    rows = inf.InequalityRows(lambda own, w, d: own[:1] - 0.02, level="cell")
+    solver = inf.TrustRegion(inequalities=(rows,))
+    with pytest.raises(ds.ConfigurationError, match="inequalities"):
+        inf.bootstrap(study, joint_fit, replicates=2, key=jax.random.key(3), steps=1, solver=solver)
 
 
 def test_sample_draws_the_posterior_of_a_lowered_study(lowered, joint_fit):
