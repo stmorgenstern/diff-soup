@@ -237,7 +237,7 @@ The options, with their defaults:
   refit is the polish. `inner=TrustRegion(max_steps=k)` allows `k`
   polish iterations per step, two when omitted. The polish reuses the
   derivatives the step computed and adds only solves without
-  derivatives, so that the fit needs fewer steps.
+  derivatives.
 - `radius_init=`, `radius_max=`, `eta=`, `grad_tol=`, `step_tol=`,
   `cost_tol=`, and `x_scale=` are the trust-region options of
   `ds.optimization.NewtonTrustRegion` ([Newton trust
