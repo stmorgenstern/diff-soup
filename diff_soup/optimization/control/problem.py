@@ -543,7 +543,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         initial_state: The state the horizon starts from; an `args` leaf.
         theta: The model parameters; an `args` leaf.
         limits: What the functionals read as limits, such as a voltage ceiling; an `args` leaf.
-        start: The first guess of `u`; the middle of the bounds, or zeros, when `None`.
+        start: The first guess of `u`. When `None`, the middle of the bounds, or zeros, and a free duration whose bounds give no positive middle starts at its block's knot span, the length its signal was declared with.
         solver: The time-stepping solver and its tolerances.
         adjoint: The differentiation strategy of the horizon solve, `None` for forward mode.
         layout: The placement of a batch of horizons.
@@ -596,7 +596,7 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
         """Lower to closures over `u` and `args`; see [AbstractOptimizationProblem.numeric_problem][diff_soup.optimization.AbstractOptimizationProblem.numeric_problem]."""
         horizon = self._closures()
         n = self.controls.size
-        start = _middle(self.bounds, n) if self.start is None else jnp.asarray(self.start)
+        start = _start(self.controls, self.bounds) if self.start is None else jnp.asarray(self.start)
         x0 = jnp.reshape(jnp.asarray(start, dtype=jnp.float64), (n,))
         structure = {
             "value_gradient",
@@ -732,11 +732,37 @@ class ControlProblem(AbstractOptimizationProblem, eqx.Module):
 
 
 def _middle(bounds: tuple[ArrayLike | None, ArrayLike | None] | None, n: int) -> Float[Array, " n"]:
-    """The middle of finite bounds, the finite bound where one side is open, zero where both are."""
+    """The middle of finite bounds, the finite bound where one side is open, zero where both are.
+
+    A side given as `None` is open.
+    """
     if bounds is None:
         return jnp.zeros((n,))
-    lower, upper = (jnp.broadcast_to(jnp.asarray(side, dtype=jnp.float64), (n,)) for side in bounds)
+    lower, upper = bounds
+    lower = -jnp.inf if lower is None else lower
+    upper = jnp.inf if upper is None else upper
+    lower, upper = (
+        jnp.broadcast_to(jnp.asarray(side, dtype=jnp.float64), (n,)) for side in (lower, upper)
+    )
     finite_lower, finite_upper = jnp.isfinite(lower), jnp.isfinite(upper)
     middle = jnp.where(finite_lower & finite_upper, 0.5 * (lower + upper), 0.0)
     middle = jnp.where(finite_lower & ~finite_upper, lower, middle)
     return jnp.where(~finite_lower & finite_upper, upper, middle)
+
+
+def _start(
+    controls: AbstractControls, bounds: tuple[ArrayLike | None, ArrayLike | None] | None
+) -> Float[Array, " n"]:
+    """The first guess when the problem gives none.
+
+    The middle of the bounds (`_middle`), except that a free duration of `SignalControls` whose
+    middle is not positive starts at its block's knot span, the length its signal was declared
+    with.
+    """
+    start = _middle(bounds, controls.size)
+    if not (isinstance(controls, SignalControls) and controls.free_durations):
+        return start
+    first = controls.size - len(controls.blocks)
+    declared = jnp.asarray([block.span for block in controls.blocks], dtype=start.dtype)
+    middle = start[first:]
+    return start.at[first:].set(jnp.where(middle > 0, middle, declared))
