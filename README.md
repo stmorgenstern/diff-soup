@@ -38,7 +38,7 @@ pip install "diff-soup[cu12]"   # CUDA 12, driver 525 or newer
 pip install diff-soup           # CPU only
 ```
 
-Requires Linux x86_64 and Python 3.12 or 3.13. The GPU backend needs an NVIDIA GPU of compute capability 8.0 or newer.
+Requires Linux on x86_64 or ARM (aarch64) and Python 3.12 or 3.13. The GPU backend needs an NVIDIA GPU of compute capability 8.0 or newer.
 
 Turn on JAX's 64-bit mode with `jax.config.update("jax_enable_x64", True)` before building a problem.
 
@@ -103,7 +103,7 @@ diff-soup builds on the following projects.
 
 **Sparse direct solvers**  
 [SuiteSparse KLU](https://github.com/DrTimothyAldenDavis/SuiteSparse): the CPU sparse LU (Davis and Palamadai Natarajan 2010).  
-[SuperLU_MT](https://github.com/xiaoyeli/superlu_mt): the threaded CPU sparse LU for source builds (Li 2005).  
+[SuperLU_MT](https://github.com/xiaoyeli/superlu_mt): the threaded CPU sparse LU (Li 2005).  
 [NVIDIA cuDSS](https://docs.nvidia.com/cuda/cudss/): the GPU sparse direct solver.  
 
 **JAX ecosystem**  
