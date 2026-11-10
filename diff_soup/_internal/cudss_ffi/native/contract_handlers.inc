@@ -5973,18 +5973,21 @@ void ContextRelease(int64_t context_id) {
     for (int device : devices) {
         if (cudaSetDevice(device) == cudaSuccess) cudaDeviceSynchronize();
     }
-    // Each slot frees its cuDSS objects and buffers.
-    std::set<Analysis*> touched;
+    // Each slot frees its cuDSS objects and buffers. The slots of a released analysis are its
+    // last owners (ForgetAnalysis erased its sites), so `touched` holds each analysis until its
+    // device patterns are accounted for.
+    std::set<std::shared_ptr<Analysis>> touched;
     slot_registry::ReleaseContextSlots(reg, context, [&](Slot& slot) {
         slot.analysis->contexts.erase(context);
-        touched.insert(slot.analysis.get());
+        touched.insert(slot.analysis);
     });
     for (auto& entry : reg.storage_contexts) entry.second.erase(context);
-    for (Analysis* a : touched) {
+    for (const auto& a : touched) {
         if (a->contexts.empty() && a->FreeDevice()) {
             --reg.device_analyses;
         }
     }
+    touched.clear();  // destroys the released analyses that no slot or site holds
     if (current >= 0) cudaSetDevice(current);
     (void)cudaGetLastError();
 }
