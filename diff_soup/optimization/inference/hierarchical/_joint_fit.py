@@ -26,6 +26,7 @@ from diff_soup.optimization.inference.hierarchical import _active_set as active_
 from diff_soup.optimization.inference.hierarchical import _bounds as box
 from diff_soup.optimization.inference.hierarchical import _inequality as inequality
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._constraints import start_on_rows
 from diff_soup.optimization.inference.hierarchical._lane_route import _LABEL, _LaneRoute, _listed
 from diff_soup.optimization.inference.hierarchical._trust_step import (
     _bounded_gradient,
@@ -642,6 +643,9 @@ class _JointFit:
                 # Iterates stay strictly inside the box: a start on or beyond a side
                 # moves to the next float inside it.
                 x = box.make_strictly_feasible(x, bounds[0], bounds[1], rstep=0)
+            # The steps keep the equality rows from a point on them: a start off them moves
+            # onto them first.
+            x = start_on_rows(x, route.constraint_matrix, route.constraint_rhs, route.fixed, bounds)
             if not trial_is_valid(route.view, x):
                 raise ValueError("TrustRegion initial point failed the trial predicate.")
             if self.rows is not None:
