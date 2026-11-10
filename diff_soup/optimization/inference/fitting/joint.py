@@ -1293,19 +1293,26 @@ class JointInferenceProblem:
     def child_results(self, x_flat: np.ndarray) -> tuple:
         """Reconstruct each child's fitted problem + local/state values from ``x_flat``.
 
+        Every child's vector and fitted parameters come from one jitted program,
+        built once and kept on this problem; the answer at the last ``x_flat`` is
+        kept for the next call at the same point.
+
         Returns a tuple of
         [ChildFit][diff_soup.optimization.inference.fitting.result.ChildFit], one per
         child in input order.
         """
-        x = jnp.asarray(x_flat)
-        out = []
-        for i, child in enumerate(self.problems):
-            xc = _reconstruct_child_flat(x, i, self._layout)
-            fitted = None
-            if child.unflatten_fn is not None and child.prob_static is not None:
-                import equinox as eqx
+        import equinox as eqx
 
-                fitted = eqx.combine(child.unflatten_fn(xc), child.prob_static)
+        x = np.asarray(x_flat)
+        last = self.__dict__.get("_last_children")
+        key = (x.dtype.str, x.tobytes())
+        if last is not None and last[0] is self and last[1] == key:
+            return last[2]
+        flats, dynamic = self._children_program()(jnp.asarray(x_flat))
+        flats = jax.device_get(flats)
+        out = []
+        for child, xc, parts in zip(self.problems, flats, dynamic):
+            fitted = None if parts is None else eqx.combine(parts, child.prob_static)
             local = {}
             for gname in child.parameters.local:
                 cols = _child_group_cols(child, gname)
@@ -1313,7 +1320,29 @@ class JointInferenceProblem:
                     local[gname] = np.asarray(xc)[list(cols)]
             window_states = child.window_states_of(np.asarray(xc))
             out.append(ChildFit(opt_params=fitted, local=local, window_states=window_states))
-        return tuple(out)
+        out = tuple(out)
+        self.__dict__["_last_children"] = (self, key, out)
+        return out
+
+    def _children_program(self) -> Callable:
+        """The jitted program of every child's flat vector and fitted dynamic parameters."""
+        kept = self.__dict__.get("_kept_children_program")
+        if kept is None or kept[0] is not self:
+            layout, problems = self._layout, self.problems
+
+            def children(x: jax.Array) -> tuple:
+                flats = tuple(_reconstruct_child_flat(x, i, layout) for i in range(len(problems)))
+                parts = tuple(
+                    child.unflatten_fn(flat)
+                    if child.unflatten_fn is not None and child.prob_static is not None
+                    else None
+                    for child, flat in zip(problems, flats)
+                )
+                return flats, parts
+
+            kept = (self, jax.jit(children))
+            self.__dict__["_kept_children_program"] = kept
+        return kept[1]
 
     def shared_values(self, x_flat: np.ndarray) -> dict:
         """Extract the fitted value of each shared group from the joint vector."""

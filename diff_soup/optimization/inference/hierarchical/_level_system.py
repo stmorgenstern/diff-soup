@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import functools
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, NamedTuple
 
 import equinox as eqx
@@ -309,12 +310,130 @@ def _regularizer_blocks(
     order, or is ``None`` for weight one everywhere. A block contributes its
     weight times its curvature, slope and cost; a block of weight zero
     contributes nothing and touches no node. The regularizer is evaluated at
-    ``point`` placed on ``device``.
+    ``point`` placed on ``device``. The blocks' columns are checked once per
+    regularizer, layout and weights (``_regularizer_plan``); every point then
+    runs one jitted program of the blocks' sums.
     """
-    rows = regularizer.residual(jax.device_put(point, device))
-    total_rows = int(np.shape(rows)[0])
-    if total_rows == 0:
+    plan = _regularizer_plan(
+        regularizer,
+        point,
+        counts,
+        widths,
+        offsets,
+        ancestors,
+        dtype,
+        names,
+        members,
+        block_weights,
+        device,
+    )
+    if plan is None:
         return None, 0.0, frozenset()
+    placed = jax.device_put(np.asarray(point, dtype=dtype), device)
+    extra = plan.program(placed)
+    return extra, regularizer_cost(regularizer, placed, block_weights), plan.touched
+
+
+def regularizer_block_costs(regularizer: Any, x: jax.Array) -> tuple:
+    """``(columns, costs)``: every block's columns and unweighted ``0.5 |r_b|^2`` at ``x``.
+
+    In the order of ``regularizer.block_rows``, from one jitted program kept on the
+    regularizer; ``costs`` is a host array.
+    """
+    kept = regularizer.__dict__.get("_block_costs") if hasattr(regularizer, "__dict__") else None
+    if kept is None or kept[0] is not regularizer:
+        columns: list = []
+
+        def costs(point: jax.Array) -> jax.Array:
+            declared = tuple(regularizer.block_rows(point))
+            columns[:] = [tuple(int(column) for column in item[0]) for item in declared]
+            rows = [jnp.ravel(item[1]) for item in declared]
+            if not rows:
+                return jnp.zeros((0,), dtype=point.dtype)
+            return jnp.stack([0.5 * (row @ row) for row in rows])
+
+        kept = (regularizer, jax.jit(costs), columns)
+        if hasattr(regularizer, "__dict__"):
+            regularizer.__dict__["_block_costs"] = kept
+    values = np.asarray(kept[1](x))
+    return tuple(kept[2]), values
+
+
+def regularizer_cost(regularizer: Any, x: jax.Array, block_weights: Any = None) -> float:
+    """The regularizer's cost at ``x``: its ``penalty``, or with ``block_weights`` every block's weighted cost.
+
+    The weighted cost sums ``w_b * 0.5 |r_b|^2`` over the blocks in their order
+    (a block of weight zero adds nothing). The one definition the level system,
+    the trial cost and ``LoweredStudy``'s loss read.
+    """
+    if block_weights is None:
+        return float(regularizer.penalty(x))
+    _, costs = regularizer_block_costs(regularizer, x)
+    weights = np.asarray(block_weights, dtype=np.float64)
+    if weights.size != costs.size:
+        raise ValueError(
+            f"the regularizer's block_rows(x) declares {costs.size} blocks at this point "
+            f"and {weights.size} where its weights were attributed; a regularizer declares "
+            "the same blocks at every point."
+        )
+    terms = np.where(weights == 0.0, 0.0, weights * costs)
+    return float(np.cumsum(terms)[-1]) if terms.size else 0.0
+
+
+class _RegularizerPlan(NamedTuple):
+    """The checked placement of a regularizer's blocks on the levels, and its program.
+
+    ``touched`` holds the nodes the blocks of nonzero weight touch; ``program(x)``
+    gives ``extra``, the blocks' weighted curvature and slope summed per node.
+    """
+
+    touched: frozenset
+    program: Callable
+
+
+def _regularizer_plan(
+    regularizer: Any,
+    point: np.ndarray,
+    counts: tuple,
+    widths: tuple,
+    offsets: tuple,
+    ancestors: tuple,
+    dtype: DTypeLike,
+    names: Any,
+    members: Any,
+    block_weights: Any,
+    device: Any,
+) -> _RegularizerPlan | None:
+    """The plan of ``regularizer`` on these levels, built once and kept on the regularizer.
+
+    ``None`` for a regularizer without rows. The key is what the plan reads: the
+    levels' counts, widths, offsets and ancestor tables, the dtype and the weights.
+
+    Raises:
+        ValueError: If the blocks do not cover the rows exactly once, a Jacobian's
+            shape does not match its rows and columns, a block addresses a column
+            outside the levels or couples members that are not ancestors of one
+            another, or the weights do not name one weight per block.
+    """
+    dtype = np.dtype(dtype)
+    tables = tuple(
+        tuple(None if table is None else np.asarray(table).tobytes() for table in level or ())
+        for level in ancestors
+        if level is not None
+    )
+    key = (tuple(counts), tuple(widths), tuple(offsets), tables, dtype.str, block_weights)
+    kept = regularizer.__dict__.get("_level_plans") if hasattr(regularizer, "__dict__") else None
+    if kept is None or kept[0] is not regularizer:
+        kept = (regularizer, {})
+        if hasattr(regularizer, "__dict__"):
+            regularizer.__dict__["_level_plans"] = kept
+    if key in kept[1]:
+        return kept[1][key]
+    placed = jax.device_put(np.asarray(point, dtype=dtype), device)
+    total_rows = int(np.shape(regularizer.residual(placed))[0])
+    if total_rows == 0:
+        kept[1][key] = None
+        return None
     provider = getattr(regularizer, "block_rows", None)
     if not callable(provider):
         raise ValueError(
@@ -322,7 +441,7 @@ def _regularizer_blocks(
             "columns each row addresses; the levels of a hierarchy take a regularizer whose "
             "rows declare their columns, as a regularizer declared on the study does."
         )
-    declared = tuple(provider(jax.device_put(point, device)))
+    declared = tuple(provider(placed))
     covered = sum(int(np.size(item[1])) for item in declared)
     if covered != total_rows:
         raise ValueError(
@@ -335,24 +454,6 @@ def _regularizer_blocks(
             f"block_rows(x) declares {len(declared)} blocks; give one weight per block, in the "
             "order of block_rows(x)."
         )
-    depth = len(counts)
-    g = int(widths[0])
-    root = np.zeros((g, g), dtype=dtype)
-    root_gradient = np.zeros((g,), dtype=dtype)
-    diagonal = [None] + [
-        np.zeros((counts[level - 1], widths[level], widths[level]), dtype=dtype)
-        for level in range(1, depth + 1)
-    ]
-    cross = [None] + [
-        tuple(
-            np.zeros((counts[level - 1], widths[level], widths[above]), dtype=dtype)
-            for above in range(level)
-        )
-        for level in range(1, depth + 1)
-    ]
-    gradient = [None] + [
-        np.zeros((counts[level - 1], widths[level]), dtype=dtype) for level in range(1, depth + 1)
-    ]
 
     def level_name(level: int) -> Any:
         return names[level - 1] if names is not None else level
@@ -360,17 +461,14 @@ def _regularizer_blocks(
     def member(level: int, node: int) -> Any:
         return members[level - 1][node] if members is not None else node
 
-    cost = 0.0
-    touched: set = set()
+    places, touched = [], set()
     for index, (columns, residual, jacobian) in enumerate(declared):
         columns = tuple(int(column) for column in columns)
-        residual = np.ravel(np.asarray(residual, dtype=dtype))
-        jacobian = np.asarray(jacobian, dtype=dtype)
-        if jacobian.shape != (residual.size, len(columns)):
+        size = int(np.size(residual))
+        if tuple(np.shape(jacobian)) != (size, len(columns)):
             raise ValueError(
-                f"regularizer block {index} has a Jacobian of shape {jacobian.shape}; its "
-                f"{residual.size} rows and {len(columns)} columns need "
-                f"{(residual.size, len(columns))}."
+                f"regularizer block {index} has a Jacobian of shape {tuple(np.shape(jacobian))}; "
+                f"its {size} rows and {len(columns)} columns need {(size, len(columns))}."
             )
         where = []
         for column in columns:
@@ -399,32 +497,78 @@ def _regularizer_blocks(
                         "may couple a member with its ancestors only."
                     )
         weight = None if block_weights is None else float(block_weights[index])
+        places.append((tuple(where), weight))
+        if weight != 0.0:
+            touched.update(nodes)
+    plan = _RegularizerPlan(
+        frozenset(touched),
+        jax.jit(
+            functools.partial(_regularizer_sums, provider, tuple(places), counts, widths, dtype)
+        ),
+    )
+    kept[1][key] = plan
+    return plan
+
+
+def _regularizer_sums(provider, places, counts, widths, dtype, x) -> tuple:
+    """``extra``: every block's weighted curvature and slope summed per node (traced).
+
+    ``places`` holds per block its ``(level, node, position)`` per column and its
+    weight; each destination array takes one scatter-add of all its terms.
+    """
+    depth = len(counts)
+    g = int(widths[0])
+    shapes = {("root",): (g, g), ("root_gradient",): (g,)}
+    for level in range(1, depth + 1):
+        shapes[("diagonal", level)] = (counts[level - 1], widths[level], widths[level])
+        shapes[("gradient", level)] = (counts[level - 1], widths[level])
+        for above in range(level):
+            shapes[("cross", level, above)] = (counts[level - 1], widths[level], widths[above])
+    terms: dict = {name: ([], []) for name in shapes}
+    for (where, weight), (_, residual, jacobian) in zip(places, provider(x)):
         if weight == 0.0:
             continue
-        touched.update(nodes)
+        residual = jnp.ravel(jnp.asarray(residual, dtype=dtype))
+        jacobian = jnp.asarray(jacobian, dtype=dtype)
         curvature = jacobian.T @ jacobian
         slope = jacobian.T @ residual
-        if weight is None:
-            cost += 0.5 * float(residual @ residual)
-        else:
+        if weight is not None:
             curvature = weight * curvature
             slope = weight * slope
-            cost += weight * (0.5 * float(residual @ residual))
         for i, (level_i, node_i, position_i) in enumerate(where):
             if level_i == 0:
-                root_gradient[position_i] += slope[i]
+                name, index = ("root_gradient",), (position_i,)
             else:
-                gradient[level_i][node_i, position_i] += slope[i]
+                name, index = ("gradient", level_i), (node_i, position_i)
+            terms[name][0].append(index)
+            terms[name][1].append(slope[i])
             for j, (level_j, _, position_j) in enumerate(where):
                 if level_i == level_j:
                     if level_i == 0:
-                        root[position_i, position_j] += curvature[i, j]
+                        name, index = ("root",), (position_i, position_j)
                     else:
-                        diagonal[level_i][node_i, position_i, position_j] += curvature[i, j]
+                        name, index = ("diagonal", level_i), (node_i, position_i, position_j)
                 elif level_i > level_j:
-                    cross[level_i][level_j][node_i, position_i, position_j] += curvature[i, j]
-    extra = (root, root_gradient, tuple(diagonal), tuple(cross), tuple(gradient))
-    return extra, cost, frozenset(touched)
+                    name, index = ("cross", level_i, level_j), (node_i, position_i, position_j)
+                else:
+                    continue
+                terms[name][0].append(index)
+                terms[name][1].append(curvature[i, j])
+    arrays = {}
+    for name, shape in shapes.items():
+        array = jnp.zeros(shape, dtype=dtype)
+        indices, values = terms[name]
+        if indices:
+            columns = tuple(np.asarray(axis, dtype=np.int64) for axis in zip(*indices))
+            array = array.at[columns].add(jnp.stack(values))
+        arrays[name] = array
+    diagonal = (None,) + tuple(arrays[("diagonal", level)] for level in range(1, depth + 1))
+    cross = (None,) + tuple(
+        tuple(arrays[("cross", level, above)] for above in range(level))
+        for level in range(1, depth + 1)
+    )
+    gradient = (None,) + tuple(arrays[("gradient", level)] for level in range(1, depth + 1))
+    return arrays[("root",)], arrays[("root_gradient",)], diagonal, cross, gradient
 
 
 def regularizer_blocks_at(

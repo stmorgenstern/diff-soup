@@ -330,7 +330,18 @@ class _JointRegularizer:
     layout: JointLayout
 
     def residual(self, x_joint: jax.Array) -> jax.Array:
-        """The stacked child regularizer residual rows (length 0 when all are NoReg)."""
+        """The stacked child regularizer residual rows (length 0 when all are NoReg).
+
+        One jitted program over every child, built once and kept on this object.
+        """
+        kept = self.__dict__.get("_residual_program")
+        if kept is None or kept[0] is not self:
+            kept = (self, jax.jit(self._residual))
+            self.__dict__["_residual_program"] = kept
+        return kept[1](jnp.asarray(x_joint))
+
+    def _residual(self, x_joint: jax.Array) -> jax.Array:
+        """The stacked child regularizer residual rows (traced)."""
         rows = []
         for i, child in enumerate(self.children):
             xc = _reconstruct_child_flat(jnp.asarray(x_joint), i, self.layout)
