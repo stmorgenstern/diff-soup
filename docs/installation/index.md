@@ -72,8 +72,13 @@ last command at a CUDA 12 toolkit's compiler with
 
 `pip install -e` in the last command installs in development mode, and the
 `dev` extra adds the test and lint tools. The SuperLU_MT solver is built when
-a SuperLU_MT installation is found; `diff_soup/_internal/superlu_ffi/build_superlu_mt.sh`
-builds one.
+it finds an installation made by `diff_soup/_internal/superlu_ffi/build_superlu_mt.sh`.
+Other SuperLU_MT builds, such as conda-forge's, carry their own COLAMD and are
+refused.
+
+On ARM (aarch64), pass `-C cmake.define.KLU_VENDOR_DIR=<tree>` naming a
+SuiteSparse 7.10 tree built for the host.
+`diff_soup/_internal/klu_ffi/build_suitesparse.sh` builds one.
 
 ## Troubleshooting
 
