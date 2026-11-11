@@ -176,6 +176,7 @@ nav:
           - Experiments and studies: reference/inference/experiments.md
           - Fitting: reference/inference/fitting.md
           - Optimization solvers: reference/inference/solvers.md
+          - Control: reference/inference/control.md
           - Likelihoods and priors: reference/inference/likelihoods-and-priors.md
           - Statistics: reference/inference/statistics.md
           - Posterior sampling: reference/inference/sampling.md
