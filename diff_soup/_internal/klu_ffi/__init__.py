@@ -3,11 +3,12 @@
 The native module ``_native_klu`` is built per checkout from
 ``native/klu_ffi.cpp`` against the SuiteSparse KLU shared libraries (see
 ``CMakeLists.txt``). [load][diff_soup._internal.klu_ffi.load] imports it once
-and registers its three XLA FFI targets on the CPU platform:
+and registers its XLA FFI targets on the CPU platform, one of each for
+``float64`` (``_f64``) and for ``complex128`` (``_c128``) values:
 
-- ``diffsoup_klu_factor_f64``: factor values into a slot;
-- ``diffsoup_klu_refactor_f64``: refactor into a slot where a predicate holds;
-- ``diffsoup_klu_apply_f64``: solve with a slot's factors, in either orientation.
+- ``diffsoup_klu_factor_*``: factor values into a slot;
+- ``diffsoup_klu_refactor_*``: refactor into a slot where a predicate holds;
+- ``diffsoup_klu_apply_*``: solve with a slot's factors, in either orientation.
 
 [available][diff_soup._internal.klu_ffi.available] reports whether the module
 imports, without raising. The module's other functions (the analysis, site and
@@ -36,6 +37,9 @@ _NATIVE: Optional[ModuleType] = None
 def load() -> ModuleType:
     """Import the native module and register its FFI targets (once per process).
 
+    The factor and refactor targets keep a state per call of a compiled program, whose type is
+    registered with XLA first.
+
     Returns:
         The ``_native_klu`` module.
 
@@ -54,8 +58,18 @@ def load() -> ModuleType:
             raise ImportError(f"{_BUILD_HINT}Import failed with: {exc}") from exc
         import jax
 
-        for name, capsule in native.registrations().items():
-            jax.ffi.register_ffi_target(name, capsule, platform="cpu")
+        # XLA refuses a handler whose state type it does not know, and it applies the pending
+        # registrations of a platform handlers first when it makes the platform's client, so
+        # the CPU client is made before the state type and the handlers are registered.
+        try:
+            jax.devices("cpu")
+        except RuntimeError:  # the CPU platform is disabled; nothing can run the handlers
+            pass
+        state_type = getattr(native, "call_state_type", None)
+        if state_type is not None:  # a module built before the calls had their state has none
+            jax.ffi.register_ffi_type("diffsoup_klu_call_state", state_type(), platform="cpu")
+        for name, handler in native.registrations().items():
+            jax.ffi.register_ffi_target(name, handler, platform="cpu")
         _NATIVE = native
         return native
 

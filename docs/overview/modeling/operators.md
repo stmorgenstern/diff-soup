@@ -372,9 +372,11 @@ class FourierSpectral(AbstractOperator):
 ```
 
 Sparsity needs no declaration when extending the built-in bank. On
-grids the lowering probes the assembled residual at build time and
-widens the stencil pattern to the coupling the operators exercise.
-On meshes the pattern is the element connectivity.
+grids `spec.build()` reads the stencil pattern from the equations
+themselves, so it holds the coupling the operators exercise. With
+`q.dt` in an equation, or `exact_sparsity=False`, it probes the
+assembled residual at build time instead. On meshes the pattern is the
+element connectivity.
 
 ## References
 

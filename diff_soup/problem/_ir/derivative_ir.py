@@ -567,14 +567,19 @@ def capturing_forms() -> bool:
     return bool(getattr(_CAPTURE, "active", False))
 
 
+def _tracing_capture() -> bool:
+    """Whether the active capture pass traces the equations instead of evaluating them."""
+    return bool(getattr(_CAPTURE, "tracing", False))
+
+
 @contextlib.contextmanager
-def _capture_context():
-    previous = capturing_forms()
-    _CAPTURE.active = True
+def _capture_context(*, tracing: bool = False):
+    previous = capturing_forms(), _tracing_capture()
+    _CAPTURE.active, _CAPTURE.tracing = True, tracing
     try:
         yield
     finally:
-        _CAPTURE.active = previous
+        _CAPTURE.active, _CAPTURE.tracing = previous
 
 
 def _decided(cell) -> bool:
@@ -592,17 +597,32 @@ def stamp_capture_error(cells, exc: BaseException) -> None:
 def capture_forms(cells, evaluate) -> None:
     """Run the build-time capture pass for the equations owning ``cells``.
 
-    ``evaluate()`` evaluates those equations once, eagerly, at a generic
-    state. Inside it each residual-form adapter records its structure and each
-    plain equation marks itself plain. A failure is stored in every cell still
-    undecided, so ``LoweredProblem.derivative_forms()`` raises with the reason
-    instead of lowering the equation with the plain mass diagonal.
+    ``evaluate()`` evaluates those equations once at a generic state. Inside it
+    each residual-form adapter records its structure and each plain equation
+    marks itself plain. A plain equation is decided by tracing ``evaluate``,
+    which compiles nothing; only the equations that return a derivative
+    expression are then evaluated eagerly, since their forms are recorded from
+    values. A failure is stored in every cell still undecided, so
+    ``LoweredProblem.derivative_forms()`` raises with the reason instead of
+    lowering the equation with the plain mass diagonal.
 
     Args:
         cells: The form cells the evaluation should decide.
         evaluate: A callable of no arguments that evaluates the equations.
     """
     pending = [cell for cell in cells if cell is not None and not _decided(cell)]
+    if not pending:
+        return
+
+    def trace() -> None:
+        evaluate()
+
+    try:
+        with _capture_context(tracing=True):
+            jax.eval_shape(trace)
+    except Exception:  # noqa: BLE001 - the eager pass below decides or stamps.
+        pass
+    pending = [cell for cell in pending if not _decided(cell)]
     if not pending:
         return
     try:
@@ -613,7 +633,7 @@ def capture_forms(cells, evaluate) -> None:
 
 
 def record_form(cell, field_name: str, ir, *, state_deps, check_fields=None) -> None:
-    """Record one equation's derivative structure, during a capture pass only.
+    """Record one equation's derivative structure, during an evaluating capture pass only.
 
     Args:
         cell: The equation's form cell.
@@ -623,7 +643,7 @@ def record_form(cell, field_name: str, ir, *, state_deps, check_fields=None) -> 
             coefficients read (``None`` when undecidable); linear forms only.
         check_fields: An optional callable that rejects the referenced fields.
     """
-    if not capturing_forms() or cell.get("captured"):
+    if not capturing_forms() or _tracing_capture() or cell.get("captured"):
         return
     if isinstance(ir, ImplicitResidualIR):
         if check_fields is not None:

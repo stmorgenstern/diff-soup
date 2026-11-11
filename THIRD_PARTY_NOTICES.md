@@ -3,9 +3,10 @@
 diff_soup is licensed under BSD-3-Clause (see `LICENSE`). Portions of
 its algorithms and code are derived from or modeled on the following
 permissively-licensed projects, reproduced here with their required
-notices. Vendored binary dependencies (SuiteSparse/KLU and the GCC runtime
-libraries they need) carry their own license files under
-`diff_soup/_internal/klu_ffi/licenses/`.
+notices. Vendored binary dependencies (SuiteSparse, SuperLU_MT and the GCC
+runtime libraries they need) carry their own license files under
+`diff_soup/_internal/klu_ffi/licenses/` and
+`diff_soup/_internal/superlu_ffi/THIRD_PARTY_NOTICES.md`.
 
 ## OrdinaryDiffEq.jl (MIT "Expat" License)
 
@@ -54,8 +55,8 @@ row 0), its minimum-step law (a small multiple of the floating-point
 spacing at the current time), and its factor-of-two step cut after a
 nonlinear-convergence failure.
 
-The bounded trust region of `ds.inference.TrustRegion`
-(`diff_soup/inference/hierarchical/_bounds.py`) reproduces the box-bound
+The bounded trust region of `ds.optimization.inference.TrustRegion`
+(`diff_soup/optimization/inference/hierarchical/_bounds.py`) reproduces the box-bound
 handling of SciPy's `least_squares` with `method="trf"`
 (`scipy/optimize/_lsq/common.py` and `trf.py`): the Coleman-Li scaling,
 `make_strictly_feasible`, `intersect_trust_region`, and `select_step`, under
@@ -158,10 +159,11 @@ license texts, including the full GNU Lesser General Public License version
 ## SuperLU_MT (BSD-3-Clause License)
 
 The SuperLU_MT extension links SuperLU_MT 4.0.2 and the reference BLAS
-routines distributed with it, statically. It is built only when a
-SuperLU_MT installation is found. SuperLU_MT is Copyright (c) 2003, The
-Regents of the University of California, through Lawrence Berkeley
-National Laboratory. Its license text and the exact source revision are in
+routines distributed with it, statically. The wheels include it, and a
+source build adds it when a SuperLU_MT installation is found. SuperLU_MT
+is Copyright (c) 2003, The Regents of the University of California,
+through Lawrence Berkeley National Laboratory. Its license text and the
+exact source revision are in
 `diff_soup/_internal/superlu_ffi/THIRD_PARTY_NOTICES.md`.
 
 ## GCC runtime libraries (GPL-3.0-or-later WITH GCC-exception-3.1, LGPL-2.1-or-later)

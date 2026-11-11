@@ -38,9 +38,9 @@ _LOWER_INVALIDATE = _model_axis.lowering("invalidate")
 class CuDSS(LinearSolver):
     """NVIDIA cuDSS, a sparse direct solver on CUDA GPUs.
 
-    It factors float64 and float32 matrices. `linear="cudss"` selects it with default settings,
-    and `"auto"` picks it on a GPU. `ds.linear.CuDSS` is `None` when the cuDSS extension is
-    not installed.
+    It factors float64 and float32 matrices, real or complex. `linear="cudss"` selects it with
+    default settings, and `"auto"` picks it on a GPU. `ds.linear.CuDSS` is `None` when the
+    cuDSS extension is not installed.
 
     Args:
         reorder: The fill-reducing ordering, `"amd"` or `"metis"`, where `None` takes the
@@ -57,10 +57,11 @@ class CuDSS(LinearSolver):
             symmetric factorization instead of a general LU.
         zero_fill: `True` zeros the solution buffer before every solve, and `None` does so for
             float32 factors only.
-        downcast_factors: `True` or `"block_diagonal"` stores the factor in float32 except its
-            diagonal blocks, and `"strict_diagonal"` except its diagonal.
+        downcast_factors: `True` or `"block_diagonal"` stores a float64 factor in float32 except
+            its diagonal blocks, and `"strict_diagonal"` except its diagonal. Complex values
+            refuse it.
         emulation_mantissa_bits: From 1 to 64, the mantissa bits cuDSS uses to emulate a float64
-            factorization on GPUs that support it.
+            factorization on GPUs that support it. Complex values refuse it.
         batch_layout: `"stacked"` (default) factors a `jax.vmap` batch as one block-diagonal
             matrix, and `"uniform"` refactors only the matrices that ask.
 
@@ -80,6 +81,7 @@ class CuDSS(LinearSolver):
     batch_layout: str = eqx.field(static=True, default="stacked")
 
     backend_name = "cudss"
+    platforms = ("cuda",)
     # The settings: every analyze option of the one-device route. The
     # options of the per-call solver of a model axis across processes stay
     # analyze options only.
@@ -293,7 +295,7 @@ class CuDSS(LinearSolver):
             The MLIR values of ``(x, status, order)``.
 
         Raises:
-            FactorContractError: If ``b`` is complex.
+            FactorContractError: If the values or ``b`` are of a dtype cuDSS does not take.
         """
         if _model_axis.model_axis_record(params["analysis"]) is not None:
             return _LOWER_APPLY(ctx, *operands, **params)

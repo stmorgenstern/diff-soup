@@ -5,19 +5,19 @@ its measurements, and a `Study` groups experiments with the parameters
 they share or vary. See [fitting
 parameters](../../overview/inference/fitting.md).
 
-::: diff_soup.inference.Measurement
+::: diff_soup.optimization.inference.Measurement
     options:
       members: false
 
-::: diff_soup.inference.Experiment
+::: diff_soup.optimization.inference.Experiment
     options:
       members: false
 
-::: diff_soup.inference.Study
+::: diff_soup.optimization.inference.Study
     options:
       members: false
 
-::: diff_soup.inference.Hierarchy
+::: diff_soup.optimization.inference.Hierarchy
     options:
       members: false
 
@@ -28,7 +28,7 @@ parameters](../../overview/inference/fitting.md).
 `ds.lower(study)` returns a `LoweredStudy` for a hierarchical fit ([hierarchical
 fits](../../overview/inference/hierarchical.md)).
 
-::: diff_soup.inference.LoweredStudy
+::: diff_soup.optimization.inference.LoweredStudy
     options:
       members:
         - prepare

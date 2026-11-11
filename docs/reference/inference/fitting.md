@@ -1,18 +1,18 @@
 # Fitting
 
-`ds.inference.optsolve` fits an `InferenceProblem`, an experiment or a
+`ds.optimization.optsolve` fits an `InferenceProblem`, an experiment or a
 study paired with an objective, and returns an `OptResult`. See [fitting
 parameters](../../overview/inference/fitting.md).
 
 !!! tip "Recommended defaults"
     Declare a `Measurement` and an `Experiment`, pose an `InferenceProblem`,
-    and fit it with `ds.inference.optsolve`. Start with `ds.inference.MLE()`
+    and fit it with `ds.optimization.optsolve`. Start with `ds.optimization.inference.MLE()`
     and a `Gaussian` likelihood, and move to `MAP` when every fitted handle
     has a prior. Bound every run with the optimizer's `max_steps`.
 
-::: diff_soup.inference.optsolve
+::: diff_soup.optimization.optsolve
 
-::: diff_soup.inference.InferenceProblem
+::: diff_soup.optimization.inference.InferenceProblem
     options:
       members:
         - placement
@@ -20,11 +20,11 @@ parameters](../../overview/inference/fitting.md).
         - values
         - param_group_names
 
-::: diff_soup.inference.MLE
+::: diff_soup.optimization.inference.MLE
     options:
       members: false
 
-::: diff_soup.inference.MAP
+::: diff_soup.optimization.inference.MAP
     options:
       members: false
 
@@ -35,19 +35,19 @@ parameters](../../overview/inference/fitting.md).
 A trajectory sets how each experiment's solve is split in time ([multiple
 shooting](../../overview/inference/multiple-shooting.md)).
 
-::: diff_soup.inference.LeastSquares
+::: diff_soup.optimization.inference.LeastSquares
     options:
       members: false
 
-::: diff_soup.inference.SingleShoot
+::: diff_soup.optimization.inference.SingleShoot
     options:
       members: false
 
-::: diff_soup.inference.Multishoot
+::: diff_soup.optimization.inference.Multishoot
     options:
       members: false
 
-::: diff_soup.inference.Windows
+::: diff_soup.optimization.inference.Windows
     options:
       members:
         - from_data
@@ -55,21 +55,21 @@ shooting](../../overview/inference/multiple-shooting.md)).
         - uniform
         - at
 
-::: diff_soup.inference.Continuity
+::: diff_soup.optimization.inference.Continuity
     options:
       members: false
 
-::: diff_soup.inference.StateBasis
+::: diff_soup.optimization.inference.StateBasis
     options:
       members:
         - full
         - from_modes
 
-::: diff_soup.inference.FixedInitialState
+::: diff_soup.optimization.inference.FixedInitialState
     options:
       members: false
 
-::: diff_soup.inference.LearnedInitialState
+::: diff_soup.optimization.inference.LearnedInitialState
     options:
       members: false
 
@@ -77,15 +77,15 @@ shooting](../../overview/inference/multiple-shooting.md)).
 
 ### Bounds and regularization
 
-::: diff_soup.inference.Bounds
+::: diff_soup.optimization.inference.Bounds
     options:
       members: false
 
-::: diff_soup.inference.Tikhonov
+::: diff_soup.optimization.inference.Tikhonov
     options:
       members: false
 
-::: diff_soup.inference.NoReg
+::: diff_soup.optimization.inference.NoReg
     options:
       members: false
 
@@ -93,7 +93,7 @@ shooting](../../overview/inference/multiple-shooting.md)).
 
 ### Results
 
-::: diff_soup.inference.OptResult
+::: diff_soup.optimization.OptResult
     options:
       members:
         - params
@@ -108,11 +108,11 @@ shooting](../../overview/inference/multiple-shooting.md)).
         - save
         - load
 
-::: diff_soup.inference.TerminationStatus
+::: diff_soup.optimization.TerminationStatus
     options:
       members: false
 
-::: diff_soup.inference.OptDiagnostics
+::: diff_soup.optimization.inference.OptDiagnostics
     options:
       members: false
 
@@ -120,7 +120,7 @@ shooting](../../overview/inference/multiple-shooting.md)).
 
 ### Callbacks
 
-::: diff_soup.inference.Callback
+::: diff_soup.optimization.inference.Callback
     options:
       members:
         - bind
@@ -128,14 +128,14 @@ shooting](../../overview/inference/multiple-shooting.md)).
         - on_step
         - on_end
 
-::: diff_soup.inference.LogCallback
+::: diff_soup.optimization.inference.LogCallback
     options:
       members: false
 
-::: diff_soup.inference.CheckpointCallback
+::: diff_soup.optimization.inference.CheckpointCallback
     options:
       members: false
 
-::: diff_soup.inference.StopFit
+::: diff_soup.optimization.inference.StopFit
     options:
       members: false

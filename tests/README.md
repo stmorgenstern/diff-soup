@@ -27,13 +27,13 @@ There is no `linear/` tier. Timeouts apply when `pytest-timeout` is installed.
 
 | scope | files | test functions | collected items | source lines |
 |---|---|---|---|---|
-| whole suite | 43 | 390 | 565 | 14,100 |
-| `public_api` | 19 | 175 | 277 | 5,592 |
-| `contracts` | 17 | 160 | 220 | 5,400 |
-| `performance_contracts` | 2 | 11 | 28 | 480 |
-| `multi_device` | 2 | 29 | 34 | 960 |
-| `integration` | 2 | 11 | 32 | 680 |
-| `validation` | 1 | 4 | 20 | 420 |
+| whole suite | 51 | 493 | 829 | 17,757 |
+| `public_api` | 21 | 204 | 325 | 6,632 |
+| `contracts` | 22 | 229 | 430 | 7,583 |
+| `performance_contracts` | 2 | 15 | 19 | 471 |
+| `multi_device` | 3 | 31 | 32 | 1,040 |
+| `integration` | 2 | 10 | 19 | 524 |
+| `validation` | 1 | 4 | 4 | 132 |
 
 Source lines count every Python file under `tests/`, the infrastructure and
 `support/` included; the tier lines count the files in the tier's directory.
@@ -47,7 +47,7 @@ two minutes; per-file durations are recorded in the session report.
 1. **One file per public verb group.** The manifest's `feature_contracts` names the
    group; a new group is a manifest decision made in its own commit.
 2. **Public behaviour only.** Tests import `diff_soup` and the namespaces the
-   manifest lists under `public_namespaces` (`diff_soup.inference`,
+   manifest lists under `public_namespaces` (`diff_soup.optimization.inference`,
    `diff_soup.linear`, `diff_soup.domains`, ...). Any other `diff_soup` module is
    private. A `contracts/` file whose contract is about one private module may
    import that one module, named in the manifest under `private_imports`; no other

@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
+from diff_soup.optimization import inference as inf
 from tests.support.inference import (
     TIMES,
     TRUE_RATE,
@@ -142,8 +142,12 @@ def test_windows_from_states_seed_every_window_without_scoring_the_seeds(decay):
         inf.Windows.from_states(TIMES, states[:-1])
 
 
-def test_a_window_initialization_is_stored_once_and_read_back(decay):
+def test_a_window_initialization_is_stored_once_and_read_back(decay, tmp_path, request):
     """The window sweep is stored under its content key in DIFFSOUP_CACHE_DIR and reused."""
+    # Its own empty store: tests of other files store the same sweep in the suite's.
+    suite_store = os.environ["DIFFSOUP_CACHE_DIR"]
+    request.addfinalizer(lambda: os.environ.update(DIFFSOUP_CACHE_DIR=suite_store))
+    os.environ["DIFFSOUP_CACHE_DIR"] = str(tmp_path)
     directory = Path(os.environ["DIFFSOUP_CACHE_DIR"]) / "window-initialization"
     before = set(directory.glob("*.npz"))
     trajectory = inf.Multishoot(inf.Windows.uniform(2))

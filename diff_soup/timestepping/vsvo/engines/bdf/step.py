@@ -50,10 +50,6 @@ from diff_soup._precision import Precision
 from diff_soup.nonlinear.border_cache import initial_border_cache
 from diff_soup.nonlinear.generations import certify_exact_root, initial_generations
 from diff_soup.nonlinear.result import LinearizationDirective
-from diff_soup.timestepping.consistent_ic.pin_differential import (
-    _full_dense_topology,
-    _structure,
-)
 from diff_soup.timestepping.vsvo.coefficients import cj_from_hinvgak
 from diff_soup.timestepping.vsvo.common.adaptive import (
     CAUSE_ESCALATION,
@@ -64,19 +60,28 @@ from diff_soup.timestepping.vsvo.common.adaptive import (
     initial_rung_state,
 )
 from diff_soup.timestepping.vsvo.common.backends import (
-    analyze_sensitivity,
     initialization_policy,
     resolve_backend,
 )
 from diff_soup.timestepping.vsvo.common.contract import (
+    ENDPOINT_CLAMP_FUZZ,
+    ENGINE_CACHE_SIZE,
+    ENGINE_CAPABILITIES,
     EngineCapabilities,
+    clamp_initial_step,
     closure_moved,
-    consume_consistent_init,
+    consistent_start,
     ic_gate_tolerance,
+    initialization_policies,
     pack_state,
+    problem_layout,
+    project_start,
+    refuse_unprojected_start,
+    sensitivity_analyses,
+    where_state,
 )
 from diff_soup.timestepping.vsvo.common.decisions import replay_decisions
-from diff_soup.timestepping.vsvo.common.driver import StepReport
+from diff_soup.timestepping.vsvo.common.engine import StepReport
 from diff_soup.timestepping.vsvo.common.flash_controller import (
     FLASH_ERR_SEED,
     flash_step_control,
@@ -87,8 +92,8 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     state_block_size,
 )
 from diff_soup.timestepping.vsvo.common.trace import BDFTraceRecord, StepTraceHeader
-from diff_soup.timestepping.vsvo.common.weights import error_weight
 from diff_soup.utils.lanes import lane_cond
+from diff_soup.utils.weights import error_weight
 
 from .coeffs import bdf_set_coeffs
 from .complete_step import bdf_complete_step
@@ -121,33 +126,9 @@ _CODE_SUCCESS = 1
 # rounding errors of it.
 _TN_SNAP_FUZZ = 100.0
 
-# The endpoint clamp shortens a step to just shy of the endpoint by this many
-# rounding errors.
-_ENDPOINT_CLAMP_FUZZ = 4.0
-
 # The step-growth cap reset after every successful step -- the same value
 # applies on early and general steps.
 _ETA_MAX_POST_SUCCESS = 10.0
-
-
-def _capabilities() -> EngineCapabilities:
-    """The BDF-tracking engine's capability flags (every flag stated)."""
-    return EngineCapabilities(
-        # The factored iteration matrix persists across attempts and is
-        # refactored only where a setup replaces it.
-        supports_factor_reuse=True,
-        supports_events=True,
-        # This engine integrates the mass-matrix ODE/DAE form (a correction-form
-        # residual built from the mass and right-hand side), not a user-supplied
-        # truly-implicit residual F(t, y, ydot).
-        supports_fully_implicit=False,
-        # The augmented Schur machinery handles bordered-global rows.
-        supports_global_constraints=True,
-        # The mass is evaluated as identity, constant, or purely time-dependent;
-        # a state-dependent mass is rejected before the solve.
-        supports_state_dependent_mass=False,
-        supports_dense_output=True,
-    )
 
 
 def _reject_unsupported_problem(problem: Any) -> None:
@@ -188,11 +169,6 @@ def _pad_to(vec: jax.Array, length: int) -> jax.Array:
     if have < length:
         return jnp.concatenate([vec, jnp.zeros((length - have,), vec.dtype)])
     return vec[:length]
-
-
-def _where_state(cond: jax.Array, a: BDFState, b: BDFState) -> BDFState:
-    """Select between two carried states leaf-by-leaf on a scalar predicate."""
-    return jax.tree_util.tree_map(lambda x, y: jnp.where(cond, x, y), a, b)
 
 
 def _decision_part(decision, start, stop):
@@ -552,14 +528,9 @@ class BDFEngine(eqx.Module):
         t1 = jnp.asarray(t1, dtype=dtype)
         uround = jnp.asarray(jnp.finfo(dtype).eps, dtype=dtype)
 
-        _, _, _diff, _alg_index, needs_projection = _structure(problem)
-
-        # These solves factor this problem exactly as the corrector does, so
-        # they are analyzed with the lowered problem's placement and the
-        # accepted-root sensitivity precision this solve declared for each
-        # derivative direction — never the backend's defaults.
-        ic_layout, ic_precision = initialization_policy(problem, self.precision, mode="forward")
-        _, ic_reverse_precision = initialization_policy(problem, self.precision, mode="reverse")
+        refuse_unprojected_start(problem, not bool(cfg.consistent_ic), "consistent_ic=False is")
+        policies = initialization_policies(problem, self.precision)
+        ic_layout, ic_precision, ic_reverse_precision = policies
         slope_fn = bdf_slope_fn(
             problem,
             theta,
@@ -570,41 +541,20 @@ class BDFEngine(eqx.Module):
             precision=ic_precision,
             reverse_precision=ic_reverse_precision,
         )
-        if not bool(cfg.consistent_ic) and needs_projection:
-            raise ConfigurationError(
-                "this problem has algebraic rows; "
-                "consistent_ic=False is not supported for it. Enable "
-                "consistent initialization."
-            )
-        ic = problem.consistent_initial_state(
+        ic = project_start(
+            self,
+            problem,
             t0,
-            pack_state(u0, lam0),
+            u0,
+            lam0,
+            ydot0,
             theta,
             control,
-            ydot0=jnp.concatenate([ydot0, jnp.zeros((n_lam,), dtype=dtype)]),
-            tol=ic_gate_tolerance(self.atol, self.ic_tol),
+            policies,
             max_iters=self.ic_max_newton_iters,
-            backend=self.backend,
-            layout=ic_layout,
-            precision=ic_precision,
-            reverse_precision=ic_reverse_precision,
         )
-        ic_y, ic_ydot = consume_consistent_init(ic)
-        u_c = jnp.asarray(ic_y[:n_u], dtype=dtype)
-        lam_c = jnp.asarray(ic_y[n_u:], dtype=dtype)
-        alg_norm = jnp.asarray(ic.residual_norm, dtype=dtype)
-
-        y_aug0 = pack_state(u_c, lam_c)
-        # The consistent initialization computes derivatives for every
-        # differential row, including differential globals in the bordered
-        # partition; algebraic rows arrive as zeros. Consume it whole.
-        ydot_aug0 = jnp.asarray(ic_ydot, dtype=dtype)
-
-        # A per-row absolute tolerance arrives as a vector on the driver
-        # configuration; it rides the carry so accepted-step weight refreshes
-        # keep consuming it.
-        atol_rows = cfg.atol if getattr(cfg.atol, "ndim", 0) == 1 else None
-        ewt0 = error_weight(y_aug0, self.rtol, self.atol if atol_rows is None else atol_rows)
+        start = consistent_start(self, cfg, ic, n_u, dtype)
+        u_c, lam_c, y_aug0, ydot_aug0, alg_norm, atol_rows, ewt0 = start
 
         hmax = float(cfg.hmax)
         hmax_inv = jnp.asarray(1.0 / hmax if hmax > 0.0 else 0.0, dtype=dtype)
@@ -639,20 +589,7 @@ class BDFEngine(eqx.Module):
             jax.lax.cond(dt0 != 0.0, lambda _: dt0, _auto_initial_step, operand=None)
         )
 
-        # hmax / hmin clamps, then the endpoint clamp against t1, all BEFORE the
-        # history seed scales zn[1] by h.
-        rh = jnp.abs(hh) * hmax_inv
-        hh = jnp.where(rh > 1.0, hh / jnp.where(rh > 1.0, rh, 1.0), hh)
-        at_min = jnp.abs(hh) < hmin
-        hh = jnp.where(at_min, hh * (hmin / jnp.where(at_min, jnp.abs(hh), 1.0)), hh)
-        overshoot = (t0 + hh - t1) * hh > 0
-        hh = jnp.where(overshoot, (t1 - t0) * (1.0 - _ENDPOINT_CLAMP_FUZZ * uround), hh)
-
-        if step is not None:
-            # A replayed restart enters with the step its forward sweep recorded.
-            replay, recorded = step
-            recorded = jax.lax.stop_gradient(jnp.asarray(recorded).astype(dtype))
-            hh = jnp.where(replay, recorded, hh)
+        hh = clamp_initial_step(hh, t0, t1, hmax_inv, hmin, uround, step, dtype)
 
         state = init_bdf_state(y_aug0, ydot_aug0, hh, n, dtype.type)
 
@@ -764,14 +701,7 @@ class BDFEngine(eqx.Module):
         one_f = jnp.ones((), dtype)
 
         backend = self.backend
-        # The problem's lowering-declared Layout is the single source of
-        # truth for device placement: it places EVERY analysis of this solve
-        # — each corrector rung's factor and the sensitivity pattern alike —
-        # so a multi-GPU factorization request reaches the adjoint's
-        # transpose factor too, never silently staying single-device.
-        layout = getattr(problem, "layout", None)
-        if layout is None:
-            layout = Layout()
+        layout = problem_layout(problem)
         adaptive = self.precision.solve_mode == "adaptive"
         # The corrector's routes: one per precision rung (two under the
         # adaptive ladder, which switches between them on the carried rung).
@@ -827,29 +757,7 @@ class BDFEngine(eqx.Module):
             rung_changed=None if prec is None else prec.entered,
             control=carry.control,
         )
-        # The sensitivity solves of the per-step root derivative factor the
-        # full-system matrix at the accepted root exactly — the tangent solve
-        # the matrix, a reverse sweep its transpose, each under the precision
-        # policy of its direction — through this engine's own backend; a
-        # dense-mode plan hands it the full dense pattern. The symbolic
-        # analysis is problem-static.
-        full_topology = problem.full_topology
-        if full_topology is None:
-            full_topology = _full_dense_topology(int(problem.n))
-        sens_analysis = analyze_sensitivity(
-            backend,
-            full_topology,
-            layout=layout,
-            precision=self.precision,
-            mode="forward",
-        )
-        rev_analysis = analyze_sensitivity(
-            backend,
-            full_topology,
-            layout=layout,
-            precision=self.precision,
-            mode="reverse",
-        )
+        sens_analysis, rev_analysis = sensitivity_analyses(self, problem, backend, layout)
         nls = bdf_corrector_root(
             problem,
             backend,
@@ -1091,7 +999,7 @@ class BDFEngine(eqx.Module):
         overtake = (tn_snapped + hprime_p - t1) * h_adj > 0
         clamp = jnp.logical_and(jnp.logical_not(at_end), overtake)
         hprime_c = jnp.where(
-            clamp, (t1 - tn_snapped) * (1.0 - _ENDPOINT_CLAMP_FUZZ * uround), hprime_p
+            clamp, (t1 - tn_snapped) * (1.0 - ENDPOINT_CLAMP_FUZZ * uround), hprime_p
         )
         eta_c = jnp.where(clamp, hprime_c / h_adj, eta_p)
 
@@ -1196,8 +1104,8 @@ class BDFEngine(eqx.Module):
         )
 
         # --- select the branch ---
-        fail_state = _where_state(did_converge, error_fail_state, conv_fail_state)
-        new_state = _where_state(accept, accept_state, fail_state)
+        fail_state = where_state(did_converge, error_fail_state, conv_fail_state)
+        new_state = where_state(accept, accept_state, fail_state)
         # The two-tier solver state persists across attempts and accepted steps:
         # it is re-evaluated only inside a setup, so carry the corrector's
         # post-setup values (fresh where a gate fired, the prior values
@@ -1551,7 +1459,7 @@ class BDFEngine(eqx.Module):
         return bdf_dense(carry.state, carry.tn, t)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.lru_cache(maxsize=ENGINE_CACHE_SIZE)
 def bdf_engine(
     profile,
     *,
@@ -1570,9 +1478,9 @@ def bdf_engine(
     Resolves the linear backend from ``linear`` (the dense CPU backend for the
     default and ``"auto"`` names) and reads the corrector loop shape, the
     Jacobian setup policy, and the accepted-step controller mode from
-    ``profile``. Identical configurations return one memoised engine object,
-    so repeated solves share the driver's compiled program instead of
-    recompiling per construction.
+    ``profile``. Identical configurations return one memoised engine object
+    (of the last ``ENGINE_CACHE_SIZE``), so repeated solves share the driver's
+    compiled program instead of recompiling per construction.
 
     Args:
         profile: The solver execution profile (``nonlinear_mode`` selects the
@@ -1611,7 +1519,7 @@ def bdf_engine(
         atol=float(atol),
         loop_form=profile.nonlinear_mode,
         jacobian_policy=profile.jacobian_policy,
-        capabilities=_capabilities(),
+        capabilities=ENGINE_CAPABILITIES["bdf"],
         controller_mode=profile.controller_mode,
         controller_law=profile.controller_law,
         newton_tol_factor=float(newton_tol_factor),

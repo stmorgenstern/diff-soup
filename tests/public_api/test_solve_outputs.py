@@ -10,14 +10,22 @@ import pytest
 
 import diff_soup as ds
 from diff_soup.timestepping import Bisection, EventSet
-from tests.support.problems import ConstrainedDAE, DecayODE, observed_recipe, operational_cell
+from tests.support.problems import (
+    ConstrainedDAE,
+    DecayODE,
+    observed_recipe,
+    operational_cell,
+    thirds_dae,
+)
 
 _THETA = jnp.asarray(0.4)
 #: Solver and root-finder settings (requested tolerances, not asserted bounds).
 _TIGHT = {"rtol": 1e-7, "atol": 1e-9}
 _ROOT = {"rtol": 1e-10, "atol": 1e-12}
 _FINE = {"rtol": 1e-8, "atol": 1e-10}
+_RESISTANCE = {"rtol": 1e-10, "atol": 1e-12}
 _VDP = {"rtol": 1e-6, "atol": 1e-8}
+_FLOOR = {"rtol": 1e-8, "atol": 1e-12}
 _PROJECTED = ds.DenseOutputPolicy(mode="projected")
 # measured worst event-time error 1.1e-9 (projected DAE cutoff; 1.0e-13 for a time event),
 # CPU VM 2026-10-22, pytest tests/public_api/test_solve_outputs.py
@@ -180,6 +188,29 @@ def test_the_save_grid_is_evaluated_only_on_attempts_that_cover_a_save_time():
     )
     assert int(solution.stats.trial_steps) > 5
     assert 0 < int(solution.stats.saveat_interpolations) <= 5 * 5
+
+
+# measured 1.8e-8 relative on every row, workstation 2026-11-05,
+# pytest tests/public_api/test_solve_outputs.py::test_projected_rows_at_the_rounding_floor_pass_the_gate_of_the_solves_own_start
+_FLOOR_BOUND = 1e-6
+
+
+def test_projected_rows_at_the_rounding_floor_pass_the_gate_of_the_solves_own_start():
+    """Projected rows of ``y' = -y``, ``0 = 3 z - y`` from ``y = 1.95e8`` at ``atol = 1e-12``,
+    where the algebraic residual often cannot fall below 7.5e-9, are each projected under the
+    gate the solve's own initialization passed: every row is finite and equals ``y0 e^{-t}``,
+    ``z = y/3``."""
+    start, times = 195046369.6325935, jnp.linspace(0.0, 0.5, 41)
+    solution = ds.pdesolve(
+        thirds_dae(),
+        ds.JIDA(linear="dense", **_FLOOR),
+        (0.0, 0.5),
+        jnp.asarray([start, start / 3.0]),
+        saveat=ds.SaveAt(ts=times, output=_PROJECTED),
+        max_steps=2000,
+    )
+    y = start * np.exp(-np.asarray(times))
+    np.testing.assert_allclose(solution.ys, np.stack([y, y / 3.0], axis=1), rtol=_FLOOR_BOUND)
 
 
 @pytest.mark.parametrize(
@@ -389,6 +420,30 @@ def test_an_operational_switch_changes_the_row_and_owns_its_samples_by_epoch():
         solve(dense=True)
 
 
+@pytest.mark.parametrize("current_seed", [None, 0.2])
+def test_resistance_control_seeds_and_solves_the_known_load(current_seed):
+    """V = u - 2 I and V = 3 I imply I = u/5 and u = 2 exp(-4t/5)."""
+    problem = operational_cell(modes=("current", "voltage", "power", "resistance")).build()
+    initial = jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))])
+    control = ds.ControlState.operating(mode=3, target=3.0, current_seed=current_seed)
+    times = jnp.asarray([0.0, 0.1, 0.5])
+    solution = ds.pdesolve(
+        problem,
+        ds.JIDA(linear="dense", **_RESISTANCE),
+        (0.0, 0.5),
+        initial,
+        control_state0=control,
+        saveat=ds.SaveAt(ts=times, output=_PROJECTED),
+        max_steps=400,
+    )
+    assert bool(solution.ok)
+    expected_u = 2.0 * np.exp(-0.8 * np.asarray(times))
+    # measured relative error 1.263e-10 for both seeds, workstation 2026-11-06, pytest
+    # tests/public_api/test_solve_outputs.py::test_resistance_control_seeds_and_solves_the_known_load
+    np.testing.assert_allclose(solution.ys, np.repeat(expected_u[:, None], 4, axis=1), rtol=1e-8)
+    np.testing.assert_allclose(solution.lambdas[:, 0], expected_u / 5.0, rtol=1e-8)
+
+
 def test_schedules_and_segments_are_value_types_that_validate_their_entries():
     """Segments compare and hash by value and read a polynomial target; a schedule sums its
     durations and refuses an empty or a non-segment entry."""
@@ -404,6 +459,38 @@ def test_schedules_and_segments_are_value_types_that_validate_their_entries():
         ds.Schedule([])
     with pytest.raises(TypeError):
         ds.Schedule([held, "hold"])
+
+
+def test_a_schedule_step_budget_bounds_each_segment_and_not_the_schedule():
+    """``max_steps`` of solve_schedule is each segment's budget: two current holds whose
+    attempts add up to one more than the budget both run to success, and a budget of one
+    attempt stops the first hold with MAX_STEPS before the second runs."""
+    problem = operational_cell().build()
+    holds = ds.schedule_arrays(
+        ds.Schedule([ds.Segment(current=0.5, duration=0.3), ds.Segment(current=1.5, duration=0.4)]),
+        problem.operational_modes(),
+    )
+
+    def solve(**keywords):
+        return ds.solve_schedule(
+            problem,
+            ds.JIDA(linear="dense", **_RESISTANCE),
+            holds,
+            jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))]),
+            t0=0.0,
+            t_end=0.7,
+            times=jnp.asarray([0.5, 0.7]),
+            **keywords,
+        )
+
+    attempts = int(solve()[0].stats.trial_steps)
+    within, _ = solve(max_steps=attempts - 1)
+    capped, ends = solve(max_steps=1)
+    assert (
+        bool(within.ok)
+        and capped.result == ds.RESULT.MAX_STEPS
+        and np.asarray(ends.ran).tolist() == [True, False]
+    )
 
 
 def _van_der_pol():

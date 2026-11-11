@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 import diff_soup as ds
-from diff_soup import inference as inf
+from diff_soup.optimization import inference as inf
 from tests.support.inference import (
     TIMES,
     decay_experiment,
@@ -38,7 +38,7 @@ import jax
 import numpy as np
 
 import diff_soup as ds
-from diff_soup import inference as inf
+from diff_soup.optimization import inference as inf
 from tests.support.inference import decay_recipe, decay_study
 
 assert jax.device_count() == 2, jax.devices()

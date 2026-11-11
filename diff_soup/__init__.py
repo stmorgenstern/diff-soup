@@ -2,24 +2,24 @@
 
 Three layers with two public scientific namespaces:
 
-* Layer 1 (public):  ``domains``, ``inference``
+* Layer 1 (public):  ``domains``, ``optimization``
 * Layer 2 (problem): ``problem``
 * Layer 3 (private): ``timestepping``, ``nonlinear``, ``linear``
 
 **Curated top-level namespace.** This file re-exports the subset of symbols
 that users import directly from ``diff_soup``.  Every other symbol lives
-behind its sub-namespace. ``diff_soup.inference`` is not imported eagerly:
-``ds.inference`` resolves it on first access, so the idiomatic spelling is
-``ds.inference.x``.
+behind its sub-namespace. ``diff_soup.optimization.inference`` is not imported eagerly:
+``ds.optimization.inference`` resolves it on first access, so the idiomatic spelling is
+``ds.optimization.inference.x``.
 
 Import direction: L1 → L2 → L3, never upward. Enforced by the
 contract test ``tests/contracts/test_architecture.py`` and, for module-level
 imports between first-level packages, by ``.github/scripts/check_layers.py``.
 
 Design principles:
-- No long-lived deprecation shims or aliases.
+- A deprecated path warns with a ``DeprecationWarning`` and lasts one release.
 - No string-flag dispatch in the public signature.
-- One verb per job: ``pdesolve``, ``lower``, and ``inference.optsolve``.
+- One verb per job: ``pdesolve``, ``lower``, and ``optimization.optsolve``.
 - One AD entry per verb: ``pdesolve`` → solver's ``solve``, ``lower`` → IFT
   chain.
 - Underscore = private; the contract test walks the import surface.
@@ -28,24 +28,14 @@ Design principles:
 import sys as _sys
 import types as _types
 
-# First import of the package: turns on JAX's constant hoisting before ``jax``
-# loads, so compiled programs take the arrays they close over (mesh coordinates,
-# connectivity, quadrature tables) as arguments instead of program text.
-import diff_soup._jax_constants  # noqa: F401
-
-# Second: write typed-FFI custom-call configuration onto the StableHLO op
-# itself instead of a discardable attribute, so every LAPACK, cuSOLVER, and
-# cuDSS call reaches XLA as the typed FFI call it is (``diff_soup._jax_typed_ffi``).
-import diff_soup._jax_typed_ffi  # noqa: F401
+# First import of the package: makes the changes to the process that
+# ``diff_soup._environment`` lists (the XLA flags, JAX's constant hoisting, the
+# typed-FFI custom-call builder) before anything else imports ``jax``.
+import diff_soup._environment  # noqa: F401
 
 # ---------------------------------------------------------------------------
-# Root-private modules: the lowering provider, errors, layout, schedules
+# Root-private modules: errors, layout, schedules
 # ---------------------------------------------------------------------------
-# Register the lowering-analysis provider. Importing ``diff_soup._lowering``
-# calls ``set_lowering_ops`` so ``lower()`` can build residual, Jacobian,
-# sparsity and mass kernels from the Layer 1 operator bank. This file is the
-# wiring layer, so it may import every layer.
-import diff_soup._lowering  # noqa: F401 — side-effect: registers the provider.
 from diff_soup import distributed
 
 # ``compile`` compiles one ``pdesolve`` call ahead of time without running it.
@@ -63,7 +53,14 @@ from diff_soup._precision import Precision
 
 # ``Schedule``/``Segment`` describe an operating protocol: segments that each hold
 # one row of a model's operational control table at a constant target.
-from diff_soup._schedule import Schedule, Segment
+from diff_soup._schedule import (
+    Schedule,
+    ScheduleArrays,
+    Segment,
+    SegmentEnds,
+    schedule_arrays,
+    solve_schedule,
+)
 from diff_soup._solution import RESULT
 from diff_soup._version import __version__ as __version__
 
@@ -106,12 +103,16 @@ from diff_soup.problem import (
     ResidualSparsity,
     RowOwner,
     Scales,
+    SolverView,
     TopologyReport,
     TransferOp,
     VarRef,
     default_theta,
+    jacobian_nnz,
+    jacobian_pattern,
     lower,
     parameter_gradient,
+    solver_view,
     tags,
     topology_report,
 )
@@ -185,11 +186,11 @@ problem = _sys.modules["diff_soup.problem"]
 # __all__ — the curated public surface
 # ---------------------------------------------------------------------------
 
-# ``inference`` and ``learnables`` are resolved on first access by the module
+# ``optimization`` and ``learnables`` are resolved on first access by the module
 # ``__getattr__`` below; every other name is bound when ``diff_soup`` imports.
 __all__ = [
     "distributed",
-    "inference",
+    "optimization",
     "problem",
     "global_mesh",
     "mesh_groups",
@@ -240,6 +241,10 @@ __all__ = [
     "NodalInjectOp",
     # ---- iteration-matrix structure diagnostics ----
     "topology_report",
+    "jacobian_nnz",
+    "jacobian_pattern",
+    "solver_view",
+    "SolverView",
     "TopologyReport",
     "RowOwner",
     # ---- forward-simulation entry point ----
@@ -284,6 +289,10 @@ __all__ = [
     # ---- operating protocols ----
     "Schedule",
     "Segment",
+    "ScheduleArrays",
+    "SegmentEnds",
+    "schedule_arrays",
+    "solve_schedule",
     # ---- differentiation strategies ----
     "ForwardAdjoint",
     "CheckpointAdjoint",
@@ -291,16 +300,24 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Resolve inference and its learnable selector on first attribute access.
+    """Resolve optimization, the learnable selector and the deprecated inference alias.
 
     The inference package imports the whole fitting and statistics stack, so it
-    is not loaded with ``import diff_soup``; ``ds.inference`` imports it on
-    demand and returns the package. Any other unknown attribute raises
-    ``AttributeError`` as usual.
+    is not loaded with ``import diff_soup``; ``ds.optimization.inference`` imports it on
+    demand and returns the package. ``ds.inference`` imports the deprecated alias
+    ``diff_soup.inference``, which warns once and binds itself here. Any other unknown
+    attribute raises ``AttributeError`` as usual.
     """
-    if name in ("inference", "learnables"):
+    if name == "inference":
+        import diff_soup.inference as inference
+
+        return inference
+    if name == "learnables":
         import importlib
 
-        inference = importlib.import_module("diff_soup.inference")
-        return inference if name == "inference" else inference.learnables
+        return importlib.import_module("diff_soup.optimization.inference").learnables
+    if name == "optimization":
+        import importlib
+
+        return importlib.import_module("diff_soup.optimization")
     raise AttributeError(f"module 'diff_soup' has no attribute {name!r}")

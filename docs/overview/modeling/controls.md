@@ -91,6 +91,6 @@ protocol = ds.Schedule([
 - `carry_step=None` continues the integrator's step size and history
   into a segment that keeps the mode, and starts afresh when the mode
   changes. `True` always continues, and `False` always starts afresh.
-- An experiment follows a protocol through `ds.inference.Experiment(...,
+- An experiment follows a protocol through `ds.optimization.inference.Experiment(...,
   schedule=protocol)` ([fitting
   parameters](../inference/fitting.md#declare-the-experiment)).

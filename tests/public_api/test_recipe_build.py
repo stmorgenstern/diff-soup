@@ -1,6 +1,6 @@
 """Recipe API: domains and the grid factory, fields and equations, custom operators and
-transfers, couplings and read-through aliases, build identity, globals and operational
-control tables."""
+transfers, couplings and read-through aliases, build identity, exact-sparsity builds, globals
+and operational control tables."""
 
 from __future__ import annotations
 
@@ -327,6 +327,80 @@ def test_the_topology_report_attributes_a_dense_global_row_and_counts_its_colors
     assert (report.n, report.nnz, report.color_count) == (7, 29, 7)
     assert report.widest_rows == ((6, 7, "load"),)
     assert report.per_variable_nnz == {"u": 22, "load": 7}
+
+
+#: Which cells read the global, and each cell's diffusion coefficient (zero on the fourth).
+_READS_LOAD = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+_DIFFUSES = np.array([1.0, 1.0, 1.0, 0.0, 1.0, 1.0])
+
+
+def _partial_global_line():
+    """``u' = 0.05 d u_xx - 0.4 u^2 + 0.1 u_right + r load`` on six cells, ``u_right`` gathered
+    with zero fill past the last cell, and ``load = mean(u)`` (the recipe, not built)."""
+    spec = ds.problem("exact_pattern_line").domain(
+        "line", ds.cartesian_grid_1d(6, 0.0, 1.0, method="fvm")
+    )
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: 1.0 + x)
+    spec.global_var("load", initial=0.0, scale=1.0)
+    spec.equation(writes="u", reads=("u", "load"))(
+        lambda q: (
+            0.05 * _DIFFUSES * q.ops.laplacian(q.u)
+            - 0.4 * q.u**2
+            + 0.1 * q.u.at[np.arange(1, 7)].get(mode="fill", fill_value=0.0)
+            + _READS_LOAD * q["load"]
+        )
+    )
+    spec.constraint.galvanostatic(
+        name="load_closure",
+        closes="load",
+        current_fn=lambda q: q["load"] - jnp.mean(q.u),
+        target_fn=lambda time: jnp.asarray(0.0),
+    )
+    return spec
+
+
+def _entries(problem):
+    topology = ds.solver_view(problem).full_topology
+    return set(zip(topology.rows.tolist(), topology.cols.tolist()))
+
+
+def test_a_default_build_declares_only_the_entries_a_tangent_reaches():
+    """A default build keeps 24 of the 29 entries of ``build(exact_sparsity=False)``, dropping the
+    global's column on the four rows that never read it and the fourth row's left neighbour,
+    whose coefficient is zero, and adding none (the filled gather reads no first cell); every
+    entry of ``F_y`` or ``F_ydot`` that ``jax.jacfwd`` finds nonzero at a random state is kept."""
+    spec = _partial_global_line()
+    exact, declared = spec.build(), spec.build(exact_sparsity=False)
+    view, theta, t = ds.solver_view(exact), ds.default_theta(exact), jnp.asarray(0.3)
+    state, rate = jax.random.uniform(jax.random.PRNGKey(5), (2, view.n), minval=0.5, maxval=1.5)
+    nonzero = (jax.jacfwd(lambda y: view.residual(t, y, rate, theta))(state) != 0) | (
+        jax.jacfwd(lambda ydot: view.residual(t, state, ydot, theta))(rate) != 0
+    )
+    reached = set(zip(*(index.tolist() for index in np.nonzero(np.asarray(nonzero)))))
+    assert [ds.jacobian_nnz(declared), ds.jacobian_nnz(exact)] == [29, 24]
+    assert reached <= _entries(exact) < _entries(declared)
+
+
+@pytest.mark.parametrize("linear", ["dense", pytest.param("klu", marks=pytest.mark.requires_klu)])
+def test_a_default_build_solves_as_the_declared_build(linear):
+    """A consistently initialized JNDF solve of the default, exact-pattern build stores the states
+    and the global that the solve of ``build(exact_sparsity=False)`` stores, bit for bit."""
+    spec = _partial_global_line()
+    solver = ds.JNDF.stock(linear=linear, **{"rtol": 1e-9, "atol": 1e-11})
+
+    def solve(problem):
+        solution = ds.pdesolve(
+            problem,
+            solver,
+            (0.0, 1.0),
+            spec.assemble_state({}),
+            saveat=ds.SaveAt(ts=jnp.linspace(0.2, 1.0, 5)),
+            consistent_ic=True,
+        )
+        return np.asarray(solution.ys), np.asarray(solution.lambdas)
+
+    for exact, declared in zip(solve(spec.build()), solve(spec.build(exact_sparsity=False))):
+        np.testing.assert_array_equal(exact, declared)
 
 
 def test_sparse_jvp_groups_recover_a_tridiagonal_jacobian_exactly():

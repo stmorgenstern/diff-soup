@@ -36,7 +36,8 @@ class TopologyReport(NamedTuple):
         nnz: Number of structural nonzeros.
         max_row_degree: Largest number of nonzeros in one row.
         mean_row_degree: Mean number of nonzeros per row.
-        color_count: Colors needed to compute the Jacobian by automatic differentiation, or `None` for a dense pattern.
+        color_count: Tangents the solver evaluates to assemble the Jacobian, one per color, or `None` for a dense pattern.
+        pullback_count: Residual pullbacks the solver evaluates for the rows it holds out of the coloring.
         widest_rows: [`RowOwner`][diff_soup.problem.RowOwner] records of the rows with the most nonzeros, widest first.
         per_variable_nnz: Nonzeros per field or global name, empty when the rows carry no names.
     """
@@ -48,6 +49,7 @@ class TopologyReport(NamedTuple):
     color_count: Optional[int]
     widest_rows: tuple
     per_variable_nnz: dict
+    pullback_count: int = 0
 
 
 def _row_names(sources, n: int) -> list:
@@ -79,10 +81,31 @@ def _row_names(sources, n: int) -> list:
     return names
 
 
+def jacobian_nnz(problem) -> int:
+    """Return the structural entry count of the solver's iteration matrix.
+
+    Reads the pattern of the solver's linearization without constructing a dense matrix.
+    Dense solver views report their full matrix size, including structural zeros.
+
+    Args:
+        problem: A problem accepted by ``pdesolve``.
+
+    Returns:
+        Number of stored entries in ``F_y + cj * F_ydot``, including globals.
+    """
+    from diff_soup.problem.implicit.solver_problem import solver_view
+
+    view = solver_view(problem)
+    linearization = view.plan.linearization
+    return int(view.n) ** 2 if linearization is None else linearization.pattern.nnz
+
+
 def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
     """Summarize the Jacobian sparsity pattern a problem presents to the solvers.
 
-    A problem without a sparse pattern reports a dense one.
+    The pattern, color and pullback counts are those of the solver's linearization, so
+    the report builds no coloring of its own. A problem without a sparse pattern
+    reports a dense one.
 
     Args:
         problem: A [`LoweredProblem`][diff_soup.problem.LoweredProblem], [`MassProblem`][diff_soup.problem.MassProblem], or [`ImplicitProblem`][diff_soup.problem.ImplicitProblem].
@@ -91,29 +114,21 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
     Returns:
         A [`TopologyReport`][diff_soup.problem.TopologyReport].
     """
-    from diff_soup.problem._ad.sparse_jac import SparseJacobian
-    from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
-    from diff_soup.timestepping.vsvo.common.contract import coerce_problem
+    from diff_soup.problem.implicit.solver_problem import solver_view
 
-    solver_contract = coerce_problem(problem)
-    view = get_or_build_solver_view(solver_contract)
+    solver_contract = solver_view(problem)
+    view = solver_view(solver_contract)
     owner_sources = (problem, solver_contract, view.source)
-    topo = view.full_topology
-    if topo is None:
+    linearization = view.plan.linearization
+    if linearization is None:
         n = int(view.problem.n)
         degrees = np.full((n,), n, dtype=np.int64)
         rows = None
         nnz = n * n
-        color_count: Optional[int] = None
     else:
-        n = int(topo.n_dofs)
-        rows = np.asarray(topo.rows)
-        cols = np.asarray(topo.cols)
-        degrees = np.bincount(rows, minlength=n).astype(np.int64)
-        nnz = int(rows.shape[0])
-        color_count = int(
-            SparseJacobian.from_coo(rows.astype(np.int32), cols.astype(np.int32), n).n_colors
-        )
+        pattern = linearization.pattern
+        n, rows, nnz = pattern.shape[0], pattern.rows, pattern.nnz
+        degrees = pattern.row_degrees()
 
     names = _row_names(owner_sources, n)
     order = np.argsort(-degrees, kind="stable")[: max(int(top_k), 0)]
@@ -130,7 +145,8 @@ def topology_report(problem, *, top_k: int = 5) -> TopologyReport:
         nnz=nnz,
         max_row_degree=int(degrees.max()) if n else 0,
         mean_row_degree=float(degrees.mean()) if n else 0.0,
-        color_count=color_count,
+        color_count=view.plan.color_count,
         widest_rows=widest,
         per_variable_nnz=per_variable_nnz,
+        pullback_count=view.plan.pullback_count,
     )

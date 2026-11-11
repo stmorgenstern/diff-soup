@@ -95,10 +95,10 @@ for label, R in particles.items():
         theta_true = ds.default_theta(problem, {D: 1e4, k: k_true[label]})
         sol = ds.pdesolve(problem, solver, (0.0, 2.0), y0, theta=theta_true, saveat=ds.SaveAt(ts=ts))
         data = sol.ys + 1e-3 * np.random.default_rng(len(experiments)).standard_normal(sol.ys.shape)
-        experiments.append(ds.inference.Experiment(
+        experiments.append(ds.optimization.inference.Experiment(
             particle, inputs={"R": R, "protocol": protocol}, id=f"{label}-{protocol}",
             solver=solver, t_span=(0.0, 2.0), initial_state=y0, parameters={"particle": label},
-            measurements=(ds.inference.Measurement("c", ts, data, likelihood=ds.inference.Gaussian(sigma=1e-3)),)))
+            measurements=(ds.optimization.inference.Measurement("c", ts, data, likelihood=ds.optimization.inference.Gaussian(sigma=1e-3)),)))
 ```
 
 ## The hierarchical least-squares problem
@@ -132,17 +132,17 @@ tier is empty. The joint decision vector is ordered
 
 Each experiment couples only to the shared block and to its own
 cluster, so the Jacobian and the Hessian of the loss have an arrowhead
-structure, one block per cluster bordered by the shared block. `ds.inference.TrustRegion` factors that structure cluster by cluster
+structure, one block per cluster bordered by the shared block. `ds.optimization.inference.TrustRegion` factors that structure cluster by cluster
 and solves the shared block last, so the joint Hessian is never
 assembled.
 
 The full fit:
 
 ```python
-hierarchy = ds.inference.Hierarchy(levels=("particle",), shared=(D,), per={"particle": (k,)})
-study = ds.inference.Study(experiments, parameters=hierarchy)
+hierarchy = ds.optimization.inference.Hierarchy(levels=("particle",), shared=(D,), per={"particle": (k,)})
+study = ds.optimization.inference.Study(experiments, parameters=hierarchy)
 lowered = ds.lower(study)
-result = ds.inference.optsolve(lowered, ds.inference.TrustRegion())
+result = ds.optimization.optsolve(lowered, ds.optimization.inference.TrustRegion())
 result[D]            # the shared diffusivity
 result[k]["A"]       # the rate constant of particle A
 result[k]["B"]       # the rate constant of particle B
@@ -151,11 +151,11 @@ result[k]["C"]       # the rate constant of particle C
 
 ## Solving the hierarchical least-squares problem
 
-To solve this problem, we declare one `ds.inference.Experiment` per
-experiment, tie their parameters together in a `ds.inference.Study`
-through a `ds.inference.Hierarchy`, lower the study with `ds.lower`, and
-solve it using `ds.inference.optsolve` with
-`ds.inference.TrustRegion()`.
+To solve this problem, we declare one `ds.optimization.inference.Experiment` per
+experiment, tie their parameters together in a `ds.optimization.inference.Study`
+through a `ds.optimization.inference.Hierarchy`, lower the study with `ds.lower`, and
+solve it using `ds.optimization.optsolve` with
+`ds.optimization.inference.TrustRegion()`.
 
 ### Declare the experiments
 
@@ -164,10 +164,10 @@ Each experiment is declared as on
 template in place of a built problem and its arguments under `inputs=`.
 
 ```python
-experiments.append(ds.inference.Experiment(
+experiments.append(ds.optimization.inference.Experiment(
     particle, inputs={"R": R, "protocol": protocol}, id=f"{label}-{protocol}",
     solver=solver, t_span=(0.0, 2.0), initial_state=y0, parameters={"particle": label},
-    measurements=(ds.inference.Measurement("c", ts, data, likelihood=ds.inference.Gaussian(sigma=1e-3)),)))
+    measurements=(ds.optimization.inference.Measurement("c", ts, data, likelihood=ds.optimization.inference.Gaussian(sigma=1e-3)),)))
 ```
 
 - `model` is the template. `inputs=` gives the arguments of this
@@ -186,14 +186,14 @@ experiments.append(ds.inference.Experiment(
 
 ### Pose the joint inference problem
 
-`ds.inference.Hierarchy` declares which parameters are shared and which
-take one value per member of a level, `ds.inference.Study` ties the
+`ds.optimization.inference.Hierarchy` declares which parameters are shared and which
+take one value per member of a level, `ds.optimization.inference.Study` ties the
 experiments to it, and `ds.lower` prepares the study for fitting ([pose
 the inference problem](fitting.md#pose-the-inference-problem)).
 
 ```python
-hierarchy = ds.inference.Hierarchy(levels=("particle",), shared=(D,), per={"particle": (k,)})
-study = ds.inference.Study(experiments, parameters=hierarchy)
+hierarchy = ds.optimization.inference.Hierarchy(levels=("particle",), shared=(D,), per={"particle": (k,)})
+study = ds.optimization.inference.Study(experiments, parameters=hierarchy)
 lowered = ds.lower(study)
 ```
 
@@ -214,14 +214,14 @@ lowered = ds.lower(study)
 
 ### Run the fit
 
-`ds.inference.TrustRegion()` is the recommended optimizer for a
+`ds.optimization.inference.TrustRegion()` is the recommended optimizer for a
 hierarchical study. It is a trust-region Gauss-Newton method solved
 level by level. The curvature is assembled one cluster at a time from
 that cluster's experiments, and each step is solved from the clusters up
 to the shared parameters.
 
 ```python
-result = ds.inference.optsolve(lowered, ds.inference.TrustRegion())
+result = ds.optimization.optsolve(lowered, ds.optimization.inference.TrustRegion())
 ```
 
 The options, with their defaults:
@@ -231,28 +231,40 @@ The options, with their defaults:
 - `max_steps=30` bounds the number of steps.
   `target_accepted_steps=None`, when set, ends the run after that many
   accepted steps with the status `ACCEPTED_STEPS`.
-- `nested_at=None` names a level at which the fit splits into two loops.
-  The levels above it take the outer step, and each member of that level
-  then refits its own parameters.
+- `nested_at=None` names a level of the hierarchy, such as `"particle"`.
+  After every accepted step, each member of that level, here each
+  particle, then refits its own parameters with the others held. This
+  refit is the polish. `inner=TrustRegion(max_steps=k)` allows `k`
+  polish iterations per step, two when omitted. The polish reuses the
+  derivatives the step computed and adds only solves without
+  derivatives.
 - `radius_init=`, `radius_max=`, `eta=`, `grad_tol=`, `step_tol=`,
   `cost_tol=`, and `x_scale=` are the trust-region options of
-  `ds.inference.NewtonTrustRegion` ([Newton trust
+  `ds.optimization.NewtonTrustRegion` ([Newton trust
   region](solvers.md#newton-trust-region)).
 - `weights=None` gives one nonnegative weight per cluster, multiplying
   that cluster's contribution to the loss.
 - `constraints=()` and `gauges=()` add linear equality constraints on
   the joint vector, `LinearConstraint` and `Gauge` from
-  `diff_soup.inference.statistics.parameters`. A gauge pins a direction
+  `diff_soup.optimization.inference.statistics.parameters`. A gauge pins a direction
   the data leave free, such as the mean of a spatial field.
+- `inequalities=()` adds inequality constraints on the fitted parameters,
+  as `ds.optimization.inference.InequalityRows`. Its function returns
+  rows that the fit keeps at or below zero. With `level="particle"` it
+  is called as `rows(own, shared, data)` for each particle, with that
+  particle's parameters, the shared parameters, and its entry of
+  `data=`. A step that would cross a row stops at it, so start the fit
+  where the rows hold. The fit ends where the loss cannot decrease
+  without crossing a row, the KKT conditions of the constrained problem.
 - `fixed_indices=()` freezes the joint coordinates at those indices.
 - `callbacks=()` attaches callbacks to the solver
   ([run the fit](fitting.md#run-the-fit)).
-- `ds.inference.optsolve(lowered, ..., checkpoint=directory)` saves the
+- `ds.optimization.optsolve(lowered, ..., checkpoint=directory)` saves the
   fit after every attempt and, when the directory already holds one,
   resumes from the newest.
 
-`ds.inference.NewtonTrustRegion()` and
-`ds.inference.LevenbergMarquardt()` also fit a lowered study, by dense
+`ds.optimization.NewtonTrustRegion()` and
+`ds.optimization.LevenbergMarquardt()` also fit a lowered study, by dense
 steps over the whole joint vector. `TrustRegion` is the best choice when
 the joint vector is large, since its curvature stays cluster-local.
 
@@ -277,6 +289,9 @@ result.experiments["A-potentiostatic"].opt_params
   experiment's parameters in the form `ds.pdesolve` takes through
   `theta=`.
 - `result.params` is the joint decision vector, shared handles first.
+- `result.work["inner_iterations"]` counts the polish iterations of each
+  member of the `nested_at` level, in the order of
+  `result.work["inner_members"]`.
 
 ## Uncertainty across the population
 
@@ -288,27 +303,27 @@ population methods estimate the spread of a parameter across the
 clusters:
 
 ```python
-posterior = ds.inference.laplace(lowered, result)
+posterior = ds.optimization.inference.laplace(lowered, result)
 posterior[D].sd                                      # the standard error of the shared diffusivity
 posterior[k]["A"].sd                                 # the standard error of the rate constant of particle A
 posterior.cov[D, k][None, "A"]                       # the covariance of D with k of particle A
 
-robust = ds.inference.cluster_covariance(lowered, result, cluster="particle")
-boot = ds.inference.bootstrap(lowered, result, replicates=100, key=jax.random.key(0))
+robust = ds.optimization.inference.cluster_covariance(lowered, result, cluster="particle")
+boot = ds.optimization.inference.bootstrap(lowered, result, replicates=100, key=jax.random.key(0))
 boot.interval(D)                                     # the bootstrap interval of the shared diffusivity
-prof = ds.inference.profile(lowered, result, k, owner="A", optimizer=ds.inference.TrustRegion(), max_steps=8)
+prof = ds.optimization.inference.profile(lowered, result, k, owner="A", optimizer=ds.optimization.inference.TrustRegion(), max_steps=8)
 prof.interval(0.95)                                  # the profile interval of the rate constant of particle A
 ```
 
-- `ds.inference.laplace(problem, fit)` is the Laplace approximation of
+- `ds.optimization.inference.laplace(problem, fit)` is the Laplace approximation of
   the joint posterior. `posterior[D]` is the marginal of a shared handle,
   `posterior[k]["A"]` the marginal of a varying handle in one cluster,
   and `posterior.cov[D, k]` a dictionary of covariances keyed by the
   pair of cluster labels, `None` for a shared handle.
-- `ds.inference.cluster_covariance(problem, fit, *, cluster)` estimates
+- `ds.optimization.inference.cluster_covariance(problem, fit, *, cluster)` estimates
   the covariance of the fit from the spread of the residuals between the
   clusters of `cluster`, without trusting the declared noise scale.
-- `ds.inference.bootstrap(problem, fit, *, replicates, key)` refits the
+- `ds.optimization.inference.bootstrap(problem, fit, *, replicates, key)` refits the
   study `replicates` times with the clusters reweighted, and
   `boot[handle]` returns the fitted values across the replicates. It
   refuses fewer than three clusters, naming the count and the minimum.
@@ -316,7 +331,7 @@ prof.interval(0.95)                                  # the profile interval of t
   takes from the fit, and `steps="refit"` refits each replicate to
   convergence. `checkpoint=` saves the run to a directory, and a later
   call with the same arguments resumes from it.
-- `ds.inference.profile(problem, fit, handle, *, owner=, optimizer=)`
+- `ds.optimization.inference.profile(problem, fit, handle, *, owner=, optimizer=)`
   walks one cluster's value of a varying handle, named by `owner=`, with
-  every other parameter refitted by `ds.inference.TrustRegion`
+  every other parameter refitted by `ds.optimization.inference.TrustRegion`
   ([the profile likelihood](identifiability.md#the-profile-likelihood)).

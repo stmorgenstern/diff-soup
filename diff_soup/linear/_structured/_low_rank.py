@@ -935,7 +935,9 @@ def _lower_invalidate(self, ctx: Any, *args: Any, **params: Any) -> Any:
     return mlir.lower_fun(invalidate_inner, multiple_results=True)(ctx, *args)
 
 
-@functools.lru_cache(maxsize=None)
+# One subclass per inner backend class (ours: the library defines fewer than ten backends; an
+# evicted class is rebuilt as a new type, so programs keyed on it trace again).
+@functools.lru_cache(maxsize=64)
 def _specialised(inner_cls: type) -> type:
     """The subclass of ``Woodbury`` whose capability flags are ``inner_cls``'s."""
     namespace: dict[str, Any] = {

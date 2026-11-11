@@ -34,11 +34,12 @@ The direct backends factor the iteration matrix and come in both forms.
   numeric factor across steps, and serves the reduced-precision solve
   modes of the problem's precision policy ([precision](precision.md)).
 - `"klu"` is SuiteSparse KLU on the host CPU, on float64 values. A batch
-  of independent matrices is factored one matrix after another. It is
-  the CPU sparse solver in the released wheels.
+  of independent matrices is factored one matrix after another.
 - `"superlu"` is SuperLU_MT on the host CPU, a threaded sparse LU on
-  float64 values. It is not in the wheels and comes with a
-  [source build](../../installation/index.md#install-from-source).
+  float64 values. It uses every core the process may run on unless
+  `OMP_NUM_THREADS` caps it.
+- `"klu"`, `"superlu"`, and `"cudss"` also factor complex matrices,
+  `complex128` and on cuDSS `complex64`.
 - `"dense"` is the XLA dense LU on CPU and GPU. It holds the LU of the
   assembled matrix and batches natively under `jax.vmap`. On a loaded CPU
   host, above a few hundred unknowns, its LU can stall on OpenBLAS threads
@@ -47,12 +48,6 @@ The direct backends factor the iteration matrix and come in both forms.
   at most ten unknowns, otherwise cuDSS on GPU and KLU on CPU. When
   the resolved sparse backend is unavailable the solve raises with a
   build hint, and `linear="dense"` opts into the dense cost.
-
-!!! warning "SuperLU_MT on more than one thread"
-    SuperLU_MT's threaded factorization can return a wrong solution and
-    report success, an upstream defect. A source build uses every core
-    the process may run on unless `OMP_NUM_THREADS` caps it. Set
-    `OMP_NUM_THREADS=1`, or use `"klu"`.
 
 The composed backends take arguments, so they are objects only.
 

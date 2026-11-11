@@ -15,7 +15,8 @@ How the pieces fit:
   shares that native analysis, whatever its precision rung or its
   ``symmetric``/``spd`` declaration, so the pattern is reordered once and
   stored on the device once; the native analysis is released when the last
-  such ``Analysis`` is collected. The device copies of the pattern are
+  such ``Analysis`` is collected and no compiled program that factors with it
+  exists. The device copies of the pattern are
   made on first use in a [SolveContext][diff_soup.linear.SolveContext] and
   freed with the last context that uses them.
 - The values of a factor or solve call arrive in the topology's coordinate
@@ -65,12 +66,15 @@ two ways:
   id and lane token are constants of the program (as they are when a
   jitted function factors in a context it closes over) passes
   ``static_context`` and ``static_lane``. A solve, refactor or invalidation
-  whose handle is the direct result of such a factor call, or of a refactor
-  call whose own held handle resolves the same way, passes ``static_path``
-  (the factor call's site, then each refactor call's site in order) with
-  the factor's context and lane ([handle_path][]); such a refactor still
-  reads its predicate. A static dispatch is counted as
-  ``static_dispatches`` in [contract_stats][].
+  whose handle is the direct result of a factor or refactor call of the
+  program passes ``static_path`` ([handle_path][]), which holds that
+  producing call's site alone; the handler then takes the handle words the
+  producing call wrote, when they are this handle's: written in the same
+  execution of the program into the buffer the call reads its handle
+  from. Otherwise (another execution, or another call of the same site in
+  this execution, wrote the site since) it reads the handle, as a dynamic
+  dispatch does. Such a refactor still reads its predicate. A static
+  dispatch is counted as ``static_dispatches`` in [contract_stats][].
 - Dynamic dispatch. Every other handle (one carried through a loop, passed
   into the program, computed, or produced under ``lax.map`` lanes or a
   traced context) is read back to the host before cuDSS is called: one
@@ -92,6 +96,14 @@ solve phase waits on the stream inside the library, so a solve returns to the
 host only once its result is ready, with or without a read of ours:
 ``host_reads == 0`` means that no read of ours synchronises, not that the
 solve overlaps with work queued after it.
+
+Complex values factor at either rung: ``complex128`` at ``"fp64"`` and
+``complex64`` at ``"fp32"``, through the ``c128`` and ``c64`` handlers, which
+share the native analysis, the assembly and the status rules of the real ones
+(a complex factor is never downcast). A transposed solve of a complex factor is
+the plain transpose ``A^T`` (cuDSS's transpose solve mode), never the conjugate
+transpose. A complex right-hand side on a real factor is solved by the real
+handler as one real block of its real and imaginary parts.
 
 The FFI targets are registered with JAX the first time this route is used,
 so importing the package with an extension that predates the contract
@@ -123,6 +135,7 @@ from diff_soup.linear._primitive import (
     CALL_FENCE_ATTRIBUTE,
     empty_slot_handle,
     lower_ffi_call,
+    lower_split_apply,
     lowered_site_key,
     storage_key,
 )
@@ -243,6 +256,12 @@ _RUNGS: dict[str, tuple[str, Any]] = {
     "fp64": ("f64", np.dtype(np.float64)),
     "fp32": ("f32", np.dtype(np.float32)),
 }
+#: Precision rung -> the same for complex values.
+_COMPLEX_RUNGS: dict[str, tuple[str, Any]] = {
+    "fp64": ("c128", np.dtype(np.complex128)),
+    "fp32": ("c64", np.dtype(np.complex64)),
+}
+_SUFFIXES = ("f64", "f32", "c128", "c64")
 
 _TARGET_PREFIX = "diff_soup_cudss_contract_"
 #: The factor, solve and refactor handlers take the operator values in the
@@ -252,13 +271,16 @@ _FACTOR_KIND, _SOLVE_KIND, _REFACTOR_KIND = "factor_coo", "solve_coo", "refactor
 _TARGET_NAMES = tuple(
     f"{_TARGET_PREFIX}{kind}_{suffix}"
     for kind in (_FACTOR_KIND, _SOLVE_KIND, _REFACTOR_KIND, "invalidate")
-    for suffix in ("f64", "f32")
+    for suffix in _SUFFIXES
 )
-_FACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_FACTOR_KIND}_{s}" for s in ("f64", "f32"))
-_REFACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_REFACTOR_KIND}_{s}" for s in ("f64", "f32"))
+_FACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_FACTOR_KIND}_{s}" for s in _SUFFIXES)
+_REFACTOR_TARGETS = frozenset(f"{_TARGET_PREFIX}{_REFACTOR_KIND}_{s}" for s in _SUFFIXES)
 #: The operand positions of a refactor call's held handle: after the ordering
 #: token, the values, the held values and the predicate.
 _REFACTOR_HANDLE_OPERANDS = (4, 5, 6)
+
+#: The XLA FFI type of the factor and refactor calls' state (one per call of a compiled program).
+_CALL_STATE_TYPE = "diff_soup_cudss_contract_call_state"
 
 _REGISTRATION_LOCK = threading.Lock()
 _REGISTERED = False
@@ -278,9 +300,10 @@ def _rebuild_command() -> str:
 def _native():
     """The loaded cuDSS extension, its contract FFI targets registered with JAX.
 
-    The eight FFI targets of the contract handlers (factor, solve, refactor
-    and invalidate, each at both rungs) are registered once per process, on
-    the first call.
+    The FFI targets of the contract handlers (factor, solve, refactor and
+    invalidate, for each value type) are registered once per process, on the
+    first call, after the type of the state the factor and refactor targets
+    keep for each call of a compiled program.
 
     Returns:
         The ``_native_solver`` extension module.
@@ -316,6 +339,16 @@ def _native():
                 f"The native cuDSS extension provides no handlers for {missing}, which the "
                 f"cuDSS factor contract needs; rebuild it {_rebuild_command()}."
             )
+        state_type = getattr(native_solver, "contract_call_state_type", None)
+        if state_type is not None:  # a module built before the calls had their state has none
+            # XLA refuses a handler whose state type it does not know, and it applies the pending
+            # registrations of a platform handlers first when it makes the platform's client, so
+            # the CUDA client is made before the state type and the handlers are registered.
+            try:
+                jax.devices("cuda")
+            except RuntimeError:  # no CUDA client in this process; nothing can run the handlers
+                pass
+            jax.ffi.register_ffi_type(_CALL_STATE_TYPE, state_type(), platform="CUDA")
         for name in _TARGET_NAMES:
             jax.ffi.register_ffi_target(name, handlers[name], platform="CUDA")
         _REGISTERED = True
@@ -522,7 +555,8 @@ class _CuDSSContractAnalysis:
     on the precision rung or the structure declaration, so every
     [Analysis][diff_soup.linear.Analysis] of one coordinate pattern and set
     of options holds the same record. The native analysis is released when
-    the last record that holds it is collected.
+    the last record that holds it is collected and no compiled program that
+    factors with it exists.
     """
 
     __slots__ = (
@@ -1174,24 +1208,13 @@ def _identity_attributes(context: Optional[int], lane: Optional[int]) -> dict[st
 
 
 def _path_attributes(resolved: Optional[tuple]) -> dict[str, Any]:
-    """``static_path``, ``static_context`` and ``static_lane`` for a call that consumes a handle.
+    """``static_path`` for a call that consumes a handle: its producing call's site alone.
 
-    An empty path with ``-1`` for both means the handler reads the handle; a
-    path with ``-1`` for both names the producing call whose result words
-    the handler takes in the same execution.
+    The handler takes the result words of that call in the same execution
+    when they are this handle's; an empty path means it reads the handle.
     """
-    if resolved is None:
-        return {
-            "static_path": np.zeros((0,), np.int64),
-            "static_context": np.int64(-1),
-            "static_lane": np.int64(-1),
-        }
-    path, context, lane = resolved
-    return {
-        "static_path": np.asarray(path, np.int64),
-        "static_context": np.int64(context),
-        "static_lane": np.int64(lane),
-    }
+    path = () if resolved is None else resolved[0][-1:]
+    return {"static_path": np.asarray(path, np.int64)}
 
 
 def _storage_attributes(storage: Optional[str], context: Any) -> dict[str, np.int64]:
@@ -1244,27 +1267,64 @@ def _record(analysis: Analysis) -> _CuDSSContractAnalysis:
     return record
 
 
-def _check_real(dtype: Any, precision: str, what: str = "values") -> None:
-    """Refuse values or right-hand sides that are not float32 or float64.
+_TAKEN = tuple(np.dtype(t) for t in (np.float32, np.float64, np.complex64, np.complex128))
 
-    The native handlers assemble float32 and float64 values at either rung
-    (casting to the rung's dtype); complex and half-precision arrays are not
-    taken.
+
+def _is_complex(dtype: Any, precision: str, what: str = "values") -> bool:
+    """Whether values or right-hand sides of ``dtype`` are complex, refusing a dtype not taken.
+
+    The native handlers assemble real values as the rung's real dtype and
+    complex values as its complex dtype (casting to the rung's width);
+    float32, float64, complex64 and complex128 are taken, half-precision and
+    integer arrays are not.
+
+    Returns:
+        Whether the dtype is complex.
 
     Raises:
         FactorContractError: For any other dtype.
     """
-    if np.dtype(dtype) not in (np.dtype(np.float32), np.dtype(np.float64)):
+    if np.dtype(dtype) not in _TAKEN:
         raise FactorContractError(
-            f"cuDSS takes float32 or float64 {what} (the {precision} rung casts them to its "
-            f"dtype); got {np.dtype(dtype).name}. Cast the {what} before the call."
+            f"cuDSS takes float32, float64, complex64 or complex128 {what} (the {precision} "
+            f"rung casts them to its width); got {np.dtype(dtype).name}. Cast the {what} before "
+            "the call."
+        )
+    return bool(np.issubdtype(np.dtype(dtype), np.complexfloating))
+
+
+def _check_complex_options(analysis: Analysis, dtype: Any, precision: str) -> None:
+    """Refuse the float64 precision options on complex values, which the handlers ignore.
+
+    ``downcast_factors`` and ``emulation_mantissa_bits`` act on float64
+    factors only; a complex factor would silently keep its full width.
+
+    Raises:
+        FactorContractError: If the values are complex and the analysis sets either option.
+    """
+    if not _is_complex(dtype, precision):
+        return
+    options = dict(analysis.options)
+    named = [
+        name
+        for name, unset in (
+            ("downcast_factors", (None, False)),
+            ("emulation_mantissa_bits", (None,)),
+        )
+        if options.get(name) not in unset
+    ]
+    if named:
+        raise FactorContractError(
+            f"cuDSS applies {' and '.join(named)} to float64 factors only, and these values are "
+            f"{np.dtype(dtype).name}; analyze the complex operator without "
+            f"{' and '.join(named)}."
         )
 
 
-def _rung(precision: str) -> tuple[str, np.dtype]:
-    """The FFI target suffix and the value dtype of a precision rung."""
+def _rung(precision: str, complex_: bool = False) -> tuple[str, np.dtype]:
+    """The FFI target suffix and the value dtype of a precision rung, real or complex."""
     try:
-        return _RUNGS[precision]
+        return (_COMPLEX_RUNGS if complex_ else _RUNGS)[precision]
     except KeyError:
         raise FactorContractError(
             f"cuDSS factors at the precision rungs {sorted(_RUNGS)}; got {precision!r}."
@@ -1277,10 +1337,11 @@ def factor_avals(
     """The handle: three ``int32`` scalars, the context id, the slot and its generation.
 
     Raises:
-        FactorContractError: If the values are not real.
+        FactorContractError: If cuDSS does not take the values' dtype, or complex values
+            meet a float64 precision option.
     """
-    del analysis, orientation, tol
-    _check_real(values_aval.dtype, precision)
+    del orientation, tol
+    _check_complex_options(analysis, values_aval.dtype, precision)
     scalar = ShapedArray((), jnp.int32)
     return (scalar, scalar, scalar)
 
@@ -1297,10 +1358,11 @@ def empty_handle(
     """The handle of an empty factor: ``(context id, -1, -1)``, slot ``-1`` holding nothing.
 
     Raises:
-        FactorContractError: If the values are not real.
+        FactorContractError: If cuDSS does not take the values' dtype, or complex values
+            meet a float64 precision option.
     """
-    del analysis, orientation, tol
-    _check_real(values_aval.dtype, precision)
+    del orientation, tol
+    _check_complex_options(analysis, values_aval.dtype, precision)
     return empty_slot_handle(context_id, leaves=3)
 
 
@@ -1321,7 +1383,9 @@ def lower_factor(
     The call names its native site by a key computed from the lowered call
     ([lowered_site_key][diff_soup.linear._primitive.lowered_site_key]); the
     handler creates the site on the first call with that key, so two
-    lowerings of one program share their sites and their program text. The
+    lowerings of one program share their sites and their program text, and
+    numbers the calls that carry one key in the live programs, so each call of
+    a function that a program calls several times has a site of its own. The
     values go to the handler in the coordinate order of the topology; it assembles
     them on the device into the CSR values of ``A_bc`` at the rung's
     precision, straight into the slot's value copy, and factors them, for
@@ -1341,10 +1405,9 @@ def lower_factor(
     """
     del tol
     record = _record(analysis)
-    suffix, _ = _rung(precision)
+    suffix, _ = _rung(precision, _is_complex(ctx.avals_in[0].dtype, precision))
     _native()
     transposed = orientation == "AT"
-    _check_real(ctx.avals_in[0].dtype, precision)
     site = lowered_site_key(
         ctx, "cudss factor", record.native_id, orientation, precision, _call_shapes(ctx)
     )
@@ -1398,9 +1461,10 @@ def lower_apply(
     passes values ``(lanes, nnz)``, handle leaves ``(lanes,)`` and ``b`` of
     shape ``(lanes, n)`` or ``(lanes, nrhs, n)``, lane ``k`` solving with
     lane ``k`` of the batch slot. When the handle resolves by the rule of
-    [handle_path][], the call carries ``static_path``, ``static_context``
-    and ``static_lane`` and the handler finds the slot without reading the
-    handle back; otherwise they are an empty path and ``-1``.
+    [handle_path][], the call carries ``static_path``, the producing call's
+    site, and the handler takes the handle words of that call in place of a
+    read when they are this handle's (see the module's "Static dispatch");
+    otherwise the path is empty.
 
     A solve with ``transpose=False`` of a factor that names shared storage
     (``storage``) carries the storage's key and, when the program states it,
@@ -1409,17 +1473,47 @@ def lower_apply(
     reading the handle; otherwise it follows the rule above. A transposed
     solve of such a factor follows the rule above.
 
+    Complex values solve with the complex handler, ``b`` and ``x`` in the
+    rung's complex dtype; a complex ``b`` on real values is solved by the
+    real handler as one real block of its real and imaginary parts
+    ([lower_split_apply][diff_soup.linear._primitive.lower_split_apply]), stacked
+    along the right-hand side axis: ``(2 nrhs, n)``, or ``(lanes, 2 nrhs, n)``
+    for a batched handle.
+
     Returns:
         The MLIR values of ``(x, status, order)``.
 
     Raises:
-        FactorContractError: If ``b`` is complex.
+        FactorContractError: If the values or ``b`` are of a dtype cuDSS does not take.
     """
     del n_handle, orientation, tol
-    _check_real(ctx.avals_in[0].dtype, precision)
-    _check_real(ctx.avals_in[-1].dtype, precision, "right-hand sides")
+    complex_values = _is_complex(ctx.avals_in[0].dtype, precision)
+    complex_b = _is_complex(ctx.avals_in[-1].dtype, precision, "right-hand sides")
+    if complex_b and not complex_values:
+        return lower_split_apply(
+            ctx,
+            b,
+            lambda real_ctx, block: lower_apply(
+                real_ctx,
+                values,
+                held_context,
+                slot,
+                generation,
+                order,
+                block,
+                n_handle=3,
+                analysis=analysis,
+                orientation="A",
+                transpose=transpose,
+                precision=precision,
+                tol=None,
+                storage=storage,
+            ),
+            axis=1 if ctx.avals_in[1].shape else 0,
+            real_dtype=_rung(precision)[1],
+        )
     record = _record(analysis)
-    suffix, _ = _rung(precision)
+    suffix, _ = _rung(precision, complex_values)
     _native()
     resolved = handle_path(held_context, slot, generation, analysis_id=record.native_id)
     avals = list(ctx.avals_in)
@@ -1473,10 +1567,10 @@ def lower_refactor(
     is refactored, a lane that asks from the values the call carries for it
     and a lane that does not from the values its slot already holds. When
     the held handle resolves by the rule of [handle_path][], the call
-    carries ``static_path``, ``static_context`` and ``static_lane`` and the
-    handler finds the held slot without reading the handle back; otherwise
-    they are an empty path and ``-1``. The predicate is always read back to
-    the host.
+    carries ``static_path``, the producing call's site, and the handler
+    takes the handle words of that call in place of a read when they are
+    this handle's; otherwise the path is empty. The predicate is always read
+    back to the host.
 
     The call receives ``values`` and ``held_values`` in the coordinate order
     of the topology and the predicate before the handle; the handler
@@ -1499,10 +1593,9 @@ def lower_refactor(
     """
     del n_handle, tol
     record = _record(analysis)
-    suffix, _ = _rung(precision)
+    suffix, _ = _rung(precision, _is_complex(ctx.avals_in[0].dtype, precision))
     _native()
     transposed = orientation == "AT"
-    _check_real(ctx.avals_in[0].dtype, precision)
     resolved = handle_path(held_context, held_slot, held_generation, analysis_id=record.native_id)
     site = lowered_site_key(
         ctx,
@@ -1513,6 +1606,7 @@ def lower_refactor(
         _call_shapes(ctx),
         bool(adopt),
         storage,
+        per_device=storage is not None,
     )
     results, order = lower_ffi_call(
         ctx,
@@ -1550,13 +1644,16 @@ def lower_invalidate(
 ) -> list:
     """Lower an invalidation to one FFI call ordered by the order word.
 
+    The call carries no values, so it goes to the rung's real handler, which
+    invalidates the factor the handle names whether it is real or complex.
+
     At run time the slot the handle names (every lane of a batch slot for a
     batched handle) no longer stands for any factor: the next solve on it
     refactors it from the values that solve carries. The context id the
     handle carries is the one used; the separate ``context_id`` operand is
     not passed on. When the handle resolves by the rule of [handle_path][],
-    the call carries ``static_path``, ``static_context`` and
-    ``static_lane``; otherwise an empty path and ``-1``. A factor that names
+    the call carries ``static_path``, the producing call's site; otherwise
+    the path is empty. A factor that names
     shared storage (``storage``) invalidates that storage, found from its
     key as a solve finds it.
 

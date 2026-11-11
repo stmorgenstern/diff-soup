@@ -13,14 +13,13 @@ pip install "diff-soup[cu12]"   # CUDA 12, driver 525 or newer
 
 Requirements:
 
-- Linux x86_64
+- Linux on x86_64 or ARM (aarch64)
 - Python 3.12 or 3.13
 - glibc 2.28 or newer
 - for the GPU extras, an NVIDIA GPU of compute capability 8.0 or newer
 
-The wheel bundles the KLU sparse solver and installs JAX 0.11. It does
-not include SuperLU_MT, which a [source build](#install-from-source)
-adds. The GPU extras add the CUDA build of JAX and the cuDSS sparse
+The wheel bundles the KLU and SuperLU_MT sparse solvers and installs
+JAX 0.11. The GPU extras add the CUDA build of JAX and the cuDSS sparse
 solver, so no compiler or CUDA toolkit is needed. The `mesh` extra installs
 gmsh, which meshes complex geometries, and meshio, which reads and writes mesh
 files, for example `pip install "diff-soup[cu13,mesh]"`. OpenCV, which
@@ -73,8 +72,13 @@ last command at a CUDA 12 toolkit's compiler with
 
 `pip install -e` in the last command installs in development mode, and the
 `dev` extra adds the test and lint tools. The SuperLU_MT solver is built when
-a SuperLU_MT installation is found; `diff_soup/_internal/superlu_ffi/build_superlu_mt.sh`
-builds one.
+it finds an installation made by `diff_soup/_internal/superlu_ffi/build_superlu_mt.sh`.
+Other SuperLU_MT builds, such as conda-forge's, carry their own COLAMD and are
+refused.
+
+On ARM (aarch64), pass `-C cmake.define.KLU_VENDOR_DIR=<tree>` naming a
+SuiteSparse 7.10 tree built for the host.
+`diff_soup/_internal/klu_ffi/build_suitesparse.sh` builds one.
 
 ## Troubleshooting
 
@@ -83,3 +87,6 @@ builds one.
 - If `libcudss.so.1` is not found, add the `nvidia/*/lib` directories of
   the installed wheels to `LD_LIBRARY_PATH` before starting Python.
 - To run on the CPU of a GPU machine, set `JAX_PLATFORMS=cpu`.
+- On a host with more than 64 logical CPUs, the threaded OpenBLAS of the
+  numpy and scipy wheels can crash JAX on the CPU. Set
+  `OPENBLAS_NUM_THREADS=1` before importing numpy or jax.

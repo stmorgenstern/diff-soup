@@ -5,7 +5,9 @@
 #   bash diff_soup/_internal/superlu_ffi/build_superlu_mt.sh [PREFIX]
 #
 # PREFIX defaults to $CONDA_PREFIX. The script installs into it:
-#   lib/libsuperlu_mt_OPENMP.a    SuperLU_MT, OpenMP threads, 32-bit indices, -fPIC
+#   lib/libsuperlu_mt_OPENMP.a    SuperLU_MT, OpenMP threads, 32-bit indices, -fPIC,
+#                                 with the patches in patches/ applied, without
+#                                 its own COLAMD
 #   lib/libsuperlu_mt_blas.a      the reference BLAS that ships with SuperLU_MT
 #   include/superlu_mt/*.h        the SuperLU_MT headers
 # Then `pip install .` (or a CMake build of diff_soup/_internal) builds the
@@ -21,10 +23,18 @@
 #   JOBS               parallel compile jobs (default: 8)
 #   CC                 C compiler (default: gcc)
 #
-# The build needs git (unless SUPERLU_MT_SOURCE is set), CMake >= 3.13, a C
-# compiler with OpenMP, and make. SuperLU_MT is BSD-3 licensed; see
+# The patches in patches/ are applied in name order to a copy of the source, so
+# a given checkout is never modified, and apply to the default commit only.
+# 0001 makes the factorization correct on several threads. 0002 leaves
+# SuperLU_MT's own COLAMD (SRC/colamd.c, LGPL-2.1-or-later) out of the library,
+# so its colamd calls stay undefined; the extension links SuiteSparse's COLAMD
+# (BSD-3-Clause), the one the KLU extension ships, which has the same 32-bit
+# interface (see superlu_ffi/CMakeLists.txt). The build needs git (unless
+# SUPERLU_MT_SOURCE is set), CMake >= 3.13, a C compiler with OpenMP, patch and
+# make. SuperLU_MT is BSD-3 licensed; see
 # diff_soup/_internal/superlu_ffi/THIRD_PARTY_NOTICES.md.
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PREFIX="${1:-${CONDA_PREFIX:-}}"
 if [ -z "$PREFIX" ]; then
@@ -57,7 +67,15 @@ if [ -e "$PREFIX/lib/libblas.a" ]; then
     exit 2
 fi
 
-cmake -S "$SRC" -B "$BUILD_DIR/cmake" -G "Unix Makefiles" \
+# Patch a copy of the source.
+rm -rf "$BUILD_DIR/patched"
+mkdir -p "$BUILD_DIR/patched"
+(cd "$SRC" && tar --exclude=.git -cf - .) | tar -xf - -C "$BUILD_DIR/patched"
+for patch_file in "$HERE"/patches/*.patch; do
+    patch -s -p1 --batch -d "$BUILD_DIR/patched" < "$patch_file"
+done
+
+cmake -S "$BUILD_DIR/patched" -B "$BUILD_DIR/cmake" -G "Unix Makefiles" \
     -DCMAKE_C_COMPILER="$CC" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_FLAGS="-O3 -fPIC" \
@@ -78,4 +96,5 @@ cmake --install "$BUILD_DIR/cmake"
 # Give the reference BLAS a name no other package picks up through -lblas.
 mv -f "$PREFIX/lib/libblas.a" "$PREFIX/lib/libsuperlu_mt_blas.a"
 
-echo "SuperLU_MT $(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo "from $SRC") installed into $PREFIX"
+echo "SuperLU_MT $(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo "from $SRC")," \
+    "patched with $(cd "$HERE/patches" && echo *.patch), installed into $PREFIX"

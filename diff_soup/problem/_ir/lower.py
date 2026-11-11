@@ -22,17 +22,16 @@ Three responsibilities:
    fp64 this is a no-op; for a mixed-precision config it prevents forward-pass
    precision loss from corrupting the factor dtype.
 
-The L1-dependent host analysis (operator-bank residual / Jacobian kernels,
-boundary geometry, FEM sparsity stencils) is injected via a ``LoweringOps``
-provider — see [_OPS_PROVIDER][] and [set_lowering_ops][].  The
-``problem`` layer may not import ``domains`` directly (the import-direction law,
-AST-enforced).
+The host analysis that needs the ``domains`` operator bank (residual and
+Jacobian kernels, boundary geometry, FEM sparsity stencils) is
+``diff_soup.problem._lowering.provider.analyze``, imported where it is called,
+since the provider imports this module.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
-from collections.abc import Callable
 from typing import Any, Optional
 
 import equinox as eqx
@@ -49,25 +48,6 @@ from diff_soup.problem._cache import compose_content_key
 from .content_hash import content_hash
 from .equation_set import EquationSet
 from .lowered_problem import LoweredProblem
-
-# ---------------------------------------------------------------------------
-# Operator-provider injection seam.
-# ---------------------------------------------------------------------------
-#
-# The residual / Jacobian / sparsity / mass-diagonal kernels for an EquationSet
-# are built from the ``domains.operators`` bank. The ``problem`` layer cannot
-# import ``domains`` directly (the import-direction law); a layer that may import
-# ``domains`` (the public surface or a domains-side registration) supplies a
-# provider here.  The provider protocol is the single function:
-#
-#     analyze(eqset, *, precision) -> _LoweringAnalysis
-#
-# which performs the host analysis pass (layout, bcs, sparsity, mass_diagonal,
-# residual_fn, jac_blocks_fn, observe_fn, controls_fn), applying the
-# boundary-cast law at closure entry.  ``set_lowering_ops`` registers it.  The
-# only mutable module state is the registered provider, set once at import of
-# the wiring layer.
-_OPS_PROVIDER: Optional[Callable[..., "_LoweringAnalysis"]] = None
 
 
 class _LoweringAnalysis:
@@ -105,54 +85,24 @@ class _LoweringAnalysis:
             setattr(self, name, kw.get(name))
 
 
-def set_lowering_ops(provider: Optional[Callable[..., _LoweringAnalysis]]) -> None:
-    """Register the ``domains``-aware analysis provider for ``lower()`` (the injection seam).
-
-    Called once by the wiring layer — the layer that may import
-    ``domains.operators``.  The provider performs the host analysis pass and
-    returns a
-    [_LoweringAnalysis][diff_soup.problem._ir.lower._LoweringAnalysis].  Pass
-    ``None`` to clear the seam (the
-    test / session-reset hook).
-
-    Args:
-        provider: ``analyze(eqset, *, precision) -> _LoweringAnalysis``, or
-            ``None`` to clear the registered provider.
-    """
-    global _OPS_PROVIDER
-    _OPS_PROVIDER = provider
-
-
-def _build_analysis(eqset: EquationSet, *, precision: Precision) -> _LoweringAnalysis:
-    """Run the host analysis pass via the injected provider.
-
-    The residual / Jacobian / sparsity / mass-diagonal construction requires
-    ``domains.operators``, which the ``problem`` layer cannot import directly.
-    When no provider is registered, raises a [LoweringError][]
-    directing the caller to register one via [set_lowering_ops][].
+def _build_analysis(
+    eqset: EquationSet, *, precision: Precision, probe_stencils: bool = True
+) -> _LoweringAnalysis:
+    """Run the host analysis pass, ``diff_soup.problem._lowering.provider.analyze``.
 
     Args:
         eqset: The EquationSet to analyse.
         precision: The dtype policy (its ``compute_dtype`` drives the
             boundary-cast law at closure entry).
+        probe_stencils: Whether to measure stencils at probe states, or else read
+            them from the residual's tangent map, as an ``exact_sparsity`` build does.
 
     Returns:
         The [_LoweringAnalysis][].
-
-    Raises:
-        LoweringError: When no analysis provider is registered.
     """
-    if _OPS_PROVIDER is None:
-        raise LoweringError(
-            "lower(): no operator-bank analysis provider is registered. "
-            "The residual / Jacobian / sparsity / mass-diagonal kernels are "
-            "built from diff_soup.domains.operators, which the problem layer "
-            "may not import directly (import-direction law, AST-enforced). "
-            "A layer that may import domains.operators must register a provider "
-            "via diff_soup.problem._ir.lower.set_lowering_ops(provider) before "
-            "calling lower()."
-        )
-    return _OPS_PROVIDER(eqset, precision=precision)
+    from diff_soup.problem._lowering.provider import analyze
+
+    return analyze(eqset, precision=precision, probe_stencils=probe_stencils)
 
 
 def _assemble_lowered_problem(
@@ -162,6 +112,7 @@ def _assemble_lowered_problem(
     layout: Layout,
     precision: Precision,
     structure_key: Any,
+    exact_sparsity: bool = False,
     boundary: Optional[dict] = None,
     initial_lambda_si: Any = None,
 ) -> LoweredProblem:
@@ -209,6 +160,7 @@ def _assemble_lowered_problem(
         precision=precision,
         quad_fields=getattr(eqset, "quad_fields", frozenset()),
         _structure_key=structure_key,
+        _exact_sparsity=exact_sparsity,
     )
 
 
@@ -225,13 +177,13 @@ def lower(
     lowered problem.
 
     Args:
-        eqset: An [`EquationSet`][diff_soup.problem.EquationSet] or a [`Study`][diff_soup.inference.Study].
+        eqset: An [`EquationSet`][diff_soup.problem.EquationSet] or a [`Study`][diff_soup.optimization.inference.Study].
         layout: Device placement, a [`Layout`][diff_soup.Layout], or `None` for the default.
         precision: [`Precision`][diff_soup.Precision] of an equation set, or `None` for the default, refused for a study.
         **options: Keywords for a study, such as `chunk`, refused for an equation set.
 
     Returns:
-        A [`LoweredProblem`][diff_soup.problem.LoweredProblem], or a [`LoweredStudy`][diff_soup.inference.LoweredStudy] for a study.
+        A [`LoweredProblem`][diff_soup.problem.LoweredProblem], or a [`LoweredStudy`][diff_soup.optimization.inference.LoweredStudy] for a study.
 
     Raises:
         LoweringError: If `eqset` is neither an equation set nor a study.
@@ -243,7 +195,7 @@ def lower(
                 f"lower() takes an EquationSet or a Study; got {type(eqset).__name__}. "
                 "Build a spec via ds.problem(...) and call .to_equation_set(), construct an "
                 "EquationSet directly, or declare the experiments to fit in a "
-                "diff_soup.inference.Study."
+                "diff_soup.optimization.inference.Study."
             )
         if precision is not None:
             raise TypeError(
@@ -265,6 +217,7 @@ def lower_declared(
     *,
     layout: Optional[Layout] = None,
     precision: Optional[Precision] = None,
+    exact_sparsity: Optional[bool] = None,
     bounds: Optional[tuple] = None,
     declarations: Optional[tuple] = None,
     geometry_scales: Optional[tuple] = None,
@@ -280,6 +233,8 @@ def lower_declared(
         eqset: The EquationSet to lower.
         layout: Device-placement policy (default = single device).
         precision: Dtype policy (default = fp64).
+        exact_sparsity: Hold only the Jacobian entries a tangent can reach; see
+            ``ProblemSpec.build``. ``None`` does so unless an equation uses ``q.dt``.
         bounds: ``(handle, (lower, upper), learnable)`` per bounded declared
             parameter; ``None`` attaches none.
         declarations: The declaration handles of the build, matched by name.
@@ -302,17 +257,28 @@ def lower_declared(
     key = compose_content_key(
         structure_hash, layout=layout, precision=precision, scales=eqset.scales
     )
+    if exact_sparsity is not False:
+        key = ("exact_sparsity" if exact_sparsity else "sparsity", key)
     built: list = []
 
-    def _build() -> tuple:
-        analysis = _build_analysis(eqset, precision=precision)
+    def _assemble(exact: bool) -> tuple:
+        analysis = _build_analysis(eqset, precision=precision, probe_stencils=not exact)
         template = _assemble_lowered_problem(
             analysis,
             eqset,
             layout=layout,
             precision=precision,
             structure_key=key,
+            exact_sparsity=exact,
         )
+        return template, analysis
+
+    def _build() -> tuple:
+        template, analysis = _assemble(exact_sparsity is not False)
+        if exact_sparsity is None and template.derivative_forms():
+            # The tangent walk reads a residual with an explicit mass; a q.dt
+            # form keeps the declared blocks, measured at probe states.
+            template, analysis = _assemble(False)
         built.append(template)
         return template, analysis
 
@@ -327,6 +293,7 @@ def lower_declared(
             layout=layout,
             precision=precision,
             structure_key=key,
+            exact_sparsity=template._exact_sparsity,
             boundary=_rewrapped_boundary_slots(analysis, eqset),
             initial_lambda_si=_initial_bordered_values(eqset, analysis.initial_lambda_si),
         )
@@ -453,12 +420,12 @@ def _value_copy(
     The copy is ``eqx.combine(theta, static)`` with ``source``'s static
     partition: new tuple, dict and module nodes down to every leaf, so it shares
     only immutable things (arrays, functions, static fields) with ``source`` and
-    with other copies.  Equal values and bounds return the memoized object,
-    whose handle metadata (the bounds' and declarations' handles, matched by
+    with other copies.  Equal values, bounds and priors return the memoized
+    object, whose handle metadata (the bounds' and declarations' handles, matched by
     name) becomes the caller's; a traced value (lowering inside a
     transformation) has no bytes to digest, so its copy is not memoized.
     """
-    digest = _value_digest(theta, bounds)
+    digest = _value_digest(theta, bounds, declarations)
     made: list = []
 
     def _make() -> LoweredProblem:
@@ -492,8 +459,14 @@ def _value_copy(
     return copy
 
 
-def _value_digest(theta: Any, bounds: Optional[tuple]) -> Optional[str]:
-    """SHA-256 of the value leaves (dtype, shape and bytes, in order) and the bounds.
+def _value_digest(
+    theta: Any, bounds: Optional[tuple], declarations: Optional[tuple] = None
+) -> Optional[str]:
+    """SHA-256 of the value leaves (dtype, shape and bytes, in order), the bounds and the priors.
+
+    The priors are those of ``declarations``. A fit reads each parameter's prior
+    from the declarations of its problem, so problems that differ only in a
+    prior are two problems.
 
     ``None`` when a leaf is traced: a value inside a transformation has no bytes.
     """
@@ -512,6 +485,11 @@ def _value_digest(theta: Any, bounds: Optional[tuple]) -> Optional[str]:
                 h.update(f"|bound:{getattr(handle, 'name', handle)}:{bool(learnable)}".encode())
                 for limit in tuple(limits):
                     _digest_value(h, limit)
+        for declaration in declarations or ():
+            prior = getattr(declaration, "prior", None)
+            if prior is not None:
+                h.update(f"|prior:{getattr(declaration, 'name', declaration)}".encode())
+                _digest_prior(h, prior)
     except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError):
         return None
     return h.hexdigest()
@@ -528,6 +506,35 @@ def _digest_value(h: Any, value: Any) -> None:
         return
     h.update(f"|{array.dtype.str}:{array.shape}:".encode())
     h.update(np.ascontiguousarray(array).tobytes())
+
+
+def _digest_prior(h: Any, prior: Any) -> None:
+    """Feed a prior's type and field values to the hash ``h``.
+
+    A dataclass (an ``eqx.Module`` included) is read field by field and a tuple
+    or list item by item, so an array field enters by its bytes, never by a
+    repr that may elide them.
+    """
+    if dataclasses.is_dataclass(prior) and not isinstance(prior, type):
+        h.update(f"|{type(prior).__module__}.{type(prior).__qualname__}(".encode())
+        for field in dataclasses.fields(prior):
+            h.update(f"{field.name}=".encode())
+            _digest_prior(h, getattr(prior, field.name))
+        h.update(b")")
+    elif isinstance(prior, (tuple, list)):
+        h.update(f"|{type(prior).__name__}[".encode())
+        for item in prior:
+            _digest_prior(h, item)
+        h.update(b"]")
+    else:
+        _digest_value(h, prior)
+
+
+def prior_digest(prior: Any) -> str:
+    """SHA-256 of a prior's type and field values, equal for priors equal in content."""
+    h = hashlib.sha256()
+    _digest_prior(h, prior)
+    return h.hexdigest()
 
 
 def _initial_bordered_values(eqset: EquationSet, reference: Any) -> Any:

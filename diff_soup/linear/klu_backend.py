@@ -1,7 +1,7 @@
 """SuiteSparse KLU sparse-direct backend (host CPU) on the analyze / factor / solve contract.
 
 [KLUBackend][diff_soup.linear.klu_backend.KLUBackend], exported as
-``diff_soup.linear.KLU``, factors real float64 matrices with SuiteSparse
+``diff_soup.linear.KLU``, factors float64 and complex128 matrices with SuiteSparse
 **KLU** through the native ``diff_soup._internal.klu_ffi`` extension
 (``_native_klu``). The symbolic analysis of a pattern is built once on the
 host; numeric factors live in host memory owned by a
@@ -10,11 +10,12 @@ the factor's order word and returns it, so the operations on a factor that
 is passed from one to the next keep that order under ``jit``, ``vmap`` and
 both autodiff modes.
 
-Dtype contract: KLU factorizes real double-precision matrices only. Complex
-values or right-hand sides are refused at trace time with
-[FactorContractError][diff_soup.linear.FactorContractError] (a complex system
-must be embedded as its real ``2n`` block form, or solved with a backend that
-factors complex values).
+Dtype contract: KLU factors at the ``"fp64"`` rung: real values as ``float64``
+(``klu_factor``) and complex values as ``complex128`` (``klu_z_factor``), with
+one symbolic analysis of the pattern for both. A complex right-hand side on a
+real factor is solved as one real block of its real and imaginary parts. A
+transposed solve of a complex factor is the plain transpose ``A^T``
+(``klu_z_tsolve`` with ``conj_solve = 0``), never the conjugate transpose.
 
 Telemetry: [native_stats][diff_soup.linear.klu_backend.KLUBackend.native_stats]
 reports the process-wide counters of the extension (factorizations,
@@ -38,7 +39,6 @@ from diff_soup._layout import Layout
 from diff_soup.linear._api import LinearSolver, SparseTopology, option_field_items
 from diff_soup.linear._factor import (
     Analysis,
-    FactorContractError,
     SolveContext,
     dirichlet_rows,
 )
@@ -49,7 +49,10 @@ from diff_soup.linear._primitive import (
     lower_ffi_call,
     lower_slot_apply,
     lower_slot_refactor,
+    lower_split_apply,
     lowered_site_key,
+    slot_dtype,
+    slot_targets,
     storage_key,
 )
 
@@ -73,9 +76,9 @@ KLU_SCALINGS: dict[str, int] = {"none": 0, "sum": 1, "max": 2}
 
 _KLU_OPTION_NAMES = ("ordering", "btf", "scale", "pivot_tolerance")
 
-_FACTOR_TARGET = "diffsoup_klu_factor_f64"
-_REFACTOR_TARGET = "diffsoup_klu_refactor_f64"
-_APPLY_TARGET = "diffsoup_klu_apply_f64"
+#: The common prefix of the extension's FFI targets
+#: ([slot_targets][diff_soup.linear._primitive.slot_targets]).
+_TARGET_PREFIX = "diffsoup_klu"
 
 
 def _native():
@@ -112,7 +115,10 @@ class _KLUContractAnalysis:
 
 
 def _release_native_analysis(native_id: int) -> None:
-    """Drop the native registry's reference to an analysis (its sites keep it alive)."""
+    """Release a native analysis: its call sites and its factor slots in every context.
+
+    A compiled program that factors with it keeps it until the program is collected.
+    """
     try:
         _native().analysis_release(native_id)
     except Exception:  # noqa: BLE001 - interpreter shutdown or a missing module
@@ -158,21 +164,28 @@ def _parse_contract_options(options: tuple) -> dict[str, Any]:
     }
 
 
-def _site_key(ctx: Any, kind: str, analysis: Analysis, *parts: Any) -> np.int64:
+def _site_key(
+    ctx: Any, kind: str, analysis: Analysis, *parts: Any, per_device: bool = False
+) -> np.int64:
     """The native site key of one lowered factor or refactor call on ``analysis``.
 
     A deterministic key of the lowered call
     ([lowered_site_key][diff_soup.linear._primitive.lowered_site_key]): the
     handler creates the site on the first call that carries it, so two
-    lowerings of one program share their sites and their program text. A
-    site belongs to no context: its slots are keyed by the context id the
-    call carries at run time, and each slot is freed with its context.
+    lowerings of one program share their sites and their program text. The
+    handler numbers the calls that carry one key in the live programs, so
+    each call of a function that a program calls several times has a site of
+    its own. A site belongs to no context: its slots are keyed by the context
+    id the call carries at run time, and each slot is freed with its context.
     ``parts`` are the call's parameters and operand shapes, which tell
-    calls of otherwise equal programs apart.
+    calls of otherwise equal programs apart; ``per_device`` marks a call on
+    shared storage, whose slot the extension keys by device.
     """
     record: _KLUContractAnalysis = analysis.backend_analysis
     shapes = tuple((tuple(aval.shape), str(aval.dtype)) for aval in ctx.avals_in)
-    return lowered_site_key(ctx, f"klu {kind}", record.native_id, shapes, *parts)
+    return lowered_site_key(
+        ctx, f"klu {kind}", record.native_id, shapes, *parts, per_device=per_device
+    )
 
 
 def _analysis_id(analysis: Analysis) -> np.int64:
@@ -181,21 +194,20 @@ def _analysis_id(analysis: Analysis) -> np.int64:
     return np.int64(record.native_id)
 
 
-def _check_real(dtype: Any, what: str = "values") -> None:
-    """Raise unless ``dtype`` is a real floating dtype."""
-    if not jnp.issubdtype(dtype, jnp.floating):
-        raise FactorContractError(
-            f"KLU factors real matrices only; got {what} of dtype {jnp.dtype(dtype)}. Embed a "
-            "complex system in its real 2n block form [[Re, -Im], [Im, Re]] or use a backend "
-            "that factors complex values."
-        )
+def _native_dtype(dtype: Any) -> np.dtype:
+    """The dtype the native calls take for values of ``dtype``: float64 or complex128.
+
+    Raises:
+        FactorContractError: If ``dtype`` is neither a real nor a complex floating dtype.
+    """
+    return slot_dtype(dtype, "KLU")
 
 
 class KLUBackend(LinearSolver):
     """SuiteSparse KLU, a sparse direct solver on the CPU.
 
-    It factors float64 matrices only. `linear="klu"` selects it with default settings, and
-    `"auto"` picks it on a CPU host.
+    It factors float64 and complex128 matrices. `linear="klu"` selects it with default
+    settings, and `"auto"` picks it on a CPU host.
 
     Args:
         ordering: The fill-reducing ordering of each block, `"amd"` (default) or `"colamd"`.
@@ -277,10 +289,12 @@ class KLUBackend(LinearSolver):
     ) -> tuple:
         """The handle: two ``int32`` scalars, the owning context's id and the slot's id.
 
+        The handle is the same for real and complex values.
+
         Raises:
-            FactorContractError: If the values are not real.
+            FactorContractError: If the values are not floating point.
         """
-        _check_real(values_aval.dtype)
+        _native_dtype(values_aval.dtype)
         scalar = jax.core.ShapedArray((), jnp.int32)
         return (scalar, scalar)
 
@@ -297,9 +311,9 @@ class KLUBackend(LinearSolver):
         """The handle of an empty factor: the context's id and slot ``-1``.
 
         Raises:
-            FactorContractError: If the values are not real.
+            FactorContractError: If the values are not floating point.
         """
-        _check_real(values_aval.dtype)
+        _native_dtype(values_aval.dtype)
         return empty_slot_handle(context_id)
 
     def label_empty_lanes(self, handle: tuple, lanes: Any, size: int) -> tuple:
@@ -334,16 +348,18 @@ class KLUBackend(LinearSolver):
         lanes of a value batch (distinct slot tokens) get one slot each and
         every context gets its own. Both orientations factor ``A_bc``; a
         solve with orientation ``"AT"`` runs the transposed KLU solve.
+        Complex values are factored as ``complex128`` by the complex target.
 
         Returns:
             The MLIR values of ``(context id, slot, status, order)``.
         """
         del tol
         site = _site_key(ctx, "factor", analysis, orientation, precision)
-        values, values_aval = cast_operand(ctx, values, ctx.avals_in[0], np.float64)
+        dtype = _native_dtype(ctx.avals_in[0].dtype)
+        values, values_aval = cast_operand(ctx, values, ctx.avals_in[0], dtype)
         results, order = lower_ffi_call(
             ctx,
-            _FACTOR_TARGET,
+            slot_targets(_TARGET_PREFIX, dtype)[0],
             order,
             [values, token, context_id],
             [values_aval, *ctx.avals_in[1:3]],
@@ -374,10 +390,15 @@ class KLUBackend(LinearSolver):
         """Lower a solve with the slot's factors to one FFI call ordered by the order word.
 
         Runs ``klu_tsolve`` when exactly one of ``orientation == "AT"`` and
-        ``transpose`` holds, else ``klu_solve``. ``b`` of shape ``(nrhs, n)``
-        is solved as one block. The solution is ``float64``, the result
-        dtype of the ``"fp64"`` rung, which ``b`` already has; it is ``nan``
-        unless the factorization succeeded. The call fails when the handle's
+        ``transpose`` holds, else ``klu_solve`` (``klu_z_tsolve`` with
+        ``conj_solve = 0`` and ``klu_z_solve`` for complex values: the
+        transpose is never conjugated). ``b`` of shape ``(nrhs, n)`` is solved
+        as one block. The solution has the result dtype of the ``"fp64"``
+        rung, which ``b`` already has: ``float64``, or ``complex128`` when the
+        values or ``b`` are complex. A complex ``b`` on real values is solved
+        by the real call as one block of ``2 nrhs`` columns, the real parts
+        then the imaginary parts. The solution is ``nan`` unless the
+        factorization succeeded. The call fails when the handle's
         context has been released or its slot was built for another analysis
         (the call carries the analysis's native id as ``analysis_id``). An
         empty handle (slot ``-1``) makes no call and returns ``nan`` with
@@ -393,18 +414,25 @@ class KLUBackend(LinearSolver):
             The MLIR values of ``(x, status, order)``.
         """
         del n_handle, precision, tol
-        return lower_slot_apply(
-            ctx,
-            values,
-            held_context,
-            slot,
-            order,
-            b,
-            target=_APPLY_TARGET,
-            values_dtype=np.float64,
+        dtype = _native_dtype(ctx.avals_in[0].dtype)
+        attributes = dict(
+            target=slot_targets(_TARGET_PREFIX, dtype)[2],
+            values_dtype=dtype,
             transpose=(orientation == "AT") != bool(transpose),
             analysis_id=_analysis_id(analysis),
             storage=storage_key(None if transpose else storage),
+        )
+        b_aval = ctx.avals_in[-1]
+        if dtype == np.complex128 or not jnp.issubdtype(b_aval.dtype, jnp.complexfloating):
+            return lower_slot_apply(ctx, values, held_context, slot, order, b, **attributes)
+        return lower_split_apply(
+            ctx,
+            b,
+            lambda real_ctx, block: lower_slot_apply(
+                real_ctx, values, held_context, slot, order, block, **attributes
+            ),
+            axis=0,
+            real_dtype=dtype,
         )
 
     def lower_refactor(
@@ -449,6 +477,8 @@ class KLUBackend(LinearSolver):
             The MLIR values of ``(kept values, context id, slot, status, order)``.
         """
         del n_handle, tol
+        dtype = _native_dtype(ctx.avals_in[0].dtype)
+        factor_target, refactor_target, _ = slot_targets(_TARGET_PREFIX, dtype)
         return lower_slot_refactor(
             ctx,
             values,
@@ -457,11 +487,20 @@ class KLUBackend(LinearSolver):
             held_context,
             held_slot,
             order,
-            refactor_target=_REFACTOR_TARGET,
-            factor_target=_FACTOR_TARGET,
-            site=_site_key(ctx, "refactor", analysis, orientation, precision, adopt, storage),
+            refactor_target=refactor_target,
+            factor_target=factor_target,
+            site=_site_key(
+                ctx,
+                "refactor",
+                analysis,
+                orientation,
+                precision,
+                adopt,
+                storage,
+                per_device=storage is not None,
+            ),
             analysis_id=_analysis_id(analysis),
-            values_dtype=np.float64,
+            values_dtype=dtype,
             storage=storage_key(storage),
         )
 
@@ -486,8 +525,9 @@ class KLUBackend(LinearSolver):
             ``klu_tsolve`` calls), ``nonfinite`` and ``singular`` (factor
             requests with non-finite values or a singular result),
             ``released_context_errors`` (calls refused because their context
-            was released), ``live_slots``, ``live_sites`` and
-            ``live_analyses``.
+            was released), ``live_slots``, ``live_sites``,
+            ``live_analyses`` and ``live_lu_entries`` (the entries of L and
+            U, diagonals included, over the live numeric factorizations).
 
         Raises:
             ConfigurationError: If the KLU extension is not built.

@@ -1,8 +1,10 @@
-"""Solve outputs under transformations: named outputs under jax.jit and jax.vmap, the
-reverse-mode gradient through a terminal sample that replaced a requested row, and the Diffrax
-backend's outputs mapping."""
+"""Solve outputs under transformations: named outputs under jax.jit and jax.vmap, lanes of a
+schedule whose segments end at different times, the reverse-mode gradient through a terminal
+sample that replaced a requested row, and the Diffrax backend's outputs mapping."""
 
 from __future__ import annotations
+
+import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -12,11 +14,15 @@ import pytest
 import diff_soup as ds
 from diff_soup.domains import cartesian_grid_1d
 from diff_soup.timestepping import Bisection
-from tests.support.problems import observed_recipe
+from tests.support.problems import observed_recipe, operational_cell
 
 _OBSERVED, _OBSERVED_Y0, _RATE = observed_recipe()
-#: Eight states and one global on 24 save times; the named outputs are two scalars.
-_SAVE_TIMES = jnp.linspace(0.05, 1.0, 24)
+#: Eight states and one global on 24 save times and twenty more packed within 2e-6 of t = 0.4,
+#: more than one step fills sample by sample, so lanes of a batch cover the cluster at different
+#: steps; the named outputs are two scalars.
+_SAVE_TIMES = jnp.asarray(
+    np.sort(np.concatenate([np.linspace(0.05, 1.0, 24), 0.4 + 1e-7 * np.arange(1, 21)]))
+)
 _NAMED = ("mean_u", "load_gap")
 _VALUE = jnp.asarray(1.3)
 #: Solver and root-finder settings (requested tolerances, not asserted bounds).
@@ -26,7 +32,7 @@ _CHECKPOINTED = ds.JNDF.stock(
 _EVENT_ROOT = {"atol": 1e-12}
 _DIFFRAX = {"rtol": 1e-9, "atol": 1e-9}
 # measured 1.5e-13 (mean_u) and 3.5e-13 (load_gap) between the middle lane of the batch and the
-# unbatched solve, CPU VM 2026-10-22,
+# unbatched solve, workstation 2026-11-07,
 # pytest tests/public_api/test_solve_outputs_ad.py::test_named_outputs_batch_over_a_parameter
 _LANE_BOUND = 1e-11
 #: The central-difference step in the rate.
@@ -73,9 +79,42 @@ def test_named_outputs_batch_over_a_parameter(named):
     unbatched value equals the unbatched solve."""
     values = jnp.asarray([0.9, 1.3, 1.7])
     batched = jax.vmap(lambda value: dict(_observed_solve(value, _NAMED).outputs))(values)
-    assert all(batched[name].shape == (3, 24) for name in _NAMED)
+    assert all(batched[name].shape == (3, 44) for name in _NAMED)
     for name in _NAMED:
         np.testing.assert_allclose(batched[name][1], named[name], rtol=0.0, atol=_LANE_BOUND)
+
+
+#: Solver settings of the schedule lanes (requested tolerances, not asserted bounds).
+_FINE = {"rtol": 1e-8, "atol": 1e-10}
+
+
+def test_lanes_of_a_schedule_whose_segments_end_at_different_times_store_their_own_solves():
+    """``jax.vmap`` over the durations of two current holds, whose first hold ends at 0.3, 0.5
+    and 0.7 in the three lanes, stores in each lane the samples of its own jitted solve."""
+    problem = operational_cell().build()
+    holds = ds.schedule_arrays(
+        ds.Schedule([ds.Segment(current=0.5, duration=0.3), ds.Segment(current=1.5, duration=0.6)]),
+        problem.operational_modes(),
+    )
+
+    def samples(durations):
+        solution, _ = ds.solve_schedule(
+            problem,
+            ds.JIDA(linear="dense", **_FINE),
+            dataclasses.replace(holds, duration=durations),
+            jnp.concatenate([jnp.full((4,), 2.0), jnp.zeros((1,))]),
+            t0=0.0,
+            t_end=0.9,
+            times=jnp.asarray([0.25, 0.45, 0.65, 0.85]),
+        )
+        return solution.ys
+
+    durations = jnp.asarray([[0.3, 0.6], [0.5, 0.4], [0.7, 0.2]])
+    lanes = jax.jit(jax.vmap(samples))(durations)
+    alone = jnp.stack([jax.jit(samples)(d) for d in durations])
+    # measured 0.0 between a lane and its own solve, workstation CPU 2026-11-07,
+    # pytest tests/public_api/test_solve_outputs_ad.py
+    np.testing.assert_allclose(lanes, alone, rtol=0.0, atol=1e-11)
 
 
 #: A terminating event at a requested save time: its sample replaces that row.

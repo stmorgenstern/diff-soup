@@ -4,6 +4,14 @@ that a solve by name keeps its backend."""
 
 from __future__ import annotations
 
+import gc
+import json
+import os
+import subprocess
+import sys
+import weakref
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -18,6 +26,7 @@ from diff_soup.linear import (
     SolveStatus,
     SparseTopology,
     SuperLU,
+    after,
     analyze,
     empty_factor,
     factor,
@@ -25,7 +34,7 @@ from diff_soup.linear import (
     solve,
     solve_checked,
 )
-from tests.support.problems import reaction_diffusion_recipe
+from tests.support.problems import SparseChainDAE, reaction_diffusion_recipe
 
 BACKENDS = {"klu": KLU, "superlu": SuperLU}
 MARKS = {"klu": pytest.mark.requires_klu, "superlu": pytest.mark.requires_superlu}
@@ -264,6 +273,32 @@ def test_a_tangent_through_twice_refactored_shared_storage_equals_one_through_it
         np.testing.assert_allclose(got, expected, **EXACT)
 
 
+@pytest.mark.requires_superlu
+def test_superlu_solves_a_real_factor_after_a_complex_refactor_of_its_storage_in_one_program():
+    """A real and a complex factor name one shared storage; in one execution a complex refactor
+    of the storage and then a real solve: the solve factors its own real values afresh rather
+    than solving with the complex factor the storage now holds."""
+    topology = _pattern()
+    real = _values(topology, seed=60)
+    complex_ = _values(topology, seed=61) * (1.0 - 0.5j)
+    analysis = analyze(topology, backend=SuperLU())
+    with SolveContext() as ctx:
+        held_real = empty_factor(analysis, ctx=ctx, dtype=np.float64, storage="kinds")
+        held_complex = empty_factor(analysis, ctx=ctx, dtype=np.complex128, storage="kinds")
+        held_real = refactor(held_real, real, True)
+        held_complex = refactor(held_complex, complex_, True)
+
+        @jax.jit
+        def complex_then_real(held_real, held_complex, values):
+            held_complex = refactor(held_complex, values, True)
+            return solve(after(held_real, held_complex), _B)[0]
+
+        x = complex_then_real(held_real, held_complex, 1.5 * complex_)
+    # measured 1.4e-16 componentwise relative to NumPy, workstation CPU 2026-11-09,
+    # pytest tests/contracts/test_linear_host.py -k complex_refactor
+    np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, real), _B), **EXACT)
+
+
 @pytest.mark.parametrize("name", HOSTS)
 def test_native_statistics_count_one_factorization_per_setup_and_release_their_slots(name):
     """A scan that solves with its carried factor and then refactors it in place factors its
@@ -291,6 +326,77 @@ def test_native_statistics_count_one_factorization_per_setup_and_release_their_s
 
 
 @pytest.mark.parametrize("name", HOSTS)
+def test_each_call_of_a_jitted_factor_keeps_one_slot_however_often_it_runs(name):
+    """A jitted factor-and-solve that a program calls three times is lowered once, yet each call
+    keeps a slot of its own and factors once per run, without a rebuild; a call in the body of a
+    scan keeps one slot over all its steps."""
+    topology = _pattern()
+    values = _values(topology, seed=70)
+    backend = BACKENDS[name]()
+    analysis = analyze(topology, backend=backend)
+    with SolveContext() as ctx:
+        inner = jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), _B)[0])
+        thrice = jax.jit(lambda v: [inner(k * v) for k in (1.0, 2.0, 3.0)])
+        first = _delta(backend, lambda: thrice(values))
+        again = _delta(backend, lambda: thrice(values))
+        xs = thrice(values)
+
+        def body(total, k):
+            return total + solve(factor(analysis, k * values, ctx=ctx), _B)[0], None
+
+        loop = _delta(
+            backend, jax.jit(lambda: jax.lax.scan(body, 0.0 * _B, jnp.arange(1.0, 5.0))[0])
+        )
+    work = [again[key] for key in ("factorizations", "refactorizations", "rebuilds")]
+    assert (first["live_slots"], work, loop["live_slots"]) == (3, [0, 3, 0], 1)
+    for k, x in zip((1.0, 2.0, 3.0), xs):
+        np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, k * values), _B), **EXACT)
+
+
+@pytest.mark.parametrize("name", HOSTS)
+def test_a_program_compiled_ahead_of_time_outlives_its_analysis_and_frees_it_with_itself(name):
+    """A program that analyzes inside its trace, compiled ahead of time, still solves after its
+    Analysis is collected; once the program is collected too, the backend holds no slot, site,
+    analysis or call of either."""
+    base = _pattern()
+    # One more duplicate entry: a pattern of its own, whose Analysis no other test's program holds.
+    topology = SparseTopology(
+        np.append(base.rows, 0), np.append(base.cols, 0), N, bc_indices=base.bc_indices
+    )
+    values = _values(topology, seed=71)
+    backend = BACKENDS[name]()
+    gauges = ("live_slots", "live_sites", "live_analyses", "live_calls")
+    traced = []
+
+    def collect(first):
+        # analyze keeps the 64 most recent analyses alive: 64 others, then JAX's caches
+        # cleared, leave an Analysis that nothing else holds to the collector.
+        for n in range(first, first + 64):
+            index = np.arange(n, dtype=np.int32)
+            analyze(SparseTopology(rows=index, cols=index, n_dofs=n), backend=backend)
+        jax.clear_caches()
+        gc.collect()
+
+    def run(v, ctx):
+        analysis = analyze(topology, backend=backend)
+        traced.append(weakref.ref(analysis))
+        return solve(factor(analysis, v, ctx=ctx), _B)[0]
+
+    collect(100)
+    start = [backend.native_stats()[key] for key in gauges]
+    with SolveContext() as ctx:
+        program = jax.jit(lambda v: run(v, ctx)).lower(values).compile()
+        collect(200)
+        collected = traced[0]() is None
+        x = program(values)
+        del program
+        collect(300)
+        left = [backend.native_stats()[key] for key in gauges]
+    assert (collected, left) == (True, start)
+    np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, values), _B), **EXACT)
+
+
+@pytest.mark.parametrize("name", HOSTS)
 def test_a_host_backend_refuses_a_program_compiled_for_a_gpu(name):
     """Lowering a host factorization for the cuda platform raises FactorContractError naming
     the cpu platform and the cuda target, without a GPU present."""
@@ -301,6 +407,142 @@ def test_a_host_backend_refuses_a_program_compiled_for_a_gpu(name):
         )
         with pytest.raises(FactorContractError, match="cpu platform only.*cuda"):
             traced.lower(lowering_platforms=("cuda",))
+
+
+# Forty SuperLU factors of a 24-unknown sparse system, each solved plain and transposed: the
+# threads the extension used and a digest of every solution's bytes. The thread count is fixed
+# per process (OMP_NUM_THREADS), so each count runs in its own process.
+_THREADS_WORKER = """
+import hashlib
+import jax.numpy as jnp
+import numpy as np
+from diff_soup.linear import SolveContext, SparseTopology, SuperLU, analyze, factor, solve
+
+rng = np.random.default_rng(0)
+mask = rng.random((24, 24)) < 0.15
+np.fill_diagonal(mask, True)
+rows, cols = (axis.astype(np.int32) for axis in np.nonzero(mask))
+values = rng.normal(size=rows.size) + 6.0 * (rows == cols)
+b = jnp.asarray(rng.normal(size=(4, 24)))
+analysis = analyze(SparseTopology(rows, cols, 24), backend=SuperLU())
+digest = hashlib.sha256()
+for k in range(40):
+    with SolveContext() as ctx:
+        f = factor(analysis, jnp.asarray(values * (1.0 + 1e-3 * k)), ctx=ctx)
+        for transpose in (False, True):
+            digest.update(np.asarray(solve(f, b, transpose=transpose)[0]).tobytes())
+print("REPORT", SuperLU.threads(), digest.hexdigest())
+"""
+
+
+def _report(worker, **env):
+    """The line ``worker`` prints after ``REPORT`` in a host-only subprocess under ``env``."""
+    base = {key: value for key, value in os.environ.items() if "proxy" not in key.lower()}
+    base.update(JAX_PLATFORMS="cpu", OMP_NUM_THREADS="1", CUDA_VISIBLE_DEVICES="")
+    base.update(JAX_ENABLE_X64="1", **env)
+    run = subprocess.run(
+        [sys.executable, "-c", worker],
+        cwd=Path(__file__).resolve().parents[2],
+        env=base,
+        capture_output=True,
+        text=True,
+        timeout=110,
+    )
+    assert run.returncode == 0, run.stderr[-4000:]
+    line = next(item for item in run.stdout.splitlines() if item.startswith("REPORT "))
+    return line.removeprefix("REPORT ")
+
+
+def _superlu_rounds(threads):
+    """``(threads used, digest)`` of the SuperLU worker run with ``OMP_NUM_THREADS=threads``."""
+    used, digest = _report(_THREADS_WORKER, OMP_NUM_THREADS=str(threads)).split()
+    return int(used), digest
+
+
+@pytest.mark.requires_superlu
+def test_superlu_solves_on_five_threads_equal_one_threads_bit_for_bit():
+    """SuperLU's factors and solves on up to five threads, at least two, are the bits of one
+    thread's: the factorization neither races nor reorders its updates by schedule. The row
+    needs a host that gives the process two CPUs, as every host the suite runs on does."""
+    (_, single), (used, several) = _superlu_rounds(1), _superlu_rounds(5)
+    assert used >= 2 and several == single
+
+
+#: Run on two forced host CPU devices: one jitted KLU factor and solve, run under each device as
+#: the default device; the slots each run takes and the two solutions.
+_SITES_WORKER = r"""
+import json
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from diff_soup.linear import KLU, SolveContext, SparseTopology, analyze, factor, solve
+
+index = np.arange(12)
+pattern = SparseTopology(
+    rows=np.concatenate([index, index[1:], index[:-1]]),
+    cols=np.concatenate([index, index[:-1], index[1:]]),
+    n_dofs=12,
+)
+values = jnp.asarray(np.concatenate([np.full(12, 4.0), np.full(22, -1.0)]))
+backend, slots, solutions = KLU(), [], []
+with SolveContext() as ctx:
+    analysis = analyze(pattern, backend=backend)
+    program = jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), jnp.linspace(-1.0, 2.0, 12))[0])
+    for device in jax.devices():
+        with jax.default_device(device):
+            before = backend.native_stats()["live_slots"]
+            solutions.append(np.asarray(program(values)).tolist())
+            slots.append(backend.native_stats()["live_slots"] - before)
+print("REPORT " + json.dumps({"slots": slots, "same": solutions[0] == solutions[1]}))
+"""
+
+
+@pytest.mark.requires_klu
+def test_one_program_under_two_default_devices_factors_at_one_site_per_device():
+    """A jitted KLU factor and solve run under ``jax.default_device`` set to each of two host
+    devices takes a factor slot in each run, one site per device rather than one shared, and
+    both runs return the same solution."""
+    assert json.loads(
+        _report(_SITES_WORKER, XLA_FLAGS="--xla_force_host_platform_device_count=2")
+    ) == {
+        "slots": [1, 1],
+        "same": True,
+    }
+
+
+@pytest.mark.requires_cuda
+@pytest.mark.requires_klu
+def test_an_auto_solve_under_a_cpu_default_device_runs_klu_on_that_device():
+    """In a process whose default backend is a GPU, a jitted ``linear="auto"`` JIDA solve of a
+    25-unknown DAE that initializes consistently, run under ``jax.default_device`` set to a CPU
+    device, runs KLU on that device and stores bitwise what the same solve with ``linear="klu"``
+    stores."""
+    chain, cpu = SparseChainDAE(n=12), jax.devices("cpu")[0]
+
+    def solve(linear):
+        solver = ds.JIDA.stock(linear=linear, **{"rtol": 1e-8, "atol": 1e-10})
+
+        def run(rate):
+            solution = ds.pdesolve(
+                chain.problem,
+                solver,
+                (0.0, 0.5),
+                chain.initial_state(),
+                theta=rate,
+                saveat=ds.SaveAt(t1=True),
+                consistent_ic=True,
+            )
+            return solution.ys, solution.lambdas, solution.stats
+
+        with jax.default_device(cpu):
+            return jax.jit(run)(jnp.asarray(0.7))
+
+    auto, klu = solve("auto"), solve("klu")
+    assert (auto[2].linear_backend, auto[0].devices()) == ("klu", {cpu})
+    for got, expected in zip(auto[:2], klu[:2]):
+        np.testing.assert_array_equal(got, expected)
 
 
 _DIFFUSION = reaction_diffusion_recipe(n=12)

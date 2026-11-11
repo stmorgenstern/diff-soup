@@ -33,7 +33,7 @@ from diff_soup.problem.implicit.root_ift import (
 from diff_soup.problem.implicit.signature import StructureSignature
 from diff_soup.problem.implicit.solver_problem import (
     SolverView,
-    get_or_build_solver_view,
+    solver_view,
 )
 from diff_soup.problem.implicit.structure import DAEStructure, Dependencies
 from diff_soup.problem.implicit.theta_codec import ThetaCodec
@@ -55,6 +55,6 @@ __all__ = [
     "build_consistent_init_plan",
     "check_consistent_init",
     "consistent_initial_state",
-    "get_or_build_solver_view",
     "implicit_step_root",
+    "solver_view",
 ]

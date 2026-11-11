@@ -265,6 +265,7 @@ def _locate_crossing(
     state_at: Optional[Callable] = None,
     state_status: Optional[Callable] = None,
     active: Any = None,
+    args: Any = None,
 ):
     """Detect a sign change of ``cond_fn`` over ``[t_lo, t_hi]`` and root-find it.
 
@@ -292,9 +293,9 @@ def _locate_crossing(
     the previous always-on cost — never worse.
 
     Args:
-        cond_fn: The event condition ``(t, y, args, *, control, **kw) -> real``.
-            Called with ``args=None`` here (the in-loop ``lam`` is folded into
-            the interpolated state by the caller when needed).
+        cond_fn: The event condition ``(t, y, args, *, control, **kw) -> real``,
+            called with ``args`` as its third argument (the caller folds the
+            in-loop ``lam`` into the interpolated state when needed).
         interp_fn: One-step state interpolant ``t -> y`` over ``[t_lo, t_hi]``.
         root_finder: A [Bisection][diff_soup.timestepping.events.Bisection] (or any object with a
             ``solve(fn, lo, hi)`` method).
@@ -305,6 +306,7 @@ def _locate_crossing(
         direction: ``"up"`` (negative→positive), ``"down"`` (positive→negative),
             or ``"any"`` (either).  Filters which crossings fire.
         control: Optional fixed control pytree threaded to ``cond_fn``.
+        args: Parameter pytree passed as the condition's third argument.
         control_at: Optional ``t -> control`` resolver for a time-dependent
             Recipe control. When present it takes precedence over ``control``.
         event: Event owning this crossing. Passed unchanged to ``state_at``;
@@ -358,7 +360,7 @@ def _locate_crossing(
     def _g(t):  # noqa: ANN001, ANN202
         control_t = control if control_at is None else control_at(t)
         state_t = interp_fn(t) if state_at is None else state_at(event, t)
-        return jnp.asarray(cond_fn(t, state_t, None, control=control_t)).reshape(())
+        return jnp.asarray(cond_fn(t, state_t, args, control=control_t)).reshape(())
 
     # AD-exact switch time: the primal is byte-identical to the raw
     # ``root_finder.solve(_g, t_lo, t_hi)`` (the event-accuracy bands pin it),
@@ -432,6 +434,7 @@ def resolve_in_loop(
     state_at: Optional[Callable] = None,
     state_status: Optional[Callable] = None,
     active: Any = None,
+    args: Any = None,
 ):
     """Resolve which event fires this accepted step + where (SciML CallbackSet semantics).
 
@@ -493,6 +496,7 @@ def resolve_in_loop(
         active: Optional bool scalar (the caller's step-accepted flag) gating
             each continuous event's expensive located arm; the returned
             ``fired`` keeps its unmasked semantics.
+        args: Parameter pytree passed to conditions during root localization.
 
     Returns:
         tuple: ``(fired, idx, t_star, kind, direction, evaluation_ok)`` where
@@ -559,6 +563,7 @@ def resolve_in_loop(
                 state_at=state_at,
                 state_status=state_status,
                 active=active,
+                args=args,
             )
             _all_evaluations_ok = jnp.logical_and(_all_evaluations_ok, evaluation_ok)
             _rf_atol = float(getattr(_ev.root_finder, "atol", 0.0))
@@ -740,7 +745,11 @@ class Event(eqx.Module):
     Pass it, or an `EventSet`, as `event=` to `pdesolve`. Without a `root_finder` the condition is read as a boolean at the end of each accepted step, and with one its sign change is located inside the step.
 
     Args:
-        cond_fn: `cond_fn(t, y, args, *, control=None)`, returning a boolean, or a real scalar for a continuous event.
+        cond_fn: `cond_fn(t, y, args, *, control=None)`, returning a boolean,
+            or a real scalar for a continuous event. `args` is the solve's
+            `theta` pytree, including default parameters when none were passed.
+            Read differentiated condition parameters from `args` instead of
+            closing over traced values.
         affect: `affect(t, y, args, control)` returning `(y_new, control_new)`, or `None` to stop the solve at the event.
         root_finder: Root finder that locates a continuous crossing, for example `Bisection()`.
         direction: Crossing that fires a continuous event, `"up"` (negative to positive), `"down"`, or `"any"`.

@@ -305,6 +305,7 @@ class Analysis:
         "_backend_analysis",
         "_key",
         "_hash",
+        "__weakref__",
     )
 
     def __init__(

@@ -8,7 +8,7 @@ A [Family][diff_soup.problem._ir.family.Family] is a population of ``count``
 structurally-identical members (e.g. an MPM electrode's many particles) sharing
 ONE member domain and per-member variable / equation / BC / coupling templates.
 This module is the declarative front-end that compiles down to that IR node +
-``diff_soup._lowering.family_residual`` lowering — it does NOT re-implement the
+``diff_soup.problem._lowering.family_residual`` lowering — it does NOT re-implement the
 vmapped residual / sparsity / Schur machinery.
 
 The user writes::
@@ -182,6 +182,33 @@ class _MemberView:
         return object.__getattribute__(self, "_row")[name]
 
 
+def _member_q(view, ctx, var_map, t) -> _QView:
+    """The ``q`` a member equation reads.
+
+    ``q.<field>`` and ``q.ops`` are the member's own; ``q.p`` and ``q.fn`` are
+    the problem's declared parameters and functions, which the member kernel
+    puts on ``ctx`` from the evaluation's runtime namespaces, so a substituted
+    parameter value and its tangent reach member equations as they reach
+    component equations. A ctx that carries none leaves both empty.
+    """
+    params = getattr(ctx, "params", None)
+    functions = getattr(ctx, "functions", None)
+    pointwise = getattr(ctx, "pointwise_functions", None) or getattr(
+        functions, "pointwise_names", ()
+    )
+    return _QView(
+        view=view,
+        var_map=var_map,
+        ops=ctx.ops,
+        params=params.as_dict() if hasattr(params, "as_dict") else params,
+        functions=functions.as_dict() if hasattr(functions, "as_dict") else functions,
+        pointwise_functions=pointwise,
+        t=t,
+        coords=None,
+        controls=getattr(ctx, "controls", None),
+    )
+
+
 class _FamilyMemberRHS:
     """Adapter wrapping a user ``(q, m)`` closure for the IR rhs callsite.
 
@@ -191,7 +218,7 @@ class _FamilyMemberRHS:
     member-domain ctx (``ctx.ops``), the runtime member-view ``m`` (built from
     the vmapped param row), and ``t``.  These are re-wrapped in a
     [_QView][diff_soup.problem._spec.q_accessor._QView] so the user closure reads
-    ``q.c_s`` / ``q.ops`` exactly as in a plain
+    ``q.c_s`` / ``q.ops`` / ``q.p`` exactly as in a plain
     ``@spec.equation`` body, then calls ``inner(q, m)``.
 
     A plain Python closure is captured by reference; an ``eqx.Module`` closure
@@ -214,17 +241,7 @@ class _FamilyMemberRHS:
         return self._inner
 
     def __call__(self, view, ctx, m, t):
-        q = _QView(
-            view=view,
-            var_map=self._var_map,
-            ops=ctx.ops,
-            params={},
-            functions={},
-            t=t,
-            coords=None,
-            controls=getattr(ctx, "controls", None),
-        )
-        return self._inner(q, m)
+        return self._inner(_member_q(view, ctx, self._var_map, t), m)
 
 
 class _FamilyMemberAdapter(eqx.Module):
@@ -243,17 +260,7 @@ class _FamilyMemberAdapter(eqx.Module):
         return self.inner
 
     def __call__(self, view, ctx, m, t):
-        q = _QView(
-            view=view,
-            var_map=self.var_map,
-            ops=ctx.ops,
-            params={},
-            functions={},
-            t=t,
-            coords=None,
-            controls=getattr(ctx, "controls", None),
-        )
-        return self.inner(q, m)
+        return self.inner(_member_q(view, ctx, self.var_map, t), m)
 
 
 def _make_member_rhs(inner: Callable, var_map: dict[str, Any]) -> Callable:
@@ -329,7 +336,7 @@ class _MemberResidualFormAdapter(eqx.Module):
         if not isinstance(result, DerivativeExpr):
             record_plain(form_cell)
             return result
-        from .build import _check_cell_scales, _slope_evaluation
+        from .residual_forms import _check_cell_scales, _slope_evaluation
 
         slopes = current_slopes()
         if slopes is not None:
@@ -354,7 +361,7 @@ def _wrap_member_derivative_return(
     rhs: Callable, *, equation_name: str, field_name: str, member_fields: tuple
 ) -> Callable:
     """Wrap a single-output member rhs in the residual-form adapter."""
-    from .build import _FormCell
+    from .residual_forms import _FormCell
 
     return _MemberResidualFormAdapter(
         inner=rhs,
@@ -776,8 +783,19 @@ class _FamilyHandle:
         """Decorator that registers a member equation, as `@members.equation(writes=..., reads=..., name=None)`.
 
         The closure takes `(q, m)`, with `m.<name>` the member's entry of a
-        per-member parameter and `m.member_index` its index. `writes` names one
-        member field or a tuple of them.
+        per-member parameter and `m.member_index` its index. `q.p.<name>` and
+        `q.fn.<name>` read the problem's declared parameters and functions, the
+        same for every member. `writes` names one member field or a tuple of them.
+
+        !!! example
+
+            ```python
+            spec.param("scale", value=1.5)
+
+            @members.equation(writes="c", reads=("c",))
+            def member_decay(q, m):
+                return -q.p.scale * m.rate * q.c
+            ```
         """
         return _FamilyEquationDecorator(self)
 
@@ -1117,7 +1135,7 @@ class _FamilyHandle:
         # member-var name against the member Variable so the IR BC's ``.var``
         # is the member Variable.  The flux closure is then folded into the
         # per-member vmap kernel by the residual lowering.
-        from .build import _emit_bc
+        from .build_components import _emit_bc
 
         var_map = {v.name: v for v in member_vars}
         return tuple(_emit_bc(bc, var_map) for bc in self._member_bcs)

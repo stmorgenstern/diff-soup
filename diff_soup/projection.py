@@ -43,13 +43,13 @@ from diff_soup.nonlinear.solver import (
     nonlinear_solve_primal,
 )
 from diff_soup.problem.implicit.consistent_init import resolve_backend_route
-from diff_soup.problem.implicit.problems import MassProblem
-from diff_soup.problem.implicit.solver_problem import get_or_build_solver_view
-from diff_soup.timestepping.consistent_ic.pin_differential import (
+from diff_soup.problem.implicit.consistent_init.pinned import (
     ContractOperator,
     PinnedOperator,
     _ic_topology,
 )
+from diff_soup.problem.implicit.problems import MassProblem
+from diff_soup.problem.implicit.solver_problem import solver_view
 
 
 class AlgebraicProjectionStatus(enum.IntEnum):
@@ -580,7 +580,7 @@ def _project_algebraic_bidirectional(
     options,
 ) -> AlgebraicProjectionResult:
     """Internal event-root projection supporting both AD directions."""
-    view = get_or_build_solver_view(problem)
+    view = solver_view(problem)
     plan = _projection_plan(view, options)
     state = jnp.asarray(state)
     dtype = state.dtype
@@ -634,7 +634,7 @@ def project_algebraic(
     Raises:
         ConfigurationError: If a vector has the wrong length, or `state_dot` is missing where it is required.
     """
-    view = get_or_build_solver_view(problem)
+    view = solver_view(problem)
     if options is None:
         options = AlgebraicProjectionOptions()
     plan = _projection_plan(view, options)

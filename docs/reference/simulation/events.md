@@ -33,13 +33,27 @@ or rewriting its state and continuing. See
 
 A `Schedule` of `Segment`s runs an experiment through rows of the operating
 table in turn, and `ControlState` carries the controls through a solve
-([controls](../../overview/modeling/controls.md)).
+([controls](../../overview/modeling/controls.md)). `schedule_arrays` lowers a
+schedule against a model's modes, and `solve_schedule` runs its segments one
+after another.
 
 ::: diff_soup.Schedule
     options:
       members: false
 
 ::: diff_soup.Segment
+    options:
+      members: false
+
+::: diff_soup.schedule_arrays
+
+::: diff_soup.ScheduleArrays
+    options:
+      members: false
+
+::: diff_soup.solve_schedule
+
+::: diff_soup.SegmentEnds
     options:
       members: false
 

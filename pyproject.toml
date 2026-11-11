@@ -55,7 +55,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "diff-soup"
-version = "1.1.0"
+version = "1.2.0"
 description = "Differentiable, GPU-native JAX library for stiff PDEs and DAEs"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -101,7 +101,7 @@ dependencies = [
     # Geometry pipeline: opencv traces image-mask contours; the meshing step
     # imports gmsh on first use, from the [mesh] extra.
     "opencv-python>=4.8",
-    # Posterior sampling backend for diff_soup.inference.sample(): blackjax
+    # Posterior sampling backend for diff_soup.optimization.inference.sample(): blackjax
     # provides the RMH/NUTS kernels and window adaptation. Pure Python on top
     # of jax, so it adds no build burden.
     "blackjax>=1.7,<2",

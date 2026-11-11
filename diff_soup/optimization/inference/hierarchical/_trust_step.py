@@ -1,0 +1,582 @@
+"""The trust-region step of a lowered study: its subproblem, its trial, its noise and gradient floors."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any, NamedTuple
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jaxtyping import ArrayLike
+
+from diff_soup.optimization.inference.engine._layout import lane_layout
+from diff_soup.optimization.inference.fitting._trial import trial_is_valid
+from diff_soup.optimization.inference.fitting.scales import ConstantScale, HessianScale, XScale
+from diff_soup.optimization.inference.hierarchical import _bounds as box
+from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
+from diff_soup.optimization.inference.hierarchical._lane_route import _lane_positions, _LaneRoute
+from diff_soup.optimization.inference.hierarchical._level_solve import _quadratic
+from diff_soup.optimization.solvers._loop_judge import _floor_radius, _larger, _namespace
+
+
+def _full_step_decrease(
+    system: elimination.LevelSystem,
+    gradient: np.ndarray,
+    scale: ArrayLike,
+    zero: tuple,
+    addition: ArrayLike | None = None,
+) -> float:
+    """The decrease the model predicts for its full step.
+
+    ``zero`` is the solve at zero damping in the coordinates ``z = scale * s``
+    (``solve_scaled(system, scale, 0.0, addition)``), and the full step is
+    ``s = z / scale``: zero on the fixed coordinates, under the system's
+    equality rows. The model is the one that solve minimizes, its scaled matrix
+    carrying ``addition`` on its diagonal. The decrease is ``nan`` when that
+    solve is not finite (the matrix is singular at this point).
+    """
+    if isinstance(zero, elimination.AttemptSolve) and zero.answers(scale, zero.radius, addition):
+        # The attempt's program predicted it on the device, from the same solve.
+        return zero.decrease
+    z, q_squared = np.asarray(zero[0]), float(zero[1])
+    if not (np.all(np.isfinite(z)) and np.isfinite(q_squared)):
+        return float("nan")
+    step = (1.0 / np.asarray(scale, dtype=z.dtype)) * z
+    quadratic = elimination.level_quadratic(system, step)
+    if addition is not None:
+        quadratic += float(np.asarray(addition, dtype=np.float64) @ (z * z))
+    return -(float(gradient @ step) + 0.5 * quadratic)
+
+
+def _stationarity(
+    system: elimination.LevelSystem,
+    gradient: np.ndarray,
+    scale: ArrayLike,
+    zero: tuple,
+    relative_to: float,
+    addition: ArrayLike | None = None,
+) -> float:
+    """The decrease the model predicts for its full step, relative to the cost scale.
+
+    The decrease is ``_full_step_decrease``'s, divided by ``relative_to``, the
+    cost scale ``max(|cost|, cost_atol / cost_tol)`` at the point
+    (``cost_scale``); the number is ``nan`` when the solve at zero damping is
+    not finite.
+    """
+    return _full_step_decrease(system, gradient, scale, zero, addition) / relative_to
+
+
+class _FullStep(NamedTuple):
+    """The model's full step at a point, as the gradient floor reads it.
+
+    ``norm`` is its norm in the subproblem's coordinates ``z = scale * s``,
+    the norm the radius is measured in; ``length`` its norm in parameter
+    units; ``decrease`` the decrease the model predicts for it, in cost units
+    (``nan`` when the solve at zero damping is not finite); ``scale`` the
+    coordinates' scale.
+    """
+
+    norm: float
+    length: float
+    decrease: float
+    scale: ArrayLike
+
+
+def _subproblem(
+    x: ArrayLike,
+    gradient: ArrayLike,
+    scale: ArrayLike,
+    bounds: tuple[ArrayLike, ArrayLike] | None,
+) -> box.Scaling:
+    """The coordinates of the trust-region subproblem at ``x``.
+
+    Without bounds they are ``z = scale * s`` and the matrix has no diagonal
+    addition (``addition`` is ``None``); with bounds they are the Coleman-Li
+    coordinates of ``_bounds.coleman_li_scaling``. Written for arrays.
+    """
+    if bounds is None:
+        xp = _namespace(x, gradient, scale)
+        ones = xp.ones_like(x)
+        return box.Scaling(v=ones, dv=xp.zeros_like(x), scale=scale, addition=None, theta=1.0)
+    return box.coleman_li_scaling(x, gradient, bounds[0], bounds[1], scale)
+
+
+def _bounded_gradient(
+    gradient: ArrayLike, coordinates: box.Scaling, bounds: tuple[ArrayLike, ArrayLike] | None
+) -> ArrayLike:
+    """The gradient the gradient test reads: ``g * v`` under bounds, ``g`` without."""
+    return gradient if bounds is None else gradient * coordinates.v
+
+
+def _model_form(system: elimination.LevelSystem, d: ArrayLike, addition: ArrayLike) -> Callable:
+    """``quadratic_form(v) = (d v)^T H (d v) + v^T diag(addition) v`` of the system's model."""
+    xp = _namespace(d, addition)
+
+    def quadratic_form(vector: ArrayLike) -> ArrayLike:
+        with np.errstate(all="ignore"):
+            quadratic = xp.asarray(_quadratic(system, d * vector))
+            return quadratic + addition @ (vector * vector)
+
+    return quadratic_form
+
+
+def _choose(
+    system: elimination.LevelSystem,
+    x: ArrayLike,
+    gradient: ArrayLike,
+    coordinates: box.Scaling,
+    step: ArrayLike,
+    radius: ArrayLike,
+    bounds: tuple,
+    *,
+    equality: ArrayLike,
+) -> tuple:
+    """The trial step under the box, from the subproblem's solution ``step``.
+
+    ``_bounds.select_step`` on the scaled model of ``system`` with its diagonal
+    addition; with equality rows only its first candidate, the step shortened
+    to stay inside, which keeps the rows. ``equality`` may be traced (whether
+    the step holds rows decided in the program). Returns ``(step, scaled_step,
+    predicted)``. Written for arrays.
+    """
+    xp = _namespace(x, gradient, step, radius, coordinates.scale)
+    scale, addition = coordinates.scale, coordinates.addition
+    with np.errstate(all="ignore"):
+        d = 1.0 / scale
+        scaled_step = scale * step
+    quadratic_form = _model_form(system, d, addition)
+    g_h = d * gradient
+    lower, upper = bounds
+    static = isinstance(equality, (bool, np.bool_))
+    if static and equality:
+        return box.shortened_step(
+            x, quadratic_form, g_h, step, scaled_step, lower, upper, coordinates.theta
+        )
+    reach = _larger(radius, xp.linalg.norm(scaled_step))
+    if xp is np:
+        reach = float(reach)
+    chosen = box.select_step(
+        x, quadratic_form, g_h, step, scaled_step, d, reach, lower, upper, coordinates.theta
+    )
+    if static:
+        return chosen
+    # Whether the step holds rows is known in the program only: both candidates, one taken.
+    shortened = box.shortened_step(
+        x, quadratic_form, g_h, step, scaled_step, lower, upper, coordinates.theta
+    )
+    return tuple(xp.where(equality, a, b) for a, b in zip(shortened, chosen))
+
+
+def _trial_from(
+    system: elimination.LevelSystem,
+    x: ArrayLike,
+    gradient: ArrayLike,
+    coordinates: box.Scaling,
+    radius: ArrayLike,
+    proposed: ArrayLike,
+    predicted: ArrayLike,
+    *,
+    fixed: ArrayLike | tuple,
+    bounds: tuple[ArrayLike, ArrayLike] | None,
+    equality: ArrayLike,
+) -> tuple:
+    """The trial of the subproblem's step ``proposed``, of predicted decrease ``predicted``.
+
+    The coordinates ``fixed`` are held. Without bounds the trial is ``x +
+    step``; with them it is ``x`` plus the best of the step, the step reflected
+    at the sides it crosses and the Cauchy step, by the model's value
+    (``_choose``; ``equality``: the system has equality rows), kept strictly
+    inside the box. Returns ``(trial, scaled_norm, predicted)``: ``scaled_norm``
+    the chosen step's norm in the subproblem's coordinates, ``predicted`` the
+    decrease the model predicts for it. Written for arrays.
+    """
+    xp = _namespace(x, gradient, proposed, predicted, coordinates.scale)
+    fixed = np.asarray(fixed, dtype=np.int64)
+    if fixed.size:
+        held = np.zeros(np.shape(proposed), dtype=bool)
+        held[fixed] = True
+        proposed = xp.where(held, 0.0, proposed)
+    if bounds is None:
+        trial = x + proposed
+        scaled_norm = xp.linalg.norm(coordinates.scale * proposed)
+    else:
+        chosen, chosen_scaled, predicted = _choose(
+            system, x, gradient, coordinates, proposed, radius, bounds, equality=equality
+        )
+        trial = box.make_strictly_feasible(x + chosen, bounds[0], bounds[1], rstep=0)
+        scaled_norm = xp.linalg.norm(chosen_scaled)
+    if xp is np:
+        return np.asarray(trial), float(scaled_norm), float(predicted)
+    return trial, scaled_norm, predicted
+
+
+def _trial_point(
+    system: elimination.LevelSystem,
+    x: np.ndarray,
+    gradient: np.ndarray,
+    coordinates: box.Scaling,
+    radius: float,
+    *,
+    first: tuple,
+    fixed: np.ndarray,
+    bounds: tuple[ArrayLike, ArrayLike] | None,
+    equality: bool,
+) -> tuple:
+    """The step of radius ``radius`` from ``x`` in the subproblem's ``coordinates``, and its trial.
+
+    The step is ``level_secular_step``'s on ``system`` from its solve at zero
+    damping ``first``, with the coordinates ``fixed`` held, and the trial
+    ``_trial_from``'s. Returns ``(trial, scaled_norm, predicted, multiplier,
+    solves)``: ``scaled_norm`` the chosen step's norm in the subproblem's
+    coordinates, ``predicted`` the decrease the model predicts for it.
+    """
+    if (
+        isinstance(first, elimination.AttemptSolve)
+        and not first.failed
+        and first.answers(coordinates.scale, radius, coordinates.addition)
+    ):
+        # The attempt's program solved the step of this radius with its solve at zero.
+        proposed, predicted = first.step.copy(), first.predicted
+        multiplier, solves = first.multiplier, first.solves
+    else:
+        # The search on the host, from the solve at zero damping; a search the program
+        # could not bracket is refused here, where the step is taken.
+        proposed, predicted, multiplier, solves = elimination.level_secular_step(
+            system, coordinates.scale, radius, first=first, addition=coordinates.addition
+        )
+    trial, scaled_norm, predicted = _trial_from(
+        system,
+        np.asarray(x),
+        np.asarray(gradient),
+        coordinates,
+        radius,
+        np.asarray(proposed),
+        predicted,
+        fixed=fixed,
+        bounds=bounds,
+        equality=equality,
+    )
+    return trial, scaled_norm, predicted, multiplier, solves
+
+
+def _trial_valid(view: Any, point: np.ndarray) -> bool:
+    """The trial predicate of ``view`` at ``point``; a predicate that raises rejects it."""
+    try:
+        return trial_is_valid(view, point)
+    except Exception:  # noqa: BLE001 -- a predicate that raises rejects the trial
+        return False
+
+
+def _trials_valid(view: Any, points: np.ndarray) -> np.ndarray:
+    """The trial predicate of ``view`` at every row of ``points``, ``(m,)`` bool.
+
+    One program of the predicate vmapped over the rows, built at the first call and kept on
+    ``view``; a predicate that raises there is asked row by row (``_trial_valid``), so a
+    row at which it raises is rejected alone.
+    """
+    checker = getattr(view, "trial_is_valid", None)
+    if checker is None:
+        return np.ones((len(points),), dtype=bool)
+    kept = getattr(view, "__dict__", {}).get("_trials_program")
+    if kept is None or kept[0] is not view:
+        kept = (view, jax.jit(jax.vmap(checker)))
+        if hasattr(view, "__dict__"):
+            view.__dict__["_trials_program"] = kept
+    try:
+        values = np.asarray(jax.device_get(kept[1](jnp.asarray(points))))
+    except Exception:  # noqa: BLE001 -- a predicate that raises rejects its trial alone
+        values = None
+    if values is None or values.shape != (len(points),):
+        return np.asarray([_trial_valid(view, point) for point in points], dtype=bool)
+    return values.astype(bool)
+
+
+def _noise_ceiling(route: Any) -> float | None:
+    """The route's ceiling of the evaluation noise as a float, or ``None`` when it is unknown."""
+    ceiling = getattr(route, "evaluation_noise", None)
+    return None if ceiling is None else float(ceiling)
+
+
+def _noise_trial_limit(solver: Any, route: Any) -> float | None:
+    """The largest relative predicted decrease of a trial counted toward the evaluation noise.
+
+    It is ``noise_trial_limit`` times the route's ceiling of the evaluation
+    noise, or ``None`` (no bound) when either is unset.
+    """
+    ceiling = _noise_ceiling(route)
+    if solver.noise_trial_limit is None or ceiling is None:
+        return None
+    return float(solver.noise_trial_limit) * ceiling
+
+
+# How far the a priori bound of the gradient's error exceeds the corrector's band times the
+# size of the lanes' gradient terms. Calibrated on a three-particle test model as twice the
+# largest measured ratio of the gradient's error (the centered difference of the computed
+# values along the model's step, the gradient and a random direction, minus the gradient's
+# slope) to the band times the terms: 0.24 at rtol 3e-4 and 0.51 at rtol 3e-5, where the
+# error falls more slowly than the tolerance because the step grid's own parameter dependence
+# does not follow the corrector's band; the margin is taken at the tighter tolerance.
+_FLOOR_FACTOR = 1.0
+
+# The band within which a lane's nonlinear corrector accepts its iterate, per unit of the
+# solver's rtol and newton_tol_factor, relative: the derivative at that iterate differs from
+# the slope of the computed values by about this band.
+_BAND = 0.33
+
+
+def _lane_tolerances(route: _LaneRoute) -> tuple:
+    """Per lane, its experiment solver's ``rtol`` and ``newton_tol_factor``, as host arrays.
+
+    Both are read as ``LoweredStudy.evaluation_noise`` reads ``rtol``: from
+    the solver of the lane's experiment, the largest component of a vector.
+    A solver without ``rtol`` gives ``nan``, one without ``newton_tol_factor``
+    gives 1.
+    """
+    problem = route.problem
+    count = len(route.ids)
+    rtols = np.full((count,), np.nan)
+    factors = np.ones((count,))
+    experiments = tuple(getattr(getattr(problem, "study", None), "experiments", None) or ())
+    if not experiments:
+        return rtols, factors
+    layout = lane_layout(problem.diagnostic_problem)
+    positions = _lane_positions(problem.plan(), route.ids)
+    for lane, index in enumerate(np.asarray(layout.experiments, dtype=np.int64)[positions]):
+        solver = getattr(experiments[int(index)], "solver", None)
+        rtol = getattr(solver, "rtol", None)
+        if rtol is not None:
+            rtols[lane] = float(np.max(np.asarray(rtol, dtype=np.float64)))
+        factor = getattr(solver, "newton_tol_factor", None)
+        if factor is not None:
+            factors[lane] = float(np.max(np.asarray(factor, dtype=np.float64)))
+    return rtols, factors
+
+
+def _lane_bands(route: _LaneRoute) -> np.ndarray | None:
+    """Every lane's corrector band ``0.33 * newton_tol_factor * rtol``, or ``None``.
+
+    A lane whose solver has no ``rtol`` has the band 0 and adds nothing to the
+    bound of the gradient's error; ``None`` when no lane's solver has one,
+    and the fit then has no gradient floor.
+    """
+    rtols, factors = _lane_tolerances(route)
+    known = np.isfinite(rtols)
+    if not known.any():
+        return None
+    return np.where(known, _BAND * factors * np.where(known, rtols, 0.0), 0.0)
+
+
+def _lane_columns(route: _LaneRoute) -> np.ndarray:
+    """Per lane, the joint column of each of its narrow coordinates, shape ``(lanes, width)``.
+
+    A lane's narrow coordinates are the shared block, then the block of its
+    node at every level, as the level reducer reads them; the joint vector
+    holds the shared block, then every node of level 1 in node order, and so
+    on down the levels.
+    """
+    widths = tuple(int(width) for width in route.tables.widths)
+    counts = tuple(int(count) for count in route.tables.counts)
+    nodes = np.asarray(route.nodes, dtype=np.int64)
+    lanes = nodes.shape[0]
+    parts = [np.broadcast_to(np.arange(widths[0], dtype=np.int64), (lanes, widths[0]))]
+    offset = widths[0]
+    for level in range(1, len(widths)):
+        width = widths[level]
+        parts.append(
+            offset + nodes[:, level - 1 : level] * width + np.arange(width, dtype=np.int64)
+        )
+        offset += counts[level - 1] * width
+    return np.concatenate(parts, axis=1)
+
+
+class _GradientFloor:
+    """The a priori bound of the gradient's error at a fit's current point.
+
+    The bound is ``sum_l a_l * t_l * sqrt(2 * c_l)`` over the lanes, in cost
+    per unit of scaled step length: ``c_l`` is the lane's cost and
+    ``t_l = sqrt(sum_i N_l[i, i] / scale_i**2)`` over its free coordinates,
+    ``N_l`` its block, so that ``t_l * sqrt(2 * c_l)`` bounds the size of the
+    lane's gradient terms ``|J_l|^T |r_l|`` in the scaled coordinates;
+    ``a_l`` is ``kappa * omega_l * band_l`` under ``gradient_floor="auto"``
+    (``omega_l`` the lane's weight, ``band_l`` its corrector's band) and
+    ``value * omega_l`` under a number. The regularizer's rows are exact and
+    add nothing. ``current`` holds the lanes' diagonals and costs of the
+    blocks request at the current point and ``latest`` those of the latest
+    blocks request; the bound is ``None`` without them, without a floor, or
+    when the results carry neither the lanes' blocks nor their diagonals.
+    """
+
+    def __init__(self, solver: Any, route: _LaneRoute):
+        """Read the solver's ``gradient_floor`` and the lanes' weights, bands and columns."""
+        setting = solver.gradient_floor
+        self.route = route
+        self.given = None if setting is None or isinstance(setting, str) else float(setting)
+        self.coefficients = None
+        if setting is not None:
+            omega = np.asarray(route.omega, dtype=np.float64)
+            if self.given is not None:
+                self.coefficients = self.given * omega
+            else:
+                bands = _lane_bands(route)
+                if bands is not None:
+                    self.coefficients = _FLOOR_FACTOR * omega * bands
+        self.columns = None if self.coefficients is None else _lane_columns(route)
+        # A fixed coordinate never moves: its share of a gradient's error is never taken.
+        self.free = np.ones((route.n,), dtype=np.float64)
+        self.free[np.asarray(route.fixed, dtype=np.int64)] = 0.0
+        self.current: tuple[np.ndarray, np.ndarray] | None = None
+        self.latest: tuple[np.ndarray, np.ndarray] | None = None
+
+    def record(self, results: Any) -> tuple[np.ndarray, np.ndarray] | None:
+        """Keep the lanes' terms of a ``blocks`` (or ``hessian``) request as ``latest``; return them.
+
+        The terms are host arrays ``(lanes, width)`` and ``(lanes,)``: every
+        lane's diagonal of its matrix and its cost, of member 0. The diagonals
+        come from the lanes' blocks in one process, and from the diagonals the
+        processes gather beside the level sums (``Results.normal_diagonal``)
+        when the lanes run in several. Under ``hessian="true"`` the diagonal of
+        the exact Hessian stands in for that of the Gauss-Newton matrix, its
+        negative entries counted as 0. ``None`` without a floor or when the
+        results carry neither the lanes' blocks nor their diagonals.
+        """
+        self.latest = None
+        if self.columns is None:
+            return None
+        rows = np.flatnonzero(np.asarray(results.members) == 0)
+        if rows.shape[0] != 1:
+            return None
+        row = int(rows[0])
+        normal = getattr(results, "normal", None)
+        if normal is not None:
+            matrices = np.asarray(normal)[row]
+            if matrices.ndim != 3 or matrices.shape[-2] != matrices.shape[-1]:
+                return None
+            diagonals = np.diagonal(matrices, axis1=-2, axis2=-1)
+        else:
+            gathered = getattr(results, "normal_diagonal", None)
+            if gathered is None:
+                return None
+            diagonals = np.asarray(gathered)[row]
+        if diagonals.shape != self.columns.shape:
+            return None
+        diagonals = np.array(diagonals, dtype=np.float64)
+        costs = np.array(np.asarray(results.cost, dtype=np.float64)[row])
+        self.latest = (diagonals, costs)
+        return self.latest
+
+    def bound(self, scale: ArrayLike) -> float | None:
+        """The bound at the current point in the coordinates ``z = scale * s``, or ``None``."""
+        if self.coefficients is None or self.current is None:
+            return None
+        diagonals, costs = self.current
+        value = float(
+            _floor_bound(
+                self.coefficients,
+                self.columns,
+                self.free,
+                diagonals,
+                costs,
+                np.asarray(scale, dtype=np.float64),
+            )
+        )
+        return value if np.isfinite(value) else None
+
+    def terms(self) -> tuple | None:
+        """``(coefficients, columns, free)``, the bound's fixed arrays; ``None`` without a floor."""
+        if self.coefficients is None:
+            return None
+        return self.coefficients, self.columns, self.free
+
+    def current_terms(self, dtype: Any = np.float64) -> tuple:
+        """``(diagonals, costs, known)``: the lanes' terms at the current point, zeros when unknown."""
+        if self.current is None:
+            shape = (0, 0) if self.columns is None else self.columns.shape
+            return np.zeros(shape, dtype=dtype), np.zeros(shape[:1], dtype=dtype), np.False_
+        diagonals, costs = self.current
+        return np.asarray(diagonals, dtype=dtype), np.asarray(costs, dtype=dtype), np.True_
+
+    def message(self, sigma: float, floor_sigma: float) -> str:
+        """The message of a fit that converged to the accuracy of its derivatives."""
+        if self.given is not None:
+            source = f"from the given derivative accuracy {self.given:.2g}"
+        else:
+            rtols, _ = _lane_tolerances(self.route)
+            known = rtols[np.isfinite(rtols)]
+            spread = "up to " if known.size and np.any(known != known[0]) else ""
+            top = float(np.max(known)) if known.size else float("nan")
+            source = f"from the solver tolerance rtol {spread}{top:.2g}"
+        return (
+            "converged to the accuracy of the solver's derivatives: the model's predicted "
+            f"decrease ({sigma:.2g}) is below the gradient's accuracy floor ({floor_sigma:.2g}, "
+            f"{source}), both relative to the cost scale max(|cost|, cost_atol / cost_tol); a "
+            "tighter solver tolerance lowers the "
+            "floor in proportion"
+        )
+
+
+class _FloorEnd(NamedTuple):
+    """The gradient floor at a fit's end point: what its verdict reads, and its ``info`` entries.
+
+    ``level`` is the floor (``None`` before the first floor sample or without
+    a floor) and ``sigma`` its cost equivalent along the model's full step,
+    relative to the cost scale.
+    """
+
+    level: float | None
+    sigma: float
+    entries: dict
+
+
+def _floor_bound(
+    coefficients: ArrayLike,
+    columns: ArrayLike,
+    free: ArrayLike,
+    diagonals: ArrayLike,
+    costs: ArrayLike,
+    scale: ArrayLike,
+) -> ArrayLike:
+    """``sum_l a_l * t_l * sqrt(2 * c_l)``, the bound of ``_GradientFloor``, in the coordinates ``scale``.
+
+    Written for arrays; ``nan`` or ``inf`` where the terms are not finite.
+    """
+    xp = _namespace(diagonals, costs, scale)
+    with np.errstate(all="ignore"):
+        inverse = free / xp.square(scale)
+        inverse = xp.where(xp.isfinite(inverse), inverse, 0.0)
+        terms = xp.maximum(diagonals, 0.0) * inverse[columns]
+        lengths = xp.sqrt(xp.sum(terms, axis=1))
+        return xp.sum(coefficients * lengths * xp.sqrt(2.0 * xp.maximum(costs, 0.0)))
+
+
+def _radius_floor(
+    level: ArrayLike | None, full_norm: ArrayLike, gradient: ArrayLike, scale: ArrayLike
+) -> ArrayLike:
+    """``_floor_radius`` with the gradient's norm in the coordinates ``z = scale * s``.
+
+    0 before the first floor sample (``level`` ``None`` or ``nan``), and where the
+    radius is not finite. Written for arrays.
+    """
+    xp = _namespace(level, full_norm, gradient, scale)
+    with np.errstate(all="ignore"):
+        norm = xp.linalg.norm(gradient / scale)
+    value = _floor_radius(level, full_norm, norm)
+    value = xp.where(xp.isfinite(value), value, 0.0)
+    return float(value) if xp is np else value
+
+
+def _scale_candidate(
+    system: elimination.LevelSystem, strategy: XScale, diagonal: ArrayLike
+) -> ArrayLike:
+    """The scale this attempt proposes, from the diagonal of the system's matrix (written for arrays)."""
+    xp = _namespace(diagonal)
+    dtype = diagonal.dtype
+    if isinstance(strategy, ConstantScale):
+        empty = jnp.zeros((0, diagonal.shape[0]), dtype=dtype)
+        return xp.sqrt(xp.asarray(strategy.damping_diagonal(empty, system.point), dtype=dtype))
+    with np.errstate(invalid="ignore"):
+        if isinstance(strategy, HessianScale):
+            damping = xp.maximum(xp.abs(diagonal), np.finfo(dtype).eps)
+        else:
+            damping = xp.maximum(diagonal, 1e-10)
+    return xp.sqrt(damping)

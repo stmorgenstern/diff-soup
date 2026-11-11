@@ -26,7 +26,7 @@ declares exactly what the general verb declares.
 
 [operational][diff_soup.problem._spec.control_namespace._ControlNamespace.operational]
 declares something else again: a static table of terminal residual rows —
-current, voltage, power — closing one algebraic current unknown, of which
+current, voltage, power, resistance — closing one algebraic current unknown, of which
 exactly one is active at runtime.  It appends a constraint rather than a
 ``ControlSpec``, and its mode and target are carried in the solve's
 [ControlState][diff_soup.timestepping.control_state.ControlState] instead of
@@ -45,9 +45,8 @@ import math
 from collections.abc import Callable, Sequence
 from numbers import Real
 
+from .operating_modes import operating_mode_names
 from .specs import ControlSpec, OperationalControlSpec
-
-_OPERATIONAL_MODES = ("current", "voltage", "power")
 
 
 class _ControlNamespace:
@@ -112,11 +111,11 @@ class _ControlNamespace:
         current: str | None = None,
         voltage: str,
         current_unknown: str,
-        modes: Sequence[str] = _OPERATIONAL_MODES,
+        modes: Sequence[str] = operating_mode_names(),
         seed_voltage_threshold: float = 1e-6,
         current_from_residual: str | None = None,
     ) -> None:
-        """Declare an operating table of current, voltage and power rows that close one current unknown.
+        """Declare current, voltage, power and resistance rows closing one current unknown.
 
         The active row and its target come from an operating
         [`ControlState`][diff_soup.ControlState] passed as `control_state0`, and
@@ -128,7 +127,7 @@ class _ControlNamespace:
             current: Name of the scalar observation giving the current.
             voltage: Name of the scalar observation giving the voltage.
             current_unknown: Name of the global current the table closes.
-            modes: Rows of the table, distinct entries of `"current"`, `"voltage"`, `"power"`, indexed by the mode.
+            modes: Distinct rows from `"current"`, `"voltage"`, `"power"`, `"resistance"`, indexed by the mode.
             seed_voltage_threshold: Voltage magnitude above which a power mode without a current seed starts from `target / V`.
             current_from_residual: Name of a field whose summed residual rows give the current.
         """
@@ -141,17 +140,18 @@ class _ControlNamespace:
                 "assembled residual rows sum to the current>"
             )
         modes = tuple(modes)
+        supported = operating_mode_names()
         if not modes:
             raise ValueError(
                 f"operational control {name!r} declares an empty mode tuple; "
-                f"list at least one mode from {_OPERATIONAL_MODES!r}"
+                f"list at least one mode from {supported!r}"
             )
         seen: set = set()
         for m in modes:
-            if m not in _OPERATIONAL_MODES:
+            if m not in supported:
                 raise ValueError(
                     f"operational control {name!r} declares unknown mode {m!r}; "
-                    f"supported modes are {_OPERATIONAL_MODES!r}"
+                    f"supported modes are {supported!r}"
                 )
             if m in seen:
                 raise ValueError(

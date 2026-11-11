@@ -26,13 +26,14 @@ a typed-FFI call exactly as the rewrite pattern would have produced it, so
 the HLO that XLA compiles, the numbers it computes, and its compile time are
 those of a program on which the pattern did fire.
 
-The wrapper installs itself when diff_soup is imported, provided this
-jaxlib's ``custom_call`` still parks dictionaries in ``mhlo.backend_config``
-(a jaxlib that writes them inherently needs no help) and the bundled
-StableHLO is at least 1.3.0. Set ``DIFF_SOUP_INHERENT_FFI_CONFIG=0`` in the
-environment before importing diff_soup to leave JAX's lowering untouched,
-for instance to reproduce the failure or to compare lowered programs;
-:func:`install` and :func:`uninstall` switch it within a process. Programs
+``diff_soup._environment`` installs the wrapper when diff_soup is imported,
+provided this jaxlib's ``custom_call`` still parks dictionaries in
+``mhlo.backend_config`` (a jaxlib that writes them inherently needs no help)
+and the bundled StableHLO is at least 1.3.0. Set
+``DIFF_SOUP_INHERENT_FFI_CONFIG=0`` in the environment before importing
+diff_soup to leave JAX's lowering untouched, for instance to reproduce the
+failure or to compare lowered programs; :func:`install` and :func:`uninstall`
+switch it within a process. Programs
 lowered with the wrapper differ textually from programs lowered without it,
 so the persistent compilation cache is filled afresh once.
 
@@ -46,13 +47,9 @@ from __future__ import annotations
 
 import functools
 import inspect
-import os
 from typing import Any
 
 from diff_soup._jax_compat import hlo, internal_mlir, ir
-
-DISABLE_VARIABLE = "DIFF_SOUP_INHERENT_FFI_CONFIG"
-"""Environment variable; the value ``0`` keeps the wrapper from installing."""
 
 TYPED_FFI_API_VERSION = 4
 """XLA's ``CustomCallApiVersion::API_VERSION_TYPED_FFI``."""
@@ -123,7 +120,3 @@ def uninstall() -> None:
     if installed():
         internal_mlir.custom_call = _original_custom_call
         _original_custom_call = None
-
-
-if os.environ.get(DISABLE_VARIABLE, "1") != "0":
-    install()

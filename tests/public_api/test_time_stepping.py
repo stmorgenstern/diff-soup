@@ -350,3 +350,100 @@ def test_a_float32_periodic_problem_solves_in_float32_and_conserves_its_mean():
     assert single.dtype == jnp.float32
     np.testing.assert_allclose(single, double, rtol=0.0, atol=_PERIODIC_BOUND)
     np.testing.assert_allclose(np.mean(single), np.mean(start), rtol=0.0, atol=_PERIODIC_BOUND)
+
+
+def _tracking_dae():
+    """``x' = -x`` and the algebraic ``z^3 + z = theta * x``, whose Jacobian in ``z`` moves with
+    the state, so a held iteration matrix ages as the solve proceeds."""
+
+    def rhs(t, y, theta, control):
+        x, z = y
+        return jnp.stack((-x, z**3 + z - theta * x))
+
+    unit = ds.Dependencies(time=False, state=False, parameters=False, control=False)
+    return ds.MassProblem(
+        rhs=rhs,
+        mass=ds.MassOperator.sparse(
+            [0], [0], lambda t, y, th, c: jnp.ones((1,), y.dtype), n=2, dependencies=unit
+        ),
+        structure=ds.DAEStructure(differential_vars=np.asarray([True, False])),
+    )
+
+
+# measured 5.7e-7 (2.9e-3 when a large first correction may pass on a carried rate) at rtol
+# 1e-6, workstation 2026-11-05,
+# pytest tests/public_api/test_time_stepping.py::test_with_algebraic_rows_unchecked_every_accepted_step_meets_its_constraint
+_CONSTRAINT_BOUND = 1e-5
+#: Solver settings of the constraint-tracking solve (requested tolerances, not asserted bounds).
+_TRACKING_TOLERANCES = {"rtol": 1e-6, "atol": 1e-10}
+
+
+def test_with_algebraic_rows_unchecked_every_accepted_step_meets_its_constraint():
+    """With the algebraic rows out of the error test (the stock JIDA), the algebraic state at
+    every accepted step solves its constraint to the requested relative tolerance: the
+    corrector does not accept a large first correction on a held matrix's carried rate."""
+    theta, z0 = jnp.asarray(1e3), 9.966666790534978  # z0^3 + z0 = 1e3 to 1.4e-12
+    solver = ds.JIDA.stock(linear="dense", **_TRACKING_TOLERANCES)
+    solution = ds.pdesolve(
+        _tracking_dae(), solver, (0.0, 3.0), jnp.asarray([1.0, z0]), theta=theta,
+        saveat=ds.SaveAt(steps=True), max_steps=400,
+    )  # fmt: skip
+    x, z = np.asarray(solution.ys[solution.valid_mask]).T
+    # The constraint residual over its z-derivative is the root error to first order.
+    error = np.abs(z**3 + z - float(theta) * x) / ((3.0 * z**2 + 1.0) * np.abs(z))
+    assert solution.result == ds.RESULT.SUCCESS and error.max() <= _CONSTRAINT_BOUND
+
+
+def _rounding_cell(spread=1e3):
+    """Two particles relaxing at a common potential through a linear kinetics row, ``y = [c1,
+    c2, phi, r1, r2]``, whose open-circuit term carries an exactly cancelling ``spread *
+    (sin^2 c + cos^2 c - 1)``: a residual rounding of ``spread`` ulps that moves with the state,
+    far above an error weight of 1e-12. Returns the problem and its closed form."""
+
+    def potential(c):
+        return 3.0 + 1e-3 * c + spread * (jnp.sin(c) ** 2 + jnp.cos(c) ** 2 - 1.0)
+
+    def rhs(t, y, theta, control):
+        c1, c2, phi, r1, r2 = y
+        kinetics = (r1 - theta * (phi - potential(c1)), r2 - theta * (phi - potential(c2)))
+        return jnp.stack((r1, r2, r1 + r2, *kinetics))
+
+    unit = ds.Dependencies(time=False, state=False, parameters=False, control=False)
+    problem = ds.MassProblem(
+        rhs=rhs,
+        mass=ds.MassOperator.sparse(
+            [0, 1], [0, 1], lambda t, y, th, c: jnp.ones((2,), y.dtype), n=5, dependencies=unit
+        ),
+        structure=ds.DAEStructure(differential_vars=np.asarray([1, 1, 0, 0, 0], dtype=bool)),
+    )
+
+    def analytical(t, theta):
+        gap = 0.2 * jnp.exp(-1e-3 * theta * t)
+        rate = -1e-3 * theta * gap / 2
+        return jnp.stack((0.5 + gap / 2, 0.5 - gap / 2, jnp.full_like(gap, 3.0005), rate, -rate))
+
+    return problem, analytical
+
+
+# measured 2.3e-10 at rtol 1e-10 and atol 1e-12 (dense and KLU alike), workstation 2026-11-05,
+# pytest tests/public_api/test_time_stepping.py::test_a_tight_atol_solve_finishes_where_its_corrections_reach_the_rounding_floor
+_FLOOR_BOUND = 1e-8
+#: Solver settings of the rounding-floor solve (requested tolerances, not asserted bounds).
+_FLOOR_TOLERANCES = {"rtol": 1e-10, "atol": 1e-12}
+
+
+@pytest.mark.parametrize("linear", ["dense", pytest.param("klu", marks=pytest.mark.requires_klu)])
+def test_a_tight_atol_solve_finishes_where_its_corrections_reach_the_rounding_floor(linear):
+    """JIDA at atol 1e-12 on a DAE whose kinetics residual rounds far above that weight reaches
+    the end of its span at the closed form: once a short step leaves only rounding to correct,
+    the corrector accepts the iterate instead of cutting the step until the budget runs out."""
+    problem, analytical = _rounding_cell()
+    theta, ts = jnp.asarray(1e3), jnp.linspace(0.0, 1.0, 5)
+    solver = ds.JIDA.stock(linear=linear, **_FLOOR_TOLERANCES)
+    solution = ds.pdesolve(
+        problem, solver, (0.0, 1.0), analytical(0.0, theta), theta=theta,
+        saveat=ds.SaveAt(ts=ts), max_steps=1000,
+    )  # fmt: skip
+    assert solution.result == ds.RESULT.SUCCESS
+    exact = jax.vmap(analytical, in_axes=(0, None))(ts, theta)
+    np.testing.assert_allclose(solution.ys, exact, rtol=0.0, atol=_FLOOR_BOUND)

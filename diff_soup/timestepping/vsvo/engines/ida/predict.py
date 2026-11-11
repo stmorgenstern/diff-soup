@@ -38,11 +38,24 @@ def ida_predict(phi: jax.Array, gamma: jax.Array, kk: jax.Array) -> tuple[jax.Ar
     j = jnp.arange(MXORDP1)
     kk = jnp.asarray(kk)
     zero = jnp.zeros((), dtype=phi.dtype)
-    yy_mask = (j <= kk)[:, None]
-    yp_mask = ((j >= 1) & (j <= kk))[:, None]
-    yypredict = jnp.sum(jnp.where(yy_mask, phi, zero), axis=0)
-    yppredict = jnp.sum(jnp.where(yp_mask, gamma[:, None] * phi, zero), axis=0)
-    return yypredict, yppredict
+    yy_rows = jnp.where((j <= kk)[:, None], phi, zero)
+    yp_rows = jnp.where(((j >= 1) & (j <= kk))[:, None], gamma[:, None] * phi, zero)
+    return _sum_rows(yy_rows), _sum_rows(yp_rows)
+
+
+def _sum_rows(rows: jax.Array) -> jax.Array:
+    """Add the history rows as one elementwise expression, fused with the masks that feed it.
+
+    The rows are added in groups of four, then the groups in order.
+    """
+    groups = [rows[j] for j in range(0, MXORDP1, 4)]
+    for j in range(MXORDP1):
+        if j % 4:
+            groups[j // 4] = groups[j // 4] + rows[j]
+    total = groups[0]
+    for group in groups[1:]:
+        total = total + group
+    return total
 
 
 __all__ = ["ida_predict"]

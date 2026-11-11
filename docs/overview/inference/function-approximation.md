@@ -47,7 +47,7 @@ def reaction_diffusion(q):
   alongside the learnable parameters
   ([pose the inference problem](fitting.md#pose-the-inference-problem)).
 
-The built-in approximators live in `diff_soup.inference.approx` and
+The built-in approximators live in `diff_soup.optimization.inference.approx` and
 fall into three classes by their argument:
 
 - functions of the state variables, for physical operators and
@@ -91,7 +91,7 @@ For example, to fit a diffusivity \(D(u) = \exp\big(\sum_k a_k P_k\big)\)
 with three coefficients, starting from the constant \(D = 0.1\):
 
 ```python
-from diff_soup.inference.approx import Legendre
+from diff_soup.optimization.inference.approx import Legendre
 
 spec = ds.problem("heat")
 spec.domain("rod", rod)
@@ -109,15 +109,15 @@ def heat(q):
 spec.bc.dirichlet("u", node_indices=np.array([0, n - 1]), value=0.0)
 problem = spec.build()
 y0 = spec.assemble_state({})
-infproblem = ds.inference.InferenceProblem(
-    ds.inference.Experiment(problem, solver, (0.0, 0.1), y0, (measurement,)), parameters=D_of_u)
-result = ds.inference.optsolve(infproblem)
+infproblem = ds.optimization.inference.InferenceProblem(
+    ds.optimization.inference.Experiment(problem, solver, (0.0, 0.1), y0, (measurement,)), parameters=D_of_u)
+result = ds.optimization.optsolve(infproblem)
 ```
 
 The expansion evaluates \(\sum_k a_k P_k(x)\), with \(x\) the state
 mapped onto \([-1, 1]\) and the coefficients \(a_k\) the fitted values,
 and it broadcasts over the nodal array on its own, so it is declared
-without `pointwise=True`. `ds.inference.Tikhonov` weights the
+without `pointwise=True`. `ds.optimization.inference.Tikhonov` weights the
 coefficient of degree \(k\) by \(1 + k(k + 1)\) by default, which damps
 the high-degree coefficients first
 ([regularization](fitting.md#regularization)).
@@ -158,13 +158,13 @@ several state variables.
 - `transform=` is a function `transform(u_1, ..., u_d, p)` of the inputs
   and the raw expansion, applied to the result.
 - `sparse_legendre_weights(basis)` gives the weight \(1 + k(k + 1)\) of
-  each term by its total degree \(k\), for `ds.inference.Tikhonov(weights=)`.
+  each term by its total degree \(k\), for `ds.optimization.inference.Tikhonov(weights=)`.
 
 For example, to fit a reaction rate that depends on the concentration and
 the temperature, \(r(c, T)\), with total degree two:
 
 ```python
-from diff_soup.inference.approx import SparseLegendre
+from diff_soup.optimization.inference.approx import SparseLegendre
 
 rate = spec.function("rate", SparseLegendre(intervals=((0.0, 1.0), (250.0, 350.0)), degree=2,
                                             coeffs=jnp.array([0.25, 0.0, 0.0, 0.0, 0.0, 0.0])), learnable=True)
@@ -217,7 +217,7 @@ the nodal array as it is. For example, a reaction rate that increases
 with the state:
 
 ```python
-from diff_soup.inference.approx import MonotoneMLP
+from diff_soup.optimization.inference.approx import MonotoneMLP
 
 rate = spec.function("rate", MonotoneMLP(1, width=8, depth=1, key=jax.random.PRNGKey(0)), learnable=True)
 
@@ -249,7 +249,7 @@ For example, a diffusivity that depends on the whole profile, kept
 positive through a transform:
 
 ```python
-from diff_soup.inference.approx import FNO1d, Transform
+from diff_soup.optimization.inference.approx import FNO1d, Transform
 
 K = spec.function("K", Transform(FNO1d(modes=3, width=4, depth=1, key=jax.random.PRNGKey(0)), "softplus"),
                   learnable=True)
@@ -302,7 +302,7 @@ them, weighted by the mass of each node.
 For example, to fit a diffusivity field on the rod with three modes:
 
 ```python
-from diff_soup.inference.approx import KLBasis
+from diff_soup.optimization.inference.approx import KLBasis
 
 kl = KLBasis.from_domain(rod, length_scale=0.25, sigma=0.5, n_modes=3)
 psi = spec.function("psi", kl, learnable=True)
@@ -347,7 +347,7 @@ scale.
 For example, to fit a diffusivity field on the rod:
 
 ```python
-from diff_soup.inference.approx import FourierFeatureNet
+from diff_soup.optimization.inference.approx import FourierFeatureNet
 
 D_x = spec.function("D_x", FourierFeatureNet.from_domain(rod, n_frequencies=2, width=5, depth=1, key=jax.random.PRNGKey(0),
                                                          transform=lambda x, raw: 0.2 * jnp.exp(raw)), learnable=True)
@@ -375,6 +375,10 @@ basis is an equinox module evaluated inside an equation as
 - `CubicHermite(knots, values, slopes)` is a cubic on each segment
   matched to the value and the slope at both of its knots, so the
   signal is smooth.
+- `BSpline(knots, control_points)` is the clamped cubic B-spline
+  \(s(t) = \sum_i p_i B_i(t)\), with two more control points than knots.
+  It starts at the first control point, ends at the last, has a continuous
+  second derivative, and never leaves the range of its control points.
 - `Fourier(period, cos_coeffs, sin_coeffs, mean)` is the truncated
   series \(s(t) = \bar s + \sum_{k=1}^{n} c_k \cos(2\pi k t / T) + s_k
   \sin(2\pi k t / T)\), periodic with period \(T\).
@@ -385,10 +389,15 @@ exactly on an interior knot takes the segment to its left, the segment
 a solver step ending there was integrated against. A multi-component
 signal carries a trailing axis of size \(m\) on its values.
 
+The four piecewise signals are polynomials on every segment.
+`polynomials()` returns their coefficients in the time since each
+segment's start, shape `(K, degree + 1)` with the constant term first.
+This is how a signal drives a schedule exactly as a control.
+
 For example, to fit a forcing term that steps once at \(t = 0.05\):
 
 ```python
-from diff_soup.inference.approx import PiecewiseConstant
+from diff_soup.optimization.inference.approx import PiecewiseConstant
 
 knots = jnp.array([0.0, 0.05, 0.1])
 drive = spec.function("drive", PiecewiseConstant(knots, jnp.zeros(2)), learnable=True)
@@ -408,7 +417,7 @@ is passed as `value_fn=` instead. For example, to fit the value at the
 left end of the rod:
 
 ```python
-from diff_soup.inference.approx import PiecewiseLinear
+from diff_soup.optimization.inference.approx import PiecewiseLinear
 
 inlet = spec.function("inlet", PiecewiseLinear(knots, jnp.zeros(3)), learnable=True)
 spec.bc.dirichlet("u", node_indices=np.array([0]), fn=lambda q, t: q.fn.inlet(t))

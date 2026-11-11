@@ -1,0 +1,18 @@
+SuperLU_MT 1e4bc160: leave its own COLAMD out of the library.
+
+SRC/colamd.c is COLAMD 2.9 under the GNU LGPL 2.1 or later. Without it the library leaves colamd,
+colamd_recommended and colamd_set_defaults undefined, and diff-soup's SuperLU_MT extension takes them
+from SuiteSparse's COLAMD (BSD-3-Clause), the libcolamd the KLU extension ships, which has the same
+32-bit interface. SRC/get_perm_c.c still compiles against SRC/colamd.h for the declarations.
+
+diff --git a/SRC/CMakeLists.txt b/SRC/CMakeLists.txt
+--- a/SRC/CMakeLists.txt
++++ b/SRC/CMakeLists.txt
+@@ -1,5 +1,7 @@
+ 
+ file(GLOB sources "*.c")
++# COLAMD comes from SuiteSparse (the libcolamd the KLU extension ships), not from SRC/colamd.c.
++list(REMOVE_ITEM sources "${CMAKE_CURRENT_SOURCE_DIR}/colamd.c")
+ 
+ function(add_superlu_mt_target PLAT_SUFFIX)
+   add_library(superlu_mt${PLAT_SUFFIX} ${sources})

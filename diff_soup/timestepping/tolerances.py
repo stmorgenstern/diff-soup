@@ -36,7 +36,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
-from diff_soup.timestepping.consistent_ic.pin_differential import _structure
+from diff_soup.problem.implicit.consistent_init.pinned import _structure
 
 _ROLE_KEYS = ("differential", "algebraic")
 _PARTITION_KEYS = ("state", "global")
@@ -83,7 +83,9 @@ class ToleranceSpec:
     Args:
         rtol: Positive relative tolerance.
         atol: Positive absolute tolerance, a scalar, one value per row, or a mapping keyed by field, global, role, partition, or `"default"`.
-        ic_rtol: Relative tolerance of consistent initialization, `rtol` when `None`.
+        ic_rtol: Relative tolerance of consistent initialization. When `None`,
+            use `rtol` unless `ic_atol` was supplied, which requests an
+            absolute-only gate.
         ic_atol: Absolute tolerance of consistent initialization, in the forms of `atol`, which it copies when `None`.
         newton_tol_factor: Positive scale on the corrector's acceptance threshold, where values above one loosen it.
         event_tol: Positive tolerance stored on the resolved record and not read by the engines.
@@ -407,10 +409,13 @@ def resolve_tolerances(
             differential_mask,
             what="ic_atol",
         )
+    ic_rtol = spec.ic_rtol
+    if ic_rtol is None:
+        ic_rtol = spec.rtol if spec.ic_atol is None else 0.0
     return ResolvedTolerances(
         rtol=float(spec.rtol),
         atol=atol,
-        ic_rtol=float(spec.rtol if spec.ic_rtol is None else spec.ic_rtol),
+        ic_rtol=float(ic_rtol),
         ic_atol=ic_atol,
         newton_tol_factor=float(spec.newton_tol_factor),
         event_tol=None if spec.event_tol is None else float(spec.event_tol),

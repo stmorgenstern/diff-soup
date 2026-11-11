@@ -33,24 +33,14 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
 from diff_soup._precision import Precision
 from diff_soup.linear._krylov import exact_backend
 from diff_soup.nonlinear.border_cache import initial_border_cache
 from diff_soup.nonlinear.generations import certify_exact_root, initial_generations
 from diff_soup.nonlinear.result import LinearizationDirective
-from diff_soup.timestepping.consistent_ic.api import (
-    ICRequest,
-    ICState,
-    InitMode,
-    consistent_init,
-)
-from diff_soup.timestepping.consistent_ic.pin_differential import (
-    ICConfig,
-    _full_dense_topology,
-    _structure,
-)
+from diff_soup.problem.implicit.consistent_init.euler_newton import euler_newton_ic
+from diff_soup.problem.implicit.consistent_init.pinned import ICConfig, ICMode
 from diff_soup.timestepping.vsvo.common.adaptive import (
     CAUSE_ESCALATION,
     CAUSE_FALSE_CONVERGENCE,
@@ -60,19 +50,27 @@ from diff_soup.timestepping.vsvo.common.adaptive import (
     initial_rung_state,
 )
 from diff_soup.timestepping.vsvo.common.backends import (
-    analyze_sensitivity,
-    initialization_policy,
     resolve_backend,
 )
 from diff_soup.timestepping.vsvo.common.contract import (
+    ENDPOINT_CLAMP_FUZZ,
+    ENGINE_CACHE_SIZE,
+    ENGINE_CAPABILITIES,
     EngineCapabilities,
+    clamp_initial_step,
     closure_moved,
-    consume_consistent_init,
+    consistent_start,
     ic_gate_tolerance,
+    initialization_policies,
     pack_state,
+    problem_layout,
+    project_start,
+    refuse_unprojected_start,
+    sensitivity_analyses,
+    where_state,
 )
 from diff_soup.timestepping.vsvo.common.decisions import replay_decisions
-from diff_soup.timestepping.vsvo.common.driver import StepReport
+from diff_soup.timestepping.vsvo.common.engine import StepReport
 from diff_soup.timestepping.vsvo.common.flash_controller import (
     FLASH_ERR_SEED,
     flash_step_control,
@@ -83,11 +81,12 @@ from diff_soup.timestepping.vsvo.common.linear_ops import (
     state_block_size,
 )
 from diff_soup.timestepping.vsvo.common.trace import IDATraceRecord, StepTraceHeader
-from diff_soup.timestepping.vsvo.common.weights import error_weight, wrms_norm
 from diff_soup.utils import safe_div
+from diff_soup.utils.lanes import lane_cond, live_lane_cond
+from diff_soup.utils.weights import error_weight, wrms_norm
 
 from .coeffs import ida_set_coeffs
-from .complete_step import ACTION_UNSET, ida_complete_step
+from .complete_step import ACTION_UNSET, advance_phi, ida_complete_step
 from .dense import ida_get_solution
 from .error import ida_test_error
 from .failure import NonlinearFlag, ida_handle_nflag, ida_reset, kflag_to_result_code
@@ -104,10 +103,6 @@ _CODE_SUCCESS = 1
 # Snap the internal time onto the endpoint when it lands within this many
 # rounding errors of it.
 _TN_SNAP_FUZZ = 100.0
-
-# The endpoint clamp shortens the step to just shy of the endpoint by this many
-# rounding errors.
-_ENDPOINT_CLAMP_FUZZ = 4.0
 
 # The endpoint save band. Must equal the driver's save tolerance (its
 # ``t_new >= t1 - 1e-10`` finished-step test) so a step already within this band
@@ -136,20 +131,6 @@ class _ConsistentInitAdapter(NamedTuple):
     converged: jax.Array
 
 
-def _capabilities() -> EngineCapabilities:
-    """The IDA-tracking engine's capability flags (every flag stated)."""
-    return EngineCapabilities(
-        # The factored iteration matrix persists across attempts and is
-        # refactored only where a setup replaces it.
-        supports_factor_reuse=True,
-        supports_events=True,
-        supports_fully_implicit=True,
-        supports_global_constraints=True,
-        supports_state_dependent_mass=True,
-        supports_dense_output=True,
-    )
-
-
 def _pad_to(vec: jax.Array, length: int) -> jax.Array:
     """Right-pad (or truncate) ``vec`` to ``length`` along its single axis."""
     have = int(vec.shape[0])
@@ -158,18 +139,13 @@ def _pad_to(vec: jax.Array, length: int) -> jax.Array:
     return vec[:length]
 
 
-def _where_state(cond: jax.Array, a: IDAState, b: IDAState) -> IDAState:
-    """Select between two carried states leaf-by-leaf on a scalar predicate."""
-    return jax.tree_util.tree_map(lambda x, y: jnp.where(cond, x, y), a, b)
-
-
 def _advance_linearization_provenance(generations, *, setups, converged, correction):
     """Advance the carried linearization generations for one corrector attempt.
 
     A fired setup re-assembles the iteration matrix at the attempt's
     predictor and rebuilds its numeric factor, so the point, matrix, and
-    factor counters advance together; a gate-closed attempt leaves every
-    counter in place. The returned certificate attests exactness at the
+    factor counters advance together, once per setup; a gate-closed attempt
+    leaves every counter in place. The returned certificate attests exactness at the
     accepted root: it authorizes factor reuse only when the attempt converged
     on the freshly assembled matrix without applying a Newton correction —
     the one case in which the accepted root coincides with the factorization
@@ -178,8 +154,8 @@ def _advance_linearization_provenance(generations, *, setups, converged, correct
 
     Args:
         generations: The carry's generation record at attempt entry.
-        setups: Whether the attempt performed at least one linear-solver
-            setup (traced boolean).
+        setups: The number of linear-solver setups the attempt performed
+            (traced integer): two when the gate fired and the fresh retry ran.
         converged: The corrector's convergence predicate (traced boolean).
         correction: The converged Newton correction ``ee``; an exactly zero
             correction means the root equals the setup-time predictor.
@@ -188,13 +164,22 @@ def _advance_linearization_provenance(generations, *, setups, converged, correct
         ``(generations, certificate)`` — the advanced record and the
         certificate issued at this attempt's acceptance decision.
     """
+    setups = jnp.asarray(setups)
     bumped = generations.bump("point", "matrix", "factor")
+    twice = bumped.bump("point", "matrix", "factor")
     advanced = jax.tree_util.tree_map(
-        lambda new, old: jnp.where(setups, new, old), bumped, generations
+        lambda two, one, old: jnp.where(setups > 1, two, jnp.where(setups > 0, one, old)),
+        twice,
+        bumped,
+        generations,
     )
-    root_exact = jnp.logical_and(
-        jnp.asarray(converged),
-        jnp.logical_and(jnp.asarray(setups), jnp.all(correction == 0.0)),
+    candidate = jnp.logical_and(jnp.asarray(converged), setups > 0)
+    root_exact = lane_cond(
+        candidate,
+        lambda _: jnp.logical_and(candidate, jnp.all(correction == 0.0)),
+        lambda _: jnp.zeros((), jnp.bool_),
+        None,
+        false_is_free=True,
     )
     return advanced, certify_exact_root(advanced, root_exact)
 
@@ -300,6 +285,9 @@ class IDAEngineCarry(eqx.Module):
     # so each vmap lane keys and invalidates its own cache; a rebuilt carry
     # starts cold.
     border_cache: Any = None
+    # Whether an earlier attempt of this loop made the shared factor storage
+    # hold ``saved_blocks``: the first refactor of a loop must look at it.
+    held_current: Any = None
     # Per-row absolute-tolerance vector consumed by the error-weight law when
     # the solve's tolerances were resolved against the problem layout, or
     # ``None`` for the engine's uniform scalar. Runtime data, so it rides the
@@ -559,6 +547,7 @@ class IDAEngine(eqx.Module):
             generations=record.generations,
             root_certificate=certify_exact_root(record.generations, jnp.asarray(False)),
             border_cache=record.border_cache,
+            held_current=jnp.asarray(False),
             atol_rows=atol_rows,
         )
 
@@ -592,39 +581,29 @@ class IDAEngine(eqx.Module):
         uround = jnp.finfo(dtype).eps
         id_mask = self._id_mask(problem, dtype)
 
-        _, _, _diff, _alg_index, needs_projection = _structure(problem)
-        if (
-            not bool(cfg.consistent_ic) or self.ic_mode == "assume_consistent"
-        ) and needs_projection:
-            raise ConfigurationError(
-                "this problem has algebraic rows; "
-                "consistent_ic=False and ic_mode='assume_consistent' are "
-                "not supported for it. Enable consistent initialization."
-            )
-        # The projection factors this problem exactly as the corrector does,
-        # so it is analyzed with the lowered problem's placement and the
-        # accepted-root sensitivity precision this solve declared for each
-        # derivative direction — never the backend's defaults.
-        ic_layout, ic_precision = initialization_policy(problem, self.precision, mode="forward")
-        _, ic_reverse_precision = initialization_policy(problem, self.precision, mode="reverse")
+        refuse_unprojected_start(
+            problem,
+            not bool(cfg.consistent_ic) or self.ic_mode == "assume_consistent",
+            "consistent_ic=False and ic_mode='assume_consistent' are",
+        )
+        policies = initialization_policies(problem, self.precision)
+        ic_layout, ic_precision, _ = policies
         if self.ic_mode in ("ya_ydp_euler", "y_fixed_ydot"):
             gate_tol = ic_gate_tolerance(cfg.atol, self.ic_tol)
             mode = (
-                InitMode.ALG_AND_YDOT
-                if self.ic_mode == "ya_ydp_euler"
-                else InitMode.ALL_Y_GIVEN_YDOT
+                ICMode.ALG_AND_YDOT if self.ic_mode == "ya_ydp_euler" else ICMode.ALL_Y_GIVEN_YDOT
             )
-            euler_ic = consistent_init(
+            euler_ic = euler_newton_ic(
                 problem,
-                ICState(y=u0, lam=lam0, ydot=ydot0),
+                u0,
+                ydot0,
+                lam0,
                 theta,
-                ICRequest(
-                    mode=mode,
-                    t0=t0,
-                    cfg=ICConfig(rtol=self.rtol, atol=gate_tol),
-                    t1=t1,
-                ),
-                exact_backend(self.backend),
+                mode,
+                ICConfig(rtol=self.rtol, atol=gate_tol),
+                t0,
+                t1=t1,
+                backend=exact_backend(self.backend),
                 layout=ic_layout,
                 precision=ic_precision,
             )
@@ -644,34 +623,9 @@ class IDAEngine(eqx.Module):
                 converged=converged,
             )
         else:
-            ic = problem.consistent_initial_state(
-                t0,
-                pack_state(u0, lam0),
-                theta,
-                control,
-                ydot0=jnp.concatenate([ydot0, jnp.zeros((n_lam,), dtype=dtype)]),
-                tol=ic_gate_tolerance(self.atol, self.ic_tol),
-                backend=self.backend,
-                layout=ic_layout,
-                precision=ic_precision,
-                reverse_precision=ic_reverse_precision,
-            )
-        ic_y, ic_ydot = consume_consistent_init(ic)
-        u_c = jnp.asarray(ic_y[:n_u], dtype=dtype)
-        lam_c = jnp.asarray(ic_y[n_u:], dtype=dtype)
-        alg_norm = jnp.asarray(ic.residual_norm, dtype=dtype)
-
-        y_aug0 = pack_state(u_c, lam_c)
-        # The consistent initialization computes derivatives for every
-        # differential row, including differential globals in the bordered
-        # partition; algebraic rows arrive as zeros. Consume it whole.
-        ydot_aug0 = jnp.asarray(ic_ydot, dtype=dtype)
-
-        # A per-row absolute tolerance arrives as a vector on the driver
-        # configuration; it rides the carry so accepted-step weight refreshes
-        # keep consuming it.
-        atol_rows = cfg.atol if getattr(cfg.atol, "ndim", 0) == 1 else None
-        ewt0 = error_weight(y_aug0, self.rtol, self.atol if atol_rows is None else atol_rows)
+            ic = project_start(self, problem, t0, u0, lam0, ydot0, theta, control, policies)
+        start = consistent_start(self, cfg, ic, n_u, dtype)
+        u_c, lam_c, y_aug0, ydot_aug0, alg_norm, atol_rows, ewt0 = start
 
         hmax = float(cfg.hmax)
         hmax_inv = jnp.asarray(1.0 / hmax if hmax > 0.0 else 0.0, dtype=dtype)
@@ -700,19 +654,7 @@ class IDAEngine(eqx.Module):
             jax.lax.cond(dt0 != 0.0, lambda _: dt0, _auto_initial_step, operand=None)
         )
 
-        # hmax / hmin clamps, then the endpoint clamp against t1.
-        rh = jnp.abs(hh) * hmax_inv
-        hh = jnp.where(rh > 1.0, hh / jnp.where(rh > 1.0, rh, 1.0), hh)
-        at_min = jnp.abs(hh) < hmin
-        hh = jnp.where(at_min, hh * (hmin / jnp.where(at_min, jnp.abs(hh), 1.0)), hh)
-        overshoot = (t0 + hh - t1) * hh > 0
-        hh = jnp.where(overshoot, (t1 - t0) * (1.0 - _ENDPOINT_CLAMP_FUZZ * uround), hh)
-
-        if step is not None:
-            # A replayed restart enters with the step its forward sweep recorded.
-            replay, recorded = step
-            recorded = jax.lax.stop_gradient(jnp.asarray(recorded).astype(dtype))
-            hh = jnp.where(replay, recorded, hh)
+        hh = clamp_initial_step(hh, t0, t1, hmax_inv, hmin, uround, step, dtype)
 
         state = init_ida_state(y_aug0, ydot_aug0, hh, n, dtype.type)
 
@@ -762,6 +704,7 @@ class IDAEngine(eqx.Module):
             # The border cache starts cold on every carry construction —
             # including an event restart, which rebuilds the carry here.
             border_cache=initial_border_cache(n_u, n_lam, dtype) if n_lam > 0 else None,
+            held_current=jnp.asarray(False),
             atol_rows=atol_rows,
         )
 
@@ -819,14 +762,7 @@ class IDAEngine(eqx.Module):
         saved_t = carry.tn
 
         backend = self.backend
-        # The problem's lowering-declared Layout is the single source of
-        # truth for device placement: it places EVERY analysis of this solve
-        # — each corrector rung's factor and the sensitivity pattern alike —
-        # so a multi-GPU factorization request reaches the adjoint's
-        # transpose factor too, never silently staying single-device.
-        layout = getattr(problem, "layout", None)
-        if layout is None:
-            layout = Layout()
+        layout = problem_layout(problem)
         adaptive = self.precision.solve_mode == "adaptive"
         # The corrector's routes: one per precision rung (two under the
         # adaptive ladder, which switches between them on the carried rung).
@@ -847,7 +783,7 @@ class IDAEngine(eqx.Module):
         # also holds for backward-in-time integration.
         outside_band = jnp.abs(t1 - saved_t) > _ENDPOINT_BAND
         do_clamp = jnp.logical_and(overshoot, outside_band)
-        hh = jnp.where(do_clamp, (t1 - saved_t) * (1.0 - _ENDPOINT_CLAMP_FUZZ * uround), hh_in)
+        hh = jnp.where(do_clamp, (t1 - saved_t) * (1.0 - ENDPOINT_CLAMP_FUZZ * uround), hh_in)
 
         # Step 2 -- advance the coefficients.
         (phi_star, psi, alpha, beta, sigma, gamma, cjlast, cj, ck, ns, alphas, alpha0) = (
@@ -888,29 +824,7 @@ class IDAEngine(eqx.Module):
             rung_changed=None if prec is None else prec.entered,
             control=carry.control,
         )
-        # The sensitivity solves of the per-step root derivative factor the
-        # full-system matrix at the accepted root exactly — the tangent solve
-        # the matrix, a reverse sweep its transpose, each under the precision
-        # policy of its direction — through this engine's own backend; a
-        # dense-mode plan hands it the full dense pattern. The symbolic
-        # analysis is problem-static.
-        full_topology = problem.full_topology
-        if full_topology is None:
-            full_topology = _full_dense_topology(int(problem.n))
-        sens_analysis = analyze_sensitivity(
-            backend,
-            full_topology,
-            layout=layout,
-            precision=self.precision,
-            mode="forward",
-        )
-        rev_analysis = analyze_sensitivity(
-            backend,
-            full_topology,
-            layout=layout,
-            precision=self.precision,
-            mode="reverse",
-        )
+        sens_analysis, rev_analysis = sensitivity_analyses(self, problem, backend, layout)
         # When algebraic rows participate in the error test, stale algebraic
         # couplings can cost more Newton work than they save. A supplied exact
         # state-partial callback is already the cheap assembly path, so do not
@@ -941,6 +855,10 @@ class IDAEngine(eqx.Module):
             jacobian_values_dtype=self.jacobian_values_dtype,
             detect_precision=adaptive,
             live=live,
+            # A forward loop never restores an older carry; a replay needs
+            # the native comparison of the held values.
+            held_current=carry.held_current if decision is None else None,
+            suppressalg=self.suppressalg,
         )
 
         # The leading-coefficient bookkeeping the setup gate would carry forward.
@@ -1085,20 +1003,11 @@ class IDAEngine(eqx.Module):
         # The scaled local-error vector is not carried here: the driver reports
         # ck*enorm_k as the error estimate and exposes no consumer for a full
         # scaled-error vector, so it is never materialized.
-        new_ewt = error_weight(
-            new_state_acc.phi[0],
-            self.rtol,
-            self.atol if carry.atol_rows is None else carry.atol_rows,
-        )
         tn_snapped = jnp.where(
             jnp.abs(tn - t1) <= _TN_SNAP_FUZZ * uround * (jnp.abs(tn) + jnp.abs(hh)), t1, tn
         )
-        y_new_acc = new_state_acc.phi[0][:n_u]
-        ydot_acc = nls.yp[:n_u]
-        lam_acc = new_state_acc.phi[0][n_u:]
 
         # --- failure branch: restore, walk the ladder ---
-        phi_restored, psi_restored = ida_restore(phi_star, psi, beta, st.kk, hh, ns)
         # A non-converged corrector is a recoverable nonlinear-solver failure on
         # the dense path (no fatal residual / linear-solve returns); the abort
         # branch maps it to a nonlinear-convergence termination. A converged
@@ -1139,9 +1048,40 @@ class IDAEngine(eqx.Module):
             phase_new = jnp.where(prec_retry, st.phase, phase_new).astype(phase_new.dtype)
         predict_again = kflag == NonlinearFlag.PREDICT_AGAIN
         do_reset = jnp.logical_and(predict_again, st.nst == 0)
-        phi_reset, psi_reset = ida_reset(phi_restored, psi_restored, hh_new_f, eta_new_f)
-        phi_f = jnp.where(do_reset, phi_reset, phi_restored)
-        psi_f = jnp.where(do_reset, psi_reset, psi_restored)
+
+        # The history work runs on the side the attempt took: an accepted step
+        # folds in its correction and refreshes the error weights, a rejected
+        # one undoes the coefficient rescale. Row 0 of the result is the
+        # solution either way (a rejected attempt leaves it unscaled).
+        def _accepted_history(_):
+            phi_new = advance_phi(phi_star, nls.ee, st.kk)
+            weights = error_weight(
+                phi_new[0],
+                self.rtol,
+                self.atol if carry.atol_rows is None else carry.atol_rows,
+            )
+            return phi_new, psi, weights, nls.ee, nls.yy, nls.yp
+
+        def _rejected_history(_):
+            phi_restored, psi_restored = ida_restore(phi_star, psi, beta, st.kk, hh, ns)
+            phi_reset, psi_reset = ida_reset(phi_restored, psi_restored, hh_new_f, eta_new_f)
+            return (
+                jnp.where(do_reset, phi_reset, phi_restored),
+                jnp.where(do_reset, psi_reset, psi_restored),
+                ewt,
+                st.ee,
+                st.yy,
+                st.yp,
+            )
+
+        phi_out, psi_out, ewt_out, ee_out, yy_out, yp_out = live_lane_cond(
+            accept, _accepted_history, _rejected_history, None, live=live
+        )
+        new_state_acc = eqx.tree_at(
+            lambda s: (s.phi, s.psi, s.ee, s.yy, s.yp),
+            new_state_acc,
+            (phi_out, psi_out, ee_out, yy_out, yp_out),
+        )
         # cjold and the Newton rate memory ss are persistent solver state, not
         # step history, so a rejected attempt carries them forward exactly as an
         # accepted one does -- cjold is this attempt's cj when a setup fired, and
@@ -1150,6 +1090,9 @@ class IDAEngine(eqx.Module):
             lambda s: (
                 s.phi,
                 s.psi,
+                s.ee,
+                s.yy,
+                s.yp,
                 s.kk,
                 s.hh,
                 s.eta,
@@ -1162,8 +1105,11 @@ class IDAEngine(eqx.Module):
             ),
             st,
             (
-                phi_f,
-                psi_f,
+                phi_out,
+                psi_out,
+                ee_out,
+                yy_out,
+                yp_out,
                 kk_new_f,
                 hh_new_f,
                 eta_new_f,
@@ -1178,7 +1124,7 @@ class IDAEngine(eqx.Module):
         result_fail = jnp.where(predict_again, _CODE_SUCCESS, kflag_to_result_code(kflag))
 
         # --- select the branch ---
-        new_state = _where_state(accept, new_state_acc, st_fail)
+        new_state = where_state(accept, new_state_acc, st_fail)
         if adaptive:
             # Attribute this attempt's promotion cause and advance the policy.
             none_cause = jnp.asarray(-1, jnp.int32)
@@ -1198,7 +1144,7 @@ class IDAEngine(eqx.Module):
             promo_delta = None
         provenance, certificate = _advance_linearization_provenance(
             carry.generations,
-            setups=nls.nsetups > 0,
+            setups=nls.nsetups,
             converged=nls.converged,
             correction=nls.ee,
         )
@@ -1207,7 +1153,7 @@ class IDAEngine(eqx.Module):
             tn=jnp.where(accept, tn_snapped, saved_t),
             ncf=jnp.where(accept, jnp.asarray(0, jnp.int32), ncf_new),
             nef=jnp.where(accept, jnp.asarray(0, jnp.int32), nef_new),
-            ewt=jnp.where(accept, new_ewt, ewt),
+            ewt=ewt_out,
             theta=theta,
             control=carry.control,
             # The factored iteration matrix persists across attempts and
@@ -1232,6 +1178,7 @@ class IDAEngine(eqx.Module):
             generations=provenance,
             root_certificate=certificate,
             border_cache=nls.border_cache_out,
+            held_current=jnp.ones_like(carry.held_current),
             atol_rows=carry.atol_rows,
         )
 
@@ -1280,9 +1227,9 @@ class IDAEngine(eqx.Module):
         report = StepReport(
             accepted=accept,
             t_new=jnp.where(accept, tn_snapped, saved_t),
-            y_new=jnp.where(accept, y_new_acc, st.phi[0][:n_u]),
-            ydot_new=jnp.where(accept, ydot_acc, st.yp[:n_u]),
-            lam_new=jnp.where(accept, lam_acc, st.phi[0][n_u:]),
+            y_new=phi_out[0][:n_u],
+            ydot_new=yp_out[:n_u],
+            lam_new=phi_out[0][n_u:],
             h_new=jnp.where(accept, new_state_acc.hh, hh_new_f),
             k_new=jnp.where(accept, new_state_acc.kk, kk_new_f).astype(jnp.int32),
             err_estimate=err_estimate,
@@ -1477,7 +1424,7 @@ def _build_ida_engine(
         ic_mode=str(ic_mode),
         loop_form=profile.nonlinear_mode,
         jacobian_policy=profile.jacobian_policy,
-        capabilities=_capabilities(),
+        capabilities=ENGINE_CAPABILITIES["ida"],
         controller_mode=profile.controller_mode,
         controller_law=profile.controller_law,
         newton_tol_factor=float(newton_tol_factor),
@@ -1488,7 +1435,7 @@ def _build_ida_engine(
     )
 
 
-_ida_engine_cached = functools.lru_cache(maxsize=None)(_build_ida_engine)
+_ida_engine_cached = functools.lru_cache(maxsize=ENGINE_CACHE_SIZE)(_build_ida_engine)
 
 
 def ida_engine(
@@ -1514,9 +1461,9 @@ def ida_engine(
     carries the algebraic-suppression flag, the identification-mask override,
     and the consistent-initialization mode through to the engine.
 
-    Identical configurations return one memoised engine object, so repeated
-    solves share the driver's compiled program instead of recompiling per
-    construction. An unhashable ``id`` mask falls back to an uncached build.
+    Identical configurations return one memoised engine object (of the last
+    ``ENGINE_CACHE_SIZE``), so repeated solves share the driver's compiled
+    program instead of recompiling per construction. An unhashable ``id`` mask falls back to an uncached build.
 
     Args:
         profile: The solver execution profile (``nonlinear_mode`` selects the
