@@ -127,6 +127,13 @@ These take bounds and the rows of `Constraints` declared on the problem.
             - residual_and_jacobian
             - from_residual
 
+    ::: diff_soup.optimization.solvers.KKTSolve
+        options:
+          members:
+            - factor
+            - solve_factored
+            - solve
+
     ::: diff_soup.optimization.inference.XScale
         options:
           members:
