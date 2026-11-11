@@ -14,6 +14,7 @@ Sparsity read from the equations, compiled constrained optimization in `ds.optim
 - While a crossing is located, `Event` conditions now receive the solve's `theta` as `args`, as they do when the event is detected, so a condition can read and differentiate a parameter. Previously they received `None` there, and a condition that tests `args is None` now takes the other branch.
 - `spec.build()` now declares only the Jacobian entries a tangent can reach, unless an equation uses `q.dt` (`exact_sparsity=None`, the new default). Pass `exact_sparsity=False` for the declared blocks with a dense border per global.
 - A `SolveContext` now belongs to the thread that first factors in it, whatever the backend: `factor` and `empty_factor` in it from another thread, or a trace there of a function that calls them, raise `FactorContractError`. Create one context per thread.
+- `TrustRegion` on a lowered study now compiles a `trial_predicate` and a custom regularization into each attempt. One that reads `x` on the host now raises. Previously both ran in Python between the attempt's compiled calls.
 
 ### Features
 
