@@ -3,9 +3,10 @@
 diff_soup is licensed under BSD-3-Clause (see `LICENSE`). Portions of
 its algorithms and code are derived from or modeled on the following
 permissively-licensed projects, reproduced here with their required
-notices. Vendored binary dependencies (SuiteSparse/KLU and the GCC runtime
-libraries they need) carry their own license files under
-`diff_soup/_internal/klu_ffi/licenses/`.
+notices. Vendored binary dependencies (SuiteSparse, SuperLU_MT and the GCC
+runtime libraries they need) carry their own license files under
+`diff_soup/_internal/klu_ffi/licenses/` and
+`diff_soup/_internal/superlu_ffi/THIRD_PARTY_NOTICES.md`.
 
 ## OrdinaryDiffEq.jl (MIT "Expat" License)
 
