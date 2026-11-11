@@ -17,6 +17,10 @@
     options:
       members: false
 
+::: diff_soup.optimization.inference.InequalityRows
+    options:
+      members: false
+
 ::: diff_soup.optimization.LevenbergMarquardt
     options:
       members: false
@@ -62,6 +66,36 @@ The `x_scale=` setting of a solver takes one of these.
         - zero_mean
         - zero_mean_across
         - declared
+
+---
+
+### Constrained solvers
+
+These take bounds and the rows of `Constraints` declared on the problem.
+
+::: diff_soup.optimization.InteriorPoint
+    options:
+      members: false
+
+::: diff_soup.optimization.SQP
+    options:
+      members: false
+
+::: diff_soup.optimization.AugmentedLagrangian
+    options:
+      members: false
+
+::: diff_soup.optimization.Constraints
+    options:
+      members: false
+
+::: diff_soup.optimization.lanes
+    options:
+      members: false
+
+::: diff_soup.optimization.SolveRecord
+    options:
+      members: false
 
 ---
 
