@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.0 (unreleased)
+## 1.2.0 (2026-11-11)
 
 Sparsity read from the equations, compiled constrained optimization in `ds.optimization`, and control problems in `ds.optimization.control`, with complex linear solves on every exact backend, a public schedule solve, and fixes to JIDA and consistent initialization.
 
