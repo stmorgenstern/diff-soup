@@ -1,16 +1,16 @@
 {
   "budgets": {
-    "test_files": 51,
-    "test_functions": 501,
-    "collected_tests": 845,
-    "source_lines": 18011
+    "test_files": 52,
+    "test_functions": 507,
+    "collected_tests": 854,
+    "source_lines": 18214
   },
   "tier_budgets": {
     "public_api": {
-      "files": 21,
-      "functions": 210,
-      "collected": 334,
-      "lines": 6812
+      "files": 22,
+      "functions": 216,
+      "collected": 343,
+      "lines": 7015
     },
     "contracts": {
       "files": 22,
@@ -137,7 +137,8 @@
     "tests/support/optimization.py",
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
-    "tests/contracts/test_coloring.py"
+    "tests/contracts/test_coloring.py",
+    "tests/public_api/test_linear_penalty.py"
   ],
   "test_files": [
     "tests/public_api/test_recipe_build.py",
@@ -190,7 +191,8 @@
     "tests/multi_device/test_optimization_lanes.py",
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
-    "tests/contracts/test_coloring.py"
+    "tests/contracts/test_coloring.py",
+    "tests/public_api/test_linear_penalty.py"
   ],
   "feature_contracts": [
     {
@@ -396,6 +398,10 @@
     {
       "file": "tests/contracts/test_coloring.py",
       "feature": "Sparse-matrix colorings: every kind and order decompresses its exact products, refused patterns, seeded recovery"
+    },
+    {
+      "file": "tests/public_api/test_linear_penalty.py",
+      "feature": "LinearPenalty: a linear penalty on nonnegative parameters, its Gauss-Newton statistics, its exact zeros under the joint and the nested TrustRegion, weights changed between fits without a compile, and its refusals"
     }
   ]
 }
