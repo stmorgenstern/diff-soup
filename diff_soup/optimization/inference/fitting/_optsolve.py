@@ -90,6 +90,7 @@ def _refuse_unmet(numeric: OptimizationProblem, optimizer: OptSolver) -> None:
             f"{type(optimizer).__name__} does not take constraints, and this problem has {rows} "
             "constraint rows; solve it with InteriorPoint, SQP or AugmentedLagrangian."
         )
+    _refuse_dropped_linear(numeric, optimizer, requires)
     missing = (requires - {RESUME}) - structure
     if not missing:
         return
@@ -99,6 +100,26 @@ def _refuse_unmet(numeric: OptimizationProblem, optimizer: OptSolver) -> None:
         f"this problem does not provide: it provides {sorted(structure)}. Solvers whose "
         f"requirements it meets: {', '.join(suited) if suited else 'none of the built-in solvers'}."
     )
+
+
+def _refuse_dropped_linear(numeric: Any, optimizer: OptSolver, requires: frozenset) -> None:
+    """Refuse a linear penalty to a solver that reads the regularization's rows alone.
+
+    ``LevenbergMarquardt`` and ``NewtonTrustRegion(hessian="gauss-newton")`` append the
+    regularization's rows to the residual, which a linear penalty does not have.
+    """
+    from diff_soup.optimization.inference.fitting.regularization import linear_part
+
+    if linear_part(getattr(numeric, "regularization", None)) is None:
+        return
+    if isinstance(optimizer, CompiledSolver) or "batched_lanes" in requires:
+        return
+    if "residual_jacobian" in requires or getattr(optimizer, "hessian", None) == "gauss-newton":
+        raise ConfigurationError(
+            f"{type(optimizer).__name__} steps on the rows of the residual and of the "
+            "regularization, and a LinearPenalty has none; fit it with TrustRegion on a "
+            "lowered study, or with NewtonTrustRegion(hessian='true'), BFGS or a compiled solver."
+        )
 
 
 def _solve(

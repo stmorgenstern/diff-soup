@@ -19,13 +19,19 @@ The protocol every regularizer follows is:
 
 - ``residual(x)`` — returns a 1-D JAX array of extra least-squares rows
   (length 0 for no regularization).
-- ``penalty(x)`` — returns ``0.5 * ||residual(x)||²`` as a scalar.
+- ``linear_part()`` — ``(columns, weights)``, the linear term
+  ``sum_i weights[i] * x[columns[i]]``, or ``None`` (the default) for none.
+- ``penalty(x)`` — returns ``0.5 * ||residual(x)||²`` plus the linear term as a scalar.
+
+A Gauss-Newton fit adds the rows to its residual and the linear term to its value and
+gradient; the linear term adds nothing to the Gauss-Newton matrix.
 """
 
 from __future__ import annotations
 
+import fnmatch
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -50,7 +56,9 @@ class Regularizer(ABC):
 
     All regularizers implement ``residual(x)``, which returns the extra
     least-squares rows appended to the data residual before solving.
-    The default ``penalty(x)`` is ``0.5 * ||residual(x)||²``.
+    The default ``penalty(x)`` is ``0.5 * ||residual(x)||²``. A regularizer
+    may also carry a linear term (``linear_part``), which its ``penalty``
+    includes and its ``residual`` does not.
 
     Subclasses must implement [residual][diff_soup.optimization.inference.fitting.regularization.Regularizer.residual].  They may override
     [penalty][diff_soup.optimization.inference.fitting.regularization.Regularizer.penalty] when a cheaper closed-form expression exists, provided
@@ -83,6 +91,13 @@ class Regularizer(ABC):
         """
         r = self.residual(x)
         return 0.5 * jnp.sum(r**2)
+
+    def linear_part(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """The linear term of the penalty, ``(columns, weights)``, or ``None`` for none.
+
+        A regularizer with a linear term includes it in `penalty`, and not in `residual`.
+        """
+        return None
 
 
 class NoReg(Regularizer):
@@ -344,3 +359,220 @@ class Tikhonov(Regularizer):
         n = x.shape[0] if hasattr(x, "shape") and x.shape else len(x)
         w = self.weights if self.weights is not None else legendre_weights(n)
         return self.lambda_ * jnp.asarray(w, dtype=dt) * x
+
+
+def _checked_weight(value: Any, where: str) -> float:
+    """``value`` as a float, refused unless finite and at least zero."""
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        weight = float("nan")
+    if isinstance(value, (bool, np.bool_)) or not (np.isfinite(weight) and weight >= 0.0):
+        raise ValueError(
+            f"LinearPenalty weights are finite numbers of at least zero; {where} is {value!r}."
+        )
+    return weight
+
+
+@dataclass(frozen=True)
+class ColumnLinearPenalty(Regularizer):
+    """The linear penalty `sum_i weights[i] * x[columns[i]]` on columns of the fitted vector.
+
+    What a [LinearPenalty][diff_soup.optimization.inference.LinearPenalty] becomes once the
+    problem's parameter layout names its columns. It has no rows.
+
+    Args:
+        columns: The penalized columns, each once.
+        weights: One weight per column, each at least zero.
+    """
+
+    columns: tuple
+    weights: tuple
+
+    def __post_init__(self) -> None:
+        """Store the columns as ints and the weights as checked floats, one per column."""
+        columns = tuple(int(column) for column in self.columns)
+        given = tuple(self.weights)
+        if len(given) != len(columns):
+            raise ValueError(
+                f"ColumnLinearPenalty takes one weight per column; got {len(columns)} columns "
+                f"and {len(given)} weights."
+            )
+        weights = tuple(
+            _checked_weight(weight, f"the weight of column {column}")
+            for column, weight in zip(columns, given)
+        )
+        if len(set(columns)) != len(columns):
+            raise ValueError("ColumnLinearPenalty names each column once.")
+        object.__setattr__(self, "columns", columns)
+        object.__setattr__(self, "weights", weights)
+
+    def residual(self, x):
+        """No rows: a zero-length array of the dtype of ``x``."""
+        return jnp.zeros((0,), dtype=jnp.result_type(x))
+
+    def penalty(self, x):
+        """``sum_i weights[i] * x[columns[i]]`` (JAX-native), in the dtype of ``x``."""
+        dtype = jnp.result_type(x)
+        if not self.columns:
+            return jnp.zeros((), dtype=dtype)
+        columns = np.asarray(self.columns, dtype=np.int64)
+        return jnp.sum(jnp.asarray(self.weights, dtype=dtype) * jnp.asarray(x)[columns])
+
+    def linear_part(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(columns, weights)`` as host arrays."""
+        return (
+            np.asarray(self.columns, dtype=np.int64),
+            np.asarray(self.weights, dtype=np.float64),
+        )
+
+
+@dataclass(frozen=True)
+class LinearPenalty(Regularizer):
+    """Adds the penalty `sum_i w_i * x_i` on chosen parameters, each bounded below by zero, to the objective.
+
+    A lasso for nonnegative parameters: a fit moves the chosen parameters with all the others,
+    and a chosen parameter sits exactly at its lower bound while the data's pull to raise it is
+    weaker than its weight. Pass it as `regularization=` of an `InferenceProblem` or of
+    `ds.lower(study, ...)`, and change it between fits with `with_regularization`.
+
+    ```python
+    penalty = inf.LinearPenalty(0.1, on="rho_*")
+    lowered = ds.lower(study, objective=inf.MAP(), regularization=penalty)
+    fit = inf.optsolve(lowered, inf.TrustRegion(nested_at="experiment"))
+    ```
+
+    Args:
+        weight: One weight for every chosen parameter, or a mapping from a parameter's name
+            (or a pattern of names, or a handle) to its weight. Each weight is at least zero.
+        on: The chosen parameters: a handle, a name, a pattern of names such as `"rho_*"`,
+            or a sequence of them; `None` takes the keys of a mapping `weight`. Every
+            occurrence of a chosen parameter is penalized, one per member when it varies.
+    """
+
+    weight: Any
+    on: Any = None
+
+    def _residual_refused(self) -> None:
+        raise ValueError(
+            "LinearPenalty names its parameters, and its columns come from the problem's "
+            "parameter layout: pass it as InferenceProblem(regularization=...) or "
+            "ds.lower(study, regularization=...) instead of evaluating it directly."
+        )
+
+    def residual(self, x):
+        """No rows: a zero-length array of the dtype of ``x``."""
+        return jnp.zeros((0,), dtype=jnp.result_type(x))
+
+    def penalty(self, x):
+        """Refused: the penalty needs the columns of the problem's parameter layout."""
+        self._residual_refused()
+
+    def linear_part(self):
+        """Refused: the linear term needs the columns of the problem's parameter layout."""
+        self._residual_refused()
+
+    def _chosen(self) -> list[tuple[Any, float]]:
+        """``(selector, weight)`` pairs: a selector is a handle or a pattern of names."""
+        if isinstance(self.weight, Mapping):
+            if self.on is not None:
+                raise ValueError(
+                    "LinearPenalty takes its parameters from the keys of a mapping weight=; "
+                    "leave on=None."
+                )
+            return [
+                (key, _checked_weight(value, f"the weight of {getattr(key, 'name', key)!r}"))
+                for key, value in self.weight.items()
+            ]
+        weight = _checked_weight(self.weight, "weight=")
+        if self.on is None:
+            raise ValueError(
+                "LinearPenalty needs the parameters it penalizes: on= a handle, a name, a "
+                "pattern such as 'rho_*', or a sequence of them, or a mapping weight=."
+            )
+        selectors = (
+            list(self.on) if isinstance(self.on, (list, tuple, set, frozenset)) else [self.on]
+        )
+        return [(selector, weight) for selector in selectors]
+
+    def on_schema(self, schema: Any) -> ColumnLinearPenalty:
+        """The same penalty on the columns `schema` gives the chosen parameters.
+
+        Args:
+            schema: The [ParameterSchema][diff_soup.problem.ParameterSchema] of the problem.
+
+        Returns:
+            A [ColumnLinearPenalty][diff_soup.optimization.inference.fitting.regularization.ColumnLinearPenalty].
+
+        Raises:
+            ValueError: If a selector names no fitted parameter, a parameter is chosen twice,
+                or a weight is negative or not finite.
+        """
+        names = [entry.handle.name for entry in schema.entries]
+        weights: dict[int, float] = {}
+        chooser: dict[int, str] = {}
+        for selector, weight in self._chosen():
+            if isinstance(selector, str):
+                entries = [
+                    entry
+                    for entry in schema.entries
+                    if fnmatch.fnmatchcase(entry.handle.name, selector)
+                ]
+                label = selector
+            else:
+                try:
+                    entries = [schema.entry(selector)]
+                except (KeyError, ValueError):
+                    entries = []
+                label = getattr(selector, "name", repr(selector))
+            if not entries:
+                raise ValueError(
+                    f"LinearPenalty names {label!r}, which matches no fitted parameter; the "
+                    f"fitted parameters are {sorted(names)}."
+                )
+            for entry in entries:
+                for occurrence in entry.occurrences:
+                    for column in occurrence.columns:
+                        column = int(column)
+                        if column in weights:
+                            raise ValueError(
+                                f"LinearPenalty chooses {entry.handle.name!r} twice (by "
+                                f"{chooser[column]!r} and {label!r}); choose each parameter once."
+                            )
+                        weights[column] = weight
+                        chooser[column] = label
+        columns = tuple(sorted(weights))
+        return ColumnLinearPenalty(columns, tuple(weights[column] for column in columns))
+
+    def on_columns(self, columns: Sequence[int]) -> ColumnLinearPenalty:
+        """The penalty of one weight on explicit columns, for a problem without named parameters.
+
+        Args:
+            columns: The penalized columns of the fitted vector.
+
+        Returns:
+            A [ColumnLinearPenalty][diff_soup.optimization.inference.fitting.regularization.ColumnLinearPenalty].
+        """
+        if isinstance(self.weight, Mapping):
+            raise ValueError("LinearPenalty.on_columns takes one weight=, not a mapping.")
+        columns = tuple(int(column) for column in columns)
+        return ColumnLinearPenalty(columns, (self.weight,) * len(columns))
+
+
+def linear_part(regularization: Any) -> tuple[np.ndarray, np.ndarray] | None:
+    """The linear term ``(columns, weights)`` of ``regularization``, or ``None`` for none.
+
+    ``None`` too for a regularization without ``linear_part`` or without columns.
+    """
+    provider = getattr(regularization, "linear_part", None)
+    part = provider() if callable(provider) else None
+    if part is None or np.size(part[0]) == 0:
+        return None
+    return np.asarray(part[0], dtype=np.int64), np.asarray(part[1], dtype=np.float64)
+
+
+def rows_part(regularization: Any) -> Any:
+    """``regularization`` without its linear term: ``NoReg()`` for a linear penalty alone."""
+    if isinstance(regularization, ColumnLinearPenalty):
+        return NoReg()
+    return regularization

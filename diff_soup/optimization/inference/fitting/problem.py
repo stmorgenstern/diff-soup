@@ -279,6 +279,54 @@ class InferenceProblem(EstimationProblem):
         object.__setattr__(result, "_x0", values)
         return result
 
+    def with_regularization(self, regularization: Optional[Regularizer]) -> InferenceProblem:
+        """This problem, compiled once, with another regularization in its objective.
+
+        Nothing is lowered again: a lowered study keeps its lanes and their compiled
+        programs, and a `LinearPenalty` with other weights keeps every compiled program of
+        a `TrustRegion` fit too. Combine it with `with_start` to start each fit of a sweep
+        from the last.
+
+        ```python
+        for weight in (10.0, 1.0, 0.1):
+            problem = lowered.with_regularization(inf.LinearPenalty(weight, on="rho_*"))
+            fit = inf.optsolve(problem if fit is None else problem.with_start(fit), solver)
+        ```
+
+        Args:
+            regularization: The regularization, as `regularization=` takes it, or `None`.
+
+        Returns:
+            The problem with `regularization` in place of its own.
+
+        Raises:
+            ValueError: If a `LinearPenalty` names no fitted parameter or a parameter without
+                a finite lower bound.
+        """
+        from diff_soup.optimization.inference.fitting.regularization import NoReg, rows_part
+        from diff_soup.optimization.inference.statistics.estimation import (
+            _refuse_unbounded_linear,
+            _resolve_handle_regularization,
+        )
+
+        resolved = _resolve_handle_regularization(regularization, self.parameter_schema)
+        resolved = NoReg() if resolved is None else resolved
+        _refuse_unbounded_linear(resolved, self._inference_problem, self.parameter_schema)
+        result = copy.copy(self)
+        object.__setattr__(result, "regularization", resolved)
+        # The joint view holds the rows of the priors and of the regularization, and the
+        # compiled programs kept on it; a regularization of the same rows keeps it.
+        before, after = rows_part(self.regularization), rows_part(resolved)
+        same_rows = before is after or (isinstance(before, NoReg) and isinstance(after, NoReg))
+        if same_rows:
+            result.__dict__["_kept_joint_view"] = (result, self.joint_view())
+        # The programs of the priors read no regularization.
+        for name in ("_prior_program", "_log_prior_program"):
+            program = self.__dict__.get(name)
+            if program is not None and program[0] is self:
+                result.__dict__[name] = (result, program[1])
+        return result
+
     def finalize_opt_result(self, result, *, optimizer):
         """Attach the objective and each experiment's fitted parameter values."""
         result = super().finalize_opt_result(result, optimizer=optimizer)
@@ -969,7 +1017,10 @@ class LoweredStudy(InferenceProblem):
             values, gradients = reduce_member_gradients(
                 route.tables, results, results.lane_ids, lane_weights
             )
-        if regularizer and int(np.size(route.view.regularization.residual(jnp.asarray(self.x0)))):
+        if regularizer and (
+            route.linear is not None
+            or int(np.size(route.view.regularization.residual(jnp.asarray(self.x0))))
+        ):
             for unit, point in enumerate(flat):
                 member = routes[unit // count]
                 values[unit] += member.penalty(point)

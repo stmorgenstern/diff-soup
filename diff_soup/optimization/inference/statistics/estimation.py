@@ -20,13 +20,19 @@ from diff_soup.optimization._least_squares import LeastSquaresProblem
 from diff_soup.optimization.inference.fitting._layout import resolve_point
 from diff_soup.optimization.inference.fitting._residual_lowering import lower_residual_problem
 from diff_soup.optimization.inference.fitting._residual_memory import _MemoryCheckedHessian
+from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
 from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
 from diff_soup.optimization.inference.fitting.parameter_groups import (
     ParameterValues,
     parameter_values,
 )
-from diff_soup.optimization.inference.fitting.regularization import NoReg
+from diff_soup.optimization.inference.fitting.regularization import (
+    LinearPenalty,
+    NoReg,
+    linear_part,
+    rows_part,
+)
 from diff_soup.optimization.inference.fitting.result import OptResult
 from diff_soup.optimization.inference.statistics.likelihoods import (
     CorrelatedGaussian,
@@ -206,7 +212,9 @@ def _compile_prior_blocks(schema: ParameterSchema, objective: MLE | MAP) -> tupl
 
 
 def _resolve_handle_regularization(regularization: Any, schema: ParameterSchema) -> Any:
-    """Resolve a ``Tikhonov(on=handle)`` to the handle's column blocks; pass others through."""
+    """Resolve ``Tikhonov(on=handle)`` and ``LinearPenalty`` to their columns; pass others through."""
+    if isinstance(regularization, LinearPenalty):
+        return regularization.on_schema(schema)
     handle = getattr(regularization, "on", None)
     if handle is None:
         return regularization
@@ -220,6 +228,33 @@ def _resolve_handle_regularization(regularization: Any, schema: ParameterSchema)
     return regularization.on_columns(
         tuple(tuple(int(c) for c in occurrence.columns) for occurrence in entry.occurrences)
     )
+
+
+def _refuse_unbounded_linear(regularization: Any, problem: Any, schema: ParameterSchema) -> None:
+    """Refuse a linear penalty on a column without a finite lower bound.
+
+    A linear term on a column the box leaves free below has no minimum: the fit would carry
+    the column toward minus infinity wherever the data hold it loosely.
+    """
+    linear = linear_part(regularization)
+    if linear is None:
+        return
+    bounds = resolve_decision_bounds(problem)
+    lower = None if bounds is None else np.asarray(bounds[0], dtype=np.float64)
+    columns = linear[0]
+    free = columns if lower is None else columns[~np.isfinite(lower[columns])]
+    if free.size:
+        labels = {
+            int(column): entry.handle.name
+            for entry in schema.entries
+            for occurrence in entry.occurrences
+            for column in occurrence.columns
+        }
+        named = sorted({labels.get(int(column), f"column {int(column)}") for column in free})
+        raise ValueError(
+            f"LinearPenalty penalizes {named}, which have no finite lower bound; declare one "
+            "with spec.param(..., bounds=(0.0, None)) or penalize bounded parameters only."
+        )
 
 
 def _prior_penalty(blocks: tuple, x: Array) -> Array:
@@ -395,6 +430,7 @@ class EstimationProblem(AbstractOptimizationProblem):
         holders = getattr(problem, "data_holders", None) if jax.process_count() > 1 else None
         schema = study.parameter_schema(problem)
         regularization = _resolve_handle_regularization(regularization, schema)
+        _refuse_unbounded_linear(regularization, problem, schema)
         if trial_predicate is not None and not callable(trial_predicate):
             raise TypeError("InferenceProblem trial_predicate must be callable or None.")
         data_r = _data_residual(problem)
@@ -465,6 +501,21 @@ class EstimationProblem(AbstractOptimizationProblem):
             self, "regularization", regularization if regularization is not None else NoReg()
         )
         object.__setattr__(self, "trial_predicate", trial_predicate)
+        # The priors' rows with a regularization's rows, by those rows, shared by every copy of
+        # this problem: copies that differ in their start or their linear penalty share the
+        # programs kept on them.
+        self.__dict__["_structured_rows"] = {}
+
+    def _structured(self, rows: Any) -> _StructuredPriorRegularizer:
+        """The priors' rows with the rows ``rows``, one object per ``rows`` among this problem's copies."""
+        shared = self.__dict__.get("_structured_rows")
+        if shared is None:
+            shared = self.__dict__["_structured_rows"] = {}
+        key = "none" if isinstance(rows, NoReg) else id(rows)
+        entry = shared.get(key)
+        if entry is None or (key != "none" and entry[0] is not rows):
+            entry = shared[key] = (rows, _StructuredPriorRegularizer(self._prior_blocks, rows))
+        return entry[1]
 
     def trial_is_valid(self, x: ArrayLike) -> Array:
         """Whether ``x`` passes the declared trial predicate and the data problem's own checks."""
@@ -657,8 +708,14 @@ class EstimationProblem(AbstractOptimizationProblem):
         return kept[1]
 
     def _joint_view(self) -> EstimationProblem | JointInferenceProblem:
-        """``joint_view``, built."""
-        structured = isinstance(self.objective, MAP) or not isinstance(self.regularization, NoReg)
+        """``joint_view``, built.
+
+        The view's regularizer holds rows only: the MAP priors' and those of the
+        regularization. A linear penalty is not on the view; the lanes' route reads it from
+        this problem's ``regularization``.
+        """
+        rows = rows_part(self.regularization)
+        structured = isinstance(self.objective, MAP) or not isinstance(rows, NoReg)
         with_start = getattr(self._inference_problem, "with_start", None)
         if not callable(with_start):
             import copy
@@ -666,13 +723,13 @@ class EstimationProblem(AbstractOptimizationProblem):
             view = copy.copy(self)
             object.__setattr__(view, "n_residuals", int(self._inference_problem.residual_rows))
             if structured:
-                regularizer = _StructuredPriorRegularizer(self._prior_blocks, self.regularization)
-                object.__setattr__(view, "regularization", regularizer)
+                object.__setattr__(view, "regularization", self._structured(rows))
+            elif linear_part(self.regularization) is not None:
+                object.__setattr__(view, "regularization", NoReg())
             return view
         problem = with_start(self._x0)
         if structured:
-            regularizer = _StructuredPriorRegularizer(self._prior_blocks, self.regularization)
-            problem = problem.with_regularization(regularizer)
+            problem = problem.with_regularization(self._structured(rows))
         if self.trial_predicate is not None:
             problem = problem.with_trial_predicate(self.trial_predicate)
         return problem
@@ -876,10 +933,14 @@ def lower_estimation(
         if getattr(problem._inference_problem, "evaluate_cost_fn", None) is not None:
             value = _reduced_cost(problem)
     regularization = problem.regularization
-    if "batched_lanes" in frozenset(getattr(optimizer, "requires", ())) and (
-        isinstance(problem.objective, MAP) or not isinstance(regularization, NoReg)
-    ):
-        regularization = _StructuredPriorRegularizer(problem._prior_blocks, regularization)
+    if "batched_lanes" in frozenset(getattr(optimizer, "requires", ())):
+        # The lanes' route reads a linear penalty from the problem itself; the regularization
+        # here holds rows only.
+        rows = rows_part(regularization)
+        if isinstance(problem.objective, MAP) or not isinstance(rows, NoReg):
+            regularization = problem._structured(rows)
+        else:
+            regularization = rows
     numeric = lower_residual_problem(
         problem,
         optimizer,

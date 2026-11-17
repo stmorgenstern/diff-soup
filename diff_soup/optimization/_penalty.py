@@ -1,10 +1,13 @@
 """A regularization's penalty folded into the closures of a numeric problem.
 
-A regularization (`Tikhonov`, a MAP prior's rows) gives extra least-squares rows
-`residual(x)` and the penalty `penalty(x) = 0.5 * ||residual(x)||^2`. A host-loop solver
-adds it to the problem's objective itself; a compiled solver reads the closures
+A regularization (`Tikhonov`, a MAP prior's rows, a `LinearPenalty`) gives extra
+least-squares rows `residual(x)`, a linear term `linear_part()`, and the penalty
+`penalty(x) = 0.5 * ||residual(x)||^2` plus the linear term. A host-loop solver adds it to
+the problem's objective itself; a compiled solver reads the closures
 `OptimizationProblem.closure` returns, which carry it: the value, the gradient, the
-Gauss-Newton statistics and every Hessian. The residual rows stay the data's.
+Gauss-Newton statistics and every Hessian. The Gauss-Newton statistics take the rows and
+the linear term's value and slope; the linear term adds nothing to the matrix. The residual
+rows stay the data's.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import jax
+import jax.numpy as jnp
 from jaxtyping import Array, ArrayLike, PyTree
 
 from diff_soup.optimization._binding import Derived, Held
@@ -37,6 +41,15 @@ def _rows(held: Held, x: ArrayLike) -> tuple[Array, Array]:
     """The regularization's rows and their Jacobian at `x`."""
     residual = held.value.residual
     return residual(x), jax.jacfwd(residual)(x)
+
+
+def _linear(held: Held) -> tuple | None:
+    """The regularization's linear term ``(columns, weights)``, or ``None`` without one."""
+    provider = getattr(held.value, "linear_part", None)
+    part = provider() if callable(provider) else None
+    if part is None or len(part[0]) == 0:
+        return None
+    return part
 
 
 def _value(value: Callable, held: Held, x: ArrayLike, args: PyTree) -> Array:
@@ -68,12 +81,16 @@ def _hessian_vector(
 def _gauss_newton(gauss_newton: Callable, held: Held, x: ArrayLike, args: PyTree) -> tuple:
     value, gradient, matrix, failed = gauss_newton(x, args)
     rows, jacobian = _rows(held, x)
-    return (
-        value + half_sum_of_squares(rows),
-        gradient + jacobian.T @ rows,
-        matrix + jacobian.T @ jacobian,
-        failed,
-    )
+    value = value + half_sum_of_squares(rows)
+    gradient = gradient + jacobian.T @ rows
+    linear = _linear(held)
+    if linear is not None:
+        # The linear term adds its value and its constant slope, and nothing to the matrix.
+        columns, weights = linear
+        weights = jnp.asarray(weights, dtype=gradient.dtype)
+        value = value + jnp.sum(weights * jnp.asarray(x)[columns])
+        gradient = gradient.at[columns].add(weights)
+    return value, gradient, matrix + jacobian.T @ jacobian, failed
 
 
 def _evaluate(evaluate: Callable, held: Held, x: ArrayLike, args: PyTree) -> tuple:

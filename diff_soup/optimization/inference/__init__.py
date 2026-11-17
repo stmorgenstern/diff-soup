@@ -34,7 +34,11 @@ from diff_soup.optimization.inference.fitting.problem import (
     LoweredStudy,
     prepare_windows,
 )
-from diff_soup.optimization.inference.fitting.regularization import NoReg, Tikhonov
+from diff_soup.optimization.inference.fitting.regularization import (
+    LinearPenalty,
+    NoReg,
+    Tikhonov,
+)
 from diff_soup.optimization.inference.fitting.result import OptResult, TerminationStatus
 from diff_soup.optimization.inference.fitting.scales import (
     ConstantScale,
@@ -128,6 +132,7 @@ __all__ = [
     "learnables",
     "Bounds",
     "Tikhonov",
+    "LinearPenalty",
     "NoReg",
     "HessianScale",
     "XScale",
