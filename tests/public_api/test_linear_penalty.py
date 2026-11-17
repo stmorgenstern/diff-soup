@@ -33,11 +33,13 @@ TIMES = (0.5, 1.0)
 SQUARES = sum(t * t for t in TIMES)
 
 
-def _study():
-    spec = ds.problem("linear_penalty_toy")
+def _study(rho_prior: bool = True):
+    spec = ds.problem("linear_penalty_toy" if rho_prior else "linear_penalty_toy_no_prior")
     spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
     prior = inf.NormalPrior(0.0, PRIOR_SCALE)
-    rho = spec.param("rho", value=0.5, learnable=True, bounds=(0.0, None), prior=prior)
+    rho = spec.param(
+        "rho", value=0.5, learnable=True, bounds=(0.0, None), prior=prior if rho_prior else None
+    )
     level = spec.param("level", value=0.0, learnable=True, prior=prior)
     spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
     spec.field("v", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
@@ -85,11 +87,12 @@ def _columns(problem, handle) -> dict:
     return columns
 
 
-def _expected(weight: float, *, prior: bool) -> tuple:
+def _expected(weight: float, *, prior: bool, rho_prior: bool = True) -> tuple:
     """The closed-form ``rho`` per member and ``level`` per experiment."""
     precision = 1.0 / PRIOR_SCALE**2 if prior else 0.0
+    rho_precision = precision if rho_prior else 0.0
     rho = {
-        m: max((SQUARES * sum(a) - weight) / (SQUARES * len(a) + precision), 0.0)
+        m: max((SQUARES * sum(a) - weight) / (SQUARES * len(a) + rho_precision), 0.0)
         for m, a in DATA.items()
     }
     levels = [SQUARES * b / (SQUARES + precision) for b in LEVELS]
@@ -100,11 +103,17 @@ def _expected(weight: float, *, prior: bool) -> tuple:
 def toy():
     """The toy study lowered under MLE and under MAP, and its handles."""
     study, rho, level = _study()
+    bare, bare_rho, _ = _study(rho_prior=False)
     return {
         "mle": ds.lower(study),
         "map": ds.lower(study, objective=inf.MAP()),
         "rho": rho,
         "level": level,
+        # Under MAP with no prior declared on rho: its prior is the penalty's.
+        "bare": ds.lower(
+            bare, objective=inf.MAP(), regularization=inf.LinearPenalty(1.0, on="rho")
+        ),
+        "bare_rho": bare_rho,
     }
 
 
@@ -171,6 +180,34 @@ def test_a_map_fit_joint_or_nested_reaches_the_closed_form_with_exact_zeros(toy,
     found = [params[level_columns[f"{m}{k}"]] for m in DATA for k in range(2)]
     # measured 5.6e-16 off the closed form, B200 2026-11-17 (measure.py)
     np.testing.assert_allclose(found, levels, atol=1e-9)
+
+
+@pytest.mark.parametrize("nested_at", (None, "cohort", "experiment"))
+def test_a_positive_weight_is_the_map_prior_of_a_parameter_that_declares_none(toy, nested_at):
+    """Under MAP, rho declares no prior and the penalty is its exponential prior: the joint and
+    the nested trust regions reach max((T sum a_m - w) / (2 T), 0), the zeros exactly."""
+    fit = _fit(
+        toy["bare"], toy["bare_rho"], 0.5, inf.TrustRegion(max_steps=40, nested_at=nested_at)
+    )
+    expected, levels = _expected(0.5, prior=True, rho_prior=False)
+    columns = _columns(toy["bare"], toy["bare_rho"])
+    params = np.asarray(fit.params)
+    assert [params[columns[m]] == 0.0 for m in DATA] == [v == 0.0 for v in expected.values()]
+    # measured below 1e-15 relative off the closed form, B200 2026-11-17 (measure.py)
+    np.testing.assert_allclose(
+        [params[columns[m]] for m in DATA], list(expected.values()), rtol=1e-9
+    )
+
+
+def test_a_parameter_that_declares_no_prior_needs_a_positive_weight_under_map(toy):
+    """Weight 0 is a flat, improper prior: it, and no penalty, are refused under MAP."""
+    with pytest.raises(ValueError, match="weight is 0, a flat, improper prior"):
+        toy["bare"].with_regularization(inf.LinearPenalty(0.0, on="rho"))
+    with pytest.raises(ValueError, match="missing priors for"):
+        toy["bare"].with_regularization(None)
+    study, _, _ = _study(rho_prior=False)
+    with pytest.raises(ValueError, match="missing priors for"):
+        inf.InferenceProblem(study, objective=inf.MAP())
 
 
 def test_without_a_penalty_the_fit_is_unchanged(toy):

@@ -301,10 +301,12 @@ class InferenceProblem(EstimationProblem):
 
         Raises:
             ValueError: If a `LinearPenalty` names no fitted parameter or a parameter without
-                a finite lower bound.
+                a finite lower bound, or, under `MAP`, leaves a parameter that declares no
+                prior without a positive weight.
         """
         from diff_soup.optimization.inference.fitting.regularization import NoReg, rows_part
         from diff_soup.optimization.inference.statistics.estimation import (
+            _refuse_improper,
             _refuse_unbounded_linear,
             _resolve_handle_regularization,
         )
@@ -312,6 +314,7 @@ class InferenceProblem(EstimationProblem):
         resolved = _resolve_handle_regularization(regularization, self.parameter_schema)
         resolved = NoReg() if resolved is None else resolved
         _refuse_unbounded_linear(resolved, self._inference_problem, self.parameter_schema)
+        _refuse_improper(self.objective, resolved, self.__dict__.get("_without_prior", {}))
         result = copy.copy(self)
         object.__setattr__(result, "regularization", resolved)
         # The joint view holds the rows of the priors and of the regularization, and the

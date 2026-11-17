@@ -165,12 +165,66 @@ def _measurement_log_normalizer(study: Study, holders: tuple | None = None) -> f
     return total
 
 
-def _compile_prior_blocks(schema: ParameterSchema, objective: MLE | MAP) -> tuple:
+def _without_prior(schema: ParameterSchema) -> dict:
+    """``{name: columns}``: the fitted handles whose declarations declare no prior, with their columns."""
+    found: dict = {}
+    for entry in schema.entries:
+        for occurrence in entry.occurrences:
+            declarations = occurrence.declarations
+            if declarations and not any(
+                getattr(item, "prior", None) is not None for item in declarations
+            ):
+                found.setdefault(entry.handle.name, []).extend(
+                    int(column) for column in occurrence.columns
+                )
+    return {name: tuple(columns) for name, columns in found.items()}
+
+
+def _refuse_improper(objective: Any, regularization: Any, without: dict) -> None:
+    """Refuse a MAP whose handle without a declared prior has no positive linear penalty.
+
+    A linear penalty of weight ``w > 0`` on a parameter with a finite lower bound is the
+    exponential prior of rate ``w``, a proper prior: such a parameter needs no declared one.
+    Weight zero is a flat, improper prior and is refused like no prior.
+    """
+    if not isinstance(objective, MAP) or not without:
+        return
+    linear = linear_part(regularization)
+    weights = {} if linear is None else dict(zip(linear[0].tolist(), linear[1].tolist()))
+    flat = sorted(
+        name
+        for name, columns in without.items()
+        if all(column in weights for column in columns)
+        and any(weights[column] == 0.0 for column in columns)
+    )
+    missing = sorted(
+        name
+        for name, columns in without.items()
+        if not all(column in weights for column in columns)
+    )
+    if flat:
+        raise ValueError(
+            f"MAP requires a proper prior on every fitted handle; {flat} declare no prior and "
+            "their LinearPenalty weight is 0, a flat, improper prior. Give them a weight above "
+            "0 (an exponential prior), declare priors on spec.param, or use MLE()."
+        )
+    if missing:
+        raise ValueError(
+            f"MAP requires a proper prior on every fitted handle; missing priors for "
+            f"{missing}. Declare priors on spec.param/spec.function, penalize them with a "
+            "LinearPenalty of positive weight (an exponential prior), or use MLE()."
+        )
+
+
+def _compile_prior_blocks(
+    schema: ParameterSchema, objective: MLE | MAP, exempt: frozenset = frozenset()
+) -> tuple:
     """Compile each handle occurrence exactly once for a physical MAP.
 
     An occurrence takes its prior from the declarations of the experiments
     behind it, which must agree; an occurrence whose schema records no
-    declaration is refused.
+    declaration is refused. A handle of ``exempt`` that declares no prior adds
+    no block: its prior is a linear penalty's (``_refuse_improper``).
     """
     if isinstance(objective, MLE):
         return ()
@@ -187,7 +241,8 @@ def _compile_prior_blocks(schema: ParameterSchema, objective: MLE | MAP) -> tupl
             declarations = tuple({id(item): item for item in occurrence.declarations}.values())
             declared = [getattr(item, "prior", None) is not None for item in declarations]
             if not any(declared):
-                missing.add(entry.handle.name)
+                if entry.handle.name not in exempt:
+                    missing.add(entry.handle.name)
                 continue
             priors = [
                 compile_prior(item.prior, item, entry.size)
@@ -431,6 +486,8 @@ class EstimationProblem(AbstractOptimizationProblem):
         schema = study.parameter_schema(problem)
         regularization = _resolve_handle_regularization(regularization, schema)
         _refuse_unbounded_linear(regularization, problem, schema)
+        without = _without_prior(schema) if isinstance(objective, MAP) else {}
+        _refuse_improper(objective, regularization, without)
         if trial_predicate is not None and not callable(trial_predicate):
             raise TypeError("InferenceProblem trial_predicate must be callable or None.")
         data_r = _data_residual(problem)
@@ -439,7 +496,7 @@ class EstimationProblem(AbstractOptimizationProblem):
         dtype = np.asarray(problem.x0).dtype
         prior_blocks = tuple(
             (columns, cast_floating_leaves(prior, dtype))
-            for columns, prior in _compile_prior_blocks(schema, objective)
+            for columns, prior in _compile_prior_blocks(schema, objective, frozenset(without))
         )
 
         def residual(x):
@@ -501,6 +558,8 @@ class EstimationProblem(AbstractOptimizationProblem):
             self, "regularization", regularization if regularization is not None else NoReg()
         )
         object.__setattr__(self, "trial_predicate", trial_predicate)
+        # The handles without a declared prior, whose prior a positive linear penalty is.
+        self.__dict__["_without_prior"] = without
         # The priors' rows with a regularization's rows, by those rows, shared by every copy of
         # this problem: copies that differ in their start or their linear penalty share the
         # programs kept on them.

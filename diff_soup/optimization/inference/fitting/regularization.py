@@ -434,7 +434,9 @@ class LinearPenalty(Regularizer):
     A lasso for nonnegative parameters: a fit moves the chosen parameters with all the others,
     and a chosen parameter sits exactly at its lower bound while the data's pull to raise it is
     weaker than its weight. Pass it as `regularization=` of an `InferenceProblem` or of
-    `ds.lower(study, ...)`, and change it between fits with `with_regularization`.
+    `ds.lower(study, ...)`, and change it between fits with `with_regularization`. Under
+    `MAP` a positive weight is the parameter's exponential prior, so a penalized parameter
+    needs no declared prior; weight zero is a flat prior and needs one.
 
     ```python
     penalty = inf.LinearPenalty(0.1, on="rho_*")
