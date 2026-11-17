@@ -180,6 +180,7 @@ def _trial_from(
     fixed: ArrayLike | tuple,
     bounds: tuple[ArrayLike, ArrayLike] | None,
     equality: ArrayLike,
+    floors: tuple = (),
 ) -> tuple:
     """The trial of the subproblem's step ``proposed``, of predicted decrease ``predicted``.
 
@@ -187,9 +188,12 @@ def _trial_from(
     step``; with them it is ``x`` plus the best of the step, the step reflected
     at the sides it crosses and the Cauchy step, by the model's value
     (``_choose``; ``equality``: the system has equality rows), kept strictly
-    inside the box. Returns ``(trial, scaled_norm, predicted)``: ``scaled_norm``
-    the chosen step's norm in the subproblem's coordinates, ``predicted`` the
-    decrease the model predicts for it. Written for arrays.
+    inside the box. A coordinate of ``floors`` (``(column, lower bound)``
+    pairs, a linear penalty's) is then projected onto its lower bound, which it
+    may reach exactly (``_floored``). Returns ``(trial, scaled_norm,
+    predicted)``: ``scaled_norm`` the chosen step's norm in the subproblem's
+    coordinates, ``predicted`` the decrease the model predicts for it. Written
+    for arrays.
     """
     xp = _namespace(x, gradient, proposed, predicted, coordinates.scale)
     fixed = np.asarray(fixed, dtype=np.int64)
@@ -206,9 +210,61 @@ def _trial_from(
         )
         trial = box.make_strictly_feasible(x + chosen, bounds[0], bounds[1], rstep=0)
         scaled_norm = xp.linalg.norm(chosen_scaled)
+    if floors:
+        trial, scaled_norm, predicted = _floored(
+            system, x, gradient, coordinates, trial, scaled_norm, predicted, floors
+        )
     if xp is np:
         return np.asarray(trial), float(scaled_norm), float(predicted)
     return trial, scaled_norm, predicted
+
+
+def floor_vectors(floors: tuple, n: int, dtype: Any) -> tuple:
+    """``(mask, lower)``: host arrays ``(n,)`` of the coordinates of ``floors`` and their lower bounds.
+
+    ``lower`` is ``-inf`` off them.
+    """
+    mask = np.zeros((n,), dtype=bool)
+    lower = np.full((n,), -np.inf, dtype=dtype)
+    for column, side in floors:
+        mask[int(column)] = True
+        lower[int(column)] = side
+    return mask, lower
+
+
+def _floored(
+    system: elimination.LevelSystem,
+    x: ArrayLike,
+    gradient: ArrayLike,
+    coordinates: box.Scaling,
+    trial: ArrayLike,
+    scaled_norm: ArrayLike,
+    predicted: ArrayLike,
+    floors: tuple,
+) -> tuple:
+    """``trial`` with the coordinates of ``floors`` projected onto their lower bounds.
+
+    A coordinate below its bound is set to it, exactly. When one is, the step's norm in the
+    subproblem's coordinates and the decrease the model predicts are those of the projected
+    step; otherwise they are the trial's own. Written for arrays.
+    """
+    xp = _namespace(x, gradient, trial, coordinates.scale)
+    mask, lower = floor_vectors(floors, int(np.shape(x)[0]), np.dtype(trial.dtype))
+    below = mask & (trial < lower)
+    projected = xp.where(below, lower, trial)
+    step = projected - x
+    scaled = coordinates.scale * step
+    with np.errstate(all="ignore"):
+        quadratic = xp.asarray(_quadratic(system, step))
+        if coordinates.addition is not None:
+            quadratic = quadratic + coordinates.addition @ (scaled * scaled)
+        model = -(gradient @ step + 0.5 * quadratic)
+    moved = xp.any(below)
+    return (
+        projected,
+        xp.where(moved, xp.linalg.norm(scaled), scaled_norm),
+        xp.where(moved, model, predicted),
+    )
 
 
 def _trial_point(

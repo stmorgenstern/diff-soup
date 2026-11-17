@@ -29,6 +29,7 @@ from diff_soup.optimization.inference.engine._reducers import refuse_failed
 from diff_soup.optimization.inference.engine._request import Request
 from diff_soup.optimization.inference.engine._status import LaneStatus
 from diff_soup.optimization.inference.fitting.bounds import resolve_decision_bounds
+from diff_soup.optimization.inference.fitting.regularization import linear_part
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical._bounds import Scaling
 from diff_soup.optimization.inference.hierarchical._constraints import _constraint_rows
@@ -270,6 +271,17 @@ class _LaneRoute:
     level tables, the lane results the route reduces, its level systems and the
     points its regularizer is evaluated at are placed there. ``None`` (a plan
     that names no device) places them on the default device.
+
+    A linear penalty of the problem's regularization (``linear_part``) adds its
+    weight to the gradient and its value to the cost of every system, and
+    nothing to the matrix; ``linear`` holds its weight per joint coordinate
+    under the route's weights, ``None`` without one. Its coordinates are kept
+    at or above their lower bounds by projection instead of the box's
+    Coleman-Li scaling: ``floors`` holds ``(column, lower bound)`` per penalized
+    coordinate, ``bounds`` leaves their lower sides out (``declared_bounds``
+    keeps them), a trial is projected onto them, and a system holds a
+    penalized coordinate that sits on its lower bound with a gradient of at
+    least zero, as a fixed coordinate, so that it stays there exactly.
     """
 
     block_weights: tuple[float, ...] | None = None
@@ -282,6 +294,11 @@ class _LaneRoute:
     layout: elimination.LevelLayout | None = None
     # The level tables of subsets of the planned lanes, by their ids in canonical order.
     subset_tables: dict | None = None
+    # The linear penalty's weight per joint coordinate under the route's weights, its
+    # columns and weights as declared, and its coordinates with their lower bounds.
+    linear: np.ndarray | None = None
+    linear_terms: tuple[np.ndarray, np.ndarray] | None = None
+    floors: tuple = ()
 
     def __init__(self, solver: Any, problem: Any):
         lowered = _lowered(solver, problem)
@@ -344,17 +361,57 @@ class _LaneRoute:
         self.gauges = solver.gauges
         # The member each regularizer block belongs to, per weighted level; computed once.
         self.attributions: dict = {}
-        self.weigh_by(solver.weights, weight_priors=solver.weight_priors)
         bounds = resolve_decision_bounds(view)
         self.bounds = (
             None
             if bounds is None
             else (np.asarray(bounds[0], dtype=dtype), np.asarray(bounds[1], dtype=dtype))
         )
+        self.declared_bounds = self.bounds
+        self.linear_terms = linear_part(getattr(problem, "regularization", None))
+        if self.linear_terms is not None:
+            self._floor_linear(self.linear_terms[0])
+        self.weigh_by(solver.weights, weight_priors=solver.weight_priors)
         self.fingerprint = str(problem.parameter_schema.fingerprint)
         self.position = {lane: index for index, lane in enumerate(ids)}
         # The ceiling of the noise of the cost's evaluation, or None when it is unknown.
         self.evaluation_noise = problem.evaluation_noise
+
+    def _floor_linear(self, columns: np.ndarray) -> None:
+        """Hold the linear penalty's coordinates above their lower bounds by projection.
+
+        ``floors`` takes ``(column, lower bound)`` of every penalized coordinate, and
+        ``bounds`` leaves their lower sides out (``None`` when no side is left).
+
+        Raises:
+            ConfigurationError: If a penalized coordinate has no finite lower bound.
+        """
+        lower = None if self.bounds is None else self.bounds[0][columns]
+        if lower is None or not np.all(np.isfinite(lower)):
+            raise ConfigurationError(
+                "TrustRegion keeps a linear penalty's parameters at or above their lower bounds, "
+                "and some have none; declare bounds=(0.0, None) on every penalized parameter."
+            )
+        self.floors = tuple((int(column), float(side)) for column, side in zip(columns, lower))
+        low, high = (np.array(side, copy=True) for side in self.bounds)
+        low[columns] = -np.inf
+        if np.all(np.isneginf(low)) and np.all(np.isposinf(high)):
+            self.bounds = None
+        else:
+            self.bounds = (low, high)
+
+    def column_members(self, level: int) -> np.ndarray:
+        """``(n,)``: the member of ``level`` whose subtree holds each joint column, ``-1`` above it."""
+        layout = self.levels()
+        counts, widths, offsets = layout.counts, layout.widths, layout.offsets
+        owners = np.full((offsets[-1],), -1, dtype=np.int64)
+        for at in range(level, len(counts) + 1):
+            if at == level:
+                member = np.arange(counts[level - 1], dtype=np.int64)
+            else:
+                member = np.asarray(layout.ancestors[at][level], dtype=np.int64)
+            owners[offsets[at] : offsets[at + 1]] = np.repeat(member, widths[at])
+        return owners
 
     def weigh_by(self, weights: Any, *, weight_priors: bool) -> None:
         """Set the route's weights: the lanes', the regularizer blocks' and the gauges'.
@@ -393,9 +450,25 @@ class _LaneRoute:
         matrix, rhs = _constraint_rows(
             self.view, self.constraints, self.gauges, jax.device_put(level_one, self.device), dtype
         )
+        linear = None
+        if self.linear_terms is not None:
+            columns, values = self.linear_terms
+            linear = np.zeros((self.n,), dtype=np.float64)
+            linear[columns] = values
+            if weights is not None and weight_priors:
+                # A penalized coordinate takes the weight of the member of the weighted level
+                # it belongs to, as a regularizer block does; one above that level weighs one.
+                level = weights[0]
+                number = names.index(level) + 1 if isinstance(level, str) else int(level)
+                member = self.column_members(number)
+                values = np.asarray(weights[1], dtype=np.float64)
+                linear = linear * np.where(member >= 0, values[np.maximum(member, 0)], 1.0)
         self.weights = weights
         self.omega = omega
         self.block_weights = block_weights
+        self.linear = linear
+        # The regularizer's blocks kept for a point were weighed by the old weights.
+        self.kept_regularizer = None
         self.constraint_matrix = np.asarray(matrix, dtype=dtype)
         self.constraint_rhs = np.asarray(rhs, dtype=dtype)
 
@@ -531,21 +604,49 @@ class _LaneRoute:
             )
             blocks = reduce_levels(self.tables, lanes, results.lane_ids, self.weights)
         dtype = np.dtype(blocks.shared.dtype)
-        return elimination.level_system(
-            blocks,
-            self.tables,
-            point,
-            constraint_matrix=self.constraint_matrix,
-            constraint_rhs=self.constraint_rhs,
-            fixed_indices=self.fixed,
-            regularizer=self.view.regularization,
-            lane_weights=self.omega,
-            members=self.members,
-            block_weights=self.block_weights,
-            device=self.device,
-            layout=self.levels(),
-            regularizer_blocks=self.regularizer_at(point, dtype),
-        )
+        regularizer_blocks = self.regularizer_at(point, dtype)
+
+        def assemble(fixed: tuple) -> elimination.LevelSystem:
+            return elimination.level_system(
+                blocks,
+                self.tables,
+                point,
+                constraint_matrix=self.constraint_matrix,
+                constraint_rhs=self.constraint_rhs,
+                fixed_indices=fixed,
+                regularizer=self.view.regularization,
+                lane_weights=self.omega,
+                members=self.members,
+                block_weights=self.block_weights,
+                device=self.device,
+                layout=self.levels(),
+                regularizer_blocks=regularizer_blocks,
+            )
+
+        system = assemble(self.fixed)
+        held = self.held_on_floors(system, point)
+        if held:
+            system = assemble(tuple(sorted(set(self.fixed) | set(held))))
+        return system
+
+    def held_on_floors(self, system: elimination.LevelSystem, point: np.ndarray) -> tuple:
+        """The penalized coordinates on their lower bounds whose gradient in ``system`` is at least zero.
+
+        Their descent direction leaves the box, so a step holds them where they are, exactly
+        on the bound; one whose gradient is negative is free to move up. Empty without a
+        linear penalty.
+        """
+        if not self.floors:
+            return ()
+        columns = np.asarray([column for column, _ in self.floors], dtype=np.int64)
+        lower = np.asarray([side for _, side in self.floors], dtype=np.float64)
+        point = np.asarray(point, dtype=np.float64)
+        on = point[columns] <= lower
+        if not on.any():
+            return ()
+        gradient, _ = elimination.level_vectors(system)
+        gradient = np.asarray(gradient, dtype=np.float64)
+        return tuple(int(column) for column in columns[on & (gradient[columns] >= 0.0)])
 
     def tables_of(self, ids: tuple) -> Any:
         """The level tables of the planned lanes ``ids``, in canonical order; built once per subset.
@@ -679,27 +780,85 @@ class _LaneRoute:
 
         ``elimination.regularizer_blocks_at``'s; the blocks of the last point
         asked for are kept, so the system at an accepted trial reuses the
-        evaluation its trial cost made. ``None`` without a regularizer.
+        evaluation its trial cost made. A linear penalty adds its slope and value
+        (``with_linear``). ``None`` without a regularizer and a linear penalty.
         """
         regularizer = self.view.regularization
-        if regularizer is None:
+        if regularizer is None and self.linear is None:
             return None
         dtype = np.dtype(self.dtype if dtype is None else dtype)
         point = np.asarray(point, dtype=dtype)
         key = (dtype.str, point.tobytes(), self.block_weights)
         kept = self.kept_regularizer
         if kept is None or kept[0] != key:
-            blocks = elimination.regularizer_blocks_at(
-                regularizer,
-                point,
-                self.levels(),
-                dtype,
-                getattr(self.tables, "names", None),
-                self.members,
-                self.block_weights,
-            )
+            blocks = (None, 0.0, frozenset())
+            if regularizer is not None:
+                blocks = elimination.regularizer_blocks_at(
+                    regularizer,
+                    point,
+                    self.levels(),
+                    dtype,
+                    getattr(self.tables, "names", None),
+                    self.members,
+                    self.block_weights,
+                )
+            if self.linear is not None:
+                blocks = self.with_linear(blocks, point, dtype)
             kept = self.kept_regularizer = (key, blocks)
         return kept[1]
+
+    def with_linear(self, blocks: tuple, point: np.ndarray, dtype: Any) -> tuple:
+        """``blocks`` with the linear penalty's slope added to its gradients and its value to its cost.
+
+        The slope is ``linear``, constant; the curvature arrays are left as they are, zeros
+        when the regularizer has no rows.
+        """
+        extra, cost, touched = blocks
+        layout = self.levels()
+        counts, widths, offsets = layout.counts, layout.widths, layout.offsets
+        dtype = np.dtype(dtype)
+        if extra is None:
+            extra = self.zero_extra(dtype)
+        root, root_gradient, diagonal, cross, gradient = extra
+        slope = self.linear.astype(dtype)
+        root_gradient = root_gradient + jax.device_put(slope[: widths[0]], layout.device)
+        gradient = (None,) + tuple(
+            gradient[level]
+            + jax.device_put(
+                slope[offsets[level] : offsets[level + 1]].reshape(
+                    counts[level - 1], widths[level]
+                ),
+                layout.device,
+            )
+            for level in range(1, len(counts) + 1)
+        )
+        value = float(np.dot(self.linear, np.asarray(point, dtype=np.float64)))
+        return (root, root_gradient, diagonal, cross, gradient), float(cost) + value, touched
+
+    def zero_extra(self, dtype: Any) -> tuple:
+        """The regularizer's blocks of no rows: zero curvature and slope arrays, on the device."""
+        layout = self.levels()
+        counts, widths = layout.counts, layout.widths
+        depth = len(counts)
+        g = int(widths[0])
+
+        def zeros(shape):
+            return jax.device_put(np.zeros(shape, dtype=dtype), layout.device)
+
+        diagonal = (None,) + tuple(
+            zeros((counts[level - 1], widths[level], widths[level]))
+            for level in range(1, depth + 1)
+        )
+        cross = (None,) + tuple(
+            tuple(
+                zeros((counts[level - 1], widths[level], widths[above])) for above in range(level)
+            )
+            for level in range(1, depth + 1)
+        )
+        gradient = (None,) + tuple(
+            zeros((counts[level - 1], widths[level])) for level in range(1, depth + 1)
+        )
+        return zeros((g, g)), zeros((g,)), diagonal, cross, gradient
 
     def vectors(self, system: elimination.LevelSystem) -> tuple:
         """``elimination.level_vectors(system)``, kept for the last system asked for.
@@ -779,18 +938,22 @@ class _LaneRoute:
     def penalty(self, point: np.ndarray) -> float:
         """The regularizer's cost at ``point``: every block's ``0.5 |r_b|^2`` times its weight.
 
-        ``regularizer_cost``, the definition the level system's cost reads too.
+        ``regularizer_cost``, the definition the level system's cost reads too, plus the
+        linear penalty's value ``linear . point``.
         """
-        return regularizer_cost(
+        cost = regularizer_cost(
             self.view.regularization, jax.device_put(point, self.device), self.block_weights
         )
+        if self.linear is not None:
+            cost += float(np.dot(self.linear, np.asarray(point, dtype=np.float64)))
+        return cost
 
     def penalty_gradient(self, point: np.ndarray) -> np.ndarray:
         """The gradient of ``penalty`` at ``point``: every block's ``J_b^T r_b`` times its weight.
 
         Each block of ``view.regularization.block_rows`` adds its slope to the
         joint columns it addresses, in one jitted program; a regularizer without
-        rows gives zeros.
+        rows gives zeros. The linear penalty adds its slope ``linear``.
         """
         programs = self.programs()
         if "gradient" not in programs:
@@ -815,7 +978,12 @@ class _LaneRoute:
 
             programs["gradient"] = jax.jit(slope)
         point = np.asarray(point)
-        return np.array(programs["gradient"](jax.device_put(point, self.device)), dtype=point.dtype)
+        gradient = np.array(
+            programs["gradient"](jax.device_put(point, self.device)), dtype=point.dtype
+        )
+        if self.linear is not None:
+            gradient = gradient + self.linear.astype(point.dtype)
+        return gradient
 
     def trial_cost(self, results: Any, point: np.ndarray, *, member: int = 0) -> float:
         """The weighted lane costs of a ``value`` evaluation and the regularizer at ``point``.

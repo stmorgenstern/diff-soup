@@ -38,7 +38,10 @@ from diff_soup.optimization.inference.hierarchical._level_inner import (
 )
 from diff_soup.optimization.inference.hierarchical._level_solve import _scaled
 from diff_soup.optimization.inference.hierarchical._step_program import coordinates
-from diff_soup.optimization.inference.hierarchical._trust_step import _bounded_gradient
+from diff_soup.optimization.inference.hierarchical._trust_step import (
+    _bounded_gradient,
+    floor_vectors,
+)
 from diff_soup.optimization.inference.hierarchical._verdicts import _within
 from diff_soup.optimization.solvers._loop import (
     _NOISE_RUN,
@@ -75,7 +78,8 @@ class PolishSettings(NamedTuple):
     ``level`` is the cut level and ``count`` its number of members; ``fixed`` lists the
     fixed coordinates; ``grad_test`` whether the members' gradient test runs (the inner
     ``grad_tol`` set); the tolerances are the inner solver's; ``noise_limit`` is ``None``
-    for no bound.
+    for no bound; ``floors`` the ``(column, lower bound)`` pairs of a linear penalty's
+    coordinates, which a member's trial is projected onto, empty without one.
     """
 
     level: int
@@ -91,6 +95,7 @@ class PolishSettings(NamedTuple):
     noise_limit: float | None
     eps: float
     tiny: float
+    floors: tuple = ()
 
 
 class Layout(NamedTuple):
@@ -355,6 +360,10 @@ def _step(
         trial, scaled, predicted = inequality.member_back(
             rows, own, system, x, trial, subproblem, predicted, held, level, owners, bounds
         )
+    if settings.floors:
+        trial, scaled, predicted = _floored(
+            system, where, x, trial, scaled, predicted, subproblem, addition, settings
+        )
     return (
         trial,
         _member_norms(trial - x, member_of, count),
@@ -362,6 +371,43 @@ def _step(
         predicted,
         no_step,
         solves,
+    )
+
+
+def _floored(
+    system: elimination.LevelSystem,
+    where: Layout,
+    x: jax.Array,
+    trial: jax.Array,
+    scaled: jax.Array,
+    predicted: jax.Array,
+    subproblem: box.Scaling,
+    addition: jax.Array,
+    settings: PolishSettings,
+) -> tuple:
+    """Every member's trial with a linear penalty's coordinates projected onto their lower bounds.
+
+    A coordinate below its bound is set to it, exactly; a member with one takes the scaled
+    step and the decrease its model predicts for its projected step. Returns ``(trial,
+    scaled, predicted)``.
+    """
+    level, count = settings.level, settings.count
+    member_of = where.owners
+    mask, lower = floor_vectors(settings.floors, x.shape[0], np.dtype(x.dtype))
+    below = mask & (trial < lower)
+    projected = jnp.where(below, lower, trial)
+    step = projected - x
+    projected_scaled = subproblem.scale * step
+    model = _member_predicted(
+        system, step, projected_scaled, addition, member_of, count, level=level
+    )
+    moved = _member_sums(below.astype(jnp.int32), member_of, count) > 0
+    owned = member_of >= 0
+    column_moved = owned & moved[jnp.where(owned, member_of, 0)]
+    return (
+        projected,
+        jnp.where(column_moved, projected_scaled, scaled),
+        jnp.where(moved, model, predicted),
     )
 
 

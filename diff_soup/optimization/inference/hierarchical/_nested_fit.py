@@ -486,10 +486,14 @@ class _NestedFit(_JointFit):
     def member_costs(self, lane_costs: np.ndarray, point: np.ndarray) -> np.ndarray:
         """Each member's cost: its lanes' weighted costs and the regularizer rows of its subtree.
 
-        Every regularizer block counts with the route's weight of that block.
+        Every regularizer block counts with the route's weight of that block, and so does a
+        linear penalty on the coordinates of the member's subtree (``linear_split``).
         """
         lanes = self.route.omega * np.asarray(lane_costs, dtype=np.float64)
         costs = np.bincount(self.lane_member, weights=lanes, minlength=len(self.members))
+        linear = self.linear_split(point)
+        if linear is not None:
+            costs = costs + linear[0]
         if not self.regularized:
             return costs
         member, blocks = self.block_split(point)
@@ -501,14 +505,33 @@ class _NestedFit(_JointFit):
         return costs + np.bincount(member[owned], weights=blocks[owned], minlength=costs.size)
 
     def shared_cost(self, point: np.ndarray) -> float:
-        """The regularizer rows of no member: the blocks on coordinates above the cut level only."""
+        """The regularizer rows of no member: the blocks on coordinates above the cut level only.
+
+        A linear penalty adds its terms on those coordinates.
+        """
+        linear = self.linear_split(point)
+        shared = 0.0 if linear is None else linear[1]
         if not self.regularized:
-            return 0.0
+            return shared
         member, blocks = self.block_split(point)
         weights = self.route.block_weights
         if weights is not None:
             blocks = np.asarray(weights, dtype=np.float64) * blocks
-        return float(np.sum(blocks[member < 0]))
+        return float(np.sum(blocks[member < 0])) + shared
+
+    def linear_split(self, point: np.ndarray) -> tuple | None:
+        """``(members, shared)``: the linear penalty's value per member's subtree and above the cut.
+
+        ``None`` without a linear penalty.
+        """
+        linear = self.route.linear
+        if linear is None:
+            return None
+        terms = linear * np.asarray(point, dtype=np.float64)
+        owners = self.owners
+        below = owners >= 0
+        members = np.bincount(owners[below], weights=terms[below], minlength=len(self.members))
+        return members, float(np.sum(terms[~below]))
 
     def block_split(self, point: np.ndarray) -> tuple:
         """``(member, costs)``: every regularizer block's member of the cut level and its cost.
@@ -856,6 +879,7 @@ class _NestedFit(_JointFit):
             noise_limit=_noise_trial_limit(inner, route),
             eps=float(np.finfo(dtype).eps),
             tiny=float(np.finfo(float).tiny),
+            floors=route.floors,
         )
         owners = np.asarray(self.owners, dtype=np.int64)
         self.polish_layout = jax.device_put(polish.layout(owners, len(self.members)), route.device)

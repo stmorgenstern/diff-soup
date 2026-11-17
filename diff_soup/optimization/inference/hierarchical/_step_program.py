@@ -70,7 +70,9 @@ class StepSettings(NamedTuple):
     ``fixed`` lists the fixed coordinates; ``grad_test`` whether the gradient test
     runs (``grad_tol`` set and no rows); ``equality`` whether the system has
     equality rows; ``target_steps`` and ``max_evaluations`` are ``None`` for no
-    limit; ``noise_limit`` ``None`` for no bound.
+    limit; ``noise_limit`` ``None`` for no bound; ``floors`` the ``(column, lower
+    bound)`` pairs of a linear penalty's coordinates, which a trial is projected
+    onto (``_trust_step._floored``), empty without one.
     """
 
     fixed: tuple
@@ -89,6 +91,7 @@ class StepSettings(NamedTuple):
     max_evaluations: int | None
     eps: float
     tiny: float
+    floors: tuple = ()
 
 
 class Before(NamedTuple):
@@ -234,6 +237,7 @@ def attempt_solve_traced(
         fixed=settings.fixed,
         bounds=bounds,
         equality=settings.equality,
+        floors=settings.floors,
     )
     trial = Trial(point_, scaled_norm, predicted, multiplier, solves, failed)
     return Zero(z, decrease), lambda: trial

@@ -53,6 +53,7 @@ from diff_soup.optimization.inference.hierarchical._step_program import (
 )
 from diff_soup.optimization.inference.hierarchical._trust_step import (
     _bounded_gradient,
+    _floored,
     _FloorEnd,
     _FullStep,
     _GradientFloor,
@@ -186,6 +187,7 @@ def _rows_solve(rows, system, gradient, coordinates, radius, point, settings, bo
             fixed=settings.fixed,
             bounds=bounds,
             equality=held_equality | jnp.any(active & placed.keep),
+            floors=settings.floors,
         )
         return _TrialAnswer(point_ - point, norm, predicted, out[5], out[6], out[7])
 
@@ -216,6 +218,11 @@ def _rows_solve(rows, system, gradient, coordinates, radius, point, settings, bo
         moved = inequality.traced_onto_rows(rows, point + step, scale, ~frozen, bounds)
         if bounds is not None:
             moved = box.make_strictly_feasible(moved, bounds[0], bounds[1], rstep=0)
+        if settings.floors:
+            # A linear penalty's coordinates moved below their lower bounds are put back on them.
+            moved, norm, predicted = _floored(
+                system, point, gradient, coordinates, moved, norm, predicted, settings.floors
+            )
         return Trial(
             moved,
             norm,
@@ -605,7 +612,7 @@ class _JointFit:
                 ),
                 "linear_solver": "cholesky",
                 "subproblem": self.subproblem,
-                "active_bounds": box.active_bounds(loop.point, route.bounds),
+                "active_bounds": box.active_bounds(loop.point, route.declared_bounds),
                 "inequality_rows": 0 if self.rows is None else int(self.rows.count),
             },
             work=work.mapping(),
@@ -708,6 +715,7 @@ class _JointFit:
             max_evaluations=solver.max_evaluations,
             eps=float(np.finfo(dtype).eps),
             tiny=float(np.finfo(float).tiny),
+            floors=route.floors,
         )
 
     def before(self, loop: LoopState) -> Before:
@@ -787,6 +795,9 @@ class _JointFit:
                 # Iterates stay strictly inside the box: a start on or beyond a side
                 # moves to the next float inside it.
                 x = box.make_strictly_feasible(x, bounds[0], bounds[1], rstep=0)
+            for column, side in route.floors:
+                # A linear penalty's coordinate may start on its lower bound, not below it.
+                x[column] = max(x[column], side)
             # The steps keep the equality rows from a point on them: a start off them moves
             # onto them first.
             x = start_on_rows(x, route.constraint_matrix, route.constraint_rhs, route.fixed, bounds)
