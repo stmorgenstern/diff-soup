@@ -182,22 +182,25 @@ def test_without_a_penalty_the_fit_is_unchanged(toy):
 
 
 def test_a_new_weight_compiles_no_program(toy):
-    """A second fit of one lowered study under another weight compiles nothing."""
-    compiled = []
+    """A third fit of one lowered study under another weight compiles nothing; a new program
+    compiled after it is heard, so the listener hears compiles."""
+    heard = []
     counting = [False]
 
     def listen(event, duration, **_):
         if counting[0] and "compile" in event:
-            compiled.append(event)
+            heard.append(event)
 
     jax.monitoring.register_event_duration_secs_listener(listen)
     _fit(toy["map"], toy["rho"], 10.0, start_c_at_zero=False)
     _fit(toy["map"], toy["rho"], 0.5, start_c_at_zero=False)
     counting[0] = True
     fit = _fit(toy["map"], toy["rho"], 2.0, start_c_at_zero=False)
+    during_fit = list(heard)
+    jax.jit(lambda x: 3.0 * x + 1.0)(jnp.ones(3))
     counting[0] = False
     assert fit.converged
-    assert compiled == []
+    assert during_fit == [] and heard
 
 
 def test_a_penalty_is_refused_where_it_would_be_dropped_or_unbounded(toy):
