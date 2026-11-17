@@ -128,7 +128,7 @@ def test_the_gauss_newton_closure_adds_the_linear_value_and_slope_and_no_curvatu
     x = jnp.asarray([0.3, 0.2, 0.1])
     value, gradient, matrix, _ = plain.closure("gauss_newton")(x, None)
     p_value, p_gradient, p_matrix, _ = penalized.closure("gauss_newton")(x, None)
-    # measured 0 difference on the B200, 2026-11-17
+    # measured an exact match, B200 2026-11-17
     np.testing.assert_allclose(float(p_value - value), 0.75 * (0.3 + 0.1), rtol=1e-14)
     np.testing.assert_array_equal(np.asarray(p_gradient - gradient), [0.75, 0.0, 0.75])
     np.testing.assert_array_equal(np.asarray(p_matrix), np.asarray(matrix))
@@ -146,11 +146,11 @@ def test_the_joint_trust_region_reaches_the_closed_form_with_exact_zeros(toy, we
         if value == 0.0:
             assert params[columns[member]] == 0.0
         else:
-            # measured 4e-15 off the closed form on the B200, 2026-11-17
+            # measured 8.9e-16 relative off the closed form, B200 2026-11-17 (measure.py)
             np.testing.assert_allclose(params[columns[member]], value, rtol=1e-9)
     level_columns = _columns(toy["mle"], toy["level"])
     found = [params[level_columns[f"{m}{k}"]] for m in DATA for k in range(2)]
-    # measured 3e-15 off the data on the B200, 2026-11-17
+    # measured 5.6e-16 off the data, B200 2026-11-17 (measure.py)
     np.testing.assert_allclose(found, levels, atol=1e-9)
 
 
@@ -163,13 +163,13 @@ def test_a_map_fit_joint_or_nested_reaches_the_closed_form_with_exact_zeros(toy,
     columns = _columns(toy["map"], toy["rho"])
     params = np.asarray(fit.params)
     assert [params[columns[m]] == 0.0 for m in DATA] == [v == 0.0 for v in expected.values()]
-    # measured 5e-15 off the closed form on the B200, 2026-11-17
+    # measured 7.8e-16 relative off the closed form, B200 2026-11-17 (measure.py)
     np.testing.assert_allclose(
         [params[columns[m]] for m in DATA], list(expected.values()), rtol=1e-9
     )
     level_columns = _columns(toy["map"], toy["level"])
     found = [params[level_columns[f"{m}{k}"]] for m in DATA for k in range(2)]
-    # measured 3e-15 off the closed form on the B200, 2026-11-17
+    # measured 5.6e-16 off the closed form, B200 2026-11-17 (measure.py)
     np.testing.assert_allclose(found, levels, atol=1e-9)
 
 
