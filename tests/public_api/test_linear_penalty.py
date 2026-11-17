@@ -1,11 +1,11 @@
 """LinearPenalty: a linear penalty on nonnegative parameters, its exact zeros, and its weights.
 
 The toy study measures every parameter directly: an experiment of member ``m`` integrates
-``u' = rho_m`` and ``v' = level`` from zero and observes ``u(1)`` and ``v(1)`` with unit
-noise, so the objective is ``sum_k 0.5 (rho_m - a_mk)^2`` per member plus the levels' terms,
-and ``rho_m >= 0`` under the penalty ``w * rho_m`` has the closed form
-``max(mean_k a_mk - w / K, 0)`` (with a MAP prior ``N(0, s)``, ``max((sum_k a_mk - w) /
-(K + 1 / s^2), 0)``).
+``u' = rho_m`` and ``v' = level`` from zero and observes ``u`` and ``v`` at ``t = 1/2, 1``
+with unit noise, against ``a_mk t`` and ``b t``. With ``T = sum t^2 = 5/4`` the objective is
+``sum_k T (rho_m - a_mk)^2 / 2`` per member plus the levels' terms, and ``rho_m >= 0`` under
+the penalty ``w * rho_m`` has the closed form ``max((T sum_k a_mk - w) / (T K + 1 / s^2), 0)``,
+``1 / s^2`` the precision of a MAP prior ``N(0, s)`` and zero under MLE.
 """
 
 from __future__ import annotations
@@ -23,11 +23,14 @@ from tests.support.inference import small_fit, solver
 
 #: The members of the level ``cohort`` and the data ``a_mk`` of their two experiments: A
 #: ends above zero, B and D at zero, C starts at zero and leaves it.
-DATA = {"A": (2.0, 2.4), "B": (0.1, 0.3), "C": (1.0, 1.2), "D": (-0.6, -0.2)}
+DATA = {"A": (2.0, 2.4), "B": (0.1, 0.2), "C": (1.0, 1.2), "D": (-0.6, -0.2)}
 #: The data of the levels, one per experiment.
 LEVELS = (0.3, -0.2, 0.7, 0.1, -0.4, 0.5, 0.2, -0.1)
 #: The prior's standard deviation on every parameter.
 PRIOR_SCALE = 10.0
+#: The observation times, and the sum of their squares.
+TIMES = (0.5, 1.0)
+SQUARES = sum(t * t for t in TIMES)
 
 
 def _study():
@@ -45,8 +48,8 @@ def _study():
     def measured(name, value, index):
         return inf.Measurement(
             name,
-            times=jnp.asarray([1.0]),
-            values=jnp.asarray([value]),
+            times=jnp.asarray(TIMES),
+            values=value * jnp.asarray(TIMES),
             observe=lambda state: state[index],
             likelihood=inf.Gaussian(1.0),
         )
@@ -85,8 +88,11 @@ def _columns(problem, handle) -> dict:
 def _expected(weight: float, *, prior: bool) -> tuple:
     """The closed-form ``rho`` per member and ``level`` per experiment."""
     precision = 1.0 / PRIOR_SCALE**2 if prior else 0.0
-    rho = {m: max((sum(a) - weight) / (len(a) + precision), 0.0) for m, a in DATA.items()}
-    levels = [b / (1.0 + precision) for b in LEVELS]
+    rho = {
+        m: max((SQUARES * sum(a) - weight) / (SQUARES * len(a) + precision), 0.0)
+        for m, a in DATA.items()
+    }
+    levels = [SQUARES * b / (SQUARES + precision) for b in LEVELS]
     return rho, levels
 
 
@@ -130,8 +136,8 @@ def test_the_gauss_newton_closure_adds_the_linear_value_and_slope_and_no_curvatu
 
 @pytest.mark.parametrize("weight", (0.5, 10.0), ids=("some-zero", "all-zero"))
 def test_the_joint_trust_region_reaches_the_closed_form_with_exact_zeros(toy, weight):
-    """Under MLE, rho_m = max(mean(a_m) - w / 2, 0): B and D end exactly at zero, C (started at
-    zero) leaves it, and a large weight puts every rho exactly at zero."""
+    """Under MLE, rho_m = max(mean(a_m) - w / (2 T), 0): B and D end exactly at zero, C (started
+    at zero) leaves it, and a large weight puts every rho exactly at zero."""
     fit = _fit(toy["mle"], toy["rho"], weight)
     expected, levels = _expected(weight, prior=False)
     columns = _columns(toy["mle"], toy["rho"])
@@ -151,7 +157,7 @@ def test_the_joint_trust_region_reaches_the_closed_form_with_exact_zeros(toy, we
 @pytest.mark.parametrize("nested_at", (None, "cohort", "experiment"))
 def test_a_map_fit_joint_or_nested_reaches_the_closed_form_with_exact_zeros(toy, nested_at):
     """Under MAP with the prior N(0, 10) the joint and the nested trust regions reach
-    max((sum a_m - w) / (2 + 1/100), 0), the zeros exactly."""
+    max((T sum a_m - w) / (2 T + 1/100), 0), the zeros exactly."""
     fit = _fit(toy["map"], toy["rho"], 0.5, inf.TrustRegion(max_steps=40, nested_at=nested_at))
     expected, levels = _expected(0.5, prior=True)
     columns = _columns(toy["map"], toy["rho"])
