@@ -28,7 +28,9 @@ the [LowRankTerm][diff_soup.linear.LowRankTerm],
 gathers the entries of ``U`` from the offset derivatives in the term's order,
 and [member_block_layout][diff_soup.problem._ir._low_rank.member_block_layout]
 describes the family's members for a
-[MemberBlock][diff_soup.linear.MemberBlock] backend. The operator ``A_b + U
+[MemberBlock][diff_soup.linear.MemberBlock] backend, and
+[member_schur_layout][diff_soup.problem._ir._low_rank.member_schur_layout]
+describes every family of a problem for a `MemberSchur` backend. The operator ``A_b + U
 W^T`` is then the base topology's values joined with those entries on
 ``term.topology(base)``.
 """
@@ -49,6 +51,7 @@ __all__ = [
     "member_block_layout",
     "member_mean_term",
     "member_mean_values",
+    "member_schur_layout",
 ]
 
 
@@ -233,3 +236,93 @@ def member_block_layout(
     ]
     names = [f"{view.name}[{member}]" for member in range(int(view.count))]
     return MemberBlockLayout(members, n_dofs=n_dofs, retained=retained, term=term, names=names)
+
+
+def _member_blocks(problem: Any, family: Any) -> list:
+    """``(start, n_sites)`` of every member's flat block in a lowered family.
+
+    Today every lowered family is uniform (a ragged authored family is lowered as
+    one uniform family per size bucket), so member ``m`` starts at
+    ``base + m * member_state_size`` with the family's own site count.
+    """
+    view = problem.family_view(family.name)
+    sizes = [int(var.size) for var in family.member_variables]
+    grid = {size for size in sizes if size > 1}
+    n_sites = grid.pop() if len(grid) == 1 else (1 if not grid else None)
+    if n_sites is None:
+        raise ConfigurationError(
+            f"member_schur_layout: family {family.name!r} has member fields of sizes "
+            f"{sorted(set(sizes))!r}; a member needs its grid fields all of one size, plus "
+            "scalar fields of size 1."
+        )
+    # B1 SWITCH: when families whose members have their own length land (branch lfp/B1,
+    # handoffs/B1-layout.md), the family carries per-member node counts and offsets; read them
+    # here instead of the uniform stride. Planned names, not yet on `Family`:
+    #     nodes = family.member_nodes; offsets = family.member_offsets
+    #     return [(base + offsets[m], int(nodes[m])) for m in range(count)]
+    # (check there whether `member_offsets` is relative to the slab base or absolute).
+    nodes = getattr(family, "member_nodes", None)
+    offsets = getattr(family, "member_offsets", None)
+    if nodes is not None and offsets is not None:
+        return [
+            (int(view.base) + int(offsets[m]), int(nodes[m])) for m in range(int(view.count))
+        ]
+    stride = int(view.member_state_size)
+    return [(int(view.base) + m * stride, n_sites) for m in range(int(view.count))]
+
+
+def member_schur_layout(problem: Any, *, n_dofs: Optional[int] = None) -> Any:
+    """The `MemberSchurLayout` of every family member of a lowered problem.
+
+    Each member's grid unknowns are its fields that have one entry per grid
+    point, site by site with the fields in declaration order inside a site; its
+    scalars are its fields of one entry. Every unknown in no family member
+    (components, host fields, globals) is shared.
+
+    Args:
+        problem: The lowered problem (`spec.build()`).
+        n_dofs: Size of the operator; `None` takes the problem's state size.
+
+    Returns:
+        The layout, members family by family in the problem's family order.
+
+    Raises:
+        ConfigurationError: If the problem has no family member, a family's grid
+            fields differ in size, or two families have a different number of grid
+            fields per site.
+    """
+    from diff_soup.linear._structured._member_elimination import MemberSchurLayout
+
+    n = int(problem.state_size()) if n_dofs is None else int(n_dofs)
+    members, scalars, names, width = [], [], [], None
+    for family in problem._families:
+        if not family.member_variables:
+            continue
+        blocks = _member_blocks(problem, family)
+        sizes = [int(var.size) for var in family.member_variables]
+        for m, (start, n_sites) in enumerate(blocks):
+            grid, own, offset = [], [], start
+            for var, size in zip(family.member_variables, sizes):
+                # A grid field takes this member's n_sites entries (its own length after B1).
+                if size > 1:
+                    grid.append(np.arange(offset, offset + n_sites, dtype=np.int64))
+                    offset += n_sites
+                else:
+                    own.append(np.asarray([offset], dtype=np.int64))
+                    offset += 1
+            if not grid:
+                # A member with no grid field has nothing to sweep; its scalars stay shared.
+                continue
+            if width is None:
+                width = len(grid)
+            elif len(grid) != width:
+                raise ConfigurationError(
+                    f"member_schur_layout: family {family.name!r} has {len(grid)} grid fields "
+                    f"per site but an earlier family has {width}; one layout has one number."
+                )
+            members.append(np.stack(grid, axis=1))
+            scalars.append(np.concatenate(own) if own else np.zeros((0,), np.int64))
+            names.append(f"{family.name}[{m}]")
+    if not members:
+        raise ConfigurationError("member_schur_layout: the problem has no family member with grid fields.")
+    return MemberSchurLayout(members, n_dofs=n, scalars=scalars, names=names)
