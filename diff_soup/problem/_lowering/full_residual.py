@@ -712,7 +712,7 @@ def _build_full_residual_fn(
             op,
             alias_size,
         ) in rt_fc_specs:
-            surf_idx = fam_slab_base + jnp.arange(count) * member_state + op.member_surface_dof
+            surf_idx = fam_slab_base + op.surface_columns()
             surface_traces = u[surf_idx]  # (count,)
             transferred = op.apply(surface_traces, target_size=alias_size)
             var_views[consuming_comp][alias_var] = transferred
@@ -786,7 +786,7 @@ def _build_full_residual_fn(
         # located members ACCUMULATE).  Runs AFTER the family blocks so the slab
         # is the same state the members were assembled from.
         for fam_slab_base, member_state, count, tgt_off, tgt_size, op in scatter_specs:
-            surf_idx = fam_slab_base + jnp.arange(count) * member_state + op.member_surface_dof
+            surf_idx = fam_slab_base + op.surface_columns()
             surface_traces = u[surf_idx]  # (count,)
             contribution = op.apply(surface_traces, target_size=tgt_size)
             f = f.at[tgt_off : tgt_off + tgt_size].add(contribution.astype(u.dtype))

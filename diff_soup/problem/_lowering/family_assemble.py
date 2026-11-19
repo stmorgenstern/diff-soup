@@ -27,6 +27,7 @@ from collections.abc import Mapping
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 def _materialise_family_field(fam, var, value, coords, m_batch):
@@ -132,6 +133,8 @@ def _member_batch(fam) -> Mapping[str, "jax.Array"]:
     if not m_batch:
         offset = int(getattr(fam, "member_index_offset", 0))
         m_batch = {"member_index": jnp.arange(count) + offset}
+    if getattr(fam, "is_padded", False):
+        m_batch["member_nodes"] = jnp.asarray(fam.member_nodes)
     return m_batch
 
 
@@ -193,5 +196,12 @@ def assemble_family_pieces(families, values, default):
             field_pop = _materialise_family_field(fam, var, value, coords, m_batch)
             slab = slab.at[:, var_local_off : var_local_off + var.size].set(field_pop)
             var_local_off += int(var.size)
-        pieces.append(slab.reshape(-1))
+        if getattr(fam, "is_padded", False):
+            # A padded family's state holds each member's real nodes only: a
+            # field value is given on the padded (count, field size) shape,
+            # and its entries past a member's node count are dropped.
+            _index, real = fam.padded_slab()
+            pieces.append(slab.reshape(-1)[np.flatnonzero(real.reshape(-1))])
+        else:
+            pieces.append(slab.reshape(-1))
     return pieces

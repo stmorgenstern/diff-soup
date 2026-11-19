@@ -429,11 +429,32 @@ class LoweredProblem(eqx.Module):
         n = int(self._state_size)
         scale = np.ones(n, dtype=np.float64)
         offset = np.zeros(n, dtype=np.float64)
+        families = {fam.name: fam for fam in self._families}
+        first_offset = {}
+        for (owner, _var), off, _size, _shape in self._layout_entries:
+            if owner in families:
+                first_offset[owner] = min(first_offset.get(owner, off), off)
         for (comp_name, var_name), off, size, _shape in self._layout_entries:
             s = float(self._scales.state_ref.get((comp_name, var_name), 1.0))
             o = float(self._scales.state_offset.get((comp_name, var_name), 0.0))
-            scale[off : off + size] = s
-            offset[off : off + size] = o
+            fam = families.get(comp_name)
+            if fam is None:
+                scale[off : off + size] = s
+                offset[off : off + size] = o
+                continue
+            # A family field's unknowns interleave with the other member
+            # fields (member after member), so take its own band of each
+            # member's block rather than one contiguous slice.
+            index, real = fam.padded_slab()
+            loc = 0
+            for v in fam.member_variables:
+                if v.name == var_name:
+                    break
+                loc += int(v.size)
+            band = slice(loc, loc + int(next(v.size for v in fam.member_variables if v.name == var_name)))
+            dofs = first_offset[comp_name] + index[:, band][real[:, band]]
+            scale[dofs] = s
+            offset[dofs] = o
         return jnp.asarray(scale), jnp.asarray(offset)
 
     def _lambda_scale_arrays(self) -> tuple[jax.Array, jax.Array]:
