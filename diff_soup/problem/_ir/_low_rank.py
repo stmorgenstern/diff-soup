@@ -114,6 +114,10 @@ class MemberMeanCoupling:
 def _member_rows(view: Any, member: int, field: str) -> np.ndarray:
     """Global unknowns of ``field`` of member ``member`` in a family view."""
     band = view.field_slice(field)
+    pad_index = getattr(view, "pad_index", None)
+    if pad_index is not None:
+        # Members have their own node counts: the band's real unknowns.
+        return int(view.base) + np.unique(np.asarray(pad_index)[member, band])
     start = int(view.base) + member * int(view.member_state_size)
     return np.arange(start + band.start, start + band.stop, dtype=np.int64)
 

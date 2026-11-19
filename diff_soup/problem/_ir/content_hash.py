@@ -947,6 +947,8 @@ def _family_id(fam, var_id_to_ref=None) -> str:
         parts.append(f"member_index_offset={offset}")
     if getattr(fam, "stencil_radius", None) is not None:
         parts.append(f"stencil_radius={int(fam.stencil_radius)}")
+    if getattr(fam, "member_nodes", None) is not None:
+        parts.append(f"member_nodes={','.join(str(n) for n in fam.member_nodes)}")
     parts.append(f"domain={_domain_id(fam.domain)}")
     for v in fam.member_variables:
         qualified = _qualified_var_name(v, var_id_to_ref)

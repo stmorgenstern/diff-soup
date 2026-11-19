@@ -329,6 +329,10 @@ class FamilyScatterOp(TransferOp):
         injective: When ``True``, lowering validates that no two members share
             an ``at_indices`` target; residual behavior is identical to
             [Sum][].
+        member_columns: Each member's surface column counted from the
+            projected field's block offset, or ``None`` for ``m * n_member_dof
+            + member_surface_dof``. A family whose members have their own node
+            counts sets it, since its member blocks have no common stride.
     """
 
     at_indices: Tuple[int, ...] = eqx.field(static=True)
@@ -336,6 +340,7 @@ class FamilyScatterOp(TransferOp):
     n_member_dof: int = eqx.field(static=True)
     reduce: Reduce = eqx.field(static=True)
     injective: bool = eqx.field(static=True)
+    member_columns: Optional[Tuple[int, ...]] = eqx.field(static=True, default=None)
 
     def __init__(
         self,
@@ -344,6 +349,7 @@ class FamilyScatterOp(TransferOp):
         n_member_dof,
         reduce: "Reduce | str" = Sum(),
         injective: bool = False,
+        member_columns=None,
     ):
         if isinstance(at_indices, np.ndarray):
             ints = tuple(int(x) for x in at_indices.flat)
@@ -354,6 +360,21 @@ class FamilyScatterOp(TransferOp):
         self.n_member_dof = int(n_member_dof)
         self.reduce = _coerce_reduce(reduce)
         self.injective = bool(injective)
+        if member_columns is not None:
+            member_columns = tuple(int(c) for c in member_columns)
+            if len(member_columns) != len(ints):
+                raise ValueError(
+                    f"FamilyScatterOp: member_columns has {len(member_columns)} entries "
+                    f"for {len(ints)} members."
+                )
+        self.member_columns = member_columns
+
+    def surface_columns(self) -> np.ndarray:
+        """Each member's surface column, counted from the projected field's block offset."""
+        if self.member_columns is not None:
+            return np.asarray(self.member_columns, dtype=np.int64)
+        n_member = len(self.at_indices)
+        return np.arange(n_member, dtype=np.int64) * self.n_member_dof + self.member_surface_dof
 
     def apply(self, source: Array, target_size: int) -> Array:
         """Scatter per-member surface values into a ``target_size`` array, then reduce."""
@@ -380,13 +401,8 @@ class FamilyScatterOp(TransferOp):
         # to the projected field's block offset (field-relative, like ``apply``'s
         # caller-side gather).
         del source_size, target_size
-        n_member = len(self.at_indices)
         rows = np.asarray(self.at_indices, dtype=np.int64)
-        cols = np.array(
-            [m * self.n_member_dof + self.member_surface_dof for m in range(n_member)],
-            dtype=np.int64,
-        )
-        return rows, cols
+        return rows, self.surface_columns()
 
 
 class Coupling(eqx.Module):

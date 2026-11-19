@@ -495,10 +495,31 @@ def _family_self_block_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, 
             "refusing the dense fallback; supply a sparse member stencil."
         )
     fam_base = layout.offset_of((fam.name, fam.member_variables[0].name))
+    if getattr(fam, "is_padded", False):
+        return _padded_member_stamp(fam, r1, c1, fam_base, layout.total_size)
     base = fam_base + np.arange(int(fam.count), dtype=np.int64) * member_state_size
     tile = Pattern.of(r1, c1, member_state_size)
     stamped = tile.stamp(np.stack([base, base], axis=1), (layout.total_size, layout.total_size))
     return stamped.rows, stamped.cols
+
+
+def _padded_member_stamp(fam, r1, c1, fam_base: int, total_size: int):
+    """Stamp a padded member tile onto each member's real unknowns.
+
+    ``(r1, c1)`` is the member tile in padded-slab coordinates. Rows of padded
+    nodes are dropped; a column of a padded node lands on its field's last
+    real node, which is what the kernel's gather reads. Duplicates that
+    landing creates are removed, so each member's block is the uniform
+    member pattern on its own node count.
+    """
+    index, real = fam.padded_slab()
+    r1 = np.asarray(r1, dtype=np.int64)
+    c1 = np.asarray(c1, dtype=np.int64)
+    keep = real[:, r1]
+    rows = index[:, r1][keep] + int(fam_base)
+    cols = index[:, c1][keep] + int(fam_base)
+    keys = np.unique(rows * int(total_size) + cols)
+    return keys // int(total_size), keys % int(total_size)
 
 
 def _family_graph_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, np.ndarray]:
@@ -521,6 +542,17 @@ def _family_graph_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, np.nd
         local += int(variable.size)
     member_state = int(fam.member_state_size)
     fam_base = layout.offset_of((fam.name, fam.member_variables[0].name))
+    padded = getattr(fam, "is_padded", False)
+    if padded:
+        pad_index, pad_real = fam.padded_slab()
+
+    def band(member: int, off: int, size: int) -> np.ndarray:
+        """Absolute state indices of one member's field band (real nodes only)."""
+        if not padded:
+            return fam_base + member * member_state + off + np.arange(size, dtype=np.int64)
+        cols = slice(off, off + size)
+        return fam_base + pad_index[member, cols][pad_real[member, cols]]
+
     rows_out: list[np.ndarray] = []
     cols_out: list[np.ndarray] = []
 
@@ -538,23 +570,13 @@ def _family_graph_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, np.nd
         exchange_cols: list[np.ndarray] = []
         for source, target in zip(graph.edge_sources, graph.edge_targets):
             for row_member in (int(source), int(target)):
-                row_band = (
-                    fam_base
-                    + row_member * member_state
-                    + write_off
-                    + np.arange(write_size, dtype=np.int64)
-                )
+                row_band = band(row_member, write_off, write_size)
                 for dependency in dependencies:
                     dep_off, dep_size = field_info[dependency]
                     for col_member in (int(source), int(target)):
-                        col_band = (
-                            fam_base
-                            + col_member * member_state
-                            + dep_off
-                            + np.arange(dep_size, dtype=np.int64)
-                        )
-                        exchange_rows.append(np.repeat(row_band, dep_size))
-                        exchange_cols.append(np.tile(col_band, write_size))
+                        col_band = band(col_member, dep_off, dep_size)
+                        exchange_rows.append(np.repeat(row_band, col_band.size))
+                        exchange_cols.append(np.tile(col_band, row_band.size))
         if exchange_rows:
             rows_out.append(np.concatenate(exchange_rows))
             cols_out.append(np.concatenate(exchange_cols))
@@ -1017,7 +1039,7 @@ def _family_cross_block_sparsity(
             tgt_comp_name, alias_var = owner
             fam_name, src_var = family_var_owner[id(cp.source)]
             fam = next(f for f in eqset.families if f.name == fam_name)
-            source_size = fam.count * member_state_by_fam[fam_name]
+            source_size = int(fam.state_size)
             src_off = layout.offset_of((fam_name, src_var))
             # The alias is read NODE-LOCALLY: a reader's output at node i depends
             # on the alias at node i and that node's domain-stencil neighbours.
@@ -1050,7 +1072,7 @@ def _family_cross_block_sparsity(
             # component target rows reproduces it exactly (NOT per member).
             fam_name, src_var = family_var_owner[id(cp.source)]
             fam = next(f for f in eqset.families if f.name == fam_name)
-            source_size = fam.count * member_state_by_fam[fam_name]
+            source_size = int(fam.state_size)
             tgt_comp, tgt_var, target_size = comp_var_owner[id(cp.target)]
             writer_off = layout.offset_of((tgt_comp, tgt_var))
             src_off = layout.offset_of((fam_name, src_var))
@@ -1096,6 +1118,18 @@ def _family_cross_block_sparsity(
                 continue
             member_idx = np.asarray(member_idx, dtype=np.int64)
             src_cols = np.asarray(src_cols, dtype=np.int64)
+            if getattr(fam, "is_padded", False):
+                # Members have their own sizes: member m's block is
+                # [first + offsets[m], + sizes[m]).
+                first = layout.offset_of((fam_name, fam.member_variables[0].name))
+                sizes = fam.member_sizes[member_idx]
+                starts = first + fam.member_offsets[member_idx]
+                exp_rows = np.repeat(starts, sizes) + (
+                    np.arange(int(sizes.sum()), dtype=np.int64) - np.repeat(np.cumsum(sizes) - sizes, sizes)
+                )
+                rows_list.append(exp_rows)
+                cols_list.append(np.repeat(src_cols, sizes) + src_off)
+                continue
             # Expand over the member's own DOF axis: member m's full slab rows
             # [fam_base + m*member_state, +member_state) all depend on src_col.
             local = np.arange(member_state, dtype=np.int64)
