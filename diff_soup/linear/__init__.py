@@ -38,7 +38,9 @@ importable from this package but are not part of the public ``__all__``.
 Structured backends serve operators with a known structure in pure JAX:
 ``BlockTridiagonal`` (block cyclic reduction of block-tridiagonal chains),
 ``MemberBlock`` (banded member blocks and a retained Schur complement,
-described by a ``MemberBlockLayout``) and ``Woodbury`` (an operator with a
+described by a ``MemberBlockLayout``), ``MemberSchur`` (members eliminated
+in JAX and their shared Schur complement factored by another exact backend,
+described by a ``MemberSchurLayout``) and ``Woodbury`` (an operator with a
 low-rank term ``U W^T``, declared by a ``LowRankTerm``, over a factor of the
 base operator from any exact backend).
 
@@ -105,6 +107,8 @@ from diff_soup.linear._structured import (
     LowRankTerm,
     MemberBlock,
     MemberBlockLayout,
+    MemberSchur,
+    MemberSchurLayout,
     Woodbury,
 )
 
@@ -146,6 +150,8 @@ __all__ = [
     "LowRankTerm",
     "MemberBlock",
     "MemberBlockLayout",
+    "MemberSchur",
+    "MemberSchurLayout",
     "Woodbury",
     # Iterative solves
     "Krylov",
