@@ -40,6 +40,7 @@ from diff_soup.linear._factor import SolveStatus, dirichlet_rows
 from diff_soup.linear._structured._common import index_constant
 from diff_soup.linear._structured._member_chain import ELIMINATIONS, chain_factor, chain_solve
 from diff_soup.linear._structured._small_lu import (
+    bmm,
     small_lu_factor,
     small_lu_solve,
     small_lu_solve_transpose,
@@ -468,6 +469,20 @@ def _sub_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
     return target - jax.lax.optimization_barrier(summed)
 
 
+def _mm(a: Array, x: Array) -> Array:
+    """Batched ``a @ x``, written as a product and a sum.
+
+    A batched matrix product of complex values ran one member at a time on a graphics card
+    (0.7 ms per member in a solve); this form is one fused kernel for real and complex values.
+    """
+    return bmm(a, x)
+
+
+def _tmm(a: Array, x: Array) -> Array:
+    """Batched ``a^T @ x`` with the plain transpose."""
+    return bmm(jnp.swapaxes(a, -1, -2), x)
+
+
 def _chain(plan: _Plan, tree: MemberFactor, v: Array, transpose: bool) -> Array:
     """``T^-1 v`` (or ``T^-T v``) for site columns ``v`` ``(M, N b, m)``."""
     shape = (plan.nm, plan.n_max, plan.b, v.shape[-1])
@@ -484,13 +499,13 @@ def _local_solve(plan: _Plan, tree: MemberFactor, v: Array, transpose: bool):
     f = tree.f
     if not transpose:
         g = _chain(plan, tree, v_sites, False)
-        x_scal = small_lu_solve(tree.s_lu, tree.s_perm, v_scal - jnp.einsum("mkl,mlj->mkj", f, g))
-        x_sites = g - jnp.einsum("mlk,mkj->mlj", tree.ze, x_scal)
+        x_scal = small_lu_solve(tree.s_lu, tree.s_perm, v_scal - _mm(f, g))
+        x_sites = g - _mm(tree.ze, x_scal)
     else:
         x_scal = small_lu_solve_transpose(
-            tree.s_lu, tree.s_perm, v_scal - jnp.einsum("mlk,mlj->mkj", tree.ze, v_sites)
+            tree.s_lu, tree.s_perm, v_scal - _tmm(tree.ze, v_sites)
         )
-        x_sites = _chain(plan, tree, v_sites - jnp.einsum("mkl,mkj->mlj", f, x_scal), True)
+        x_sites = _chain(plan, tree, v_sites - _tmm(f, x_scal), True)
     return jnp.concatenate([x_sites, x_scal], axis=1)
 
 
@@ -528,11 +543,11 @@ def eliminate(plan: _Plan, values: Array) -> tuple:
         z = _chain(plan, tree, jnp.concatenate([e, b_all[:, :nb]], axis=-1), False)
         ze, zb = z[..., :k], z[..., k:]
         g = _placed(plan, "g", base, nm * k * k)
-        s_local = g.reshape(nm, k, k) - jnp.einsum("mkl,mlj->mkj", f, ze)
+        s_local = g.reshape(nm, k, k) - _mm(f, ze)
         s_lu, s_perm, singular = small_lu_factor(s_local)
         bad = bad | jnp.any(singular)
-        w_scal = small_lu_solve(s_lu, s_perm, b_all[:, nb:] - jnp.einsum("mkl,mlc->mkc", f, zb))
-        w = jnp.concatenate([zb - jnp.einsum("mlk,mkc->mlc", ze, w_scal), w_scal], axis=1)
+        w_scal = small_lu_solve(s_lu, s_perm, b_all[:, nb:] - _mm(f, zb))
+        w = jnp.concatenate([zb - _mm(ze, w_scal), w_scal], axis=1)
         tree = MemberFactor(chain=chain, f=f, ze=ze, s_lu=s_lu, s_perm=s_perm, w=w)
     else:
         w = _chain(plan, tree, b_all, False)
@@ -576,7 +591,7 @@ def reduce_rhs(plan: _Plan, values: Array, tree: MemberFactor, columns: Array, t
             taken = base[plan.c_src][:, None] * y.reshape(nm * width, m)[plan.c_col]
             c_shared = _sub_rows(c_shared, plan.c_row, taken)
         return y, c_shared
-    moved = jnp.einsum("mlc,mlj->mcj", tree.w, c_local)
+    moved = _tmm(tree.w, c_local)
     rhs = jnp.zeros((ns + 1, m), columns.dtype).at[:ns].set(c_shared)
     rhs = _sub_rows(rhs, plan.colmap, moved)
     return c_local, rhs[:ns]
@@ -592,7 +607,7 @@ def back_substitute(
     m = x_shared.shape[1]
     if not transpose:
         padded = jnp.concatenate([x_shared, jnp.zeros((1, m), x_shared.dtype)], axis=0)
-        x_local = carry - jnp.einsum("mlc,mcj->mlj", tree.w, padded[plan.colmap])
+        x_local = carry - _mm(tree.w, padded[plan.colmap])
     else:
         base = _masked(plan, values)
         v = carry.reshape(nm * width, m)
