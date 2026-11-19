@@ -49,7 +49,13 @@ solvers = {}
 for name, backend in backends.items():
     an = LIN.analyze(topology, backend=backend)
     ctx = LIN.SolveContext()
-    solvers[name] = jax.jit(lambda v, r, an=an, ctx=ctx: (lambda f: (LIN.solve(f, r)[0], LIN.solve(f, r, transpose=True)[0], f.status))(LIN.factor(an, v, ctx=ctx)))
+    def run(v, r, an=an, ctx=ctx):
+        f = LIN.factor(an, v, ctx=ctx)
+        x, _, rep = LIN.solve_checked(f, r)
+        xt, _, _ = LIN.solve_checked(f, r, transpose=True)
+        return x, xt, rep.status
+
+    solvers[name] = jax.jit(run)
 
 
 def backward(A, x, r):
