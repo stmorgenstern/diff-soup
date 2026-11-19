@@ -39,6 +39,7 @@ from diff_soup._layout import Layout
 from diff_soup.linear._api import LinearSolver, SparseTopology, option_field_items
 from diff_soup.linear._factor import (
     Analysis,
+    Factor,
     SolveContext,
     dirichlet_rows,
 )
@@ -526,13 +527,44 @@ class KLUBackend(LinearSolver):
             requests with non-finite values or a singular result),
             ``released_context_errors`` (calls refused because their context
             was released), ``live_slots``, ``live_sites``,
-            ``live_analyses`` and ``live_lu_entries`` (the entries of L and
-            U, diagonals included, over the live numeric factorizations).
+            ``live_analyses`` and ``live_lu_entries`` (the
+            [factor_entries][diff_soup.linear.klu_backend.KLUBackend.factor_entries]
+            of every live numeric factorization, summed).
 
         Raises:
             ConfigurationError: If the KLU extension is not built.
         """
         return dict(_native().stats())
+
+    @staticmethod
+    def factor_entries(f: Factor) -> int:
+        """The stored entries of one KLU factor.
+
+        These are the entries of `L` and `U`, the diagonal counted once, and of the
+        off-diagonal blocks of the block triangular form. Call it outside `jax.jit`.
+
+        Args:
+            f: A factor of one matrix (no lane axes) on a KLU analysis.
+
+        Returns:
+            The entry count, or `-1` when the factor holds no factorization: an empty factor,
+            or one whose context was released.
+
+        Raises:
+            ConfigurationError: If `f` is not a KLU factor of one matrix, or the KLU extension
+                is not built.
+        """
+        backend = f.analysis.backend
+        if not isinstance(backend, KLUBackend):
+            raise ConfigurationError(
+                f"factor_entries needs a KLU factor; got one of {type(backend).__name__}."
+            )
+        context_id, slot_id = (np.asarray(leaf) for leaf in f.handle)
+        if context_id.shape != ():
+            raise ConfigurationError(
+                f"factor_entries needs a factor of one matrix; got lane axes {context_id.shape}."
+            )
+        return int(_native().factor_entries(int(context_id), int(slot_id)))
 
     @staticmethod
     def reset_native_stats() -> None:
