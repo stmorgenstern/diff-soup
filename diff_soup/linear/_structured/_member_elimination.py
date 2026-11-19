@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple, Optional
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
@@ -442,15 +443,14 @@ def _scatter(size: int, dst: np.ndarray, src: Array) -> Array:
 
 
 def _add_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
-    """``target`` ``(r, m)`` with the rows ``updates`` ``(e, m)`` added at rows ``index``.
+    """``target`` ``(r, m)`` with the rows ``updates`` ``(..., m)`` added at rows ``index``.
 
-    Written as a scatter of scalars on the flattened target: with many repeated row indices
-    (one shared row read by every member) a scatter of whole rows runs serially on a
-    graphics card.
+    Written as a segment sum: an in-place scatter-add with many repeated row indices (one
+    shared row read by every member) took 1.3 s for 200,000 rows on a graphics card where
+    the segment sum takes 0.3 ms.
     """
-    m = target.shape[1]
-    flat = (jnp.asarray(index, jnp.int32).reshape(-1, 1) * m + jnp.arange(m, dtype=jnp.int32)).reshape(-1)
-    return target.reshape(-1).at[flat].add(updates.reshape(-1)).reshape(target.shape)
+    rows = updates.reshape(-1, target.shape[1])
+    return target + jax.ops.segment_sum(rows, index.reshape(-1), num_segments=target.shape[0])
 
 
 def _scalar_rows(plan: _Plan, base: Array) -> Optional[Array]:
