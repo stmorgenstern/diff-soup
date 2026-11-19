@@ -1,8 +1,9 @@
 // Block Thomas over many independent block-tridiagonal chains (members), threaded over members with OpenMP.
 //
-// Arrays are member-major and row-major: lower, diag, upper (..., N, b, b), right-hand sides (..., N, b, m); every
-// axis before the last three is a member axis (a lane axis added by vmap folds into it). Block row i of a chain is
-// lower_i x_{i-1} + diag_i x_i + upper_i x_{i+1}; lower_0 and upper_{N-1} are never read.
+// The members are stored back to back, each at its own length: lower, diag, upper (..., S, b, b), right-hand sides
+// (..., S, b, m), and offsets (M + 1,) with member k on sites offsets[k] .. offsets[k + 1]. Every axis before the
+// last three is a lane axis added by vmap. Block row i of a member is lower_i x_{i-1} + diag_i x_i + upper_i x_{i+1};
+// lower at its first site and upper at its last are never read. bad holds one flag per lane.
 //
 // Factor, without pivoting across grid points: P_i = diag_i - lower_i cp_{i-1}, inv_i = P_i^-1 by an LU with scaled
 // row partial pivoting inside the block (the rule of _small_lu.small_lu_factor), cp_i = inv_i upper_i. bad[member]
@@ -162,64 +163,109 @@ void solve_member(const T* inv, const T* cp, const T* lo, const T* c, T* x, int6
   }
 }
 
+// The members of one lane are stored back to back: member k holds sites offsets[k] .. offsets[k + 1] of the flat
+// chain. Every axis before the site axis is a lane axis (added by vmap); the offsets of the first lane are used.
+struct Members {
+  const int32_t* off = nullptr;
+  int64_t count = 0, sites = 0;
+};
+
+inline bool read_members(ffi::Buffer<ffi::S32> offsets, int64_t sites, Members* out) {
+  auto dims = offsets.dimensions();
+  if (dims.size() < 1 || dims[dims.size() - 1] < 1) return false;
+  out->off = offsets.typed_data();
+  out->count = dims[dims.size() - 1] - 1;
+  out->sites = out->off[out->count];
+  if (out->off[0] != 0 || out->sites != sites) return false;
+  for (int64_t k = 0; k < out->count; ++k)
+    if (out->off[k + 1] < out->off[k]) return false;
+  return true;
+}
+
+// Threads pay only when there is enough work to share.
+constexpr int64_t kParallelWork = 1 << 15;
+
 template <ffi::DataType DT>
 ffi::Error FactorImpl(ffi::Buffer<DT> lower, ffi::Buffer<DT> diag, ffi::Buffer<DT> upper,
-                      ffi::ResultBuffer<DT> inv, ffi::ResultBuffer<DT> cp, ffi::ResultBuffer<ffi::PRED> bad) {
+                      ffi::Buffer<ffi::S32> offsets, ffi::ResultBuffer<DT> inv, ffi::ResultBuffer<DT> cp,
+                      ffi::ResultBuffer<ffi::PRED> bad) {
   using T = ffi::NativeType<DT>;
   auto dims = diag.dimensions();
-  if (dims.size() < 3) return ffi::Error::InvalidArgument("member_chain_factor: diag must be (..., N, b, b)");
-  const int64_t n = dims[dims.size() - 3];
+  if (dims.size() < 3) return ffi::Error::InvalidArgument("member_chain_factor: diag must be (..., S, b, b)");
+  const int64_t sites = dims[dims.size() - 3];
   const int b = (int)dims[dims.size() - 1];
   if (b < 1 || b > 16 || dims[dims.size() - 2] != b)
     return ffi::Error::InvalidArgument("member_chain_factor: square blocks of size 1 to 16 are supported");
   if (lower.element_count() != diag.element_count() || upper.element_count() != diag.element_count())
     return ffi::Error::InvalidArgument("member_chain_factor: lower, diag and upper differ in shape");
-  const int64_t stride = n * b * b;
-  const int64_t members = stride ? diag.element_count() / stride : 0;
+  Members mem;
+  if (!read_members(offsets, sites, &mem))
+    return ffi::Error::InvalidArgument("member_chain_factor: offsets do not describe the chain");
+  const int64_t bb = b * b, stride = sites * bb;
+  const int64_t lanes = stride ? diag.element_count() / stride : 0;
   const T* lo = lower.typed_data();
   const T* dg = diag.typed_data();
   const T* up = upper.typed_data();
   T* iv = inv->typed_data();
   T* c = cp->typed_data();
   bool* bd = bad->typed_data();
+  const int64_t jobs = lanes * mem.count;
+  std::vector<char> flags(jobs > 0 ? jobs : 1, 0);
   auto run = [&](auto member) {
-#pragma omp parallel for schedule(static)
-    for (int64_t k = 0; k < members; ++k)
-      member(lo + k * stride, dg + k * stride, up + k * stride, iv + k * stride, c + k * stride, bd + k, n, b);
+#pragma omp parallel for schedule(dynamic, 8) if (lanes * stride > kParallelWork)
+    for (int64_t job = 0; job < jobs; ++job) {
+      const int64_t lane = job / mem.count, k = job % mem.count;
+      const int64_t at = lane * stride + mem.off[k] * bb;
+      bool singular = false;
+      member(lo + at, dg + at, up + at, iv + at, c + at, &singular, (int64_t)(mem.off[k + 1] - mem.off[k]), b);
+      flags[job] = singular;
+    }
   };
   if (b == 1) run(factor_member<T, 1>);
   else if (b == 2) run(factor_member<T, 2>);
   else run(factor_member<T, 0>);
+  for (int64_t lane = 0; lane < lanes; ++lane) {
+    bool any = false;
+    for (int64_t k = 0; k < mem.count; ++k) any |= (bool)flags[lane * mem.count + k];
+    bd[lane] = any;
+  }
   return ffi::Error::Success();
 }
 
 template <ffi::DataType DT>
 ffi::Error SolveImpl(ffi::Buffer<DT> inv, ffi::Buffer<DT> cp, ffi::Buffer<DT> lower, ffi::Buffer<DT> rhs,
-                     ffi::ResultBuffer<DT> x, bool transpose) {
+                     ffi::Buffer<ffi::S32> offsets, ffi::ResultBuffer<DT> x, bool transpose) {
   using T = ffi::NativeType<DT>;
   auto dims = inv.dimensions();
   auto rdims = rhs.dimensions();
   if (dims.size() < 3 || rdims.size() != dims.size())
-    return ffi::Error::InvalidArgument("member_chain_solve: factor (..., N, b, b) and rhs (..., N, b, m) needed");
-  const int64_t n = dims[dims.size() - 3];
+    return ffi::Error::InvalidArgument("member_chain_solve: factor (..., S, b, b) and rhs (..., S, b, m) needed");
+  const int64_t sites = dims[dims.size() - 3];
   const int b = (int)dims[dims.size() - 1];
   const int m = (int)rdims[rdims.size() - 1];
-  if (b < 1 || b > 16 || rdims[rdims.size() - 2] != b || rdims[rdims.size() - 3] != n)
+  if (b < 1 || b > 16 || rdims[rdims.size() - 2] != b || rdims[rdims.size() - 3] != sites)
     return ffi::Error::InvalidArgument("member_chain_solve: rhs does not match the factor");
-  const int64_t fs = n * b * b, rs = n * b * m;
-  const int64_t members = fs ? inv.element_count() / fs : 0;
-  if (rs * members != rhs.element_count())
-    return ffi::Error::InvalidArgument("member_chain_solve: rhs and factor differ in member count");
+  Members mem;
+  if (!read_members(offsets, sites, &mem))
+    return ffi::Error::InvalidArgument("member_chain_solve: offsets do not describe the chain");
+  const int64_t bb = b * b, bm = b * m, fs = sites * bb, rs = sites * bm;
+  const int64_t lanes = fs ? inv.element_count() / fs : 0;
+  if (rs * lanes != rhs.element_count())
+    return ffi::Error::InvalidArgument("member_chain_solve: rhs and factor differ in lane count");
   if (rs == 0) return ffi::Error::Success();
   const T* iv = inv.typed_data();
   const T* c = cp.typed_data();
   const T* lo = lower.typed_data();
   const T* r = rhs.typed_data();
   T* out = x->typed_data();
+  const int64_t jobs = lanes * mem.count;
   auto run = [&](auto member) {
-#pragma omp parallel for schedule(static)
-    for (int64_t k = 0; k < members; ++k)
-      member(iv + k * fs, c + k * fs, lo + k * fs, r + k * rs, out + k * rs, n, b, m, transpose);
+#pragma omp parallel for schedule(dynamic, 8) if (lanes * rs > kParallelWork)
+    for (int64_t job = 0; job < jobs; ++job) {
+      const int64_t lane = job / mem.count, k = job % mem.count;
+      const int64_t fa = lane * fs + mem.off[k] * bb, ra = lane * rs + mem.off[k] * bm;
+      member(iv + fa, c + fa, lo + fa, r + ra, out + ra, (int64_t)(mem.off[k + 1] - mem.off[k]), b, m, transpose);
+    }
   };
   if (b == 1) run(solve_member<T, 1>);
   else if (b == 2) run(solve_member<T, 2>);
@@ -235,6 +281,7 @@ ffi::Error SolveImpl(ffi::Buffer<DT> inv, ffi::Buffer<DT> cp, ffi::Buffer<DT> lo
                                     .Arg<ffi::Buffer<DT>>()                                                 \
                                     .Arg<ffi::Buffer<DT>>()                                                 \
                                     .Arg<ffi::Buffer<DT>>()                                                 \
+                                    .Arg<ffi::Buffer<ffi::S32>>()                                           \
                                     .Ret<ffi::Buffer<DT>>()                                                 \
                                     .Ret<ffi::Buffer<DT>>()                                                 \
                                     .Ret<ffi::Buffer<ffi::PRED>>());                                        \
@@ -244,6 +291,7 @@ ffi::Error SolveImpl(ffi::Buffer<DT> inv, ffi::Buffer<DT> cp, ffi::Buffer<DT> lo
                                     .Arg<ffi::Buffer<DT>>()                                                 \
                                     .Arg<ffi::Buffer<DT>>()                                                 \
                                     .Arg<ffi::Buffer<DT>>()                                                 \
+                                    .Arg<ffi::Buffer<ffi::S32>>()                                           \
                                     .Ret<ffi::Buffer<DT>>()                                                 \
                                     .Attr<bool>("transpose"));
 

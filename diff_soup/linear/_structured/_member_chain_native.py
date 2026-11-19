@@ -1,14 +1,14 @@
-"""The threaded native block Thomas kernel: the processor path of ``MemberSchur(elimination="native")``.
+"""The threaded native block Thomas kernel: the chain kernel of ``MemberSchur(elimination="native")``.
 
-Same signature, factor ([SweepFactor][]) and singular rule as the plain-JAX sweep in ``_member_chain.py``: arrays
-``(M, N, b, b)`` of many independent block-tridiagonal chains (members), right-hand sides ``(M, N, b, m)``. Block row ``i`` of a chain is
-``lower[i] x[i-1] + diag[i] x[i] + upper[i] x[i+1]``; ``lower[:, 0]`` and ``upper[:, N-1]`` are never read.
+Same factor ([SweepFactor][]) and singular rule as the plain-JAX sweep in ``_member_chain.py``, on the same flat
+chain: blocks ``(S, b, b)`` of members stored back to back, right-hand sides ``(S, b, m)``, and the members'
+``offsets`` ``(M + 1,)``. Each member is swept at its own length.
 
 The work is one XLA custom call per factor or solve (``jax.ffi.ffi_call``, not a host callback), which loops over
-members under OpenMP; the thread count follows ``OMP_NUM_THREADS``. Any axis before the last three is a member axis,
-so a lane axis added by ``vmap`` folds into the member loop. The calls have no derivative rule: ``ds.linear``
-differentiates its phased primitives through the solves (``_phased_ad.py``), never through a factorization or the
-lowering that runs this kernel.
+members under OpenMP when there is enough work to share; the thread count follows ``OMP_NUM_THREADS``. A lane axis
+added by ``vmap`` folds into the member loop. The calls have no derivative rule: ``ds.linear`` differentiates its
+phased primitives through the solves (``_phased_ad.py``), never through a factorization or the lowering that runs
+this kernel.
 """
 
 from __future__ import annotations
@@ -53,18 +53,19 @@ def _suffix(dtype) -> str:
     )
 
 
-def chain_factor(lower: Array, diag: Array, upper: Array) -> tuple[SweepFactor, Array]:
-    """Block Thomas factor of a batch of block-tridiagonal chains.
+def chain_factor(lower: Array, diag: Array, upper: Array, offsets: np.ndarray) -> tuple[SweepFactor, Array]:
+    """Block Thomas factor of the members of a flat chain.
 
     Args:
-        lower: Sub-diagonal blocks, shape ``(M, N, b, b)``.
+        lower: Sub-diagonal blocks, shape ``(S, b, b)``, zero at a member's first site.
         diag: Diagonal blocks, the same shape.
         upper: Super-diagonal blocks, the same shape.
+        offsets: ``(M + 1,)`` ``int32`` first site of every member, and ``S``.
 
     Returns:
         ``(factor, bad)``: a [SweepFactor][] holding the inverse pivot blocks ``inv``, ``cp = inv @ upper`` and
-        ``low``, ``lower`` with its first site zeroed, each ``(M, N, b, b)``; and a boolean ``(M,)`` that holds
-        where a member has a negligible or non-finite pivot, by the plain-JAX sweep's rule.
+        ``low = lower``, each ``(S, b, b)``; and one boolean that holds where some member has a negligible or
+        non-finite pivot, by the plain-JAX sweep's rule.
     """
     dtype = jnp.result_type(lower, diag, upper)
     suffix = _suffix(dtype)
@@ -73,16 +74,19 @@ def chain_factor(lower: Array, diag: Array, upper: Array) -> tuple[SweepFactor, 
     bad = jax.ShapeDtypeStruct(diag.shape[:-3], jnp.bool_)
     inv, cp, bad = jax.ffi.ffi_call(
         f"{_PREFIX}_factor_{suffix}", (block, block, bad), vmap_method="broadcast_all"
-    )(lower, diag, upper)
-    return SweepFactor(inv=inv, cp=cp, low=lower.at[..., 0, :, :].set(0)), bad
+    )(lower, diag, upper, np.asarray(offsets, np.int32))
+    return SweepFactor(inv=inv, cp=cp, low=lower), bad
 
 
-def chain_solve(factor: SweepFactor, rhs: Array, transpose: bool = False) -> Array:
+def chain_solve(
+    factor: SweepFactor, rhs: Array, offsets: np.ndarray, transpose: bool = False
+) -> Array:
     """Solve with a [chain_factor][] result.
 
     Args:
         factor: The [SweepFactor][] from [chain_factor][].
-        rhs: Right-hand sides, shape ``(M, N, b, m)``.
+        rhs: Right-hand sides, shape ``(S, b, m)``.
+        offsets: The ``offsets`` the factor was built with.
         transpose: Solve with the plain (never conjugated) transpose of each chain.
 
     Returns:
@@ -94,4 +98,4 @@ def chain_solve(factor: SweepFactor, rhs: Array, transpose: bool = False) -> Arr
     inv, cp, low, rhs = (jnp.asarray(a, dtype) for a in (inv, cp, low, rhs))
     return jax.ffi.ffi_call(
         f"{_PREFIX}_solve_{suffix}", jax.ShapeDtypeStruct(rhs.shape, dtype), vmap_method="broadcast_all"
-    )(inv, cp, low, rhs, transpose=bool(transpose))
+    )(inv, cp, low, rhs, np.asarray(offsets, np.int32), transpose=bool(transpose))

@@ -18,10 +18,17 @@ with ``T_m`` block tridiagonal. The elimination of one lane is
 
 The four lane functions [eliminate][], [reduce_rhs][], [back_substitute][]
 and the host [member_schur_plan][] are what the ``MemberSchur`` backend
-composes with the shared backend. Members shorter than the longest are padded
-with identity rows; no padded value reaches a result. Every step is a
-fixed-shape ``jax.numpy`` expression on plain transposes, so real and complex
-values, ``jit`` and ``vmap`` all work.
+composes with the shared backend.
+
+Nothing is padded to the longest member. The sites of all members are stored
+back to back (``S = sum(n_m)`` sites, a [ChainLayout][]), followed by ``k``
+scalar places per member: the *local* unknowns, ``L = S b + M k`` of them.
+The factor holds ``Z_E`` ``(S, b, k)``, ``W`` ``(L, kc)`` and the chain factor;
+``E``, ``F`` and ``C`` are read from the values where they are used. Values
+reach their places by gathers through index maps built once per pattern, and
+sums over a member's sites are reductions over equal lengths or segment sums
+over different ones. Every step is a fixed-shape ``jax.numpy`` expression on
+plain transposes, so real and complex values, ``jit`` and ``vmap`` all work.
 """
 
 from __future__ import annotations
@@ -38,7 +45,12 @@ from diff_soup._errors import ConfigurationError
 from diff_soup.linear._api import SparseTopology
 from diff_soup.linear._factor import SolveStatus, dirichlet_rows
 from diff_soup.linear._structured._common import index_constant
-from diff_soup.linear._structured._member_chain import ELIMINATIONS, chain_factor, chain_solve
+from diff_soup.linear._structured._member_chain import (
+    ELIMINATIONS,
+    ChainLayout,
+    chain_factor,
+    chain_solve,
+)
 from diff_soup.linear._structured._small_lu import (
     bmm,
     small_lu_factor,
@@ -168,6 +180,24 @@ class _Plan:
     """Host maps from a value vector to the member elimination (one per analysis)."""
 
 
+def _gather_map(size: int, dst: np.ndarray, src: np.ndarray, units: Any = ()) -> np.ndarray:
+    """For each of ``size`` places, the entry that lands there: ``-1`` for none, ``-2`` for a one.
+
+    ``(size,)`` when no place receives two entries, else ``(size, d)`` with the entries of a
+    place along the last axis (a pattern that lists an entry twice sums its values).
+    """
+    counts = np.bincount(dst, minlength=size) if dst.size else np.zeros((size,), np.int64)
+    depth = int(max(1, counts.max() if size else 1))
+    out = np.full((size, depth), -1, np.int64)
+    order = np.argsort(dst, kind="stable")
+    ordered = dst[order]
+    rank = np.arange(ordered.size) - (np.cumsum(counts) - counts)[ordered]
+    out[ordered, rank] = src[order]
+    units = np.asarray(units, dtype=np.int64)
+    out[units, 0] = -2
+    return index_constant(out if depth > 1 else out[:, 0])
+
+
 def member_schur_plan(
     layout: MemberSchurLayout, topology: SparseTopology, elimination: str = "thomas"
 ) -> _Plan:
@@ -201,7 +231,9 @@ def member_schur_plan(
     cols = np.asarray(topology.cols, dtype=np.int64)
     lengths = np.asarray(layout.lengths, dtype=np.int64)
     counts = np.asarray(layout.scalar_counts, dtype=np.int64)
-    n_max = int(lengths.max())
+    chain = ChainLayout(lengths)
+    n_sites = chain.n_sites
+    first = np.cumsum(lengths) - lengths
 
     # Owner, site and field of every unknown (-1 where it does not apply).
     owner = np.full((n,), -1, np.int64)
@@ -209,7 +241,7 @@ def member_schur_plan(
     field = np.full((n,), -1, np.int64)
     sites = layout.sites.astype(np.int64)
     member_of_site = np.repeat(np.arange(nm), lengths)
-    site_in_member = np.arange(int(lengths.sum())) - np.repeat(np.cumsum(lengths) - lengths, lengths)
+    site_in_member = np.arange(n_sites) - np.repeat(first, lengths)
     owner[sites] = member_of_site[:, None]
     site[sites] = site_in_member[:, None]
     field[sites] = np.arange(b)[None, :]
@@ -250,42 +282,43 @@ def member_schur_plan(
     pos = np.full((n,), -1, np.int64)
     pos[shared] = np.arange(ns)
 
-    width = n_max * b + k_max
-    local = np.where(site >= 0, site * b + field, n_max * b + slot)
-    loc_idx = np.full((nm, width), n, np.int64)
+    # The local place of every member unknown: its site unknowns back to back, then k scalar
+    # places per member.
+    nb = n_sites * b
+    n_local = nb + nm * k_max
     members_of = owner >= 0
-    loc_idx[owner[members_of], local[members_of]] = np.flatnonzero(members_of)
+    at_site = site >= 0
+    local = np.full((n,), -1, np.int64)
+    local[at_site] = (first[owner[at_site]] + site[at_site]) * b + field[at_site]
+    at_scalar = members_of & ~at_site
+    local[at_scalar] = nb + owner[at_scalar] * k_max + slot[at_scalar]
+    loc_idx = np.full((n_local,), -1, np.int64)
+    loc_idx[local[members_of]] = np.flatnonzero(members_of)
 
     plan = _Plan()
     plan.elimination = elimination
     plan.whole = False
-    plan.n, plan.b, plan.nm, plan.n_max, plan.k = n, b, nm, n_max, k_max
-    plan.width, plan.n_shared = width, ns
+    plan.chain = chain
+    plan.n, plan.b, plan.nm, plan.k = n, b, nm, k_max
+    plan.n_sites, plan.n_local, plan.n_shared = n_sites, n_local, ns
     plan.nnz = int(rows.size)
     plan.shared = index_constant(shared)
     plan.loc_idx = index_constant(loc_idx)
-    # Where each unknown's solution sits in [local columns of every member, shared columns].
+    # Where each unknown's solution sits in [local places, shared positions].
     place = np.empty((n,), np.int64)
-    flat_loc = loc_idx.reshape(-1)
-    real_slots = np.flatnonzero(flat_loc < n)
-    place[flat_loc[real_slots]] = real_slots
-    place[shared] = nm * width + np.arange(ns)
+    place[members_of] = local[members_of]
+    place[shared] = n_local + np.arange(ns)
     plan.place = index_constant(place)
 
+    # Every entry of a Dirichlet row is dropped and its diagonal place holds a one.
     mask, diagonal = dirichlet_rows(topology)
-    keep = np.ones((int(rows.size),), np.float64)
-    if mask is not None:
-        keep[mask] = 0.0
-    keep.flags.writeable = False
-    plan.keep = keep
-    plan.has_bc = mask is not None
+    live = np.ones((int(rows.size),), bool) if mask is None else ~np.asarray(mask, bool)
     diagonal = diagonal.astype(np.int64)
 
     rl, cl = owner[rows] >= 0, owner[cols] >= 0
     rs_, cs_ = site[rows] >= 0, site[cols] >= 0
-    entries = np.arange(rows.size, dtype=np.int64)
 
-    # Site-site entries of one member: the chain blocks, flat over (3, M, N, b, b).
+    # Site-site entries of one member: the chain blocks, flat over (3, S, b, b).
     k = np.flatnonzero(rs_ & cs_)
     offset = site[cols[k]] - site[rows[k]]
     far = np.abs(offset) > 1
@@ -297,51 +330,37 @@ def member_schur_plan(
             "a member stencil of radius 1 in the site index (declare a quantity every site reads "
             "as a member scalar)."
         )
-
-    def chain_slot(off, member, s, fr, fc):
-        return ((((off + 1) * nm + member) * n_max + s) * b + fr) * b + fc
-
-    plan.tt_src = index_constant(entries[k])
-    plan.tt_dst = index_constant(
-        chain_slot(offset, owner[rows[k]], site[rows[k]], field[rows[k]], field[cols[k]])
-    )
-    # Unit diagonals of the chain: padded sites and Dirichlet rows.
-    pad_m, pad_s = np.nonzero(np.arange(n_max)[None, :] >= lengths[:, None])
-    pad_units = chain_slot(
-        0, np.repeat(pad_m, b), np.repeat(pad_s, b), np.tile(np.arange(b), pad_m.size),
-        np.tile(np.arange(b), pad_m.size),
-    )
+    keep = live[k]
     d_site = diagonal[site[diagonal] >= 0]
-    bc_units = chain_slot(0, owner[d_site], site[d_site], field[d_site], field[d_site])
-    plan.tt_units = index_constant(np.concatenate([pad_units, bc_units]))
+    plan.tt_map = _gather_map(
+        3 * nb * b,
+        (((offset + 1) * nb + local[rows[k]]) * b + field[cols[k]])[keep],
+        k[keep],
+        (nb + local[d_site]) * b + field[d_site],
+    )
 
-    # Member scalars: E (site rows), F (scalar rows over sites), G (scalar-scalar).
-    row_local, col_local = local[rows], local[cols]
-    k = np.flatnonzero(rs_ & cl & ~cs_)
-    plan.e_src = index_constant(entries[k])
-    plan.e_dst = index_constant(
-        (owner[rows[k]] * (n_max * b) + row_local[k]) * max(k_max, 1) + slot[cols[k]]
-    )
-    k = np.flatnonzero(rl & ~rs_ & cs_)
-    plan.f_src = index_constant(entries[k])
-    plan.f_dst = index_constant(
-        (owner[rows[k]] * max(k_max, 1) + slot[rows[k]]) * (n_max * b) + col_local[k]
-    )
-    k = np.flatnonzero(rl & ~rs_ & cl & ~cs_)
-    plan.g_src = index_constant(entries[k])
-    plan.g_dst = index_constant((owner[rows[k]] * k_max + slot[rows[k]]) * k_max + slot[cols[k]])
-    pad_m, pad_j = np.nonzero(np.arange(k_max)[None, :] >= kept[:, None])
-    d_scal = diagonal[(owner[diagonal] >= 0) & (site[diagonal] < 0)]
-    plan.g_units = index_constant(
-        np.concatenate(
-            [
-                (pad_m * k_max + pad_j) * k_max + pad_j,
-                (owner[d_scal] * k_max + slot[d_scal]) * k_max + slot[d_scal],
-            ]
+    # Member scalars: E and F stored site-major (S b, k), and G (M, k, k).
+    if k_max:
+        k = np.flatnonzero(rs_ & cl & ~cs_ & live)
+        plan.e_map = _gather_map(nb * k_max, local[rows[k]] * k_max + slot[cols[k]], k)
+        k = np.flatnonzero(rl & ~rs_ & cs_ & live)
+        plan.f_map = _gather_map(nb * k_max, local[cols[k]] * k_max + slot[rows[k]], k)
+        k = np.flatnonzero(rl & ~rs_ & cl & ~cs_ & live)
+        pad_m, pad_j = np.nonzero(np.arange(k_max)[None, :] >= kept[:, None])
+        d_scal = diagonal[(owner[diagonal] >= 0) & (site[diagonal] < 0)]
+        plan.g_map = _gather_map(
+            nm * k_max * k_max,
+            (owner[rows[k]] * k_max + slot[rows[k]]) * k_max + slot[cols[k]],
+            k,
+            np.concatenate(
+                [
+                    (pad_m * k_max + pad_j) * k_max + pad_j,
+                    (owner[d_scal] * k_max + slot[d_scal]) * k_max + slot[d_scal],
+                ]
+            ),
         )
-    )
 
-    # Member rows reading shared columns, compressed per member: B over (M, width, kc).
+    # Member rows reading shared columns, compressed per member: B over (L, kc).
     k = np.flatnonzero(rl & ~cl)
     owners, shared_cols = owner[rows[k]], pos[cols[k]]
     pairs = (
@@ -352,8 +371,8 @@ def member_schur_plan(
     read = np.bincount(pairs[:, 0], minlength=nm) if pairs.size else np.zeros(nm, np.int64)
     kc = int(max(1, read.max() if read.size else 1))
     colmap = np.full((nm, kc), ns, dtype=np.int64)
-    first = np.cumsum(read) - read
-    pair_local = np.arange(pairs.shape[0]) - first[pairs[:, 0]] if pairs.size else pairs[:, 0]
+    start = np.cumsum(read) - read
+    pair_local = np.arange(pairs.shape[0]) - start[pairs[:, 0]] if pairs.size else pairs[:, 0]
     if pairs.size:
         colmap[pairs[:, 0], pair_local] = pairs[:, 1]
         key = pairs[:, 0] * max(ns, 1) + pairs[:, 1]
@@ -362,15 +381,15 @@ def member_schur_plan(
         which = np.zeros(0, np.int64)
     plan.kc = kc
     plan.colmap = index_constant(colmap)
-    plan.b_src = index_constant(entries[k])
-    plan.b_dst = index_constant((owners * width + row_local[k]) * kc + which)
+    # The shared columns each local place reads: its member's, (L, kc).
+    member_of_local = np.concatenate([np.repeat(member_of_site, b), np.repeat(np.arange(nm), k_max)])
+    plan.local_cols = index_constant(colmap[member_of_local])
+    keep = live[k]
+    plan.b_map = _gather_map(n_local * kc, (local[rows[k]] * kc + which)[keep], k[keep])
 
     # Shared rows reading member columns: C as entries.
     k = np.flatnonzero(~rl & cl)
     rm_row, rm_member = pos[rows[k]], owner[cols[k]]
-    plan.c_src = index_constant(entries[k])
-    plan.c_row = index_constant(rm_row)
-    plan.c_col = index_constant(rm_member * width + col_local[k])
 
     # The shared pattern: A_SS, the diagonal, and the fill of every member's elimination.
     kss = np.flatnonzero(~rl & ~cl)
@@ -390,15 +409,21 @@ def member_schur_plan(
     plan.shared_topology = SparseTopology(
         pattern // max(ns, 1), pattern % max(ns, 1), n_dofs=ns
     )
-    plan.ss_src = index_constant(entries[kss])
-    plan.ss_dst = index_constant(
-        np.searchsorted(pattern, pos[rows[kss]] * max(ns, 1) + pos[cols[kss]])
-    )
+    keep = live[kss]
     d_shared = diagonal[owner[diagonal] < 0]
-    plan.ss_units = index_constant(np.searchsorted(pattern, pos[d_shared] * (ns + 1)))
+    plan.ss_map = _gather_map(
+        nnz_s,
+        np.searchsorted(pattern, pos[rows[kss]] * max(ns, 1) + pos[cols[kss]])[keep],
+        kss[keep],
+        np.searchsorted(pattern, pos[d_shared] * (ns + 1)),
+    )
     fill_slot = np.full((rm_row.size * kc,), nnz_s, np.int64)
     fill_slot[real] = np.searchsorted(pattern, fill_rows[real] * max(ns, 1) + fill_cols[real])
-    plan.c_fill = index_constant(fill_slot.reshape(-1, kc))
+    keep = live[k]
+    plan.c_src = index_constant(k[keep])
+    plan.c_row = index_constant(rm_row[keep])
+    plan.c_col = index_constant(local[cols[k]][keep])
+    plan.c_fill = index_constant(fill_slot.reshape(-1, kc)[keep])
     return plan
 
 
@@ -415,17 +440,15 @@ def _whole_plan(topology: SparseTopology, elimination: str) -> _Plan:
     plan.nnz = int(rows.size)
     plan.shared = index_constant(np.arange(n))
     mask, diagonal = dirichlet_rows(topology)
-    keep = np.ones((plan.nnz,), np.float64)
-    if mask is not None:
-        keep[mask] = 0.0
-    keep.flags.writeable = False
-    plan.keep, plan.has_bc = keep, mask is not None
+    live = np.ones((plan.nnz,), bool) if mask is None else ~np.asarray(mask, bool)
     pattern = np.unique(np.concatenate([rows * max(n, 1) + cols, np.arange(n) * (n + 1)]))
     plan.nnz_shared = int(pattern.size)
     plan.shared_topology = SparseTopology(pattern // max(n, 1), pattern % max(n, 1), n_dofs=n)
-    plan.ss_dst = index_constant(np.searchsorted(pattern, rows * max(n, 1) + cols))
-    plan.ss_units = index_constant(
-        np.searchsorted(pattern, diagonal.astype(np.int64) * (n + 1))
+    plan.ss_map = _gather_map(
+        plan.nnz_shared,
+        np.searchsorted(pattern, rows * max(n, 1) + cols)[live],
+        np.flatnonzero(live),
+        np.searchsorted(pattern, diagonal.astype(np.int64) * (n + 1)),
     )
     return plan
 
@@ -434,34 +457,38 @@ class MemberFactor(NamedTuple):
     """The elimination of one lane (absent parts are ``None``)."""
 
     chain: Any
-    f: Optional[Array]
     ze: Optional[Array]
     s_lu: Optional[Array]
     s_perm: Optional[Array]
     w: Array
 
 
-def _masked(plan: _Plan, values: Array) -> Array:
-    """The values with every entry of a Dirichlet row set to zero."""
-    return values * jnp.asarray(plan.keep, values.dtype) if plan.has_bc else values
+def _take(values: Array, index: np.ndarray) -> Array:
+    """The values that land on each place of a [_gather_map][]: a gather, never a scatter.
 
-
-def _placed(plan: _Plan, name: str, base: Array, size: int) -> Array:
-    """The flat array ``name`` (``tt``, ``b``, ``e``, ``f`` or ``g``) of ``size`` slots, units set.
-
-    A scatter of the entries: a gather over every slot measured 55 ms against 33 ms for the
-    whole elimination of 5,004 members on the processor.
+    A scatter of complex values ran one element at a time on a graphics card, and a scatter
+    with zero fill wrote every padded place on the processor.
     """
-    out = _scatter(size, getattr(plan, name + "_dst"), base[getattr(plan, name + "_src")])
-    units = getattr(plan, name + "_units", None)
-    if units is not None and units.size:
-        out = out.at[units].add(jnp.ones((), base.dtype))
-    return out
+    picked = values.at[np.maximum(index, 0)].get(mode="promise_in_bounds")
+    if np.any(index < 0):
+        zero = jnp.zeros((), values.dtype)
+        other = jnp.where(index == -2, jnp.ones((), values.dtype), zero) if np.any(index == -2) else zero
+        picked = jnp.where(index >= 0, picked, other)
+    return jnp.sum(picked, axis=-1) if index.ndim == 2 else picked
 
 
-def _scatter(size: int, dst: np.ndarray, src: Array) -> Array:
-    """A flat array of ``size`` zeros with ``src`` added at ``dst``."""
-    return jnp.zeros((size,), src.dtype).at[dst].add(src)
+def _segment_sum(rows: Array, index: np.ndarray, count: int, ordered: bool = False) -> Array:
+    """``(count, ...)`` sums of ``rows`` ``(r, ...)`` over equal ``index``.
+
+    A scatter of complex values ran serially on a graphics card: the two parts are summed apart.
+    """
+
+    def total(part):
+        return jax.ops.segment_sum(part, index, num_segments=count, indices_are_sorted=ordered)
+
+    if jnp.iscomplexobj(rows):
+        return jax.lax.complex(total(rows.real), total(rows.imag))
+    return total(rows)
 
 
 def _sub_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
@@ -472,17 +499,25 @@ def _sub_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
     ran serially on a graphics card: 1.3 s for 200,000 rows against 1.7 ms this way.
     """
     rows = updates.reshape(-1, target.shape[1])
-    flat = index.reshape(-1)
-
-    def total(part):
-        return jax.ops.segment_sum(part, flat, num_segments=target.shape[0])
-
-    if jnp.iscomplexobj(rows):
-        # A scatter of complex values also ran serially on the card: sum the two parts apart.
-        summed = jax.lax.complex(total(rows.real), total(rows.imag))
-    else:
-        summed = total(rows)
+    summed = _segment_sum(rows, index.reshape(-1), target.shape[0])
     return target - jax.lax.optimization_barrier(summed)
+
+
+def _member_sum(plan: _Plan, x: Array) -> Array:
+    """``(M, ...)`` sums of site rows ``x`` ``(S, ...)`` over each member's sites."""
+    chain = plan.chain
+    if chain.uniform:
+        return jnp.sum(x.reshape((chain.n_members, chain.n_max) + x.shape[1:]), axis=1)
+    return _segment_sum(x, chain.member_of_site, chain.n_members, ordered=True)
+
+
+def _per_site(plan: _Plan, x: Array) -> Array:
+    """Member rows ``x`` ``(M, ...)`` repeated at every site of the member, ``(S, ...)``."""
+    chain = plan.chain
+    if chain.uniform:
+        shape = (chain.n_members, chain.n_max) + x.shape[1:]
+        return jnp.broadcast_to(x[:, None], shape).reshape((chain.n_sites,) + x.shape[1:])
+    return x[chain.member_of_site]
 
 
 def _mm(a: Array, x: Array) -> Array:
@@ -500,29 +535,29 @@ def _tmm(a: Array, x: Array) -> Array:
 
 
 def _chain(plan: _Plan, tree: MemberFactor, v: Array, transpose: bool) -> Array:
-    """``T^-1 v`` (or ``T^-T v``) for site columns ``v`` ``(M, N b, m)``."""
-    shape = (plan.nm, plan.n_max, plan.b, v.shape[-1])
-    x = chain_solve(tree.chain, v.reshape(shape), transpose, plan.elimination)
-    return x.reshape(v.shape)
+    """``T^-1 v`` (or ``T^-T v``) for site columns ``v`` ``(S, b, m)``."""
+    return chain_solve(tree.chain, v, plan.chain, transpose, plan.elimination)
 
 
-def _local_solve(plan: _Plan, tree: MemberFactor, v: Array, transpose: bool):
-    """``A_m^-1 v`` (or ``A_m^-T v``) for local columns ``v`` ``(M, width, m)``."""
-    nb = plan.n_max * plan.b
-    if not plan.k:
-        return _chain(plan, tree, v, transpose)
-    v_sites, v_scal = v[:, :nb], v[:, nb:]
-    f = tree.f
+def _local_solve(plan: _Plan, values: Array, tree: MemberFactor, v: Array, transpose: bool):
+    """``A_m^-1 v`` (or ``A_m^-T v``) for local columns ``v`` ``(L, m)``."""
+    ns_, b, k, nm = plan.n_sites, plan.b, plan.k, plan.nm
+    nb, m = ns_ * b, v.shape[-1]
+    v_sites = v[:nb].reshape(ns_, b, m)
+    if not k:
+        return _chain(plan, tree, v_sites, transpose).reshape(nb, m)
+    v_scal = v[nb:].reshape(nm, k, m)
+    f = _take(values, plan.f_map).reshape(ns_, b, k)
     if not transpose:
         g = _chain(plan, tree, v_sites, False)
-        x_scal = small_lu_solve(tree.s_lu, tree.s_perm, v_scal - _mm(f, g))
-        x_sites = g - _mm(tree.ze, x_scal)
+        x_scal = small_lu_solve(tree.s_lu, tree.s_perm, v_scal - _member_sum(plan, _tmm(f, g)))
+        x_sites = g - _mm(tree.ze, _per_site(plan, x_scal))
     else:
         x_scal = small_lu_solve_transpose(
-            tree.s_lu, tree.s_perm, v_scal - _tmm(tree.ze, v_sites)
+            tree.s_lu, tree.s_perm, v_scal - _member_sum(plan, _tmm(tree.ze, v_sites))
         )
-        x_sites = _chain(plan, tree, v_sites - _tmm(f, x_scal), True)
-    return jnp.concatenate([x_sites, x_scal], axis=1)
+        x_sites = _chain(plan, tree, v_sites - _mm(f, _per_site(plan, x_scal)), True)
+    return jnp.concatenate([x_sites.reshape(nb, m), x_scal.reshape(nm * k, m)], axis=0)
 
 
 def eliminate(plan: _Plan, values: Array) -> tuple:
@@ -538,54 +573,42 @@ def eliminate(plan: _Plan, values: Array) -> tuple:
         (``SINGULAR`` when a member has a negligible or non-finite pivot).
     """
     dtype = values.dtype
-    base = _masked(plan, values)
+    shared = _take(values, plan.ss_map)
     if plan.whole:
-        shared = _scatter(plan.nnz_shared, plan.ss_dst, base)
-        if plan.ss_units.size:
-            shared = shared.at[plan.ss_units].add(jnp.ones((), dtype))
         return (), shared, jnp.asarray(int(SolveStatus.SUCCESS), jnp.int32)
-    nm, n_max, b, k, kc, width = plan.nm, plan.n_max, plan.b, plan.k, plan.kc, plan.width
-    nb = n_max * b
-    blocks = _placed(plan, "tt", base, 3 * nm * nb * b)
-    lower, diag, upper = blocks.reshape(3, nm, n_max, b, b)
-    chain, bad = chain_factor(lower, diag, upper, plan.elimination)
+    nm, ns_, b, k, kc = plan.nm, plan.n_sites, plan.b, plan.k, plan.kc
+    nb = ns_ * b
+    lower, diag, upper = _take(values, plan.tt_map).reshape(3, ns_, b, b)
+    chain, bad = chain_factor(lower, diag, upper, plan.chain, plan.elimination)
     bad = jnp.any(bad)
 
-    b_all = _placed(plan, "b", base, nm * width * kc).reshape(nm, width, kc)
-    tree = MemberFactor(chain=chain, f=None, ze=None, s_lu=None, s_perm=None, w=b_all)
+    b_all = _take(values, plan.b_map).reshape(plan.n_local, kc)
+    b_sites = b_all[:nb].reshape(ns_, b, kc)
+    tree = MemberFactor(chain=chain, ze=None, s_lu=None, s_perm=None, w=b_all)
     if k:
-        f = _placed(plan, "f", base, nm * k * nb).reshape(nm, k, nb)
-        e = _placed(plan, "e", base, nm * nb * k).reshape(nm, nb, k)
-        z = _chain(plan, tree, jnp.concatenate([e, b_all[:, :nb]], axis=-1), False)
+        e = _take(values, plan.e_map).reshape(ns_, b, k)
+        f = _take(values, plan.f_map).reshape(ns_, b, k)
+        z = _chain(plan, tree, jnp.concatenate([e, b_sites], axis=-1), False)
         ze, zb = z[..., :k], z[..., k:]
-        g = _placed(plan, "g", base, nm * k * k)
-        s_local = g.reshape(nm, k, k) - _mm(f, ze)
-        s_lu, s_perm, singular = small_lu_factor(s_local)
+        reduced = _member_sum(plan, _tmm(f, z))
+        g = _take(values, plan.g_map).reshape(nm, k, k)
+        s_lu, s_perm, singular = small_lu_factor(g - reduced[..., :k])
         bad = bad | jnp.any(singular)
-        w_scal = small_lu_solve(s_lu, s_perm, b_all[:, nb:] - _mm(f, zb))
-        w = jnp.concatenate([zb - _mm(ze, w_scal), w_scal], axis=1)
-        tree = MemberFactor(chain=chain, f=f, ze=ze, s_lu=s_lu, s_perm=s_perm, w=w)
+        w_scal = small_lu_solve(s_lu, s_perm, b_all[nb:].reshape(nm, k, kc) - reduced[..., k:])
+        w_sites = zb - _mm(ze, _per_site(plan, w_scal))
+        w = jnp.concatenate([w_sites.reshape(nb, kc), w_scal.reshape(nm * k, kc)], axis=0)
+        tree = MemberFactor(chain=chain, ze=ze, s_lu=s_lu, s_perm=s_perm, w=w)
     else:
-        w = _chain(plan, tree, b_all, False)
+        w = _chain(plan, tree, b_sites, False).reshape(nb, kc)
         tree = tree._replace(w=w)
 
-    shared = _scatter(plan.nnz_shared + 1, plan.ss_dst, base[plan.ss_src])
-    if plan.ss_units.size:
-        shared = shared.at[plan.ss_units].add(jnp.ones((), dtype))
     if plan.c_src.size:
-        update = base[plan.c_src][:, None] * w.reshape(nm * width, kc)[plan.c_col]
-        fill = jnp.zeros((plan.nnz_shared + 1,), dtype).at[plan.c_fill].add(update)
-        shared = shared - jax.lax.optimization_barrier(fill)
-    shared = shared[: plan.nnz_shared]
+        update = values[plan.c_src][:, None] * w[plan.c_col]
+        fill = _segment_sum(update.reshape(-1), plan.c_fill.reshape(-1), plan.nnz_shared + 1)
+        shared = shared - jax.lax.optimization_barrier(fill)[: plan.nnz_shared]
     finite = jnp.all(jnp.isfinite(w)) & jnp.all(jnp.isfinite(shared))
     status = jnp.where(bad | ~finite, int(SolveStatus.SINGULAR), int(SolveStatus.SUCCESS))
     return tree, shared, status.astype(jnp.int32)
-
-
-def _gather_local(plan: _Plan, columns: Array) -> Array:
-    """Member columns ``(M, width, m)`` of ``columns`` ``(n, m)``, zero at padded places."""
-    padded = jnp.concatenate([columns, jnp.zeros((1, columns.shape[1]), columns.dtype)], axis=0)
-    return padded[plan.loc_idx]
 
 
 def reduce_rhs(plan: _Plan, values: Array, tree: MemberFactor, columns: Array, transpose: bool):
@@ -596,20 +619,27 @@ def reduce_rhs(plan: _Plan, values: Array, tree: MemberFactor, columns: Array, t
     """
     if plan.whole:
         return (), columns
-    nm, width, ns = plan.nm, plan.width, plan.n_shared
+    ns = plan.n_shared
     m = columns.shape[1]
-    base = _masked(plan, values)
-    c_local = _gather_local(plan, columns)
+    c_local = columns[np.maximum(plan.loc_idx, 0)]
+    if np.any(plan.loc_idx < 0):
+        # A member with fewer scalars than the most leaves scalar places empty.
+        c_local = jnp.where((plan.loc_idx >= 0)[:, None], c_local, jnp.zeros((), columns.dtype))
     c_shared = columns[plan.shared]
     if not transpose:
-        y = _local_solve(plan, tree, c_local, False)
+        y = _local_solve(plan, values, tree, c_local, False)
         if plan.c_src.size:
-            taken = base[plan.c_src][:, None] * y.reshape(nm * width, m)[plan.c_col]
+            taken = values[plan.c_src][:, None] * y[plan.c_col]
             c_shared = _sub_rows(c_shared, plan.c_row, taken)
         return y, c_shared
-    moved = _tmm(tree.w, c_local)
-    rhs = jnp.zeros((ns + 1, m), columns.dtype).at[:ns].set(c_shared)
-    rhs = _sub_rows(rhs, plan.colmap, moved)
+    # W^T c per member, then onto the shared columns each member reads.
+    moved = tree.w[:, :, None] * c_local[:, None, :]
+    nb = plan.n_sites * plan.b
+    total = _member_sum(plan, jnp.sum(moved[:nb].reshape(plan.n_sites, plan.b, plan.kc, m), axis=1))
+    if plan.k:
+        total = total + jnp.sum(moved[nb:].reshape(plan.nm, plan.k, plan.kc, m), axis=1)
+    rhs = jnp.concatenate([c_shared, jnp.zeros((1, m), columns.dtype)], axis=0)
+    rhs = _sub_rows(rhs, plan.colmap, total)
     return c_local, rhs[:ns]
 
 
@@ -619,20 +649,16 @@ def back_substitute(
     """The solution columns ``(n, m)`` from the shared solution ``(n_shared, m)``."""
     if plan.whole:
         return x_shared
-    nm, width = plan.nm, plan.width
     m = x_shared.shape[1]
     if not transpose:
         padded = jnp.concatenate([x_shared, jnp.zeros((1, m), x_shared.dtype)], axis=0)
-        x_local = carry - _mm(tree.w, padded[plan.colmap])
+        x_local = carry - jnp.sum(tree.w[:, :, None] * padded[plan.local_cols], axis=1)
     else:
-        base = _masked(plan, values)
-        v = carry.reshape(nm * width, m)
+        v = carry
         if plan.c_src.size:
-            v = _sub_rows(v, plan.c_col, base[plan.c_src][:, None] * x_shared[plan.c_row])
-        x_local = _local_solve(plan, tree, v.reshape(nm, width, m), True)
-    # A gather from the stacked member and shared columns (a scatter of complex values ran
+            v = _sub_rows(v, plan.c_col, values[plan.c_src][:, None] * x_shared[plan.c_row])
+        x_local = _local_solve(plan, values, tree, v, True)
+    # A gather from the stacked local and shared columns (a scatter of complex values ran
     # serially on a graphics card).
-    stacked = jnp.concatenate(
-        [x_local.reshape(nm * width, m), x_shared.astype(x_local.dtype)], axis=0
-    )
+    stacked = jnp.concatenate([x_local, x_shared.astype(x_local.dtype)], axis=0)
     return stacked[plan.place]
