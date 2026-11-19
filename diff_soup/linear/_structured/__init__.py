@@ -8,6 +8,10 @@
 - [MemberBlock][diff_soup.linear.MemberBlock] with
   [MemberBlockLayout][diff_soup.linear.MemberBlockLayout]: banded member
   blocks, their member-local low-rank terms and a retained Schur complement.
+- [MemberSchur][diff_soup.linear.MemberSchur] with
+  [MemberSchurLayout][diff_soup.linear.MemberSchurLayout]: members of
+  different lengths eliminated in JAX and their shared Schur complement
+  factored by another exact backend.
 
 Each is a [LinearSolver][diff_soup.linear.LinearSolver] of the contract:
 its factors cross ``jit``, ``scan`` and ``vmap`` as ``Factor`` pytrees, one
@@ -23,12 +27,16 @@ from diff_soup.linear._structured._block_tridiagonal import (
 )
 from diff_soup.linear._structured._low_rank import LowRankTerm, Woodbury
 from diff_soup.linear._structured._member_block import MemberBlock, MemberBlockLayout
+from diff_soup.linear._structured._member_elimination import MemberSchurLayout
+from diff_soup.linear._structured._member_schur import MemberSchur
 
 __all__ = [
     "BlockTridiagonal",
     "LowRankTerm",
     "MemberBlock",
     "MemberBlockLayout",
+    "MemberSchur",
+    "MemberSchurLayout",
     "Woodbury",
     "block_tridiagonal_factor",
     "block_tridiagonal_matvec",
