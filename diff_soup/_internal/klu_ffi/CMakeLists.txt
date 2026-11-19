@@ -172,3 +172,7 @@ else()
         "klu_ffi: patchelf not found, so the installed _native_klu keeps the build's search "
         "path after \$ORIGIN/lib. Install patchelf (a pip wheel) for a self-contained install.")
 endif()
+
+# The member chain extension links only the OpenMP runtime, which this extension's lib/ bundles, so it is built
+# with this one (member_chain_ffi/CMakeLists.txt).
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../member_chain_ffi" "${CMAKE_CURRENT_BINARY_DIR}/member_chain_ffi")
