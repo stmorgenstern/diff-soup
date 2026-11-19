@@ -426,6 +426,7 @@ class MemberFactor(NamedTuple):
     """The elimination of one lane (absent parts are ``None``)."""
 
     chain: Any
+    f: Optional[Array]
     ze: Optional[Array]
     s_lu: Optional[Array]
     s_perm: Optional[Array]
@@ -435,6 +436,19 @@ class MemberFactor(NamedTuple):
 def _masked(plan: _Plan, values: Array) -> Array:
     """The values with every entry of a Dirichlet row set to zero."""
     return values * jnp.asarray(plan.keep, values.dtype) if plan.has_bc else values
+
+
+def _placed(plan: _Plan, name: str, base: Array, size: int) -> Array:
+    """The flat array ``name`` (``tt``, ``b``, ``e``, ``f`` or ``g``) of ``size`` slots, units set.
+
+    A scatter of the entries: a gather over every slot measured 55 ms against 33 ms for the
+    whole elimination of 5,004 members on the processor.
+    """
+    out = _scatter(size, getattr(plan, name + "_dst"), base[getattr(plan, name + "_src")])
+    units = getattr(plan, name + "_units", None)
+    if units is not None and units.size:
+        out = out.at[units].add(jnp.ones((), base.dtype))
+    return out
 
 
 def _scatter(size: int, dst: np.ndarray, src: Array) -> Array:
@@ -450,15 +464,9 @@ def _add_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
     the segment sum takes 0.3 ms.
     """
     rows = updates.reshape(-1, target.shape[1])
-    return target + jax.ops.segment_sum(rows, index.reshape(-1), num_segments=target.shape[0])
-
-
-def _scalar_rows(plan: _Plan, base: Array) -> Optional[Array]:
-    """``F`` ``(M, k, N b)``: every member's scalar rows over its sites (``None`` without scalars)."""
-    if not plan.k:
-        return None
-    nm, nb, k = plan.nm, plan.n_max * plan.b, plan.k
-    return _scatter(nm * k * nb, plan.f_dst, base[plan.f_src]).reshape(nm, k, nb)
+    summed = jax.ops.segment_sum(rows, index.reshape(-1), num_segments=target.shape[0])
+    # The barrier keeps the compiler from folding the sum back into a scatter onto ``target``.
+    return target + jax.lax.optimization_barrier(summed)
 
 
 def _chain(plan: _Plan, tree: MemberFactor, v: Array, transpose: bool) -> Array:
@@ -468,12 +476,13 @@ def _chain(plan: _Plan, tree: MemberFactor, v: Array, transpose: bool) -> Array:
     return x.reshape(v.shape)
 
 
-def _local_solve(plan: _Plan, tree: MemberFactor, f: Any, v: Array, transpose: bool):
+def _local_solve(plan: _Plan, tree: MemberFactor, v: Array, transpose: bool):
     """``A_m^-1 v`` (or ``A_m^-T v``) for local columns ``v`` ``(M, width, m)``."""
     nb = plan.n_max * plan.b
     if not plan.k:
         return _chain(plan, tree, v, transpose)
     v_sites, v_scal = v[:, :nb], v[:, nb:]
+    f = tree.f
     if not transpose:
         g = _chain(plan, tree, v_sites, False)
         x_scal = small_lu_solve(tree.s_lu, tree.s_perm, v_scal - jnp.einsum("mkl,mlj->mkj", f, g))
@@ -507,29 +516,25 @@ def eliminate(plan: _Plan, values: Array) -> tuple:
         return (), shared, jnp.asarray(int(SolveStatus.SUCCESS), jnp.int32)
     nm, n_max, b, k, kc, width = plan.nm, plan.n_max, plan.b, plan.k, plan.kc, plan.width
     nb = n_max * b
-    blocks = _scatter(3 * nm * nb * b, plan.tt_dst, base[plan.tt_src])
-    if plan.tt_units.size:
-        blocks = blocks.at[plan.tt_units].add(jnp.ones((), dtype))
+    blocks = _placed(plan, "tt", base, 3 * nm * nb * b)
     lower, diag, upper = blocks.reshape(3, nm, n_max, b, b)
     chain, bad = chain_factor(lower, diag, upper, plan.elimination)
     bad = jnp.any(bad)
 
-    b_all = _scatter(nm * width * kc, plan.b_dst, base[plan.b_src]).reshape(nm, width, kc)
-    tree = MemberFactor(chain=chain, ze=None, s_lu=None, s_perm=None, w=b_all)
+    b_all = _placed(plan, "b", base, nm * width * kc).reshape(nm, width, kc)
+    tree = MemberFactor(chain=chain, f=None, ze=None, s_lu=None, s_perm=None, w=b_all)
     if k:
-        f = _scalar_rows(plan, base)
-        e = _scatter(nm * nb * k, plan.e_dst, base[plan.e_src]).reshape(nm, nb, k)
+        f = _placed(plan, "f", base, nm * k * nb).reshape(nm, k, nb)
+        e = _placed(plan, "e", base, nm * nb * k).reshape(nm, nb, k)
         z = _chain(plan, tree, jnp.concatenate([e, b_all[:, :nb]], axis=-1), False)
         ze, zb = z[..., :k], z[..., k:]
-        g = _scatter(nm * k * k, plan.g_dst, base[plan.g_src])
-        if plan.g_units.size:
-            g = g.at[plan.g_units].add(jnp.ones((), dtype))
+        g = _placed(plan, "g", base, nm * k * k)
         s_local = g.reshape(nm, k, k) - jnp.einsum("mkl,mlj->mkj", f, ze)
         s_lu, s_perm, singular = small_lu_factor(s_local)
         bad = bad | jnp.any(singular)
         w_scal = small_lu_solve(s_lu, s_perm, b_all[:, nb:] - jnp.einsum("mkl,mlc->mkc", f, zb))
         w = jnp.concatenate([zb - jnp.einsum("mlk,mkc->mlc", ze, w_scal), w_scal], axis=1)
-        tree = MemberFactor(chain=chain, ze=ze, s_lu=s_lu, s_perm=s_perm, w=w)
+        tree = MemberFactor(chain=chain, f=f, ze=ze, s_lu=s_lu, s_perm=s_perm, w=w)
     else:
         w = _chain(plan, tree, b_all, False)
         tree = tree._replace(w=w)
@@ -566,7 +571,7 @@ def reduce_rhs(plan: _Plan, values: Array, tree: MemberFactor, columns: Array, t
     c_local = _gather_local(plan, columns)
     c_shared = columns[plan.shared]
     if not transpose:
-        y = _local_solve(plan, tree, _scalar_rows(plan, base), c_local, False)
+        y = _local_solve(plan, tree, c_local, False)
         if plan.c_src.size:
             taken = base[plan.c_src][:, None] * y.reshape(nm * width, m)[plan.c_col]
             c_shared = _add_rows(c_shared, plan.c_row, -taken)
@@ -593,8 +598,7 @@ def back_substitute(
         v = carry.reshape(nm * width, m)
         if plan.c_src.size:
             v = _add_rows(v, plan.c_col, -base[plan.c_src][:, None] * x_shared[plan.c_row])
-        f = _scalar_rows(plan, base)
-        x_local = _local_solve(plan, tree, f, v.reshape(nm, width, m), True)
+        x_local = _local_solve(plan, tree, v.reshape(nm, width, m), True)
     out = jnp.zeros((n + 1, m), x_local.dtype)
     out = out.at[plan.loc_idx.reshape(-1)].set(x_local.reshape(nm * width, m))
     return out.at[plan.shared].set(x_shared.astype(x_local.dtype))[:n]
