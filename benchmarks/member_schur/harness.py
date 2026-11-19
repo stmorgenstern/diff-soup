@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 
@@ -369,6 +370,19 @@ def run_case(name, A, lay, info, reps, do_time, ref_name):
     return out
 
 
+def _commit():
+    """The diff-soup commit the run imports, with '+dirty' for uncommitted changes under diff_soup/."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(ds.__file__)))
+    try:
+        head = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", root, "status", "--porcelain", "--", "diff_soup"], capture_output=True,
+                               text=True).stdout.strip()
+        return head + ("+dirty" if dirty else "")
+    except Exception:  # no git checkout
+        return os.environ.get("DS_COMMIT", "unknown")
+
+
 def main_run(args):
     ref_name = "cudss" if on_gpu() else "klu"
     os.makedirs(args.out, exist_ok=True)
@@ -377,7 +391,8 @@ def main_run(args):
     dev = "gpu" if on_gpu() else "cpu"
     meta = dict(device=str(jax.devices()[0]), host=socket.gethostname(), argv=sys.argv,
                 jax=jax.__version__, xla_flags=os.environ.get("XLA_FLAGS", ""),
-                affinity=len(os.sched_getaffinity(0)))
+                affinity=len(os.sched_getaffinity(0)), commit=_commit(),
+                omp_num_threads=os.environ.get("OMP_NUM_THREADS", ""))
     tag = args.backend.replace(":", "-")
     path = f"{args.out}/{dev}_{tag}_{args.label or '-'.join(map(str, sizes))}.json"
     results = []
@@ -421,12 +436,13 @@ def main_table(paths):
     print()
     print("Times in ms, warm, median of the stated repeats (analyse: median of 5 cold calls).")
     print()
-    print("| device | backend | particles | variant | analyse | factor | refactor | solve | solve^T |")
-    print("|---|---|---:|---|---:|---:|---:|---:|---:|")
+    print("| device | backend | commit | particles | variant | analyse | factor | refactor | solve | solve^T |")
+    print("|---|---|---|---:|---|---:|---:|---:|---:|---:|")
     for r in rows:
         if "factor_ms" not in r:
             continue
-        print(f"| {r['device_kind']} | {r['backend']} | {r['particles']} | {r['variant']} | {fmt(r['analyze_ms'])} | "
+        print(f"| {r['device_kind']} | {r['backend']} | {r.get('commit', '?')} | {r['particles']} | {r['variant']} | "
+              f"{fmt(r['analyze_ms'])} | "
               f"{fmt(r['factor_ms'])} | {fmt(r['refactor_ms'])} | {fmt(r['solve_ms'])} | {fmt(r['solve_T_ms'])} |")
 
 
