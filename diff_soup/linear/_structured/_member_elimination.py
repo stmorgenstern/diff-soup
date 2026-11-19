@@ -264,6 +264,13 @@ def member_schur_plan(
     plan.nnz = int(rows.size)
     plan.shared = index_constant(shared)
     plan.loc_idx = index_constant(loc_idx)
+    # Where each unknown's solution sits in [local columns of every member, shared columns].
+    place = np.empty((n,), np.int64)
+    flat_loc = loc_idx.reshape(-1)
+    real_slots = np.flatnonzero(flat_loc < n)
+    place[flat_loc[real_slots]] = real_slots
+    place[shared] = nm * width + np.arange(ns)
+    plan.place = index_constant(place)
 
     mask, diagonal = dirichlet_rows(topology)
     keep = np.ones((int(rows.size),), np.float64)
@@ -465,7 +472,16 @@ def _sub_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
     ran serially on a graphics card: 1.3 s for 200,000 rows against 1.7 ms this way.
     """
     rows = updates.reshape(-1, target.shape[1])
-    summed = jax.ops.segment_sum(rows, index.reshape(-1), num_segments=target.shape[0])
+    flat = index.reshape(-1)
+
+    def total(part):
+        return jax.ops.segment_sum(part, flat, num_segments=target.shape[0])
+
+    if jnp.iscomplexobj(rows):
+        # A scatter of complex values also ran serially on the card: sum the two parts apart.
+        summed = jax.lax.complex(total(rows.real), total(rows.imag))
+    else:
+        summed = total(rows)
     return target - jax.lax.optimization_barrier(summed)
 
 
@@ -603,7 +619,7 @@ def back_substitute(
     """The solution columns ``(n, m)`` from the shared solution ``(n_shared, m)``."""
     if plan.whole:
         return x_shared
-    nm, width, n = plan.nm, plan.width, plan.n
+    nm, width = plan.nm, plan.width
     m = x_shared.shape[1]
     if not transpose:
         padded = jnp.concatenate([x_shared, jnp.zeros((1, m), x_shared.dtype)], axis=0)
@@ -614,6 +630,9 @@ def back_substitute(
         if plan.c_src.size:
             v = _sub_rows(v, plan.c_col, base[plan.c_src][:, None] * x_shared[plan.c_row])
         x_local = _local_solve(plan, tree, v.reshape(nm, width, m), True)
-    out = jnp.zeros((n + 1, m), x_local.dtype)
-    out = out.at[plan.loc_idx.reshape(-1)].set(x_local.reshape(nm * width, m))
-    return out.at[plan.shared].set(x_shared.astype(x_local.dtype))[:n]
+    # A gather from the stacked member and shared columns (a scatter of complex values ran
+    # serially on a graphics card).
+    stacked = jnp.concatenate(
+        [x_local.reshape(nm * width, m), x_shared.astype(x_local.dtype)], axis=0
+    )
+    return stacked[plan.place]
