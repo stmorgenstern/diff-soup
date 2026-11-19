@@ -32,59 +32,9 @@ from .layout import _BlockLayout
 
 _MAX_DENSE_FALLBACK_NNZ = 1_000_000
 
-# Maximum number of columns a single Jacobian row (one residual equation) may
-# couple to in any cross-block.  The implicit-NDF backend recovers df/du by
-# coloring COLUMNS so that no two same-colored columns share a nonzero row;
-# memory is O(n_colors * n_dofs) and n_colors is bounded below by the largest
-# row degree.  A near-dense row (one residual row coupled to ~n_dofs columns)
-# therefore collapses the coloring to roughly one color per degree of freedom
-# and the assembly to the dense size.  Every shipped coupling / flux / family
-# cross-block couples a residual row only to a transfer op's node-local source
-# columns (tens), so this absolute limit sits far above legitimate blocks while
-# rejecting a collapsing near-dense row.  Only the ROW degree is bounded: the
-# coloring is over columns, so a dense COLUMN is harmless and a legitimate
-# broadcast coupling (a family gather/scatter that touches many members) has
-# large column degree but small row degree and must pass.
-_MAX_BLOCK_DEGREE = 1024
-
-
-def _guard_block_degree(rows, cols, *, where: str, remedy: str | None = None) -> None:
-    """Reject a cross-block whose densest row exceeds the per-row column limit.
-
-    Computes the maximum ROW degree (the number of UNIQUE columns coupled to a
-    single residual row) of the local ``(rows, cols)`` block and raises when it
-    exceeds ``_MAX_BLOCK_DEGREE``.  Several assembly paths emit duplicate
-    ``(row, col)`` pairs that are later canonicalized away, so the pairs are
-    deduplicated before the degree is measured — counting raw row occurrences
-    would over-estimate the degree and reject a block that is within the limit.
-    Column degree is intentionally not bounded: the sparse-Jacobian recovery
-    colors columns, so a dense column is benign while a near-dense row collapses
-    the coloring to one color per degree of freedom.
-
-    Raises:
-        ValueError: when the densest row of ``(rows, cols)`` couples to more
-            than ``_MAX_BLOCK_DEGREE`` unique columns.
-    """
-    rows = np.asarray(rows).reshape(-1)
-    cols = np.asarray(cols).reshape(-1)
-    if rows.size == 0:
-        return
-    unique_pairs = np.unique(np.stack((rows, cols), axis=1), axis=0)
-    max_row_degree = int(np.unique(unique_pairs[:, 0], return_counts=True)[1].max())
-    if max_row_degree > _MAX_BLOCK_DEGREE:
-        if remedy is None:
-            remedy = (
-                "Give the transfer op a tighter sparsity() or compose the "
-                "block against the reading stencil so each residual row "
-                "depends only on its node-local source columns."
-            )
-        raise ValueError(
-            f"lower(): {where} declares a Jacobian row coupled to "
-            f"{max_row_degree} columns, exceeding the per-row limit of "
-            f"{_MAX_BLOCK_DEGREE}. A near-dense Jacobian row collapses the "
-            "sparse-Jacobian coloring to one color per degree of freedom, so "
-            f"the assembly grows to the dense size. {remedy}"
-        )
+# A row may couple to any number of columns: the solver's linearization keeps wide
+# rows (a host row summing many members) out of the column coloring and recovers
+# them by pullback (diff_soup/problem/implicit/linearize.py).
 
 
 def _dense_fallback_block(
@@ -317,15 +267,6 @@ def _sparsity(
                                     f"{src_var_name!r}."
                                 )
                         if cross_nnz > 0:
-                            _guard_block_degree(
-                                r_cross,
-                                c_cross,
-                                where=(
-                                    f"coupling into target {inp.name!r} "
-                                    f"(component {comp.name!r}) sourced from "
-                                    f"{src_var_name!r}"
-                                ),
-                            )
                             all_rows.append(r_cross + row_offset)
                             all_cols.append(c_cross + col_offset_src)
     # Read-through component->component cross-blocks: each consuming-equation
@@ -615,20 +556,8 @@ def _family_graph_sparsity(fam, layout: _BlockLayout) -> tuple[np.ndarray, np.nd
                         exchange_rows.append(np.repeat(row_band, dep_size))
                         exchange_cols.append(np.tile(col_band, write_size))
         if exchange_rows:
-            rows = np.concatenate(exchange_rows)
-            cols = np.concatenate(exchange_cols)
-            _guard_block_degree(
-                rows,
-                cols,
-                where=(f"family graph exchange {exchange.name!r} on graph {graph.name!r}"),
-                remedy=(
-                    "Reduce or split the graph's hub degree, or localize "
-                    "reads/weight_reads so each endpoint residual depends "
-                    "on fewer source columns."
-                ),
-            )
-            rows_out.append(rows)
-            cols_out.append(cols)
+            rows_out.append(np.concatenate(exchange_rows))
+            cols_out.append(np.concatenate(exchange_cols))
 
     if not rows_out:
         empty = np.empty((0,), dtype=np.int32)
@@ -702,24 +631,10 @@ def _read_through_node_local_cross_block(
                 )
                 if r_cross.size == 0:
                     continue
-                _guard_block_degree(
-                    r_cross,
-                    c_cross,
-                    where=(
-                        f"read-through alias {alias_var.name!r} read in component {comp_name!r}"
-                    ),
-                )
                 rows_list.append(np.asarray(r_cross, dtype=np.int64) + row_off)
                 cols_list.append(np.asarray(c_cross, dtype=np.int64) + src_off)
             elif op_cols_all.size > 0:
                 out_rows = np.arange(int(out_var.size), dtype=np.int64) + row_off
-                _guard_block_degree(
-                    np.repeat(out_rows, op_cols_all.size),
-                    np.tile(op_cols_all, out_rows.size) + src_off,
-                    where=(
-                        f"read-through alias {alias_var.name!r} read in component {comp_name!r}"
-                    ),
-                )
                 rows_list.append(np.repeat(out_rows, op_cols_all.size))
                 cols_list.append(np.tile(op_cols_all, out_rows.size) + src_off)
 
@@ -947,14 +862,6 @@ def _flux_bc_cross_block_sparsity(
                         resolved.var_name,
                         name,
                     )
-                    _guard_block_degree(
-                        r_cross,
-                        c_cross,
-                        where=(
-                            f"flux on {resolved.var_name!r} (component "
-                            f"{comp.name!r}) reading coupled-in {name!r}"
-                        ),
-                    )
                     rows_list.append(np.asarray(r_cross, dtype=np.int64) + resolved.var_offset)
                     cols_list.append(np.asarray(c_cross, dtype=np.int64) + src_off)
                     continue
@@ -973,14 +880,6 @@ def _flux_bc_cross_block_sparsity(
                     comp.name,
                     resolved.var_name,
                     name,
-                )
-                _guard_block_degree(
-                    np.repeat(boundary_rows, op_cols.size),
-                    np.tile(op_cols, boundary_rows.size) + src_off,
-                    where=(
-                        f"flux on {resolved.var_name!r} (component "
-                        f"{comp.name!r}) reading coupled-in {name!r}"
-                    ),
                 )
                 rows_list.append(np.repeat(boundary_rows, op_cols.size))
                 cols_list.append(np.tile(op_cols, boundary_rows.size) + src_off)
@@ -1002,7 +901,6 @@ def _flux_bc_cross_block_sparsity(
                 field_var = local_var_by_name[name]
                 row_off = int(resolved.var_offset)
                 col_off = layout.offset_of((comp.name, name))
-                where = f"flux on {resolved.var_name!r} (component {comp.name!r}) reading {name!r}"
                 fi = getattr(resolved, "face_indices", None)
                 fi = None if fi is None else np.asarray(fi, dtype=np.int64)
                 if (
@@ -1023,7 +921,6 @@ def _flux_bc_cross_block_sparsity(
                         resolved.var_name,
                         name,
                     )
-                    _guard_block_degree(s_rows, s_cols, where=where)
                     rows_list.append(s_rows + row_off)
                     cols_list.append(s_cols + col_off)
                 else:
@@ -1033,11 +930,6 @@ def _flux_bc_cross_block_sparsity(
                         comp.name,
                         resolved.var_name,
                         name,
-                    )
-                    _guard_block_degree(
-                        np.repeat(boundary_rows, field_cols.size),
-                        np.tile(field_cols, boundary_rows.size) + col_off,
-                        where=where,
                     )
                     rows_list.append(np.repeat(boundary_rows, field_cols.size))
                     cols_list.append(np.tile(field_cols, boundary_rows.size) + col_off)
@@ -1173,14 +1065,6 @@ def _family_cross_block_sparsity(
             )
             if r_cross.size == 0:
                 continue
-            _guard_block_degree(
-                r_cross,
-                c_cross,
-                where=(
-                    f"family scatter into {tgt_var!r} (component {tgt_comp!r}) "
-                    f"from family {fam_name!r}"
-                ),
-            )
             rows_list.append(np.asarray(r_cross, dtype=np.int64) + writer_off)
             cols_list.append(np.asarray(c_cross, dtype=np.int64) + src_off)
         else:
@@ -1219,13 +1103,6 @@ def _family_cross_block_sparsity(
                 -1
             )
             exp_cols = np.repeat(src_cols, member_state)
-            _guard_block_degree(
-                exp_rows,
-                exp_cols + src_off,
-                where=(
-                    f"family gather into {fam_name!r} from {src_var!r} (component {src_comp!r})"
-                ),
-            )
             rows_list.append(exp_rows)
             cols_list.append(exp_cols + src_off)
 
