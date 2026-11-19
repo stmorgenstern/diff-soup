@@ -456,17 +456,16 @@ def _scatter(size: int, dst: np.ndarray, src: Array) -> Array:
     return jnp.zeros((size,), src.dtype).at[dst].add(src)
 
 
-def _add_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
-    """``target`` ``(r, m)`` with the rows ``updates`` ``(..., m)`` added at rows ``index``.
+def _sub_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
+    """``target`` ``(r, m)`` with the rows ``updates`` ``(..., m)`` subtracted at rows ``index``.
 
-    Written as a segment sum: an in-place scatter-add with many repeated row indices (one
-    shared row read by every member) took 1.3 s for 200,000 rows on a graphics card where
-    the segment sum takes 0.3 ms.
+    The updates are summed as they are and the sum is subtracted behind a barrier. A
+    scatter of negated updates onto one repeated row (a shared row read by every member)
+    ran serially on a graphics card: 1.3 s for 200,000 rows against 1.7 ms this way.
     """
     rows = updates.reshape(-1, target.shape[1])
     summed = jax.ops.segment_sum(rows, index.reshape(-1), num_segments=target.shape[0])
-    # The barrier keeps the compiler from folding the sum back into a scatter onto ``target``.
-    return target + jax.lax.optimization_barrier(summed)
+    return target - jax.lax.optimization_barrier(summed)
 
 
 def _chain(plan: _Plan, tree: MemberFactor, v: Array, transpose: bool) -> Array:
@@ -543,8 +542,9 @@ def eliminate(plan: _Plan, values: Array) -> tuple:
     if plan.ss_units.size:
         shared = shared.at[plan.ss_units].add(jnp.ones((), dtype))
     if plan.c_src.size:
-        update = -base[plan.c_src][:, None] * w.reshape(nm * width, kc)[plan.c_col]
-        shared = shared.at[plan.c_fill].add(update)
+        update = base[plan.c_src][:, None] * w.reshape(nm * width, kc)[plan.c_col]
+        fill = jnp.zeros((plan.nnz_shared + 1,), dtype).at[plan.c_fill].add(update)
+        shared = shared - jax.lax.optimization_barrier(fill)
     shared = shared[: plan.nnz_shared]
     finite = jnp.all(jnp.isfinite(w)) & jnp.all(jnp.isfinite(shared))
     status = jnp.where(bad | ~finite, int(SolveStatus.SINGULAR), int(SolveStatus.SUCCESS))
@@ -574,11 +574,11 @@ def reduce_rhs(plan: _Plan, values: Array, tree: MemberFactor, columns: Array, t
         y = _local_solve(plan, tree, c_local, False)
         if plan.c_src.size:
             taken = base[plan.c_src][:, None] * y.reshape(nm * width, m)[plan.c_col]
-            c_shared = _add_rows(c_shared, plan.c_row, -taken)
+            c_shared = _sub_rows(c_shared, plan.c_row, taken)
         return y, c_shared
     moved = jnp.einsum("mlc,mlj->mcj", tree.w, c_local)
     rhs = jnp.zeros((ns + 1, m), columns.dtype).at[:ns].set(c_shared)
-    rhs = _add_rows(rhs, plan.colmap, -moved)
+    rhs = _sub_rows(rhs, plan.colmap, moved)
     return c_local, rhs[:ns]
 
 
@@ -597,7 +597,7 @@ def back_substitute(
         base = _masked(plan, values)
         v = carry.reshape(nm * width, m)
         if plan.c_src.size:
-            v = _add_rows(v, plan.c_col, -base[plan.c_src][:, None] * x_shared[plan.c_row])
+            v = _sub_rows(v, plan.c_col, base[plan.c_src][:, None] * x_shared[plan.c_row])
         x_local = _local_solve(plan, tree, v.reshape(nm, width, m), True)
     out = jnp.zeros((n + 1, m), x_local.dtype)
     out = out.at[plan.loc_idx.reshape(-1)].set(x_local.reshape(nm * width, m))
