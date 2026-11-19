@@ -123,8 +123,10 @@ inline void gemm_t(const T* a, const T* x, T* c, int b, int n) {
     }
 }
 
-template <typename T>
-void factor_member(const T* lo, const T* dg, const T* up, T* inv, T* cp, bool* bad, int64_t n, int b) {
+// B > 0 fixes the block size at compile time (the loops unroll); B == 0 takes it from b.
+template <typename T, int B>
+void factor_member(const T* lo, const T* dg, const T* up, T* inv, T* cp, bool* bad, int64_t n, int b_rt) {
+  const int b = B ? B : b_rt;
   const int bb = b * b;
   T piv[256];
   bool singular = false;
@@ -137,8 +139,10 @@ void factor_member(const T* lo, const T* dg, const T* up, T* inv, T* cp, bool* b
   *bad = singular;
 }
 
-template <typename T>
-void solve_member(const T* inv, const T* cp, const T* lo, const T* c, T* x, int64_t n, int b, int m, bool transpose) {
+template <typename T, int B>
+void solve_member(const T* inv, const T* cp, const T* lo, const T* c, T* x, int64_t n, int b_rt, int m,
+                  bool transpose) {
+  const int b = B ? B : b_rt;
   const int bb = b * b, bm = b * m;
   std::vector<T> tmp(bm);
   if (!transpose) {
@@ -181,9 +185,14 @@ ffi::Error FactorImpl(ffi::Buffer<DT> lower, ffi::Buffer<DT> diag, ffi::Buffer<D
   T* iv = inv->typed_data();
   T* c = cp->typed_data();
   bool* bd = bad->typed_data();
+  auto run = [&](auto member) {
 #pragma omp parallel for schedule(static)
-  for (int64_t k = 0; k < members; ++k)
-    factor_member(lo + k * stride, dg + k * stride, up + k * stride, iv + k * stride, c + k * stride, bd + k, n, b);
+    for (int64_t k = 0; k < members; ++k)
+      member(lo + k * stride, dg + k * stride, up + k * stride, iv + k * stride, c + k * stride, bd + k, n, b);
+  };
+  if (b == 1) run(factor_member<T, 1>);
+  else if (b == 2) run(factor_member<T, 2>);
+  else run(factor_member<T, 0>);
   return ffi::Error::Success();
 }
 
@@ -210,9 +219,14 @@ ffi::Error SolveImpl(ffi::Buffer<DT> inv, ffi::Buffer<DT> cp, ffi::Buffer<DT> lo
   const T* lo = lower.typed_data();
   const T* r = rhs.typed_data();
   T* out = x->typed_data();
+  auto run = [&](auto member) {
 #pragma omp parallel for schedule(static)
-  for (int64_t k = 0; k < members; ++k)
-    solve_member(iv + k * fs, c + k * fs, lo + k * fs, r + k * rs, out + k * rs, n, b, m, transpose);
+    for (int64_t k = 0; k < members; ++k)
+      member(iv + k * fs, c + k * fs, lo + k * fs, r + k * rs, out + k * rs, n, b, m, transpose);
+  };
+  if (b == 1) run(solve_member<T, 1>);
+  else if (b == 2) run(solve_member<T, 2>);
+  else run(solve_member<T, 0>);
   return ffi::Error::Success();
 }
 
