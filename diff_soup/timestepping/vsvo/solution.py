@@ -582,19 +582,27 @@ def _write_saveat_rows(buffers, pending, idx, rows, covered, last, any_new):
     """Write the covered rows ``rows[covered]`` at slots ``idx[covered]``.
 
     ``idx`` is increasing and every covered slot lies after the pending slot;
-    ``last`` is the largest covered slot. Uncovered rows target the discard
-    row, so the write is one scatter per buffer.
+    ``last`` is the largest covered slot. The write is one scatter per buffer.
+    Each uncovered row targets its own slot past the end of the buffer, which
+    the scatter drops, so the targets are distinct and the scatter is declared
+    unique: its JVP and transpose then cost the written rows. Without the
+    declaration JAX's rules mask the whole buffer on every write.
     """
     discard = int(buffers[0].shape[0]) - 1
+    dropped = discard + 1 + jnp.arange(int(idx.shape[0]), dtype=idx.dtype)
+
+    def write(buffer, target, rows):
+        return buffer.at[target].set(rows, mode="drop", unique_indices=True)
+
     if pending is None:
-        target = jnp.where(covered, idx, discard)
-        return tuple(b.at[target].set(r) for b, r in zip(buffers, rows)), None
+        target = jnp.where(covered, idx, dropped)
+        return tuple(write(b, target, r) for b, r in zip(buffers, rows)), None
     pending_slot, pending_rows = pending
     flush = jnp.logical_and(any_new, pending_slot >= 0)
     flush_target = jnp.where(flush, pending_slot, discard)
     buffers = tuple(b.at[flush_target].set(r) for b, r in zip(buffers, pending_rows))
-    target = jnp.where(jnp.logical_and(covered, idx != last), idx, discard)
-    buffers = tuple(b.at[target].set(r) for b, r in zip(buffers, rows))
+    target = jnp.where(jnp.logical_and(covered, idx != last), idx, dropped)
+    buffers = tuple(write(b, target, r) for b, r in zip(buffers, rows))
     position = jnp.clip(last - idx[0], 0, int(idx.shape[0]) - 1)
     pending_rows = tuple(jnp.where(any_new, r[position], p) for r, p in zip(rows, pending_rows))
     return buffers, (jnp.where(any_new, last, pending_slot), pending_rows)
