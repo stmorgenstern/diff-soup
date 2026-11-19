@@ -6,8 +6,9 @@
 //
 // Factor, without pivoting across grid points: P_i = diag_i - lower_i cp_{i-1}, inv_i = P_i^-1 by an LU with scaled
 // row partial pivoting inside the block (the rule of _small_lu.small_lu_factor), cp_i = inv_i upper_i. bad[member]
-// holds where a pivot is not finite or at most 16 unit roundoffs of the largest magnitude of its row, or an entry of
-// inv is not finite.
+// holds where a pivot is not finite or at most 16 unit roundoffs of its scale: for b > 1 the largest magnitude of
+// its row of P_i (small_lu_factor's rule), for b = 1 |lower_i| + |diag_i| + |upper_i| (the rule of the plain-JAX
+// sweep in _member_chain.py, which this kernel must match).
 //
 // Solve:      r_i = inv_i (c_i - lower_i r_{i-1}),           x_i = r_i - cp_i x_{i+1}.
 // Transposed: z_i = c_i - cp_{i-1}^T z_{i-1},                x_i = inv_i^T (z_i - lower_{i+1}^T x_{i+1}).
@@ -32,16 +33,14 @@ constexpr double kSingularPivotRoundoffs = 16.0;
 inline bool finite(double v) { return std::isfinite(v); }
 inline bool finite(std::complex<double> v) { return std::isfinite(v.real()) && std::isfinite(v.imag()); }
 
-// inv = a^-1 for one b x b block (a is overwritten). Returns true when the block is singular by the rule above.
+// inv = a^-1 for one b x b block (a is overwritten). Returns true when the block is singular by the rule above;
+// scale1 is the scale of a 1 x 1 pivot.
 template <typename T>
-bool invert_block(T* a, T* inv, int b) {
+bool invert_block(T* a, T* inv, int b, double scale1) {
   constexpr double roundoff = kSingularPivotRoundoffs * std::numeric_limits<double>::epsilon() / 2;
   if (b == 1) {
-    double scale = std::abs(a[0]);
-    if (!(scale > 0)) scale = 1.0;
-    bool singular = !finite(a[0]) || std::abs(a[0]) <= roundoff * scale;
     inv[0] = T(1.0) / a[0];
-    return singular || !finite(inv[0]);
+    return !finite(a[0]) || std::abs(a[0]) <= roundoff * scale1;
   }
   int perm[16];
   double scale[16];
@@ -87,10 +86,7 @@ bool invert_block(T* a, T* inv, int b) {
       for (int j = i + 1; j < b; ++j) acc -= a[i * b + j] * y[j];
       y[i] = acc / a[i * b + i];
     }
-    for (int i = 0; i < b; ++i) {
-      inv[i * b + c] = y[i];
-      if (!finite(y[i])) singular = true;
-    }
+    for (int i = 0; i < b; ++i) inv[i * b + c] = y[i];
   }
   return singular;
 }
@@ -133,7 +129,8 @@ void factor_member(const T* lo, const T* dg, const T* up, T* inv, T* cp, bool* b
   for (int64_t i = 0; i < n; ++i) {
     std::copy(dg + i * bb, dg + (i + 1) * bb, piv);
     if (i > 0) gemm<T, true>(lo + i * bb, cp + (i - 1) * bb, piv, b, b);
-    singular |= invert_block(piv, inv + i * bb, b);
+    const double scale1 = b == 1 ? std::abs(lo[i]) + std::abs(dg[i]) + std::abs(up[i]) : 0.0;
+    singular |= invert_block(piv, inv + i * bb, b, scale1);
     gemm<T, false>(inv + i * bb, up + i * bb, cp + i * bb, b, b);
   }
   *bad = singular;

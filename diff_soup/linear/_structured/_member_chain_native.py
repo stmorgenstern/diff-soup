@@ -1,7 +1,7 @@
 """The threaded native block Thomas kernel: the processor path of ``MemberSchur(elimination="native")``.
 
-Same signature and factor leaves as the plain-JAX sweep in ``_member_chain.py``: arrays ``(M, N, b, b)`` of many
-independent block-tridiagonal chains (members), right-hand sides ``(M, N, b, m)``. Block row ``i`` of a chain is
+Same signature, factor ([SweepFactor][]) and singular rule as the plain-JAX sweep in ``_member_chain.py``: arrays
+``(M, N, b, b)`` of many independent block-tridiagonal chains (members), right-hand sides ``(M, N, b, m)``. Block row ``i`` of a chain is
 ``lower[i] x[i-1] + diag[i] x[i] + upper[i] x[i+1]``; ``lower[:, 0]`` and ``upper[:, N-1]`` are never read.
 
 The work is one XLA custom call per factor or solve (``jax.ffi.ffi_call``, not a host callback), which loops over
@@ -19,6 +19,7 @@ import numpy as np
 
 from diff_soup._errors import ConfigurationError
 from diff_soup._internal import member_chain_ffi
+from diff_soup.linear._structured._member_chain import SweepFactor
 
 Array = jax.Array
 
@@ -52,7 +53,7 @@ def _suffix(dtype) -> str:
     )
 
 
-def chain_factor(lower: Array, diag: Array, upper: Array) -> tuple[tuple[Array, Array, Array], Array]:
+def chain_factor(lower: Array, diag: Array, upper: Array) -> tuple[SweepFactor, Array]:
     """Block Thomas factor of a batch of block-tridiagonal chains.
 
     Args:
@@ -61,9 +62,9 @@ def chain_factor(lower: Array, diag: Array, upper: Array) -> tuple[tuple[Array, 
         upper: Super-diagonal blocks, the same shape.
 
     Returns:
-        ``((inv, cp, low), bad)``: the inverse pivot blocks, ``inv @ upper`` and ``lower``, each ``(M, N, b, b)``,
-        and a boolean ``(M,)`` that holds where a pivot is not finite or at most 16 unit roundoffs of the largest
-        magnitude of its row.
+        ``(factor, bad)``: a [SweepFactor][] holding the inverse pivot blocks ``inv``, ``cp = inv @ upper`` and
+        ``low``, ``lower`` with its first site zeroed, each ``(M, N, b, b)``; and a boolean ``(M,)`` that holds
+        where a member has a negligible or non-finite pivot, by the plain-JAX sweep's rule.
     """
     dtype = jnp.result_type(lower, diag, upper)
     suffix = _suffix(dtype)
@@ -73,21 +74,21 @@ def chain_factor(lower: Array, diag: Array, upper: Array) -> tuple[tuple[Array, 
     inv, cp, bad = jax.ffi.ffi_call(
         f"{_PREFIX}_factor_{suffix}", (block, block, bad), vmap_method="broadcast_all"
     )(lower, diag, upper)
-    return (inv, cp, lower), bad
+    return SweepFactor(inv=inv, cp=cp, low=lower.at[..., 0, :, :].set(0)), bad
 
 
-def chain_solve(factor: tuple[Array, Array, Array], rhs: Array, transpose: bool = False) -> Array:
+def chain_solve(factor: SweepFactor, rhs: Array, transpose: bool = False) -> Array:
     """Solve with a [chain_factor][] result.
 
     Args:
-        factor: ``(inv, cp, low)`` from [chain_factor][].
+        factor: The [SweepFactor][] from [chain_factor][].
         rhs: Right-hand sides, shape ``(M, N, b, m)``.
         transpose: Solve with the plain (never conjugated) transpose of each chain.
 
     Returns:
         ``x`` with the shape of ``rhs``.
     """
-    inv, cp, low = factor
+    inv, cp, low = factor.inv, factor.cp, factor.low
     dtype = jnp.result_type(inv, rhs)
     suffix = _suffix(dtype)
     inv, cp, low, rhs = (jnp.asarray(a, dtype) for a in (inv, cp, low, rhs))
