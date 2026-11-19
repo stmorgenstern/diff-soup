@@ -430,6 +430,27 @@ def main_table(paths):
               f"{fmt(r['factor_ms'])} | {fmt(r['refactor_ms'])} | {fmt(r['solve_ms'])} | {fmt(r['solve_T_ms'])} |")
 
 
+def main_pivot(paths, variants=("base", "ragged", "cplx1", "chain", "network", "network+cplx1")):
+    """Factor and solve times side by side, one row per device, size and variant, one column per backend."""
+    rows = []
+    for p in paths:
+        rows += [r for r in json.load(open(p)) if "factor_ms" in r]
+    backends = sorted({r["backend"] for r in rows}, key=lambda b: (b not in ("klu", "cudss"), b))
+    key = lambda r: (r["device_kind"], r.get("host", "")[:8], r["particles"], r["variant"])  # noqa: E731
+    table = {}
+    for r in rows:
+        table.setdefault(key(r), {})[r["backend"]] = r
+    for what in ("factor_ms", "solve_ms", "solve_T_ms"):
+        print(f"\n{what[:-3]} (ms, warm median)\n")
+        print("| device | host | particles | variant | " + " | ".join(backends) + " |")
+        print("|---|---|---:|---|" + "---:|" * len(backends))
+        for k in sorted(table, key=lambda k: (k[0], k[1], k[2], variants.index(k[3]) if k[3] in variants else 99)):
+            if k[3] not in variants:
+                continue
+            cells = [fmt(table[k][b][what]) if b in table[k] else "–" for b in backends]
+            print(f"| {k[0]} | {k[1]} | {k[2]} | {k[3]} | " + " | ".join(cells) + " |")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -444,11 +465,14 @@ def main():
     r.add_argument("--out", default=os.environ.get("OUT", "/drive2/research2/lfp-overhaul/store/B2"))
     r.add_argument("--label", default="")
     t = sub.add_parser("table"); t.add_argument("paths", nargs="+")
+    t = sub.add_parser("pivot"); t.add_argument("paths", nargs="+")
     a = ap.parse_args()
     if a.cmd == "prepare":
         prepare(a.measure, a.out)
     elif a.cmd == "run":
         main_run(a)
+    elif a.cmd == "pivot":
+        main_pivot(a.paths)
     else:
         main_table(a.paths)
 
