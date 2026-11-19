@@ -68,6 +68,10 @@ from .operator_resolve import resolve_operator
 # a second vmap'd primitive.  Underscore-prefixed so it cannot collide with a
 # user ``member_params`` name.
 _MEMBER_INDEX_KEY = "__member_index__"
+# Reserved ``params_b`` key carrying a padded family member's node count, read
+# in member closures as ``m.member_nodes`` (the builder refuses a param of that
+# name in a family declared with ``nodes=``).
+_MEMBER_NODES_KEY = "member_nodes"
 
 
 class _MemberView:
@@ -325,6 +329,22 @@ class _FamilyResidualBlock:
         self._total_size = int(total_size)
         self._count = int(fam.count)
         self._member_state = int(fam.member_state_size)
+        self._state_size = int(fam.state_size)
+        self._padded = bool(getattr(fam, "is_padded", False))
+        if self._padded:
+            # The kernel works on the padded ``(count, member_state)`` slab:
+            # ``_pad_index`` gathers it from the family's real unknowns (a
+            # padded node reads its field's last real node), and
+            # ``_real_flat`` picks the real rows of the flattened padded
+            # residual, which come out in state order.
+            index, real = fam.padded_slab()
+            self._pad_index = np.asarray(index, dtype=np.int32)
+            self._real_flat = np.flatnonzero(real.reshape(-1)).astype(np.int32)
+            if not np.array_equal(
+                index.reshape(-1)[self._real_flat], np.arange(self._state_size)
+            ):  # pragma: no cover - the slab maps guarantee this
+                raise LoweringError(f"family {fam.name!r}: padded slab map is not in state order.")
+            self._member_nodes = np.asarray(fam.member_nodes, dtype=np.int32)
         self._time_ref = float(time_ref)
         # The build-time declared namespaces, read only by the build-time
         # member evaluations (form capture, reach check); a residual call
@@ -415,6 +435,12 @@ class _FamilyResidualBlock:
         # raw-node selectors resolve.
         self._member_flux_bcs: list[tuple[object, np.ndarray, np.ndarray, int, str, object]] = []
         domain = fam.domain
+        if self._padded and fam.member_bcs:
+            raise LoweringError(
+                f"Family {fam.name!r} is declared with nodes= and has a member boundary "
+                "condition. A member's last node depends on its node count, so write the "
+                "boundary flux in the member equation at index m.member_nodes - 1."
+            )
         member_var_names = {v.name for v, _loc, _shape in self._field_offsets}
         for bc in fam.member_bcs:
             if not isinstance(bc, FluxBC):
@@ -487,6 +513,12 @@ class _FamilyResidualBlock:
         self._has_forms = any(
             cell is not None and cell.get("captured") for _eq, cell in self._member_form_cells()
         )
+        if self._has_forms and self._padded:
+            raise LoweringError(
+                f"family {fam.name!r} is declared with nodes= and a member equation "
+                "records time-derivative structure (q.dt); a padded family takes "
+                "member equations in the right-hand-side form only."
+            )
         if self._has_forms and len(fam.member_variables) > 1:
             raise LoweringError(
                 f"family {fam.name!r} declares {len(fam.member_variables)} "
@@ -538,6 +570,8 @@ class _FamilyResidualBlock:
         u_row = jnp.linspace(0.75, 1.25, max(int(self._member_state), 1))
         m_row = {k: jnp.asarray(v)[0] for k, v in dict(self._fam.member_params).items()}
         m_row[_MEMBER_INDEX_KEY] = jnp.asarray(0)
+        if self._padded:
+            m_row[_MEMBER_NODES_KEY] = jnp.asarray(int(self._domain.num_nodes), dtype=jnp.int32)
         member_globals = {
             name: jnp.asarray(self._global_by_name[name].init) for name in self._global_names
         }
@@ -936,10 +970,15 @@ class _FamilyResidualBlock:
         """
         fam = runtime_fam if runtime_fam is not None else self._fam
         base = self._fam_base
-        state_size = self._count * self._member_state
-        u_mem = u[base : base + state_size].reshape(self._count, self._member_state)
+        if self._padded:
+            u_mem = u[base : base + self._state_size][self._pad_index]
+        else:
+            state_size = self._count * self._member_state
+            u_mem = u[base : base + state_size].reshape(self._count, self._member_state)
 
         params = _validate_member_params(fam)
+        if self._padded:
+            params[_MEMBER_NODES_KEY] = jnp.asarray(self._member_nodes)
         params_b = dict(params)
         # member_index rides the SAME vmap axis (one primitive, no extra trace).
         params_b[_MEMBER_INDEX_KEY] = jnp.arange(self._count) + int(
@@ -1145,6 +1184,8 @@ class _FamilyResidualBlock:
             boundary_context=boundary_context,
         )
         base = self._fam_base
+        if self._padded:
+            return f.at[base : base + self._state_size].add(f_mem.reshape(-1)[self._real_flat])
         state_size = self._count * self._member_state
         return f.at[base : base + state_size].add(f_mem.reshape(-1))
 

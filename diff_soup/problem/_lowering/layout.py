@@ -49,6 +49,7 @@ class _BlockLayout:
     entries: tuple[tuple[tuple[str, str], int, int, tuple[int, ...]], ...]
     total_size: int
     member_strides: dict[tuple[str, str], tuple[int, int, int]] = field(default_factory=dict)
+    padded_index: dict[tuple[str, str], object] = field(default_factory=dict)
 
     def offset_of(self, key: tuple[str, str]) -> int:
         """Flat offset of the block keyed ``(owner_name, var_name)``.
@@ -71,6 +72,12 @@ class _BlockLayout:
         """
         out = {}
         for key, off, size, shape in self.entries:
+            padded = self.padded_index.get(key)
+            if padded is not None:
+                # Padded family field: (count, field size) gather, each padded
+                # node reading its member's last real node.
+                out[key] = u[padded].reshape(shape)
+                continue
             stride = self.member_strides.get(key)
             if stride is None:
                 # Component (or single-field family) entry: contiguous slice.
@@ -102,8 +109,24 @@ def _layout(eqset: EquationSet) -> _BlockLayout:
             entries.append((key, off, var.size, var.shape))
             off += var.size
     member_strides: dict[tuple[str, str], tuple[int, int, int]] = {}
+    padded_index: dict[tuple[str, str], object] = {}
     for fam in getattr(eqset, "families", ()):
         fam_base = off
+        if getattr(fam, "is_padded", False):
+            # Members have their own sizes: each field's entry carries the
+            # absolute (count, field size) gather into the packed slab.
+            index, _real = fam.padded_slab()
+            sizes = fam.member_sizes
+            var_local_off = 0
+            for var in fam.member_variables:
+                key = (fam.name, var.name)
+                cols = index[:, var_local_off : var_local_off + int(var.size)]
+                real_count = int(_real[:, var_local_off : var_local_off + int(var.size)].sum())
+                entries.append((key, fam_base + int(cols[0, 0]), real_count, (fam.count, *var.shape)))
+                padded_index[key] = fam_base + cols
+                var_local_off += int(var.size)
+            off += int(sizes.sum())
+            continue
         member_state_size = fam.member_state_size
         multi_field = len(fam.member_variables) > 1
         var_local_off = 0
@@ -117,7 +140,12 @@ def _layout(eqset: EquationSet) -> _BlockLayout:
                 member_strides[key] = (member_state_size, var_local_off, var.size)
             var_local_off += var.size
         off += fam.count * member_state_size
-    return _BlockLayout(entries=tuple(entries), total_size=off, member_strides=member_strides)
+    return _BlockLayout(
+        entries=tuple(entries),
+        total_size=off,
+        member_strides=member_strides,
+        padded_index=padded_index,
+    )
 
 
 def _build_global_layout_entries(eqset: EquationSet) -> tuple:

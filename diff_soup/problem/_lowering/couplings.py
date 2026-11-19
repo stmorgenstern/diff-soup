@@ -274,9 +274,9 @@ def _resolve_family_couplings(
     if seen_targets is None:
         seen_targets = {}
     fam_owner: dict[int, tuple[str, str, int]] = {}
-    member_state_by_fam: dict[str, int] = {}
+    state_size_by_fam: dict[str, int] = {}
     for fam in getattr(eqset, "families", ()):
-        member_state_by_fam[fam.name] = int(fam.member_state_size)
+        state_size_by_fam[fam.name] = int(fam.state_size)
         for v in fam.member_variables:
             fam_owner[id(v)] = (fam.name, v.name, int(fam.count))
     comp_owner: dict[int, tuple[str, str, int]] = {}
@@ -307,7 +307,7 @@ def _resolve_family_couplings(
             # a component variable, so resolve its owning component from the
             # consuming equation's inputs.
             fam_name, src_var, count = fam_owner[id(cp.source)]
-            source_size = count * member_state_by_fam[fam_name]
+            source_size = state_size_by_fam[fam_name]
             owner = alias_owner.get(id(cp.target))
             if owner is None:
                 raise ValueError(
@@ -347,7 +347,7 @@ def _resolve_family_couplings(
         elif src_is_fam:
             # scatter: family member surface trace -> component target.
             fam_name, src_var, count = fam_owner[id(cp.source)]
-            source_size = count * member_state_by_fam[fam_name]
+            source_size = state_size_by_fam[fam_name]
             if id(cp.target) not in comp_owner:
                 raise ValueError(
                     f"family scatter coupling {cp.name!r} target "
