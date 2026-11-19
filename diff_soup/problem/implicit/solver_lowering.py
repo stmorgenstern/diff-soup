@@ -16,11 +16,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from diff_soup.domains.operators.dispatch import _STENCIL_REACH
 from diff_soup.linear import SparseTopology
 from diff_soup.problem._ad.pattern import Pattern
 from diff_soup.problem._ad.tangent_pattern import jacobian_pattern
 from diff_soup.problem._cache import BoundedContentCache
+from diff_soup.problem._ir.derivative_ir import capturing_forms
 from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
+from diff_soup.problem._spec.derivative_expr import current_slopes
 from diff_soup.problem.implicit._coo import coo_matvec
 from diff_soup.problem.implicit.operator import MassOperator
 from diff_soup.problem.implicit.problems import ImplicitProblem, MassProblem
@@ -481,6 +484,35 @@ def _static_equal(a, b) -> bool:
     return a is b or bool(eqx.tree_equal(a, b))
 
 
+def _shared_trace(fn):
+    """Return ``fn`` routed through one compiled call whenever it runs under a trace.
+
+    Each caller of the residual (Newton's residual, each coloured tangent and
+    pullback, the consistent initialization) would otherwise trace the whole
+    model graph again into the enclosing program. Under one ``eqx.filter_jit``
+    the graph is traced once per argument signature and every caller, and each
+    transform of it, reuses that trace. A call on concrete values, or inside a
+    context the residual reads at trace time (a derivative-form slope context,
+    a form capture, a stencil-reach recording), runs ``fn`` as it is.
+    """
+    shared = eqx.filter_jit(fn)
+
+    def call(t, y, theta, control):
+        traced = any(
+            isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves((t, y, theta, control))
+        )
+        if (
+            not traced
+            or current_slopes() is not None
+            or capturing_forms()
+            or _STENCIL_REACH.get() is not None
+        ):
+            return fn(t, y, theta, control)
+        return shared(t, y, theta, control)
+
+    return call
+
+
 def solver_problem_from_ir(problem):
     """Return one solver problem built directly from Recipe IR.
 
@@ -614,6 +646,8 @@ def _build_solver_problem(problem, source_static):
                     # the closing row ``lambda - bound_value = 0``.
                     g = g.at[lo:hi].set(value.astype(lam.dtype) - lam[lo:hi])
             return jnp.concatenate([f, g])
+
+        rhs = _shared_trace(rhs)
 
         def mass_values(t, y, theta, control):
             del control
