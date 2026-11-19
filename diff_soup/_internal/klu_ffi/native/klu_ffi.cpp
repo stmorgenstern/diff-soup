@@ -351,6 +351,13 @@ int64_t NumericBytes(const klu_numeric* num, bool complex) {
     return bytes;
 }
 
+// The stored entries of one numeric factorization: L and U, whose counts lnz and unz each
+// include the diagonal (so it is counted once here), and the off-diagonal blocks of the block
+// triangular form (nzoff).
+int64_t FactorEntries(const klu_numeric* num) {
+    return static_cast<int64_t>(num->lnz) + num->unz - num->n + num->nzoff;
+}
+
 int64_t SlotBytes(const Slot& slot) {
     const int64_t copies = static_cast<int64_t>(slot.values.capacity() + slot.csc.capacity()) *
                            static_cast<int64_t>(sizeof(double));
@@ -727,7 +734,7 @@ NB_MODULE(_native_klu, m) {
                 live_sites = static_cast<int64_t>(Reg().sites.size());
                 for (const auto& entry : Reg().slots) {
                     if (const klu_numeric* num = entry.second->numeric) {
-                        live_lu_entries += static_cast<int64_t>(num->lnz) + num->unz;
+                        live_lu_entries += FactorEntries(num);
                     }
                 }
             }
@@ -751,8 +758,24 @@ NB_MODULE(_native_klu, m) {
         "(klu_refactor kept), refactorizations replaced by a factorization, rebuilds started "
         "by a solve, solves, refused and singular requests, calls refused for a released "
         "context, live objects (slots, analyses, sites, and the factor and refactor calls of "
-        "the live compiled programs), and the entries of L and U (diagonals included) over the "
-        "live numeric factorizations.");
+        "the live compiled programs), and the stored entries of the live numeric "
+        "factorizations, summed (see factor_entries).");
+    m.def(
+        "factor_entries",
+        [](int32_t context_id, int32_t slot_id) -> int64_t {
+            nb::gil_scoped_release release;
+            std::lock_guard<std::mutex> lock(Reg().mutex);
+            DrainEndedCalls(Reg(), Forgetter(Reg()));
+            const Slot* slot = slot_registry::FindSlot(Reg(), slot_id);
+            if (slot == nullptr || slot->context != context_id || slot->numeric == nullptr) {
+                return -1;
+            }
+            return FactorEntries(slot->numeric);
+        },
+        nb::arg("context_id"), nb::arg("slot_id"),
+        "The stored entries of the numeric factorization held by slot `slot_id` of SolveContext "
+        "`context_id`: L and U with the diagonal counted once, and the off-diagonal blocks of "
+        "the block triangular form. -1 when the slot holds no factorization.");
     m.def(
         "reset_stats",
         []() {

@@ -52,6 +52,7 @@ from jaxtyping import Array, ArrayLike
 from diff_soup._errors import ConfigurationError
 from diff_soup._layout import Layout
 from diff_soup.linear._api import SparseTopology
+from diff_soup.linear._context import FactorContractError
 from diff_soup.linear._factor import Analysis, SolveStatus, dirichlet_rows
 from diff_soup.linear._structured._common import (
     ArrayStructuredSolver,
@@ -387,6 +388,24 @@ class BlockTridiagonal(ArrayStructuredSolver):
         del layout, precision
         refuse_options("BlockTridiagonal", options)
         return chain_plan(topology, self.block_size, caller="BlockTridiagonal")
+
+    def factor_avals(
+        self, analysis: Analysis, values_aval: Any, *, orientation: str, precision: str, tol: Any
+    ) -> tuple:
+        """The factor tree's leaves and the status leaf; complex values are refused.
+
+        Raises:
+            FactorContractError: For complex values.
+        """
+        if jnp.issubdtype(values_aval.dtype, jnp.complexfloating):
+            raise FactorContractError(
+                f"BlockTridiagonal factors real matrices only; got complex values "
+                f"({np.dtype(values_aval.dtype).name}). Factor a complex matrix with KLU, "
+                "SuperLU, CuDSS or Dense."
+            )
+        return super().factor_avals(
+            analysis, values_aval, orientation=orientation, precision=precision, tol=tol
+        )
 
     def _factor_tree(self, analysis: Analysis, values: Array, precision: str) -> tuple:
         """The chain factor of ``A_bc`` and its status (``SINGULAR`` for a failed pivot)."""
