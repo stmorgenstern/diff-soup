@@ -245,34 +245,25 @@ def member_block_layout(
 def _member_blocks(problem: Any, family: Any) -> list:
     """``(start, n_sites)`` of every member's flat block in a lowered family.
 
-    Today every lowered family is uniform (a ragged authored family is lowered as
-    one uniform family per size bucket), so member ``m`` starts at
-    ``base + m * member_state_size`` with the family's own site count.
+    A field of the family's longest size (above one) is a profile and takes each
+    member's own node count (`Family.member_nodes`, or the family's node count when
+    members share it); member ``m`` starts at the family's first unknown plus
+    `Family.member_offsets[m]`.
     """
     view = problem.family_view(family.name)
     sizes = [int(var.size) for var in family.member_variables]
-    grid = {size for size in sizes if size > 1}
-    n_sites = grid.pop() if len(grid) == 1 else (1 if not grid else None)
-    if n_sites is None:
+    n_max = max(sizes)
+    if any(1 < size < n_max for size in sizes):
         raise ConfigurationError(
             f"member_schur_layout: family {family.name!r} has member fields of sizes "
             f"{sorted(set(sizes))!r}; a member needs its grid fields all of one size, plus "
             "scalar fields of size 1."
         )
-    # B1 SWITCH: when families whose members have their own length land (branch lfp/B1,
-    # handoffs/B1-layout.md), the family carries per-member node counts and offsets; read them
-    # here instead of the uniform stride. Planned names, not yet on `Family`:
-    #     nodes = family.member_nodes; offsets = family.member_offsets
-    #     return [(base + offsets[m], int(nodes[m])) for m in range(count)]
-    # (check there whether `member_offsets` is relative to the slab base or absolute).
-    nodes = getattr(family, "member_nodes", None)
-    offsets = getattr(family, "member_offsets", None)
-    if nodes is not None and offsets is not None:
-        return [
-            (int(view.base) + int(offsets[m]), int(nodes[m])) for m in range(int(view.count))
-        ]
-    stride = int(view.member_state_size)
-    return [(int(view.base) + m * stride, n_sites) for m in range(int(view.count))]
+    count = int(view.count)
+    nodes = family.member_nodes
+    nodes = [n_max] * count if nodes is None or n_max == 1 else [int(k) for k in nodes]
+    offsets = family.member_offsets
+    return [(int(view.base) + int(offsets[m]), nodes[m] if n_max > 1 else 1) for m in range(count)]
 
 
 def member_schur_layout(problem: Any, *, n_dofs: Optional[int] = None) -> Any:
@@ -307,7 +298,7 @@ def member_schur_layout(problem: Any, *, n_dofs: Optional[int] = None) -> Any:
         for m, (start, n_sites) in enumerate(blocks):
             grid, own, offset = [], [], start
             for var, size in zip(family.member_variables, sizes):
-                # A grid field takes this member's n_sites entries (its own length after B1).
+                # A grid field takes this member's own n_sites entries.
                 if size > 1:
                     grid.append(np.arange(offset, offset + n_sites, dtype=np.int64))
                     offset += n_sites
