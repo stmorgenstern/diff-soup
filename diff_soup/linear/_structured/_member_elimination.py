@@ -441,6 +441,18 @@ def _scatter(size: int, dst: np.ndarray, src: Array) -> Array:
     return jnp.zeros((size,), src.dtype).at[dst].add(src)
 
 
+def _add_rows(target: Array, index: np.ndarray, updates: Array) -> Array:
+    """``target`` ``(r, m)`` with the rows ``updates`` ``(e, m)`` added at rows ``index``.
+
+    Written as a scatter of scalars on the flattened target: with many repeated row indices
+    (one shared row read by every member) a scatter of whole rows runs serially on a
+    graphics card.
+    """
+    m = target.shape[1]
+    flat = (jnp.asarray(index, jnp.int32).reshape(-1, 1) * m + jnp.arange(m, dtype=jnp.int32)).reshape(-1)
+    return target.reshape(-1).at[flat].add(updates.reshape(-1)).reshape(target.shape)
+
+
 def _scalar_rows(plan: _Plan, base: Array) -> Optional[Array]:
     """``F`` ``(M, k, N b)``: every member's scalar rows over its sites (``None`` without scalars)."""
     if not plan.k:
@@ -557,11 +569,11 @@ def reduce_rhs(plan: _Plan, values: Array, tree: MemberFactor, columns: Array, t
         y = _local_solve(plan, tree, _scalar_rows(plan, base), c_local, False)
         if plan.c_src.size:
             taken = base[plan.c_src][:, None] * y.reshape(nm * width, m)[plan.c_col]
-            c_shared = c_shared.at[plan.c_row].add(-taken)
+            c_shared = _add_rows(c_shared, plan.c_row, -taken)
         return y, c_shared
     moved = jnp.einsum("mlc,mlj->mcj", tree.w, c_local)
     rhs = jnp.zeros((ns + 1, m), columns.dtype).at[:ns].set(c_shared)
-    rhs = rhs.at[plan.colmap].add(-moved)
+    rhs = _add_rows(rhs, plan.colmap, -moved)
     return c_local, rhs[:ns]
 
 
@@ -580,7 +592,7 @@ def back_substitute(
         base = _masked(plan, values)
         v = carry.reshape(nm * width, m)
         if plan.c_src.size:
-            v = v.at[plan.c_col].add(-base[plan.c_src][:, None] * x_shared[plan.c_row])
+            v = _add_rows(v, plan.c_col, -base[plan.c_src][:, None] * x_shared[plan.c_row])
         f = _scalar_rows(plan, base)
         x_local = _local_solve(plan, tree, f, v.reshape(nm, width, m), True)
     out = jnp.zeros((n + 1, m), x_local.dtype)
