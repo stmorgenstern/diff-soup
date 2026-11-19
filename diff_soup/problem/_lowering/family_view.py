@@ -51,6 +51,7 @@ class FamilyView:
     field_slices: dict[str, slice]
     member_weights: Optional[jax.Array] = None
     graphs: dict[str, object] = field(default_factory=dict)
+    pad_index: Optional[object] = None
 
     def extract(self, u: jax.Array) -> jax.Array:
         """Gather the family's member-major slab from the flat state ``u``.
@@ -62,6 +63,9 @@ class FamilyView:
             ``(count, member_state_size)`` — member ``m``'s full member-state on
             row ``m`` (a single contiguous reshape, pure-jnp / differentiable).
         """
+        if self.pad_index is not None:
+            # Padded family: each padded node holds its member's last real node.
+            return u[self.base + self.pad_index]
         n = self.count * self.member_state_size
         return u[self.base : self.base + n].reshape(self.count, self.member_state_size)
 
@@ -129,4 +133,5 @@ def _build_family_view(fam, base: int) -> FamilyView:
         field_slices=field_slices,
         member_weights=None,
         graphs={graph.name: graph for graph in getattr(fam, "graphs", ())},
+        pad_index=fam.padded_slab()[0] if getattr(fam, "is_padded", False) else None,
     )

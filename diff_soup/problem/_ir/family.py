@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import functools
+
 import equinox as eqx
 import numpy as np
 
@@ -53,6 +55,71 @@ def _validate_stencil_radius(name, stencil_radius):
     return radius
 
 
+def _validate_member_nodes(name, count, domain, member_nodes):
+    """Return ``member_nodes`` as ``None`` or a tuple of ``count`` ints in ``[1, num_nodes]``."""
+    if member_nodes is None:
+        return None
+    nodes = np.asarray(member_nodes)
+    if nodes.ndim != 1 or nodes.shape[0] != int(count) or not np.issubdtype(nodes.dtype, np.integer):
+        raise ValueError(
+            f"family {name!r}: nodes must be {int(count)} integers, one per member; "
+            f"received shape {nodes.shape} and dtype {nodes.dtype}."
+        )
+    n_max = int(getattr(domain, "num_nodes"))
+    if nodes.min() < 1 or nodes.max() > n_max:
+        raise ValueError(
+            f"family {name!r}: every member's node count must be between 1 and the "
+            f"member domain's {n_max} nodes; received {int(nodes.min())} to {int(nodes.max())}."
+        )
+    return tuple(int(n) for n in nodes)
+
+
+@functools.lru_cache(maxsize=64)
+def _slab_maps(count: int, n_max: int, sizes: tuple, nodes):
+    """Static padded-slab maps ``(index, real, member_sizes, member_offsets)``.
+
+    A field of size ``n_max`` (with ``n_max > 1``) is a profile and takes each
+    member's own node count; any other field keeps its size.
+    """
+    member_state = int(sum(sizes))
+    if nodes is None:
+        index = (
+            np.arange(count, dtype=np.int64)[:, None] * member_state
+            + np.arange(member_state, dtype=np.int64)[None, :]
+        )
+        real = np.ones((count, member_state), dtype=bool)
+        member_sizes = np.full((count,), member_state, dtype=np.int64)
+        offsets = np.arange(count, dtype=np.int64) * member_state
+    else:
+        n = np.asarray(nodes, dtype=np.int64)
+        profile = [n_max > 1 and s == n_max for s in sizes]
+        member_sizes = np.zeros((count,), dtype=np.int64)
+        for s, is_profile in zip(sizes, profile):
+            member_sizes += n if is_profile else s
+        offsets = np.concatenate([[0], np.cumsum(member_sizes)[:-1]]).astype(np.int64)
+        index = np.empty((count, member_state), dtype=np.int64)
+        real = np.empty((count, member_state), dtype=bool)
+        padded_loc = 0
+        packed_loc = np.zeros((count,), dtype=np.int64)
+        for s, is_profile in zip(sizes, profile):
+            k = np.arange(s, dtype=np.int64)[None, :]
+            if is_profile:
+                own = n[:, None]
+                index[:, padded_loc : padded_loc + s] = (
+                    offsets[:, None] + packed_loc[:, None] + np.minimum(k, own - 1)
+                )
+                real[:, padded_loc : padded_loc + s] = k < own
+                packed_loc = packed_loc + n
+            else:
+                index[:, padded_loc : padded_loc + s] = offsets[:, None] + packed_loc[:, None] + k
+                real[:, padded_loc : padded_loc + s] = True
+                packed_loc = packed_loc + s
+            padded_loc += s
+    for arr in (index, real, member_sizes, offsets):
+        arr.setflags(write=False)
+    return index, real, member_sizes, offsets
+
+
 class Family(eqx.Module):
     """Record of a population of `count` identical members on one member domain.
 
@@ -74,6 +141,7 @@ class Family(eqx.Module):
         graphs: [`FamilyGraph`][diff_soup.problem.FamilyGraph] records over the members.
         graph_exchanges: [`FamilyGraphExchange`][diff_soup.problem.FamilyGraphExchange] terms along those graphs.
         stencil_radius: Jacobian reach of a member kernel in cells per axis, or `None` for one cell.
+        member_nodes: Node count of each member, or `None` for the member domain's own. Member `i` is the first `member_nodes[i]` nodes of `domain`.
     """
 
     name: str = eqx.field(static=True)
@@ -105,6 +173,11 @@ class Family(eqx.Module):
     # per axis).  Static structural configuration consumed by the sparsity
     # builder; folded into the content hash and the serialized manifest.
     stencil_radius: object = eqx.field(static=True, default=None)
+    # Per-member node counts of a padded family (``None`` = every member has
+    # the member domain's node count).  Member ``i`` is the first
+    # ``member_nodes[i]`` nodes of ``domain``; the state holds only those, and
+    # the member kernel pads each member to the domain's node count.
+    member_nodes: object = eqx.field(static=True, default=None)
     member_params: Mapping[str, "jax.Array"] = eqx.field(default_factory=dict)
     # runtime (non-static) tuple of flux callables for the member
     # FluxBCs.  Parallel to ``member_params`` — kept as pytree leaves so AD /
@@ -139,9 +212,11 @@ class Family(eqx.Module):
         graphs: tuple = (),
         graph_exchanges: tuple = (),
         stencil_radius: int | None = None,
+        member_nodes=None,
     ):
         validate_operator_factory(operator_factory)
         self.stencil_radius = _validate_stencil_radius(name, stencil_radius)
+        self.member_nodes = _validate_member_nodes(name, count, domain, member_nodes)
         if not isinstance(name, str) or not name.strip():
             raise ValueError("family name must be a non-empty string.")
         self.name = name
@@ -270,5 +345,42 @@ class Family(eqx.Module):
 
     @property
     def state_size(self) -> int:
-        """Total state size of the population: ``count * member_state_size``."""
-        return int(self.count) * self.member_state_size
+        """Total state size of the population (the sum of the member sizes)."""
+        if self.member_nodes is None:
+            return int(self.count) * self.member_state_size
+        return int(self.member_sizes.sum())
+
+    @property
+    def is_padded(self) -> bool:
+        """Whether members have their own node counts (``member_nodes`` is set)."""
+        return self.member_nodes is not None
+
+    @property
+    def member_sizes(self) -> np.ndarray:
+        """State size of each member, shape ``(count,)``."""
+        return _slab_maps(*self._slab_key())[2]
+
+    @property
+    def member_offsets(self) -> np.ndarray:
+        """Offset of each member's block from the family's first unknown, shape ``(count,)``."""
+        return _slab_maps(*self._slab_key())[3]
+
+    def padded_slab(self) -> tuple[np.ndarray, np.ndarray]:
+        """The map from the padded member slab to the family's state.
+
+        Returns:
+            ``(index, real)``, both of shape ``(count, member_state_size)``.
+            ``index[i, k]`` is the state entry, counted from the family's first
+            unknown, that padded entry ``k`` of member ``i`` reads: itself for a
+            real node, the field's last real node for a padded one. ``real`` is
+            ``True`` on real entries. A uniform family has ``index[i, k] = i *
+            member_state_size + k`` and ``real`` everywhere.
+        """
+        index, real, _sizes, _offsets = _slab_maps(*self._slab_key())
+        return index, real
+
+    def _slab_key(self) -> tuple:
+        n_max = int(getattr(self.domain, "num_nodes", 0) or 0)
+        sizes = tuple(int(getattr(v, "size", 0) or 0) for v in self.member_variables)
+        nodes = self.member_nodes if self.member_nodes is not None else None
+        return (int(self.count), n_max, sizes, nodes)

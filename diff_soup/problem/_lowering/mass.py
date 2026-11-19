@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from diff_soup.problem._ir.equation_set import EquationSet
 
@@ -184,7 +185,14 @@ def _mass_diagonal(eqset: EquationSet, layout: _BlockLayout) -> jax.Array:
                 member_mass_parts.append(jnp.zeros((var.size,), dtype=w_member.dtype))
         # One member's blocked mass slab, tiled MEMBER-MAJOR across the population.
         member_mass = jnp.concatenate(member_mass_parts)
-        parts.append(jnp.tile(member_mass, fam.count))
+        if getattr(fam, "is_padded", False):
+            # Members have their own node counts: keep each member's real
+            # entries of the padded slab (a member is a prefix of the domain).
+            _index, real = fam.padded_slab()
+            tiled = jnp.tile(member_mass, fam.count)
+            parts.append(tiled[np.flatnonzero(real.reshape(-1))])
+        else:
+            parts.append(jnp.tile(member_mass, fam.count))
 
     scales = getattr(eqset, "scales", None)
     time_ref = float(getattr(scales, "time_ref", 1.0)) if scales is not None else 1.0
