@@ -176,22 +176,25 @@ def member_schur_plan(
         topology: The pattern of the operator; its Dirichlet rows are honoured.
         elimination: The chain kernel, one of ``"thomas"``, ``"cyclic"``, ``"native"``.
 
+    A topology larger than the layout (a derivative system that appends unknowns to the
+    state) keeps the layout's members, and its trailing unknowns are shared. A topology
+    smaller than the layout is another system in another numbering (the algebraic rows of a
+    starting-state solve): no member is eliminated and the whole operator is the shared system.
+
     Returns:
         The plan: ``n``, ``n_shared``, ``shared`` (the shared unknowns, ascending),
         ``shared_topology`` (the pattern the shared values follow) and the index maps.
 
     Raises:
-        ConfigurationError: Naming the mismatch: another size, an entry that joins
-            sites of two members, or sites of one member more than one apart.
+        ConfigurationError: Naming the mismatch: an entry that joins sites of two members,
+            or sites of one member more than one apart.
     """
     if elimination not in ELIMINATIONS:
         raise ConfigurationError(f"elimination must be one of {ELIMINATIONS}; got {elimination!r}.")
-    n, b, nm = layout.n_dofs, layout.block_size, layout.n_members
-    if int(topology.n_dofs) != n:
-        raise ConfigurationError(
-            f"MemberSchur is bound to a layout of size {n} but received a topology of size "
-            f"{int(topology.n_dofs)}; build a MemberSchurLayout for this system."
-        )
+    b, nm = layout.block_size, layout.n_members
+    n = int(topology.n_dofs)
+    if n < layout.n_dofs:
+        return _whole_plan(topology, elimination)
     rows = np.asarray(topology.rows, dtype=np.int64)
     cols = np.asarray(topology.cols, dtype=np.int64)
     lengths = np.asarray(layout.lengths, dtype=np.int64)
@@ -253,6 +256,7 @@ def member_schur_plan(
 
     plan = _Plan()
     plan.elimination = elimination
+    plan.whole = False
     plan.n, plan.b, plan.nm, plan.n_max, plan.k = n, b, nm, n_max, k_max
     plan.width, plan.n_shared = width, ns
     plan.nnz = int(rows.size)
@@ -389,6 +393,34 @@ def member_schur_plan(
     return plan
 
 
+def _whole_plan(topology: SparseTopology, elimination: str) -> _Plan:
+    """The plan of an operator none of whose unknowns is eliminated: all of it is shared."""
+    n = int(topology.n_dofs)
+    rows = np.asarray(topology.rows, dtype=np.int64)
+    cols = np.asarray(topology.cols, dtype=np.int64)
+    plan = _Plan()
+    plan.elimination = elimination
+    plan.whole = True
+    plan.n = plan.n_shared = n
+    plan.nm = 0
+    plan.nnz = int(rows.size)
+    plan.shared = index_constant(np.arange(n))
+    mask, diagonal = dirichlet_rows(topology)
+    keep = np.ones((plan.nnz,), np.float64)
+    if mask is not None:
+        keep[mask] = 0.0
+    keep.flags.writeable = False
+    plan.keep, plan.has_bc = keep, mask is not None
+    pattern = np.unique(np.concatenate([rows * max(n, 1) + cols, np.arange(n) * (n + 1)]))
+    plan.nnz_shared = int(pattern.size)
+    plan.shared_topology = SparseTopology(pattern // max(n, 1), pattern % max(n, 1), n_dofs=n)
+    plan.ss_dst = index_constant(np.searchsorted(pattern, rows * max(n, 1) + cols))
+    plan.ss_units = index_constant(
+        np.searchsorted(pattern, diagonal.astype(np.int64) * (n + 1))
+    )
+    return plan
+
+
 class MemberFactor(NamedTuple):
     """The elimination of one lane (absent parts are ``None``)."""
 
@@ -454,10 +486,15 @@ def eliminate(plan: _Plan, values: Array) -> tuple:
         Schur complement on ``plan.shared_topology`` and an ``int32`` status
         (``SINGULAR`` when a member has a negligible or non-finite pivot).
     """
-    nm, n_max, b, k, kc, width = plan.nm, plan.n_max, plan.b, plan.k, plan.kc, plan.width
-    nb = n_max * b
     dtype = values.dtype
     base = _masked(plan, values)
+    if plan.whole:
+        shared = _scatter(plan.nnz_shared, plan.ss_dst, base)
+        if plan.ss_units.size:
+            shared = shared.at[plan.ss_units].add(jnp.ones((), dtype))
+        return (), shared, jnp.asarray(int(SolveStatus.SUCCESS), jnp.int32)
+    nm, n_max, b, k, kc, width = plan.nm, plan.n_max, plan.b, plan.k, plan.kc, plan.width
+    nb = n_max * b
     blocks = _scatter(3 * nm * nb * b, plan.tt_dst, base[plan.tt_src])
     if plan.tt_units.size:
         blocks = blocks.at[plan.tt_units].add(jnp.ones((), dtype))
@@ -509,6 +546,8 @@ def reduce_rhs(plan: _Plan, values: Array, tree: MemberFactor, columns: Array, t
     Returns:
         ``(carry, rhs_shared)``: what [back_substitute][] needs, and ``(n_shared, m)``.
     """
+    if plan.whole:
+        return (), columns
     nm, width, ns = plan.nm, plan.width, plan.n_shared
     m = columns.shape[1]
     base = _masked(plan, values)
@@ -530,6 +569,8 @@ def back_substitute(
     plan: _Plan, values: Array, tree: MemberFactor, carry: Array, x_shared: Array, transpose: bool
 ) -> Array:
     """The solution columns ``(n, m)`` from the shared solution ``(n_shared, m)``."""
+    if plan.whole:
+        return x_shared
     nm, width, n = plan.nm, plan.width, plan.n
     m = x_shared.shape[1]
     if not transpose:
