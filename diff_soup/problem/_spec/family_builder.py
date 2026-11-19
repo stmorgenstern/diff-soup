@@ -65,6 +65,8 @@ _SOFT_COUNT_CEILING = 256
 
 # Reserved member-view attribute exposing the vmap row index.
 _MEMBER_INDEX = "member_index"
+# Reserved member-view attribute exposing a padded family member's node count.
+_MEMBER_NODES = "member_nodes"
 
 
 @dataclass(frozen=True)
@@ -173,7 +175,12 @@ class _MemberView:
             return row.get(_MEMBER_INDEX, jnp.asarray(0))
         if name in row:
             return row[name]
-        declared = sorted(k for k in row if k != _MEMBER_INDEX)
+        if name == _MEMBER_NODES:
+            raise AttributeError(
+                "m.member_nodes exists only in a family declared with nodes=; "
+                "read the member size from the field's length."
+            )
+        declared = sorted(k for k in row if k not in (_MEMBER_INDEX, _MEMBER_NODES))
         raise AttributeError(
             f"family member view has no param {name!r}; declared params: {declared}"
         )
@@ -625,8 +632,11 @@ class _FamilyHandle:
         operators: Any = None,
         buckets: Optional[tuple] = None,
         stencil_radius: Optional[int] = None,
+        nodes: Optional[tuple] = None,
     ) -> None:
         self._spec = spec
+        # Per-member node counts of a padded family (``None`` otherwise).
+        self._nodes = nodes
         self.name = str(name)
         self.count = int(count)
         # Declared per-member Jacobian reach; ``None`` keeps the member
@@ -1178,6 +1188,7 @@ class _FamilyHandle:
                 graphs=tuple(self._graphs.values()),
                 graph_exchanges=tuple(self._graph_exchanges),
                 stencil_radius=self._stencil_radius,
+                member_nodes=self._nodes,
             )
             self._spec._families[node_name] = fam
             start += cnt
@@ -1328,6 +1339,7 @@ def make_family(
     residual_scale: Optional[dict[str, float]] = None,
     operators: Any = None,
     stencil_radius: Optional[int] = None,
+    nodes: Any = None,
 ) -> _FamilyHandle:
     """Build a [_FamilyHandle][diff_soup.problem._spec.family_builder._FamilyHandle] and register its [Family][diff_soup.problem._ir.family.Family] IR node(s).
 
@@ -1378,8 +1390,22 @@ def make_family(
         raise ValueError(f"duplicate family name {name!r}")
     buckets = None
     if isinstance(domain, (list, tuple)):
+        if nodes is not None:
+            raise ValueError(
+                f"family {name!r}: give one member domain with nodes=, not a "
+                "sequence of domains; member i is the first nodes[i] nodes of that domain."
+            )
         buckets = _bucketize_domains(name, int(count), domain)
         domain = buckets[0][0]
+    if nodes is not None:
+        from diff_soup.problem._ir.family import _validate_member_nodes
+
+        nodes = _validate_member_nodes(name, int(count), domain, nodes)
+        if any(str(p) == _MEMBER_NODES for p in (params or {})):
+            raise ValueError(
+                f"family {name!r}: param name {_MEMBER_NODES!r} is reserved for "
+                "the member's node count in a family declared with nodes=."
+            )
     if count > _SOFT_COUNT_CEILING:
         warn_user(
             f"family {name!r}: count={count} exceeds the soft ceiling of "
@@ -1399,4 +1425,5 @@ def make_family(
         operators=operators,
         buckets=buckets,
         stencil_radius=stencil_radius,
+        nodes=nodes,
     )

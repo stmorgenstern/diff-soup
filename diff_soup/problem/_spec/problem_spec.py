@@ -697,6 +697,7 @@ class ProblemSpec:
         residual_scale: Optional[dict[str, float]] = None,
         operators: Any = None,
         stencil_radius: Optional[int] = None,
+        nodes: Any = None,
     ):
         """Declare a population of `count` identical members that differ only in parameter values.
 
@@ -712,6 +713,7 @@ class ProblemSpec:
             residual_scale: Residual divisor of each member field, keyed by field name.
             operators: Operator-bank class or top-level named function of the domain, or `None` for the built-in operators.
             stencil_radius: Jacobian reach of a member kernel in cells per axis, or `None` for one cell.
+            nodes: Node count of each member, `count` integers, or `None` for the domain's own. Member `i` is the first `nodes[i]` nodes of `domain`, so all members share its spacing; the state holds only those nodes, and one kernel serves every member.
 
         Returns:
             The family, whose methods declare the member fields, equations and boundary conditions.
@@ -728,6 +730,7 @@ class ProblemSpec:
             residual_scale=residual_scale,
             operators=operators,
             stencil_radius=stencil_radius,
+            nodes=nodes,
         )
 
     # ------------------------------------------------------------------ equation
@@ -1060,6 +1063,7 @@ class ProblemSpec:
             n_member_dof=n_member_dof,
             reduce=Sum() if injective else reduce,
             injective=injective,
+            member_columns=self._family_member_columns(source, member_var),
         )
         if injective:
             self._guard_scatter_collision(at_indices)
@@ -1187,6 +1191,7 @@ class ProblemSpec:
             n_member_dof=n_member_dof,
             reduce=Sum() if injective else reduce,
             injective=injective,
+            member_columns=self._family_member_columns(proj, member_var),
         )
         if injective:
             self._guard_scatter_collision(at_indices)
@@ -1270,6 +1275,24 @@ class ProblemSpec:
         n_member_dof = int(fam.member_state_size)
         member_surface_dof = int(member_var.size) - 1
         return member_var, n_member_dof, member_surface_dof
+
+    def _family_member_columns(self, proj: "_FieldProjection", member_var):
+        """Per-member surface columns of a padded family's field, or ``None``.
+
+        Counted from the field's block offset (member 0's first node of the
+        field); each member's surface is its own last real node.
+        """
+        fam = self._ensure_family_synced(proj.family_name, self._families[proj.family_name])
+        if not getattr(fam, "is_padded", False):
+            return None
+        index, _real = fam.padded_slab()
+        loc = 0
+        for v in fam.member_variables:
+            if v.name == member_var.name:
+                break
+            loc += int(v.size)
+        surface = index[:, loc + int(member_var.size) - 1] - index[0, loc]
+        return tuple(int(c) for c in surface)
 
     def _ensure_family_synced(self, name: str, fam: Any) -> Any:
         """Re-materialise a lazily-dirty Family node before reading it.
