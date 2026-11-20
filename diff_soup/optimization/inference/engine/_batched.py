@@ -63,7 +63,7 @@ import dataclasses
 import time
 import types
 import weakref
-from collections.abc import Callable, Hashable, Iterable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from numbers import Integral, Real
 from typing import Any, NamedTuple
 
@@ -202,6 +202,10 @@ class BucketLanes:
             ``LaneInputs.dt0``.
         state_sizes: Per lane, the size of its initial state; empty when
             not recorded.
+        link_leaves: Per link of the bucket's driven lanes, the positions in
+            ``leaves`` of its values and its tangent
+            ([LinkInputs][diff_soup.optimization.inference.engine._kernel.LinkInputs]);
+            empty for a bucket of lanes without links.
 
     The numbers of the plan alone ([lane_metadata][diff_soup.optimization.inference.engine._batched.lane_metadata])
     carry no inputs: ``program`` and ``tree`` are ``None``, ``leaves`` is
@@ -219,6 +223,7 @@ class BucketLanes:
     dtype: np.dtype
     dt0_leaf: int
     state_sizes: tuple = ()
+    link_leaves: tuple = ()
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -300,6 +305,7 @@ def batched_lanes(plan: Plan, joint: Any) -> BatchedLanes:
             frames=bucket.frames,
             segments=bucket.segments,
             device=plan.device,
+            links=plan.links,
         )
         if tuple(group.children) != tuple(bucket.children):
             raise RuntimeError(
@@ -327,6 +333,10 @@ def batched_lanes(plan: Plan, joint: Any) -> BatchedLanes:
                 dtype=np.dtype(group.lanes.t0.dtype),
                 dt0_leaf=int(dt0_leaf),
                 state_sizes=(int(np.asarray(group.lanes.y0)[0].size),) * len(bucket.children),
+                link_leaves=tuple(
+                    (_position(leaves, link.values), _position(leaves, link.tangent))
+                    for link in group.lanes.links
+                ),
             )
         )
         for position, (lane, child) in enumerate(zip(bucket.lanes, bucket.children)):
@@ -344,6 +354,11 @@ def batched_lanes(plan: Plan, joint: Any) -> BatchedLanes:
         local_widths=layout.node_widths,
         n_shared=layout.shared,
     )
+
+
+def _position(leaves: list, leaf: Any) -> int:
+    """The position of the array ``leaf`` among ``leaves``, found by identity."""
+    return next(position for position, held in enumerate(leaves) if held is leaf)
 
 
 def replanned_lanes(lanes: BatchedLanes, plan: Plan) -> BatchedLanes:
@@ -888,6 +903,7 @@ def _run_bucket(
     keep_inputs: bool = True,
     keep: np.ndarray | None = None,
     keys: np.ndarray | None = None,
+    links: Sequence | None = None,
 ) -> tuple:
     """Evaluate the units of one bucket; its call outputs, its wall seconds and its batch.
 
@@ -911,7 +927,9 @@ def _run_bucket(
     (one per entry of ``members``; ``None`` takes ``members``), and which of its
     own units solved. Lanes cut by member (``cut_by_member``) fill the calls of
     their ``blocks`` program member by member, each member of each entry of
-    ``members`` in calls of its own.
+    ``members`` in calls of its own. ``links`` gives, per link of a bucket of
+    driven lanes, its values and tangents of shape (members, lanes of the
+    bucket, ...), which every call sends along for its units.
 
     Returns:
         ``(outputs, seconds, batch, kept)``: ``kept`` holds ``(call, own, solved)``
@@ -973,6 +991,8 @@ def _run_bucket(
             if call_first.tobytes() != configured[chosen].tobytes():
                 inputs = list(inputs)
                 inputs[entry.dt0_leaf] = jax.device_put(call_first, device)
+            if links is not None:
+                inputs = _with_link_numbers(entry, inputs, links, row[call], lane[call], device)
             output = program.compiled(
                 jax.device_put(narrow[call], device),
                 jax.tree_util.tree_unflatten(program.lanes_tree, inputs),
@@ -1041,6 +1061,7 @@ def _run_frozen(
     *,
     keep: np.ndarray | None = None,
     keys: np.ndarray | None = None,
+    links: Sequence | None = None,
 ) -> tuple:
     """Evaluate the units of one bucket in the ``frozen`` mode, each on its kept Jacobian.
 
@@ -1051,7 +1072,8 @@ def _run_frozen(
     each requested unit at its point and first step, every other slot at the
     point and first step it was kept with, its result dropped. The order of
     the units and the step memory play no part, and the inputs kept for other
-    modes are left as they are.
+    modes are left as they are. A requested unit of a driven lane takes its
+    link values from ``links``; every other slot keeps those it was kept with.
 
     Raises:
         ValueError: If a requested unit has no kept Jacobian.
@@ -1098,6 +1120,10 @@ def _run_frozen(
             if call_first.tobytes() != call.first.tobytes():
                 inputs = list(inputs)
                 inputs[entry.dt0_leaf] = jax.device_put(call_first, device)
+            if links is not None:
+                inputs = _with_link_numbers(
+                    entry, inputs, links, unit_row[units], unit_lane[units], device, slots
+                )
             output = program.compiled(
                 jax.device_put(call_narrow, device),
                 jax.tree_util.tree_unflatten(program.lanes_tree, inputs),
@@ -1129,6 +1155,113 @@ def _run_frozen(
             np.asarray(own.work.trial_steps),
         )
     return tuple(outputs), seconds, Batch(units=count, width=width, calls=len(pending))
+
+
+def _with_link_numbers(
+    entry: BucketLanes,
+    inputs: Sequence,
+    links: Sequence,
+    rows: np.ndarray,
+    columns: np.ndarray,
+    device: Any,
+    slots: np.ndarray | None = None,
+) -> list:
+    """A call's lane inputs with the link values of its units ``(rows, columns)``.
+
+    Without ``slots`` the units fill the call in order; with ``slots``, the
+    call's other slots keep the link values its inputs hold.
+    """
+    inputs = list(inputs)
+    for (values_leaf, tangent_leaf), (values, tangents) in zip(entry.link_leaves, links):
+        for leaf, given in ((values_leaf, values), (tangent_leaf, tangents)):
+            numbers = np.asarray(given)[rows, columns].astype(entry.leaves[leaf].dtype)
+            if slots is not None:
+                held = np.array(inputs[leaf], copy=True)
+                held[slots] = numbers
+                numbers = held
+            inputs[leaf] = jax.device_put(numbers, device)
+    return inputs
+
+
+def _bucket_links(
+    lanes: BatchedLanes, index: int, links: Mapping | None, chosen: Sequence, columns: np.ndarray
+) -> tuple | None:
+    """Per link of bucket ``index``, its values and tangents for the request's ``columns``.
+
+    ``links`` maps a driven lane's id to its links' ``(values, tangents)``, one
+    row per member that takes part; a ``tangents`` of ``None`` sends zeros.
+    Returns arrays of shape (members, columns, ...), or ``None`` for a bucket
+    of lanes without links.
+
+    Raises:
+        ValueError: If a driven lane has no values: a driven lane is evaluated
+            through its lowered study, which solves its sources first.
+    """
+    entry = lanes.buckets[index]
+    if not entry.link_leaves:
+        return None
+    ids = [chosen[int(column)] for column in columns]
+    given = [None if links is None else links.get(lane) for lane in ids]
+    if any(item is None for item in given):
+        lane = ids[[item is None for item in given].index(True)]
+        raise ValueError(
+            f"experiment {lane!r} is driven by a link, and the request gives it no values of its "
+            "source's output; evaluate it through LoweredStudy.evaluate, which solves its "
+            "sources first."
+        )
+    out = []
+    for number, (_values_leaf, tangent_leaf) in enumerate(entry.link_leaves):
+        values = np.stack([np.asarray(item[number][0]) for item in given], axis=1)
+        tangent_shape = entry.leaves[tangent_leaf].shape[1:]
+        tangents = np.stack(
+            [
+                np.zeros((values.shape[0],) + tangent_shape)
+                if item[number][1] is None
+                else np.asarray(item[number][1])
+                for item in given
+            ],
+            axis=1,
+        )
+        out.append((values, tangents))
+    return tuple(out)
+
+
+def _outputs(calls: Sequence, shape: tuple, chosen: Sequence) -> tuple:
+    """The outputs of the source units of ``calls``, and ``calls`` without them.
+
+    Returns ``(outputs, calls)``: ``outputs`` maps each source lane's id to its
+    outputs of shape (members, outputs) and their derivative of shape
+    (members, outputs, narrow width), ``None`` in a mode that forms none; a
+    unit no call holds has zeros. ``None`` when no call returned outputs.
+    """
+    found: dict = {}
+    for call in calls:
+        output = call.output
+        if output.outputs is None:
+            continue
+        given = np.asarray(output.outputs)
+        slopes = None if output.output_tangents is None else np.asarray(output.output_tangents)
+        for unit, (row, column) in enumerate(zip(call.rows, call.columns)):
+            lane = chosen[int(column)]
+            held = found.get(lane)
+            if held is None:
+                held = (
+                    np.zeros((shape[0],) + given.shape[1:], dtype=given.dtype),
+                    None
+                    if slopes is None
+                    else np.zeros((shape[0],) + slopes.shape[1:], dtype=slopes.dtype),
+                )
+                found[lane] = held
+            held[0][int(row)] = given[unit]
+            if slopes is not None:
+                held[1][int(row)] = slopes[unit]
+    if not found:
+        return None, calls
+    stripped = tuple(
+        call._replace(output=dataclasses.replace(call.output, outputs=None, output_tangents=None))
+        for call in calls
+    )
+    return types.MappingProxyType(found), stripped
 
 
 def _keep(lanes: BatchedLanes, kept: list, replaced: set | None) -> None:
@@ -1202,6 +1335,7 @@ def evaluate(
     retry_kinds: Iterable[str] = (),
     retry_first_step_factors: Iterable[Real] = (),
     member_keys: Any = None,
+    links: Mapping | None = None,
 ) -> Results:
     """Evaluate a request through the compiled programs of a study.
 
@@ -1236,12 +1370,18 @@ def evaluate(
             Jacobians are known by; ``None`` takes the members' own. A process
             that evaluates one group of a request's members gives their
             numbers in the request.
+        links: Per requested lane driven by a link, by its id, per link
+            ``(values, tangents)`` of its source's output with one row per
+            member that takes part (``tangents`` ``None`` sends zeros), as
+            [evaluate][diff_soup.optimization.inference.engine._links.evaluate] gives
+            them; ``None`` for a request of no driven lane.
 
     Returns:
         The [Results][diff_soup.optimization.inference.engine._result.Results], with the
         rung that produced each unit's result in ``status.rung``, one record
-        per unit solved again in ``retries``, and per bucket touched the
-        units, width and calls of its first pass in ``batches``.
+        per unit solved again in ``retries``, per bucket touched the units,
+        width and calls of its first pass in ``batches``, and the outputs of
+        the requested source lanes in ``outputs``.
 
     Raises:
         ValueError: If the points do not fit the study, a lane is not an
@@ -1327,6 +1467,9 @@ def evaluate(
             keep = None if present is None else present[np.ix_(rows, columns)]
             if keep is not None and not np.any(keep):
                 continue
+            numbers = _bucket_links(lanes, index, links, chosen, columns)
+            if numbers is not None:
+                numbers = tuple((values[rows], tangents[rows]) for values, tangents in numbers)
             if request.mode == "frozen":
                 out, walls[index], batches[index] = _run_frozen(
                     lanes,
@@ -1338,6 +1481,7 @@ def evaluate(
                     first[np.ix_(rows, columns)],
                     keep=keep,
                     keys=keys[rows],
+                    links=numbers,
                 )
             else:
                 out, walls[index], batches[index], held = _run_bucket(
@@ -1353,6 +1497,7 @@ def evaluate(
                     keep_inputs=not again,
                     keep=keep,
                     keys=keys[rows],
+                    links=numbers,
                 )
                 kept.extend((index, call) for call in held)
             outputs.extend(call._replace(rows=rows[call.rows]) for call in out)
@@ -1411,7 +1556,8 @@ def evaluate(
         }
         for (row, column), (rungs_tried, kinds, walls_tried) in sorted(tried.items())
     )
-    return assemble(
+    outputs, calls = _outputs(calls, shape, chosen)
+    results = assemble(
         request.mode,
         chosen,
         members,
@@ -1423,6 +1569,7 @@ def evaluate(
         batches=batches,
         present=present,
     )
+    return results if outputs is None else dataclasses.replace(results, outputs=outputs)
 
 
 __all__ = [

@@ -57,6 +57,18 @@ the lane reads exactly as it reads a single solve, and its result also holds
 the time at which each segment ended. The modes, targets and durations of the
 segments are numbers of the lane, so lanes whose schedules have one length
 share one compiled program.
+
+A lane may produce outputs for other lanes, and a lane may be driven by them
+([Link][diff_soup.optimization.inference.Link]). A source lane also returns its outputs,
+flat, in every mode but ``gradient`` in reverse mode and ``hessian``; in the ``blocks``
+mode, and the ``gradient`` mode in forward mode, it returns their derivative in
+its narrow coordinates from the same forward pass. A driven lane takes, per
+link, the values of the source's output and their derivative as numbers, and
+sets the values of its signal to ``values + tangent (x - x0)``, ``x`` the
+entries of its narrow point at the source's coordinates and ``x0`` their value
+at the point: the value is the solve on the source's output, and the one
+``jax.jacfwd`` of the ``blocks`` mode carries the source's coordinates by the
+chain rule.
 """
 
 from __future__ import annotations
@@ -121,6 +133,11 @@ class LaneProgram:
             experiment resolves for reverse mode. ``None`` when that gradient
             cannot be differentiated forward, and then the program has no
             ``hessian`` mode.
+        outputs: Per output a source lane produces for other lanes,
+            ``observe(state, t=, theta=)`` reading one saved state; empty for
+            a lane that drives none.
+        links: Per link of a driven lane, the handle of the signal function
+            whose values the link sets; empty for a lane without links.
     """
 
     problem: Any
@@ -131,6 +148,8 @@ class LaneProgram:
     point_width: int
     reverse: bool = False
     reverse_solver: Any = None
+    outputs: tuple = ()
+    links: tuple = ()
 
 
 class StreamInputs(eqx.Module):
@@ -157,6 +176,25 @@ class StreamInputs(eqx.Module):
     target: Array
     weight: Array
     likelihood: Any = None
+
+
+class LinkInputs(eqx.Module):
+    """The numbers of one link of a driven lane.
+
+    Attributes:
+        values: The source's output at the point, in the shape of the signal's
+            ``values`` array.
+        tangent: Its derivative in the source's narrow coordinates, of shape
+            ``values.shape + (source width,)``; zeros in a mode that forms no
+            derivative.
+        columns: Per narrow coordinate of the source, its position in this
+            lane's narrow point; a coordinate this lane does not read has a
+            zero column of ``tangent``.
+    """
+
+    values: Array
+    tangent: Array
+    columns: Array
 
 
 class LaneInputs(eqx.Module):
@@ -186,6 +224,11 @@ class LaneInputs(eqx.Module):
             segment capacity of its program, or ``None`` for a lane solved over
             its span in one solve. The lanes of one batch either all carry a
             schedule of one capacity or none does.
+        outputs: Per output of a source lane, the index of each of its times
+            in ``times``; empty for a lane that drives none.
+        links: Per link of a driven lane, its
+            [LinkInputs][diff_soup.optimization.inference.engine._kernel.LinkInputs];
+            empty for a lane without links.
     """
 
     columns: Array
@@ -197,6 +240,8 @@ class LaneInputs(eqx.Module):
     streams: tuple
     dt0: Array
     schedule: Optional[ScheduleArrays] = None
+    outputs: tuple = ()
+    links: tuple = ()
 
 
 class LaneWork(eqx.Module):
@@ -251,6 +296,12 @@ class LaneResult(eqx.Module):
             shape (rows, narrow width), zero for a failed lane
             (``KEEPING_BLOCKS`` only). It stays on the device: the batched
             backend keeps it and never returns it.
+        outputs: For a source lane, its outputs one after another, flat; zero
+            for a failed lane. ``None`` for any other lane, and in the
+            ``hessian`` mode and the ``gradient`` mode in reverse mode.
+        output_tangents: The derivative of ``outputs`` in narrow coordinates,
+            of shape (outputs, narrow width), zero for a failed lane
+            (``blocks``, and ``gradient`` in forward mode). ``None`` otherwise.
     """
 
     status: LaneStatus
@@ -263,6 +314,8 @@ class LaneResult(eqx.Module):
     ends: Optional[Array] = None
     end_sensitivity: Optional[Array] = None
     jacobian: Optional[Array] = None
+    outputs: Optional[Array] = None
+    output_tangents: Optional[Array] = None
 
 
 def public_mode(mode: str) -> str:
@@ -318,8 +371,35 @@ def _end_sensitivity(ends: Optional[Array], point: Array) -> Optional[Array]:
     return jnp.zeros(ends.shape + point.shape, dtype=point.dtype)
 
 
+def _with_links(program: LaneProgram, point: Array, lane: LaneInputs, theta: PyTree) -> PyTree:
+    """``theta`` with the values of every linked signal set from the lane's links.
+
+    The values are ``values + tangent (x - x0)``, ``x`` the lane's narrow point
+    at the source's coordinates and ``x0`` the same entries held constant: equal
+    to ``values`` at the point, with the derivative ``tangent`` in ``x``.
+    """
+    from diff_soup.problem._registry import theta_replace
+
+    replaced = {}
+    for handle, link in zip(program.links, lane.links):
+        moved = point[link.columns]
+        step = moved - jax.lax.stop_gradient(moved)
+        replaced[handle] = link.values + jnp.tensordot(link.tangent, step, axes=1)
+    return theta_replace(theta, replaced, caller="Link")
+
+
 def _solve(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     """Solve one lane and return its residual rows and what describes the solve.
+
+    As [_solve_lane][diff_soup.optimization.inference.engine._kernel._solve_lane]
+    without the lane's outputs.
+    """
+    rows, _outputs, aux = _solve_lane(program, point, lane)
+    return rows, aux
+
+
+def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
+    """Solve one lane and return its residual rows, its outputs and what describes the solve.
 
     A lane without a schedule is one solve over ``(t0, t1)``; a lane with one
     runs its segments in order through
@@ -331,10 +411,16 @@ def _solve(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     demands it restarts at order one from the carried step. Every other
     segment starts afresh from the lane's ``dt0``.
 
-    Returns ``(rows, aux)`` with ``rows`` the flat whitened residual (per
-    stream its weighted residual or the least-squares rows of its likelihood
-    object), zero where a frame is not observed and zero everywhere for a
-    failed lane, and
+    A driven lane's linked signals take their values from its links
+    (``_with_links``) before the solve. A source lane reads each output at its
+    times from the same solution as its streams; an output time the solve did
+    not reach, or an output that is not finite, fails the lane.
+
+    Returns ``(rows, outputs, aux)`` with ``rows`` the flat whitened residual
+    (per stream its weighted residual or the least-squares rows of its
+    likelihood object), zero where a frame is not observed and zero everywhere
+    for a failed lane, ``outputs`` the lane's outputs one after another, flat
+    and zero for a failed lane (``None`` for a lane that drives none), and
     ``aux = (row_count, status, work, predictions, ends)``, with ``ends`` the
     end time of each segment, or ``None`` for a lane without a schedule.
     """
@@ -343,6 +429,8 @@ def _solve(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
 
     flat = jnp.zeros((program.point_width,), dtype=point.dtype).at[lane.columns].set(point)
     theta = eqx.combine(program.unflatten(flat), lane.frozen)
+    if program.links:
+        theta = _with_links(program, point, lane, theta)
     if lane.schedule is None:
         solution = pdesolve(
             program.problem,
@@ -406,12 +494,27 @@ def _solve(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     flat_rows = jnp.concatenate(rows) if rows else jnp.zeros((0,), dtype=point.dtype)
 
     not_finite = jnp.logical_not(jnp.all(jnp.isfinite(jax.lax.stop_gradient(flat_rows))))
+    outputs = None
+    if program.outputs:
+        pieces = []
+        for observe, frame in zip(program.outputs, lane.outputs):
+            values = jax.vmap(lambda state, t, observe=observe: observe(state, t=t, theta=theta))(
+                filled[frame], lane.times[frame]
+            )
+            pieces.append(jnp.reshape(values, (-1,)))
+            missing = missing | jnp.any(jnp.logical_not(valid[frame]))
+        outputs = jnp.concatenate(pieces)
+        not_finite = not_finite | jnp.logical_not(
+            jnp.all(jnp.isfinite(jax.lax.stop_gradient(outputs)))
+        )
     status = lane_status(solution, sample_missing=missing, not_finite=not_finite)
     flat_rows = jnp.where(status.failed, 0.0, flat_rows)
+    if outputs is not None:
+        outputs = jnp.where(status.failed, 0.0, outputs)
     predictions = tuple(
         jax.lax.stop_gradient(jnp.where(status.failed, 0.0, value)) for value in predictions
     )
-    return flat_rows, (count, status, _work(solution, lane.dt0.dtype), predictions, ends)
+    return flat_rows, outputs, (count, status, _work(solution, lane.dt0.dtype), predictions, ends)
 
 
 def _zero_where_failed(status: LaneStatus, value: Array) -> Array:
@@ -420,7 +523,7 @@ def _zero_where_failed(status: LaneStatus, value: Array) -> Array:
 
 def lane_value(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneResult:
     """The cost of one lane."""
-    rows, (count, status, work, _predictions, ends) = _solve(program, point, lane)
+    rows, outputs, (count, status, work, _predictions, ends) = _solve_lane(program, point, lane)
     return LaneResult(
         status=status,
         cost=0.5 * rows @ rows,
@@ -430,6 +533,7 @@ def lane_value(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneResu
         observables=None,
         work=work,
         ends=ends,
+        outputs=outputs,
     )
 
 
@@ -441,9 +545,18 @@ def _blocks(program: LaneProgram, point: Array, lane: LaneInputs, *, keep: bool)
             "reverse adjoint, which refuses forward-mode differentiation; use a solver "
             "without a reverse adjoint, or ask for the gradient mode."
         )
-    jacobian, (rows, aux) = jax.jacfwd(
-        lambda q: (lambda out: (out[0], out))(_solve(program, q, lane)), has_aux=True
-    )(point)
+    outputs = tangents = None
+    if program.outputs:
+        # The outputs ride the same forward pass as the rows, with their derivative.
+        def evaluate(q):
+            rows, outputs, aux = _solve_lane(program, q, lane)
+            return (rows, outputs), (rows, outputs, aux)
+
+        (jacobian, tangents), (rows, outputs, aux) = jax.jacfwd(evaluate, has_aux=True)(point)
+    else:
+        jacobian, (rows, aux) = jax.jacfwd(
+            lambda q: (lambda out: (out[0], out))(_solve(program, q, lane)), has_aux=True
+        )(point)
     count, status, work, _predictions, ends = aux
     return LaneResult(
         status=status,
@@ -456,6 +569,8 @@ def _blocks(program: LaneProgram, point: Array, lane: LaneInputs, *, keep: bool)
         ends=ends,
         end_sensitivity=_end_sensitivity(ends, point),
         jacobian=_zero_where_failed(status, jacobian) if keep else None,
+        outputs=outputs,
+        output_tangents=None if tangents is None else _zero_where_failed(status, tangents),
     )
 
 
@@ -492,6 +607,8 @@ def lane_gradient(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneR
             work=blocks.work,
             ends=blocks.ends,
             end_sensitivity=blocks.end_sensitivity,
+            outputs=blocks.outputs,
+            output_tangents=blocks.output_tangents,
         )
 
     def cost(q):
@@ -558,7 +675,7 @@ def lane_hessian(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneRe
 
 def lane_observe(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneResult:
     """The predicted observables of one lane at its sample times."""
-    rows, (count, status, work, predictions, ends) = _solve(program, point, lane)
+    rows, outputs, (count, status, work, predictions, ends) = _solve_lane(program, point, lane)
     return LaneResult(
         status=status,
         cost=0.5 * rows @ rows,
@@ -568,6 +685,7 @@ def lane_observe(program: LaneProgram, point: Array, lane: LaneInputs) -> LaneRe
         observables=predictions,
         work=work,
         ends=ends,
+        outputs=outputs,
     )
 
 
@@ -580,7 +698,7 @@ def lane_frozen(
     another point, of shape (rows, narrow width): the one its last ``blocks``
     evaluation returned. At that point the gradient is the ``blocks`` mode's.
     """
-    rows, (count, status, work, _predictions, ends) = _solve(program, point, lane)
+    rows, outputs, (count, status, work, _predictions, ends) = _solve_lane(program, point, lane)
     return LaneResult(
         status=status,
         cost=0.5 * rows @ rows,
@@ -591,6 +709,7 @@ def lane_frozen(
         work=work,
         ends=ends,
         end_sensitivity=_end_sensitivity(ends, point),
+        outputs=outputs,
     )
 
 
@@ -633,6 +752,7 @@ __all__ = [
     "LaneProgram",
     "LaneResult",
     "LaneWork",
+    "LinkInputs",
     "StreamInputs",
     "batched_kernel",
     "lane_blocks",
