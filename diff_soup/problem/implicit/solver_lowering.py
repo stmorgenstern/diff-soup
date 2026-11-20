@@ -20,7 +20,7 @@ from diff_soup.domains.operators.dispatch import _STENCIL_REACH
 from diff_soup.linear import SparseTopology
 from diff_soup.problem._ad.pattern import Pattern
 from diff_soup.problem._ad.tangent_pattern import jacobian_pattern
-from diff_soup.problem._cache import BoundedContentCache
+from diff_soup.problem._cache import BoundedContentCache, initial_capacity
 from diff_soup.problem._ir.derivative_ir import capturing_forms
 from diff_soup.problem._registry import ThetaTable, theta_replace, theta_table, theta_value
 from diff_soup.problem._spec.derivative_expr import current_slopes
@@ -469,7 +469,7 @@ def lower_mass_form(
 # share their static partition, so they share one solver problem, whose
 # callables take every value from ``theta``. Bounded like the lowering cache it
 # follows.
-_IR_SOLVER_PROBLEM_CACHE_CAPACITY = 128
+_IR_SOLVER_PROBLEM_CACHE_CAPACITY = initial_capacity(128)
 _IR_SOLVER_PROBLEMS = BoundedContentCache(capacity=_IR_SOLVER_PROBLEM_CACHE_CAPACITY)
 
 

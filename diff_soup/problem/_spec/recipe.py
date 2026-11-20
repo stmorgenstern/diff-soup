@@ -9,13 +9,14 @@ from collections import OrderedDict
 
 import numpy as np
 
+from diff_soup.problem._cache import initial_capacity
 from diff_soup.problem._registry import register_parameter_handles
 from diff_soup.problem.parameters import parameter_decoder
 
 from .problem_spec import ProblemSpec
 
 #: The input sets a recipe keeps built, the most recently used first to stay.
-_BUILD_MEMO_CAPACITY = 128
+_BUILD_MEMO_CAPACITY = initial_capacity(128)
 
 
 def _input_key(value):
