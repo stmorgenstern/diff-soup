@@ -128,7 +128,10 @@ class StepInfo:
     of that pass. Both are ``None`` for solvers that do not report them. For
     ``TrustRegion`` on the lanes of a lowered study, ``residual_evals`` is the
     number of ``blocks``, ``value`` and ``frozen`` requests so far, the count
-    its ``max_evaluations`` budgets.
+    its ``max_evaluations`` budgets. ``predicted`` is the trust-region model's
+    decrease of the cost for the trial step; ``rho`` is the actual decrease over
+    it. It is ``None`` for a solver that does not report it and for an attempt
+    whose trial has no model decrease.
     """
 
     step: int
@@ -169,6 +172,8 @@ class StepInfo:
     # the point the attempt steps from, and in the nested mode every member's.
     stationarity: Optional[float] = None
     member_stationarity: Optional[np.ndarray] = None
+    # The model's decrease of the cost for the trial step (``rho`` is the actual one over it).
+    predicted: Optional[float] = None
 
 
 @dataclass(frozen=True)

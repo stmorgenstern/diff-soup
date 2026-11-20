@@ -9,6 +9,8 @@ Public exports
 - ``ProblemSpec`` / ``problem`` / ``lower`` — Recipe API builder and the
   lowering entry point; ``ParameterSet`` selects its returned
   parameter/function handles for optimization and UQ.
+- ``set_cache_capacity`` / ``cache_capacity`` — set and read the sizes of the
+  caches of compiled programs.
 - ``EquationSet``, ``LoweredProblem`` — compiled IR roots.
 - ``Constraint``, ``GalvanostaticConstraint``, ``DomainIntegralConstraint``,
   ``ReduceResidualConstraint``, ``BoundaryIntegralConstraint`` — constraint
@@ -28,6 +30,7 @@ Public exports
 
 from diff_soup.domains.boundary_set import BoundarySet, tags
 from diff_soup.problem._ad.tangent_pattern import jacobian_pattern
+from diff_soup.problem._cache_capacity import cache_capacity, set_cache_capacity
 from diff_soup.problem._consistency import InconsistentInitializationError
 from diff_soup.problem._ir import (
     BoundaryIntegralConstraint,
@@ -167,6 +170,9 @@ __all__ = [
     # Default differentiable-parameter pytree accessor
     "default_theta",
     "parameter_gradient",
+    # Sizes of the caches of compiled programs
+    "set_cache_capacity",
+    "cache_capacity",
     # Boundary-set selectors (where a BC / boundary integral applies)
     "BoundarySet",
     "tags",
