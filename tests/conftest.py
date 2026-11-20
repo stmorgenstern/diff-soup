@@ -6,6 +6,7 @@ import gc
 import importlib.util
 import json
 import os
+import shutil
 from collections import Counter
 from pathlib import Path
 
@@ -163,9 +164,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help=(
             "fail, rather than skip, a test whose build capability (requires_cuda, "
             "requires_cudss, requires_klu, requires_superlu) this host does not provide; a "
-            "missing requires_two_devices, requires_three_devices, requires_four_devices or "
-            "requires_two_processes stays an owed skip, since a device count or a process world "
-            "belongs to the launch, not to the build"
+            "missing requires_two_devices, requires_three_devices, requires_four_devices, "
+            "requires_two_processes or requires_mpirun stays an owed skip, since a device count "
+            "or a process world belongs to the launch, not to the build"
         ),
     )
 
@@ -207,6 +208,9 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "requires_two_processes: needs a JAX world of at least two processes"
     )
+    config.addinivalue_line(
+        "markers", "requires_mpirun: needs mpirun and mpi4py to launch a world of processes"
+    )
     if _has("beartype"):
         import jaxtyping
 
@@ -227,6 +231,7 @@ _LAUNCH_CAPABILITIES = frozenset(
         "requires_three_devices",
         "requires_four_devices",
         "requires_two_processes",
+        "requires_mpirun",
     }
 )
 _TIER_SELECTED = pytest.StashKey[bool]()
@@ -280,6 +285,10 @@ def pytest_collection_modifyitems(
         "requires_two_processes": (
             jax.process_count() >= 2,
             f"needs a two-process world, this run has {jax.process_count()} process(es)",
+        ),
+        "requires_mpirun": (
+            shutil.which("mpirun") is not None and _has("mpi4py"),
+            "needs mpirun on PATH and mpi4py importable",
         ),
     }
 
