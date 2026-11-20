@@ -222,3 +222,12 @@ def test_a_linked_study_is_fitted_on_its_lanes_only(recipes, lowered):
         inf.InferenceProblem(linked_study(recipes))
     with pytest.raises(ValueError, match="Fit it on its lanes"):
         inf.optsolve(lowered, inf.LevenbergMarquardt(max_steps=2), diagnostics=False)
+
+
+def test_a_source_moved_by_a_parameter_its_driven_lanes_do_not_read_is_refused(recipes):
+    """With the source's rate one per cell, its output moves with a coordinate no driven lane
+    reads, so the link cannot carry its derivative: the blocks request refuses it."""
+    hierarchy = inf.Hierarchy(levels=("cell",), shared=(recipes.b,), per={"cell": (recipes.a,)})
+    study = ds.lower(inf.Study(linked_study(recipes).experiments, parameters=hierarchy))
+    with pytest.raises(ValueError, match="does not read"):
+        study.gauss_newton_fn(POINT)

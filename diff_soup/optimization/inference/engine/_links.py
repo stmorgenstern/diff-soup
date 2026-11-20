@@ -33,6 +33,7 @@ would without this module.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import types
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any, NamedTuple
@@ -130,7 +131,7 @@ class LinkPlan:
     links: Mapping
     lanes: tuple
 
-    @property
+    @functools.cached_property
     def index(self) -> dict:
         """Every lane id to its index in the lane layout."""
         return {lane: index for index, lane in enumerate(self.lanes)}
@@ -322,7 +323,7 @@ def _part(request: Request, chosen: Sequence, columns: Sequence, units: Any) -> 
     )
 
 
-def _refuse_mode(links: LinkPlan, lanes: Any, mode: str, sources: Any) -> None:
+def _refuse_mode(lanes: Any, mode: str, sources: Sequence) -> None:
     """Refuse a mode in which the driven lanes cannot be evaluated."""
     if mode not in CARRIED + HELD:
         raise ValueError(
@@ -341,9 +342,7 @@ def _refuse_mode(links: LinkPlan, lanes: Any, mode: str, sources: Any) -> None:
                 )
 
 
-def _source_numbers(
-    links: LinkPlan, mode: str, source: Hashable, covered: np.ndarray, parts: Sequence
-) -> tuple:
+def _source_numbers(mode: str, source: Hashable, covered: np.ndarray, parts: Sequence) -> tuple:
     """A source's outputs, their derivative and its status per member, from the phase-one results.
 
     ``parts`` is ``(first, extra)``: the results of the request's own lanes
@@ -433,7 +432,7 @@ def evaluate(
             wanted |= mask[:, column]
     order = {lane: index for index, lane in enumerate(lanes.lane_ids)}
     sources = sorted(needed, key=order.__getitem__)
-    _refuse_mode(links, lanes, mode, sources)
+    _refuse_mode(lanes, mode, sources)
 
     # Phase one: the requested lanes no link drives, and the sources the request leaves out.
     others = [column for column in range(shape[1]) if column not in set(driven)]
@@ -469,8 +468,7 @@ def evaluate(
 
     # Phase two: the driven lanes, each with its sources' outputs at its member's point.
     numbers = {
-        source: _source_numbers(links, mode, source, covered[source], (first, extra))
-        for source in sources
+        source: _source_numbers(mode, source, covered[source], (first, extra)) for source in sources
     }
     failed = np.zeros(shape, dtype=np.int64)
     values: dict = {}
