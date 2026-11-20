@@ -1,9 +1,9 @@
 {
   "budgets": {
-    "test_files": 51,
-    "test_functions": 501,
-    "collected_tests": 845,
-    "source_lines": 18011
+    "test_files": 53,
+    "test_functions": 507,
+    "collected_tests": 864,
+    "source_lines": 18337
   },
   "tier_budgets": {
     "public_api": {
@@ -13,10 +13,10 @@
       "lines": 6812
     },
     "contracts": {
-      "files": 22,
-      "functions": 231,
-      "collected": 437,
-      "lines": 7657
+      "files": 23,
+      "functions": 236,
+      "collected": 454,
+      "lines": 7800
     },
     "performance_contracts": {
       "files": 2,
@@ -25,10 +25,10 @@
       "lines": 471
     },
     "multi_device": {
-      "files": 3,
-      "functions": 31,
-      "collected": 32,
-      "lines": 1040
+      "files": 4,
+      "functions": 32,
+      "collected": 34,
+      "lines": 1121
     },
     "integration": {
       "files": 2,
@@ -73,7 +73,8 @@
     "tests/contracts/test_linear_cudss.py": "diff_soup.linear._cudss",
     "tests/contracts/test_linear_ad.py": "diff_soup.nonlinear",
     "tests/contracts/test_lowered_study.py": "diff_soup.optimization.inference",
-    "tests/contracts/test_coloring.py": "diff_soup.problem._ad.coloring"
+    "tests/contracts/test_coloring.py": "diff_soup.problem._ad.coloring",
+    "tests/contracts/test_study_reads.py": "diff_soup.optimization.inference"
   },
   "support_data": [],
   "suite_files": [
@@ -137,7 +138,10 @@
     "tests/support/optimization.py",
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
-    "tests/contracts/test_coloring.py"
+    "tests/contracts/test_coloring.py",
+    "tests/contracts/test_study_reads.py",
+    "tests/multi_device/test_study_reads_world.py",
+    "tests/support/study_reads_world.py"
   ],
   "test_files": [
     "tests/public_api/test_recipe_build.py",
@@ -190,7 +194,9 @@
     "tests/multi_device/test_optimization_lanes.py",
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
-    "tests/contracts/test_coloring.py"
+    "tests/contracts/test_coloring.py",
+    "tests/contracts/test_study_reads.py",
+    "tests/multi_device/test_study_reads_world.py"
   ],
   "feature_contracts": [
     {
@@ -396,6 +402,14 @@
     {
       "file": "tests/contracts/test_coloring.py",
       "feature": "Sparse-matrix colorings: every kind and order decompresses its exact products, refused patterns, seeded recovery"
+    },
+    {
+      "file": "tests/contracts/test_study_reads.py",
+      "feature": "Studies whose experiments read the handles they declare (Study(reads='declared')): each lane's narrow point, its blocks laid out in its full point, the fits joint and nested and the Laplace sd equal to the study with inert placeholders, the refusals"
+    },
+    {
+      "file": "tests/multi_device/test_study_reads_world.py",
+      "feature": "Studies whose experiments read the handles they declare, fitted in a world of three processes launched by mpirun, against the one-process study with inert placeholders"
     }
   ]
 }
