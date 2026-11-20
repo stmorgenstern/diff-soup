@@ -68,6 +68,7 @@ from diff_soup.optimization.inference.fitting._joint_layout import (
     JointLayout,
     _assemble_x0,
     _build_layout,
+    _group_widths,
     _joint_group_cols,
     _joint_theta_names,
     _reconstruct_child_flat,
@@ -124,7 +125,10 @@ class JointInferenceProblem:
     group names)`` pair per level, outermost first, each member of an inner level
     under one member of the level above; the vector then holds the member blocks
     level by level, ``[global | level-1 blocks | level-2 blocks | ... | child
-    locals | states]``, and the members of the first level are the owners. When
+    locals | states]``, and the members of the first level are the owners.
+    ``reads="declared"`` lets a child lack a shared or tied group, which it then
+    does not read: one child holds each shared group, and one child of every
+    member each group of the member's level. When
     every child is structurally homogeneous the per-child residual runs through one
     ``jax.vmap`` kernel (the traced program is independent of the child count);
     heterogeneous children concatenate their own residual closures.
@@ -231,6 +235,7 @@ class JointInferenceProblem:
         data_holders: Optional[tuple] = None,
         levels: Any = None,
         level_names: Optional[tuple] = None,
+        reads: str = "all",
     ):
         """Validate shared declarations, lay out the joint vector, build the residual.
 
@@ -270,15 +275,24 @@ class JointInferenceProblem:
                 above. More than one level cannot be placed on a data mesh.
             level_names: Optional names of the levels, one per entry of
                 ``levels``, used in messages.
+            reads: ``"all"``: every child holds every shared and tied group.
+                ``"declared"``: a child may lack one, and then does not read
+                it; such a joint cannot be placed on a data mesh.
 
         Raises:
             ConfigurationError: If both ``ownership`` and ``levels`` are given,
                 if more than one level is given with a data mesh, if the
                 declarations do not fit the children, or if this process
                 holds several devices of the data axis and a child's solver
-                keeps its factors in native storage.
+                keeps its factors in native storage, or if ``reads`` is not
+                ``"all"`` or ``"declared"``.
         """
         placement = layout  # the device-placement Layout; `layout` below is the vector layout
+        if reads not in ("all", "declared"):
+            raise ConfigurationError(
+                f"JointInferenceProblem reads= is 'all' or 'declared'; got {reads!r}."
+            )
+        partial = reads == "declared"
         children = tuple(problems)
         if bounds is not None and not isinstance(bounds, Bounds):
             raise TypeError(
@@ -301,16 +315,16 @@ class JointInferenceProblem:
                 "in levels=; pass one of them."
             )
 
-        shared_vals = _validate_and_shared_init(children, shared, shared_init)
+        shared_vals = _validate_and_shared_init(children, shared, shared_init, partial)
         if levels is None:
             owned, owner_ids, child_owners, owner_vals, ownership_map = _normalise_ownership(
-                children, shared, ownership
+                children, shared, ownership, partial
             )
             layout = _build_layout(children, shared, owned, owner_ids, child_owners)
             level_vals = (owner_vals,) if owned else ()
         else:
             level_groups, level_ids, child_levels, level_vals, ownership_map = _normalise_levels(
-                children, shared, levels
+                children, shared, levels, partial
             )
             if (
                 len(level_ids) > 1
@@ -335,7 +349,14 @@ class JointInferenceProblem:
                 )
             level_names = named
 
-        homogeneous = _is_homogeneous(children)
+        if layout.partial and _sharding_requested(placement):
+            raise ConfigurationError(
+                "JointInferenceProblem places children on a device mesh by structural groups "
+                "that read the same coordinates, and some of these children read part of the "
+                "shared or tied blocks; build it without a data mesh."
+            )
+        # Children that read different coordinates never share the batched kernel.
+        homogeneous = _is_homogeneous(children) and not layout.partial
         _validate_layout(placement, children)
         if homogeneous:
             mode = _child_mode(children[0])
@@ -762,9 +783,7 @@ class JointInferenceProblem:
             if not child_columns:
                 continue
             # Child theta column -> joint column, as _reconstruct_child_flat scatters them.
-            to_joint = {
-                col: layout.shared_slice[0] + k for k, col in enumerate(layout.shared_cols[index])
-            }
+            to_joint = dict(zip(layout.shared_cols[index], layout.child_shared_positions(index)))
             to_joint.update(zip(layout.owner_cols[index], layout.child_tied_columns[index]))
             start = layout.local_slices[index][0]
             to_joint.update((col, start + k) for k, col in enumerate(layout.local_cols[index]))
@@ -1070,8 +1089,10 @@ class JointInferenceProblem:
         )
         children = tuple(self.problems[index] for index in member_indices)
         owner_shared = self.shared + self.ownership_groups
-        owner_layout = _build_layout(children, owner_shared)
-        if _is_homogeneous(children):
+        owner_layout = _build_layout(
+            children, owner_shared, widths=_group_widths(self.problems, owner_shared)
+        )
+        if _is_homogeneous(children) and not owner_layout.partial:
             selected_children = (
                 children if ad is None else tuple(child._view_for_ad(ad) for child in children)
             )
@@ -1203,7 +1224,7 @@ class JointInferenceProblem:
         occurrences = {}
         layout = self._layout
         for index, schema in enumerate(schemas):
-            shared = dict(zip(layout.shared_cols[index], range(*layout.shared_slice)))
+            shared = dict(zip(layout.shared_cols[index], layout.child_shared_positions(index)))
             local = dict(zip(layout.local_cols[index], range(*layout.local_slices[index])))
             owned = dict(zip(layout.owner_cols[index], layout.child_tied_columns[index]))
             # The level and member label of each tied child column, in the
@@ -1356,10 +1377,9 @@ class JointInferenceProblem:
         x = np.asarray(x_flat)
         vals = {}
         start = 0
-        rep = self.problems[0]
+        widths = _group_widths(self.problems, self.shared)
         for gname in self.shared:
-            cols = _child_group_cols(rep, gname)
-            n = len(cols) if cols else 0
+            n = widths[gname]
             vals[gname] = x[start : start + n]
             start += n
         return vals
