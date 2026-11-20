@@ -14,6 +14,14 @@ A study whose parameters vary between owners has that tier, one node per owner.
 A study whose experiments share every coordinate, and a study of one
 experiment, have none: there, one node of no coordinates of its own holds every
 lane.
+
+A lane's full point is every coordinate of the shared block, of its node's
+block and of its own. An experiment of a study that reads only the handles it
+declares (``Study(reads="declared")``) reads part of its full point: its narrow
+point leaves out the coordinates of the handles its model does not declare, so
+its derivatives are taken against fewer coordinates. Its results are then laid
+out in its full point, with zeros where it reads nothing, so the lanes of one
+request share one layout whatever they read.
 """
 
 from __future__ import annotations
@@ -40,6 +48,12 @@ class LaneLayout:
             point reads, in the order of that point, the shared ones first.
         targets: Per lane, the position each coordinate of its narrow point
             takes in the lane's own parameter vector.
+        full_columns: Per lane, the coordinates of its full point, the layout
+            its results are returned in; ``columns`` itself when the lane
+            reads its whole full point.
+        spread: Per lane, the position of each coordinate of its narrow point
+            in its full point; ``None`` when the lane reads its whole full
+            point.
         widths: Per lane, the length of its own parameter vector, its
             experiment's.
         shared: The shared count: the leading coordinates of the fitted
@@ -51,8 +65,8 @@ class LaneLayout:
             those of its lanes beyond the shared ones.
         tier_width: The coordinates a node holds itself, before those of its
             lanes (those of the first node); ``0`` without the tier.
-        local: Per lane, the position of each of its coordinates beyond the
-            shared ones in the block of its node.
+        local: Per lane, the position of each coordinate of its full point
+            beyond the shared ones in the block of its node.
         start: The start point, the fitted vector the problem was built with.
         experiments: Per lane, the index of its experiment among the
             problem's experiments, in their order (``joint.problems``, the
@@ -62,6 +76,8 @@ class LaneLayout:
     lanes: tuple
     columns: tuple
     targets: tuple
+    full_columns: tuple
+    spread: tuple
     widths: tuple
     shared: int
     nodes: tuple
@@ -133,6 +149,8 @@ def lane_layout(problem: Any) -> LaneLayout:
             lanes=lanes,
             columns=(everything,) * len(lanes),
             targets=(everything,) * len(lanes),
+            full_columns=(everything,) * len(lanes),
+            spread=(None,) * len(lanes),
             widths=(int(start.size),) * len(lanes),
             shared=int(start.size),
             nodes=(0,) * len(lanes),
@@ -151,6 +169,7 @@ def lane_layout(problem: Any) -> LaneLayout:
     layout = problem.ownership_layout
     shared = int(layout.n_shared)
     columns, targets, widths, nodes, local = ([None] * count for _ in range(5))
+    full, spread = [None] * count, [None] * count
     if getattr(problem, "owner_ids", ()):
         plans = problem.owner_point_plans
         for owner in plans:
@@ -162,6 +181,13 @@ def lane_layout(problem: Any) -> LaneLayout:
                 widths[child] = int(plan.child_width)
                 nodes[child] = int(owner.owner_index)
                 local[child] = np.asarray(plan.local_positions, dtype=np.int64)
+                full[child] = columns[child]
+                if plan.spread is not None:
+                    shared_width = owner.shared_width
+                    full[child] = np.concatenate(
+                        (indices[:shared_width], indices[shared_width + local[child]])
+                    )
+                    spread[child] = np.asarray(plan.spread, dtype=np.int64)
         labels = tuple(problem.owner_ids)
         node_widths = tuple(int(owner.local_width) for owner in plans)
         first, stop = layout.owner_slices[0]
@@ -174,7 +200,14 @@ def lane_layout(problem: Any) -> LaneLayout:
             state_start, state_stop = layout.state_slices[child]
             own = tuple(range(local_start, local_stop)) + tuple(range(state_start, state_stop))
             theta = len(layout.shared_cols[child]) + len(layout.local_cols[child])
-            columns[child] = np.asarray(tuple(range(shared)) + own, dtype=np.int64)
+            read = tuple(layout.child_shared_positions(child))
+            columns[child] = np.asarray(read + own, dtype=np.int64)
+            full[child] = columns[child]
+            if len(read) != shared:
+                full[child] = np.asarray(tuple(range(shared)) + own, dtype=np.int64)
+                spread[child] = np.concatenate(
+                    (np.asarray(read, dtype=np.int64), np.arange(shared, shared + len(own)))
+                )
             targets[child] = np.asarray(
                 tuple(layout.shared_cols[child])
                 + tuple(layout.local_cols[child])
@@ -192,6 +225,8 @@ def lane_layout(problem: Any) -> LaneLayout:
         lanes=lanes,
         columns=tuple(columns[index] for index in experiments),
         targets=tuple(targets[index] for index in experiments),
+        full_columns=tuple(full[index] for index in experiments),
+        spread=tuple(spread[index] for index in experiments),
         widths=tuple(widths[index] for index in experiments),
         shared=shared,
         nodes=tuple(nodes[index] for index in experiments),

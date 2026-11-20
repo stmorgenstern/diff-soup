@@ -16,7 +16,7 @@ import dataclasses
 import hashlib
 import json
 from collections.abc import Hashable
-from typing import Iterable, Sequence
+from typing import Iterable, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -42,9 +42,14 @@ class OwnerChildPointPlan:
 
     ``source_positions`` and ``target_positions`` are aligned: values gathered
     from the compact owner point at the former are scattered into the child
-    point at the latter. ``local_positions`` identifies the non-shared source
-    coordinates inside the owning plan and is used to assemble owner-local
-    sufficient statistics.
+    point at the latter. The child's full point is ``[shared | the blocks of
+    its members | its local and state coordinates]``, the coordinates its
+    derivatives are summed in. ``local_positions`` identifies the non-shared
+    coordinates of the full point inside the owning plan and is used to
+    assemble owner-local sufficient statistics. A child that reads only part of
+    its full point (a study whose experiments read the handles they declare)
+    has ``spread``, the position of each source in its full point; ``spread``
+    is ``None`` when the sources are the full point.
     """
 
     child_index: int
@@ -55,6 +60,7 @@ class OwnerChildPointPlan:
     owner_slice: tuple[int, int]
     child_local_slice: tuple[int, int]
     child_state_slice: tuple[int, int]
+    spread: Optional[tuple[int, ...]] = None
 
     @property
     def derivative_width(self) -> int:
@@ -158,7 +164,8 @@ def build_owner_point_plans(joint: JointInferenceProblem) -> tuple[OwnerPointPla
     A child's sources are the shared coordinates, then the blocks of its
     members level by level (its owner's block first), then its own local and
     state coordinates; its targets are the matching positions of its flat
-    decision vector.
+    decision vector. A child that lacks a shared or tied group has no source
+    for its coordinates.
     """
     layout = joint.ownership_layout
     n_shared = int(layout.n_shared)
@@ -191,7 +198,7 @@ def build_owner_point_plans(joint: JointInferenceProblem) -> tuple[OwnerPointPla
             n_theta = len(child_shared) + len(child_owner) + len(child_local)
             n_state = state_hi - state_lo
 
-            sources = tuple(range(n_shared))
+            sources = tuple(layout.child_shared_positions(child_index))
             targets = child_shared
             owner_sources = tuple(
                 n_shared + local_position[column]
@@ -213,13 +220,29 @@ def build_owner_point_plans(joint: JointInferenceProblem) -> tuple[OwnerPointPla
                 raise ValueError(
                     f"owner {owner_id!r} child {child_index} has an invalid compact map"
                 )
+            spread = None
+            local_positions = tuple(position - n_shared for position in sources[n_shared:])
+            if layout.partial:
+                full = (
+                    shared_indices
+                    + tuple(
+                        n_shared + local_position[column]
+                        for column in layout.child_member_columns(child_index)
+                    )
+                    + local_sources
+                    + state_sources
+                )
+                local_positions = tuple(position - n_shared for position in full[n_shared:])
+                if sources != full:
+                    place = {source: k for k, source in enumerate(full)}
+                    spread = tuple(place[source] for source in sources)
             child_plans.append(
                 OwnerChildPointPlan(
                     child_index=child_index,
                     child_width=int(np.asarray(child.x0).size),
                     source_positions=sources,
                     target_positions=targets,
-                    local_positions=tuple(position - n_shared for position in sources[n_shared:]),
+                    local_positions=local_positions,
                     owner_slice=(
                         n_shared,
                         n_shared + len(owner_columns),
@@ -236,6 +259,7 @@ def build_owner_point_plans(joint: JointInferenceProblem) -> tuple[OwnerPointPla
                         if state_hi > state_lo
                         else n_shared + local_position.get(state_lo, len(local_indices)),
                     ),
+                    spread=spread,
                 )
             )
         payload = {
@@ -252,6 +276,8 @@ def build_owner_point_plans(joint: JointInferenceProblem) -> tuple[OwnerPointPla
                     "child_width": child.child_width,
                     "sources": child.source_positions,
                     "targets": child.target_positions,
+                    # Only a child that reads part of its full point records it.
+                    **({} if child.spread is None else {"spread": child.spread}),
                 }
                 for child in child_plans
             ],
