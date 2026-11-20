@@ -367,6 +367,8 @@ def batched_lanes(plan: Plan, joint: Any) -> BatchedLanes:
         with no program yet.
     """
     layout = lane_layout(joint)
+    if plan.links is not None:
+        layout = plan.links.layout(layout)
     problems = lane_problems(joint)
     buckets, where, index = [], {}, {}
     for bucket in plan.buckets:
@@ -589,6 +591,8 @@ def lane_metadata(plan: Plan, joint: Any) -> BatchedLanes:
     from diff_soup.optimization.inference.fitting._joint_residual import _resolve_child_y0
 
     layout = lane_layout(joint)
+    if plan.links is not None:
+        layout = plan.links.layout(layout)
     problems = lane_problems(joint)
     buckets, where, index = [], {}, {}
     for bucket in plan.buckets:

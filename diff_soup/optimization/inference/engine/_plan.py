@@ -591,6 +591,10 @@ def build_plan(study: Any, joint: Any, *, chunk: Any = None, device: Any = None)
     layout = lane_layout(joint)
     problems = lane_problems(joint)
     names, _ = _lane_ids(ids, every)
+    links = build_link_plan(study, layout, names)
+    if links is not None:
+        # A driven lane's narrow point holds the coordinates its links add.
+        layout = links.layout(layout)
     declared = tuple(study.experiments)
     experiments = tuple(declared[index] for index in layout.experiments)
     widths = {index: len(columns) for index, columns in enumerate(layout.columns)}
@@ -602,7 +606,6 @@ def build_plan(study: Any, joint: Any, *, chunk: Any = None, device: Any = None)
     for index, experiment in enumerate(layout.experiments):
         lanes_of.setdefault(experiment, []).append(index)
 
-    links = build_link_plan(study, layout, names)
     refused, groups, identities, counts = [], {}, {}, {}
     for experiment, child in enumerate(every):
         reason = lane_refusal(child)

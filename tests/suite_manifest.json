@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 55,
-    "test_functions": 524,
-    "collected_tests": 889,
-    "source_lines": 18935
+    "test_functions": 526,
+    "collected_tests": 902,
+    "source_lines": 18989
   },
   "tier_budgets": {
     "public_api": {
       "files": 22,
-      "functions": 221,
-      "collected": 351,
-      "lines": 7045
+      "functions": 222,
+      "collected": 359,
+      "lines": 7069
     },
     "contracts": {
       "files": 23,
@@ -26,9 +26,9 @@
     },
     "multi_device": {
       "files": 5,
-      "functions": 35,
-      "collected": 38,
-      "lines": 1237
+      "functions": 36,
+      "collected": 43,
+      "lines": 1266
     },
     "integration": {
       "files": 2,

@@ -13,6 +13,15 @@ output sits in its lane's flat outputs, and per link which positions of the driv
 lane's narrow point hold the source's narrow coordinates. The plan carries it
 ([Plan.links][diff_soup.optimization.inference.engine._plan.Plan]).
 
+A driven lane reads the coordinates its source reads. In a study whose experiments
+read the handles they declare (``Study(reads="declared")``) a driven model need not
+declare the source's parameters: the link adds the source's coordinates of the
+driven lane's full point to its narrow point, after its own
+([LinkPlan.layout][diff_soup.optimization.inference.engine._links.LinkPlan.layout]).
+These coordinates have no place in the driven model's parameters; they reach its
+residual through the link alone, so its ``jax.jacfwd`` carries them by the chain
+rule and its results are laid out in its full point like any lane's.
+
 [evaluate][diff_soup.optimization.inference.engine._links.evaluate] runs a request of a
 study with links in two phases, each an ordinary evaluation of the batched lanes
 in one process or in several:
@@ -28,6 +37,14 @@ The results of the two phases are written to one
 unit whose source failed at its point is not solved; it takes the kind of the
 source's failure. Lanes without links, and studies without links, run as they
 would without this module.
+
+The lanes of one series of evaluations (a fit's own, or the study's) keep the
+outputs of each source at the last ``KEPT_POINTS`` points of its narrow
+coordinates where it solved. A source a request leaves out is solved again only
+at a point it has none for: a nested fit's requests of one member's lanes hold
+the shared coordinates still, so they read the outputs of the request before them.
+Outputs kept from a ``blocks`` or ``gradient`` evaluation carry their derivative and
+serve every mode; those of another mode serve the modes that form none.
 """
 
 from __future__ import annotations
@@ -35,6 +52,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import types
+import weakref
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any, NamedTuple
 
@@ -51,6 +69,11 @@ from diff_soup.optimization.inference.engine._status import ABSENT
 CARRIED: tuple[str, ...] = ("blocks", "gradient")
 #: The modes whose driven lanes take their sources' outputs as fixed values.
 HELD: tuple[str, ...] = ("value", "observe", "frozen")
+#: The points per source lane whose outputs a series of evaluations keeps.
+KEPT_POINTS: int = 8
+
+# Per series of evaluations (the step memory its lanes own), the outputs kept per source lane.
+_KEPT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 class SignalHandle(NamedTuple):
@@ -125,11 +148,19 @@ class LinkPlan:
             outputs in the order of its experiment's declaration.
         links: Per driven lane, by its index in the lane layout, its links.
         lanes: The id of every lane, by its index in the lane layout.
+        added: Per driven lane that reads coordinates through its links only,
+            by its index in the lane layout, ``(columns, places)``: the joint
+            columns its links add after its narrow point, and their positions
+            in its full point.
+        reads: Per source lane, by its index in the lane layout, the joint
+            columns of its narrow point.
     """
 
     outputs: Mapping
     links: Mapping
     lanes: tuple
+    added: Mapping = dataclasses.field(default_factory=lambda: types.MappingProxyType({}))
+    reads: Mapping = dataclasses.field(default_factory=lambda: types.MappingProxyType({}))
 
     @functools.cached_property
     def index(self) -> dict:
@@ -149,7 +180,8 @@ class LinkPlan:
 
         A source's record names each output, its shape and its readout; a driven
         lane's names each signal, the shape of its values and the source's
-        narrow width.
+        narrow width, and the count of coordinates it reads through its links
+        only.
         """
         parts = ()
         if index in self.outputs:
@@ -165,7 +197,39 @@ class LinkPlan:
                     ),
                 ),
             )
+        if index in self.added:
+            parts += (("read through links", int(self.added[index][0].shape[0])),)
         return parts or None
+
+    def link_coordinates(self, index: int) -> int:
+        """The trailing coordinates of a lane's narrow point that only its links read."""
+        added = self.added.get(index)
+        return 0 if added is None else int(added[0].shape[0])
+
+    def layout(self, layout: Any) -> Any:
+        """``layout`` with every driven lane's narrow point holding the coordinates its links add.
+
+        The added coordinates follow the lane's own: its ``columns`` gain their
+        joint columns, its ``spread`` their positions in its full point, and its
+        ``targets`` the position one past its parameters, which the kernel
+        drops ([LaneProgram.link_coordinates][diff_soup.optimization.inference.engine._kernel.LaneProgram]).
+        A layout without such lanes is returned as it is.
+        """
+        if not self.added:
+            return layout
+        columns, targets, spread = list(layout.columns), list(layout.targets), list(layout.spread)
+        for index, (added, places) in self.added.items():
+            own = np.asarray(columns[index], dtype=np.int64)
+            given = spread[index]
+            given = np.arange(own.shape[0]) if given is None else np.asarray(given)
+            columns[index] = np.concatenate((own, added))
+            targets[index] = np.concatenate(
+                (np.asarray(targets[index]), np.full(added.shape, layout.widths[index]))
+            ).astype(np.int64)
+            spread[index] = np.concatenate((given, places)).astype(np.int64)
+        return dataclasses.replace(
+            layout, columns=tuple(columns), targets=tuple(targets), spread=tuple(spread)
+        )
 
     def times(self, index: int, times: Any) -> np.ndarray:
         """A lane's sample times with the times of its outputs added, in its dtype."""
@@ -204,6 +268,10 @@ def build_link_plan(study: Any, layout: Any, names: Sequence) -> LinkPlan | None
     Returns:
         The [LinkPlan][diff_soup.optimization.inference.engine._links.LinkPlan].
 
+    A driven lane whose full point holds coordinates its source reads and it
+    does not (a model that does not declare the source's parameters) reads them
+    through its links: they follow its own coordinates in its narrow point.
+
     Raises:
         ValueError: If two links read one output into signals of different
             shapes.
@@ -240,12 +308,27 @@ def build_link_plan(study: Any, layout: Any, names: Sequence) -> LinkPlan | None
             offset += slots[-1].size
         if slots:
             outputs[lane_of[index]] = tuple(slots)
-    links = {}
+    links, added = {}, {}
     for index, experiment in enumerate(experiments):
         if not experiment.links:
             continue
         driven = lane_of[index]
         reads = {int(column): place for place, column in enumerate(layout.columns[driven])}
+        # The source's coordinates of the driven lane's full point that it does not read itself.
+        full = {int(column): place for place, column in enumerate(layout.full_columns[driven])}
+        extra = []
+        for link in experiment.links:
+            for column in layout.columns[lane_of[position[link.source]]]:
+                column = int(column)
+                if column in full and column not in reads and column not in extra:
+                    extra.append(column)
+        for column in extra:
+            reads[column] = len(reads)
+        if extra:
+            added[driven] = (
+                np.asarray(extra, dtype=np.int64),
+                np.asarray([full[column] for column in extra], dtype=np.int64),
+            )
         slots = []
         for link in experiment.links:
             source = lane_of[position[link.source]]
@@ -266,6 +349,10 @@ def build_link_plan(study: Any, layout: Any, names: Sequence) -> LinkPlan | None
         outputs=types.MappingProxyType(outputs),
         links=types.MappingProxyType(links),
         lanes=tuple(names),
+        added=types.MappingProxyType(added),
+        reads=types.MappingProxyType(
+            {index: np.asarray(layout.columns[index], dtype=np.int64) for index in outputs}
+        ),
     )
 
 
@@ -342,35 +429,74 @@ def _refuse_mode(lanes: Any, mode: str, sources: Sequence) -> None:
                 )
 
 
-def _source_numbers(mode: str, source: Hashable, covered: np.ndarray, parts: Sequence) -> tuple:
-    """A source's outputs, their derivative and its status per member, from the phase-one results.
+def _source_numbers(
+    mode: str, source: Hashable, members: int, origins: Sequence, reused: Mapping
+) -> tuple:
+    """A source's outputs, their derivative and its status per member, from phase one.
 
-    ``parts`` is ``(first, extra)``: the results of the request's own lanes
-    and those of the evaluation of the sources it leaves out (either
-    ``None``); a member whose unit of the source the request evaluates
-    (``covered``) reads ``first``, any other ``extra``.
+    ``origins`` holds ``(results, rows)`` pairs: the results of an evaluation
+    and the members whose unit of the source they give. ``reused`` maps a
+    member to the outputs kept from an earlier evaluation at its point, where
+    the source solved. A member none of them gives has zeros and the kind
+    ``absent``.
     """
-    values = tangents = kinds = None
-    for results, rows in zip(parts, (covered, ~covered)):
+    given: list = [None] * members
+    slopes: list = [None] * members
+    kinds = np.full((members,), ABSENT, dtype=np.int64)
+    for results, rows in origins:
         if results is None or not np.any(rows):
             continue
         column = results.lane_ids.index(source)
         held = (results.outputs or {}).get(source)
         if held is None:
             raise RuntimeError(f"the evaluation of experiment {source!r} returned no outputs.")
-        given, slopes = held
-        if values is None:
-            values = np.zeros_like(given)
-            kinds = np.full(rows.shape, ABSENT, dtype=np.asarray(results.status.kind).dtype)
-            if slopes is not None:
-                tangents = np.zeros_like(slopes)
-        values[rows] = given[rows]
-        kinds[rows] = np.asarray(results.status.kind)[rows, column]
-        if tangents is not None and slopes is not None:
-            tangents[rows] = slopes[rows]
-    if mode in CARRIED and tangents is None:
-        raise RuntimeError(f"the evaluation of experiment {source!r} returned no derivative.")
+        for row in np.flatnonzero(rows):
+            given[row] = held[0][row]
+            slopes[row] = None if held[1] is None else held[1][row]
+            kinds[row] = int(np.asarray(results.status.kind)[row, column])
+    for row, (values, tangents) in reused.items():
+        given[row], slopes[row], kinds[row] = values, tangents, 0
+    template = next(item for item in given if item is not None)
+    values = np.stack([np.zeros_like(template) if item is None else item for item in given])
+    tangents = None
+    if mode in CARRIED:
+        known = [item for item in slopes if item is not None]
+        if not known:
+            raise RuntimeError(f"the evaluation of experiment {source!r} returned no derivative.")
+        tangents = np.stack([np.zeros_like(known[0]) if item is None else item for item in slopes])
     return values, tangents, kinds
+
+
+def _point_key(links: LinkPlan, source: Hashable, point: np.ndarray) -> tuple:
+    """The key of a source's outputs: the source and its narrow coordinates at ``point``."""
+    columns = links.reads[links.index[source]]
+    return (source, np.ascontiguousarray(point[columns], dtype=np.float64).tobytes())
+
+
+def _keep_outputs(
+    kept: dict, links: LinkPlan, points: np.ndarray, results: Results | None, rows: Mapping
+) -> None:
+    """Keep the outputs ``results`` give for the members ``rows[source]`` where the source solved.
+
+    Outputs without their derivative never replace kept outputs that carry it.
+    """
+    if results is None or not results.outputs:
+        return
+    for source, (given, slopes) in results.outputs.items():
+        if source not in rows:
+            continue
+        column = results.lane_ids.index(source)
+        solved = rows[source] & (np.asarray(results.status.kind)[:, column] == 0)
+        held = kept.setdefault(source, {})
+        for row in np.flatnonzero(solved):
+            key = _point_key(links, source, points[row])
+            entry = (np.array(given[row]), None if slopes is None else np.array(slopes[row]))
+            if entry[1] is None and held.get(key, (None, None))[1] is not None:
+                continue
+            held.pop(key, None)
+            held[key] = entry
+            while len(held) > KEPT_POINTS:
+                held.pop(next(iter(held)))
 
 
 def evaluate(
@@ -449,7 +575,23 @@ def evaluate(
         )
         for source in sources
     }
-    missing = [source for source in sources if np.any(needed[source] & ~covered[source])]
+    points = np.asarray(request.points)[members]
+    kept = _KEPT.setdefault(lanes.memory, {})
+    _keep_outputs(kept, links, points, first, covered)
+    reused: dict = {}
+    for source in sources:
+        held = kept.get(source, {})
+        reused[source] = {}
+        for row in np.flatnonzero(needed[source] & ~covered[source]):
+            entry = held.get(_point_key(links, source, points[row]))
+            if entry is not None and (mode not in CARRIED or entry[1] is not None):
+                reused[source][int(row)] = entry
+    wanted = {}
+    for source in sources:
+        rows = needed[source] & ~covered[source]
+        rows[list(reused[source])] = False
+        wanted[source] = rows
+    missing = [source for source in sources if np.any(wanted[source])]
     extra = None
     if missing:
         extra_mode = mode if mode in CARRIED else "value"
@@ -461,14 +603,22 @@ def evaluate(
                 points=request.points,
                 active=request.active,
                 lanes=tuple(missing),
-                units=np.stack([needed[s] & ~covered[s] for s in missing], axis=1),
+                units=np.stack([wanted[source] for source in missing], axis=1),
             ),
             None,
         )
+        _keep_outputs(kept, links, points, extra, wanted)
 
     # Phase two: the driven lanes, each with its sources' outputs at its member's point.
     numbers = {
-        source: _source_numbers(mode, source, covered[source], (first, extra)) for source in sources
+        source: _source_numbers(
+            mode,
+            source,
+            shape[0],
+            ((first, covered[source]), (extra, wanted[source])),
+            reused[source],
+        )
+        for source in sources
     }
     failed = np.zeros(shape, dtype=np.int64)
     values: dict = {}
@@ -619,6 +769,7 @@ def _merged(
 __all__ = [
     "CARRIED",
     "HELD",
+    "KEPT_POINTS",
     "LinkPlan",
     "LinkSlot",
     "OutputSlot",

@@ -4,7 +4,10 @@ The source experiment produces an output (``inf.Output``) and two driven
 experiments read it into a fixed signal of their model (``inf.Link``). The
 lowered study solves the source first, then the driven experiments on its output;
 the Gauss-Newton gradient carries the source's shared rate into the driven lanes
-by the chain rule.
+by the chain rule. Each claim holds for the study whose driven model declares the
+source's rate as an inert placeholder and for the study of ``reads="declared"``
+whose driven model does not declare it: there the link adds the rate to the
+driven lanes' narrow points.
 """
 
 from __future__ import annotations
@@ -37,12 +40,19 @@ def recipes():
     return linked_recipes("public_links")
 
 
-@pytest.fixture(scope="module")
-def lowered(recipes):
-    """The linked study of exact data, lowered once."""
-    study = ds.lower(linked_study(recipes))
+def _lowered(variant: str):
+    """The linked study of exact data: driven models with the placeholder, or without it."""
+    placeholder = variant == "placeholder"
+    recipes = linked_recipes(f"public_links_{variant}", placeholder=placeholder)
+    study = ds.lower(linked_study(recipes, reads="all" if placeholder else "declared"))
     study.prepare(modes=("value", "blocks", "gradient", "frozen"))
     return study
+
+
+@pytest.fixture(scope="module", params=("placeholder", "declared"))
+def lowered(request):
+    """The linked study of each variant, lowered once."""
+    return _lowered(request.param)
 
 
 def _five_point(values: np.ndarray, step: float) -> np.ndarray:
@@ -65,6 +75,20 @@ def test_the_gauss_newton_gradient_of_a_linked_study_matches_central_differences
     # measured 1.3e-7 relative (column b of c2), CPU 2026-11-20, pytest
     # tests/public_api/test_links.py
     np.testing.assert_allclose(np.asarray(gradient), reference, rtol=1e-6, atol=1e-6)
+
+
+def test_a_driven_lane_reads_the_source_rate_its_model_does_not_declare():
+    """Under reads="declared" the link adds the source's rate to the narrow point of the driven
+    lanes, whose model does not declare it: their width is that of the placeholder study's, and
+    the cost, the gradient and the Gauss-Newton matrix equal the placeholder study's."""
+    declared, placeholder = _lowered("declared"), _lowered("placeholder")
+    widths = [{b.lanes: b.width for b in study.plan().buckets} for study in (declared, placeholder)]
+    blocks = [study.gauss_newton_fn(POINT)[:3] for study in (declared, placeholder)]
+    assert widths[0] == widths[1] == {("source",): 2, ("c1", "c2"): 2}
+    for got, expected in zip(*blocks):
+        # measured 1.3e-15 relative (the matrix), CPU 2026-11-20, pytest
+        # tests/public_api/test_links.py
+        np.testing.assert_allclose(np.asarray(got), np.asarray(expected), rtol=1e-12, atol=1e-9)
 
 
 def test_the_gradient_mode_equals_the_blocks_gradient(lowered):

@@ -537,6 +537,7 @@ def _lane_group(
         links=()
         if links is None
         else tuple(slot.into for slot in links.links.get(selected[0], ())),
+        link_coordinates=0 if links is None else links.link_coordinates(selected[0]),
     )
     columns, frozen, y0, t0, t1, times, streams, dt0, schedule, outputs, linked = jax.device_put(
         _stack(lanes), device

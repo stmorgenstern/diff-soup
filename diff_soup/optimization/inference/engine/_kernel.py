@@ -138,6 +138,10 @@ class LaneProgram:
             a lane that drives none.
         links: Per link of a driven lane, the handle of the signal function
             whose values the link sets; empty for a lane without links.
+        link_coordinates: The trailing coordinates of a driven lane's narrow
+            point that only its links read: its source's coordinates its model
+            does not declare. Their place in the parameter vector is one past
+            its end, and they are dropped there.
     """
 
     problem: Any
@@ -150,6 +154,7 @@ class LaneProgram:
     reverse_solver: Any = None
     outputs: tuple = ()
     links: tuple = ()
+    link_coordinates: int = 0
 
 
 class StreamInputs(eqx.Module):
@@ -427,7 +432,12 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     from diff_soup.pdesolve import pdesolve
     from diff_soup.timestepping.saveat import SaveAt
 
-    flat = jnp.zeros((program.point_width,), dtype=point.dtype).at[lane.columns].set(point)
+    if program.link_coordinates:
+        # The coordinates only the links read land in a slot past the parameters, dropped.
+        flat = jnp.zeros((program.point_width + 1,), dtype=point.dtype)
+        flat = flat.at[lane.columns].set(point)[: program.point_width]
+    else:
+        flat = jnp.zeros((program.point_width,), dtype=point.dtype).at[lane.columns].set(point)
     theta = eqx.combine(program.unflatten(flat), lane.frozen)
     if program.links:
         theta = _with_links(program, point, lane, theta)

@@ -5,7 +5,8 @@ The source solves ``u' = -a u`` from ``u(0) = 1`` and produces its mean ``y`` at
 ``y`` the piecewise-linear signal of the source's output. Both recipes declare
 ``a`` and ``b``; each reads one of them. The study shares ``a`` and gives every
 member of the level ``cell`` its own ``b``; the source sits in a cell of its own,
-where ``b`` is inert.
+where ``b`` is inert. Without the placeholder the driven recipe does not declare
+``a``, and the study reads the handles each model declares (``reads="declared"``).
 """
 
 from __future__ import annotations
@@ -43,10 +44,10 @@ class Linked:
     b: Any
 
 
-def _recipe(name: str, driven: bool, values: Any = None) -> tuple:
+def _recipe(name: str, driven: bool, values: Any = None, placeholder: bool = True) -> tuple:
     spec = ds.problem(name)
     spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
-    a = spec.param("a", value=0.5, learnable=True, bounds=(0.05, 3.0))
+    a = spec.param("a", value=0.5, learnable=True, bounds=(0.05, 3.0)) if placeholder else None
     b = spec.param("b", value=0.5, learnable=True, bounds=(0.05, 3.0))
     if driven:
         given = np.zeros(LINK_TIMES.shape) if values is None else values
@@ -68,10 +69,10 @@ def _recipe(name: str, driven: bool, values: Any = None) -> tuple:
     return spec, spec.build(), a, b
 
 
-def linked_recipes(name: str = "linked") -> Linked:
-    """The source and driven recipes, built."""
+def linked_recipes(name: str = "linked", *, placeholder: bool = True) -> Linked:
+    """The source and driven recipes, built; without ``placeholder`` the driven one lacks ``a``."""
     source_spec, source, a, b = _recipe(f"{name}_source", False)
-    driven_spec, driven, _, _ = _recipe(f"{name}_driven", True)
+    driven_spec, driven, _, _ = _recipe(f"{name}_driven", True, placeholder=placeholder)
     return Linked(source_spec, source, driven_spec, driven, a, b)
 
 
@@ -160,13 +161,13 @@ def driven_experiment(recipes: Linked, cell: str, *, model: Any = None, **experi
     )
 
 
-def linked_study(recipes: Linked, **source: Any) -> Any:
+def linked_study(recipes: Linked, reads: str = "all", **source: Any) -> Any:
     """The source and the two driven cells, ``a`` shared and ``b`` one per cell."""
     hierarchy = inf.Hierarchy(levels=("cell",), shared=(recipes.a,), per={"cell": (recipes.b,)})
     experiments = (source_experiment(recipes, **source),) + tuple(
         driven_experiment(recipes, cell) for cell in CELLS
     )
-    return inf.Study(experiments, parameters=hierarchy)
+    return inf.Study(experiments, parameters=hierarchy, reads=reads)
 
 
 #: The true point in the study's columns: ``a``, the source cell's inert ``b``, then each cell's.
