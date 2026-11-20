@@ -1226,13 +1226,13 @@ def _bucket_links(
     return tuple(out)
 
 
-def _outputs(calls: Sequence, shape: tuple, chosen: Sequence) -> tuple:
-    """The outputs of the source units of ``calls``, and ``calls`` without them.
+def _outputs(calls: Sequence, shape: tuple, chosen: Sequence) -> Mapping | None:
+    """The outputs of the source units of ``calls``.
 
-    Returns ``(outputs, calls)``: ``outputs`` maps each source lane's id to its
-    outputs of shape (members, outputs) and their derivative of shape
-    (members, outputs, narrow width), ``None`` in a mode that forms none; a
-    unit no call holds has zeros. ``None`` when no call returned outputs.
+    Each source lane's id maps to its outputs of shape (members, outputs) and
+    their derivative of shape (members, outputs, narrow width), ``None`` in a
+    mode that forms none; a unit no call holds has zeros. ``None`` when no call
+    returned outputs.
     """
     found: dict = {}
     for call in calls:
@@ -1255,13 +1255,7 @@ def _outputs(calls: Sequence, shape: tuple, chosen: Sequence) -> tuple:
             held[0][int(row)] = given[unit]
             if slopes is not None:
                 held[1][int(row)] = slopes[unit]
-    if not found:
-        return None, calls
-    stripped = tuple(
-        call._replace(output=dataclasses.replace(call.output, outputs=None, output_tangents=None))
-        for call in calls
-    )
-    return types.MappingProxyType(found), stripped
+    return types.MappingProxyType(found) if found else None
 
 
 def _keep(lanes: BatchedLanes, kept: list, replaced: set | None) -> None:
@@ -1556,7 +1550,7 @@ def evaluate(
         }
         for (row, column), (rungs_tried, kinds, walls_tried) in sorted(tried.items())
     )
-    outputs, calls = _outputs(calls, shape, chosen)
+    outputs = _outputs(calls, shape, chosen)
     results = assemble(
         request.mode,
         chosen,
