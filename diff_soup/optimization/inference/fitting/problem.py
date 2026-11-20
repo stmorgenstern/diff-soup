@@ -152,6 +152,7 @@ class InferenceProblem(EstimationProblem):
                 parameters=study.parameters,
                 clusters=None if isinstance(study.parameters, Hierarchy) else study.clusters,
                 independent=study.independent,
+                reads=study.reads,
             )
         super().__init__(
             study,
@@ -1116,7 +1117,7 @@ class LoweredStudy(InferenceProblem):
         matrix = None if results.normal is None else np.zeros((n, n), dtype=point.dtype)
         for position, lane in enumerate(results.lane_ids):
             bucket, slot = self._lanes.where[lane]
-            columns = self._lanes.buckets[bucket].gather[slot]
+            columns = _batched.full_columns(self._lanes.buckets[bucket])[slot]
             if gradient is not None:
                 gradient[columns] += np.asarray(results.gradient[0, position], dtype=point.dtype)
             if matrix is not None:
@@ -1384,7 +1385,7 @@ class LoweredStudy(InferenceProblem):
         rows = np.zeros((len(self.study.experiment_ids),), dtype=np.int64)
         for position, lane in enumerate(results.lane_ids):
             bucket, slot = self._lanes.where[lane]
-            columns = self._lanes.buckets[bucket].gather[slot]
+            columns = _batched.full_columns(self._lanes.buckets[bucket])[slot]
             experiment = int(experiment_of[lane])
             scores[experiment, columns] += np.asarray(results.gradient[0, position])
             rows[experiment] += int(np.asarray(results.rows)[0, position])

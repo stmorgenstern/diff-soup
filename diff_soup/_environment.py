@@ -78,6 +78,11 @@ CACHE_DIR = Variable("DIFFSOUP_CACHE_DIR")
 JAX's persistent compilation cache when one is configured, else ``~/.cache/diff_soup``,
 which a run of several processes refuses."""
 
+CACHE_CAPACITY = Variable("DIFFSOUP_CACHE_CAPACITY")
+"""The number of entries each cache of compiled programs keeps, a positive integer; read once,
+when the caches are created at import. Unset, each keeps its own default (32 or 128).
+``ds.problem.set_cache_capacity`` changes it afterwards."""
+
 DEADLINE_SECONDS = Variable("DIFF_SOUP_DEADLINE_SECONDS", "600")
 """The shortest time process 0 of a lane run waits for any reply, in seconds."""
 

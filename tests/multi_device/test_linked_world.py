@@ -92,14 +92,14 @@ def world(tmp_path_factory):
     return json.loads(line.removeprefix("REPORT "))
 
 
-@pytest.mark.requires_mpirun
+@pytest.mark.requires_mpi_launch
 def test_the_source_and_the_lanes_it_drives_run_on_different_processes(world):
     """Three processes each hold one lane: the source and the two cells it drives."""
     assert world["processes"] == 3
     assert sorted(world["ranks"].values()) == [0, 1, 2]
 
 
-@pytest.mark.requires_mpirun
+@pytest.mark.requires_mpi_launch
 def test_the_gauss_newton_gradient_over_three_processes_matches_central_differences(world):
     """The level sums of the lanes' blocks carry the link's chain rule across processes: their
     gradient matches the five-point central difference of the value cost."""
@@ -108,7 +108,7 @@ def test_the_gauss_newton_gradient_over_three_processes_matches_central_differen
     np.testing.assert_allclose(world["gradient"], world["differences"], rtol=1e-6, atol=1e-6)
 
 
-@pytest.mark.requires_mpirun
+@pytest.mark.requires_mpi_launch
 @pytest.mark.parametrize("name", ["joint", "nested"])
 def test_trust_region_fits_over_three_processes_recover_the_rates(world, name):
     """The joint and the nested fits over three processes recover the true rates."""

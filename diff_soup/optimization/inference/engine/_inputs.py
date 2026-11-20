@@ -484,7 +484,7 @@ def _lane_group(
                 f"coordinates, over {point_width} and {layout.widths[index]} fitted values). "
                 "A group takes only experiments of one derivative width."
             )
-        if not np.array_equal(columns[:n_shared], np.arange(n_shared)):
+        if not np.array_equal(layout.full_columns[index][:n_shared], np.arange(n_shared)):
             raise ValueError(
                 f"experiment {lane!r} does not read the shared parameters as the leading "
                 "coordinates of its narrow point."
@@ -591,7 +591,9 @@ def tree_of(joint: Any, groups: Iterable[LaneGroup]) -> tuple[TreeTables, tuple]
         order of the concatenation.
 
     Raises:
-        ValueError: If the groups differ in narrow width.
+        ValueError: If the groups differ in narrow width, or a lane reads part of
+            its full point (a study whose experiments read the handles they
+            declare).
     """
     groups = tuple(groups)
     widths = {group.program.width for group in groups}
@@ -601,6 +603,18 @@ def tree_of(joint: Any, groups: Iterable[LaneGroup]) -> tuple[TreeTables, tuple]
             "concatenated only at one width."
         )
     layout = lane_layout(joint)
+    partial = [
+        lane
+        for group in groups
+        for lane, child in zip(group.lane_ids, group.children)
+        if layout.spread[child] is not None
+    ]
+    if partial:
+        raise ValueError(
+            f"the lanes {partial[:4]} read part of the coordinates of their nodes, so their "
+            "results are narrower than the tables; evaluate them through the lowered study, "
+            "whose results are laid out in every lane's full point."
+        )
     tables = tree_tables(
         np.concatenate([group.owners for group in groups]),
         np.concatenate([group.local for group in groups], axis=0),

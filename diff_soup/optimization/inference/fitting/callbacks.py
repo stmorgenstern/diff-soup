@@ -114,7 +114,8 @@ class LogCallback(Callback):
         tag = "accept" if info.accepted else "REJECT"
         lm_str = ""
         if info.rho is not None:
-            lm_str = f"  rho={info.rho:+.3f}  lam={info.lam:.2e}"
+            pred = "" if info.predicted is None else f"  pred={info.predicted:.3e}"
+            lm_str = f"  rho={info.rho:+.3f}{pred}  lam={info.lam:.2e}"
         reason = ""
         if not info.accepted and info.rejection_reason:
             reason = f"  [{info.rejection_reason}]"
@@ -163,6 +164,7 @@ def _step_fields(info: StepInfo) -> dict:
         "grad_norm": float(info.grad_norm),
         "delta_norm": float(info.delta_norm),
         "rho": None if info.rho is None else float(info.rho),
+        "predicted": None if info.predicted is None else float(info.predicted),
         "lam": None if info.lam is None else float(info.lam),
         "radius": None if info.radius is None else float(info.radius),
         "wall_time_s": float(info.wall_time),

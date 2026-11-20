@@ -131,11 +131,13 @@ class Results:
         rows: The number of residual rows of every unit.
         normal: ``J^T J`` in narrow coordinates, shape ``(P, L, w, w)``, in
             the ``blocks`` mode, and the exact Hessian of the cost in the
-            ``hessian`` mode; ``None`` otherwise.
+            ``hessian`` mode; ``None`` otherwise. A lane that reads part of
+            its full point (``Study(reads="declared")``) has it laid out in
+            that point, zero where it reads nothing.
         gradient: ``J^T r`` in narrow coordinates, shape ``(P, L, w)``, in
             the ``blocks``, ``gradient``, ``hessian`` and ``frozen`` modes (in
             the ``frozen`` mode ``J`` is the one each unit's last ``blocks``
-            evaluation kept); ``None`` otherwise.
+            evaluation kept), laid out as ``normal``; ``None`` otherwise.
         observables: In the ``observe`` mode, ``observables[p][l][s]`` holds
             the predictions of stream ``s`` of lane ``l`` for member ``p`` at
             the lane's own frames; ``None`` otherwise.

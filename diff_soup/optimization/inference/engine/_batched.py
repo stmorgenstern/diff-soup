@@ -50,6 +50,12 @@ their ``blocks`` and ``frozen`` programs are compiled at the width of the
 bucket's largest member and their calls hold one member each, so a ``frozen``
 request for some members runs only those members' calls.
 
+A lane that reads part of its full point (a study whose experiments read the
+handles they declare) is differentiated against its narrow point alone; its
+gradient and matrix are then laid out in its full point, with zeros where it
+reads nothing, as soon as its call returns, so the results of one request
+share one layout and the reductions see every lane alike.
+
 ``Results.batches`` records, per bucket, the units of the first pass, the width
 of the program and the calls made. A call of a program that raises (a device
 out of memory, the sparse direct solver failing inside the program) raises a
@@ -67,6 +73,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from numbers import Integral, Real
 from typing import Any, NamedTuple
 
+import equinox as eqx
 import jax
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -206,6 +213,11 @@ class BucketLanes:
             ``leaves`` of its values and its tangent
             ([LinkInputs][diff_soup.optimization.inference.engine._kernel.LinkInputs]);
             empty for a bucket of lanes without links.
+        full: Per lane, the joint columns of its full point, the layout of its
+            results; ``None`` when every lane of the bucket reads its whole
+            full point (``gather`` is then that layout).
+        spread: Per lane and narrow coordinate, its position in the lane's
+            full point; ``None`` with ``full``.
 
     The numbers of the plan alone ([lane_metadata][diff_soup.optimization.inference.engine._batched.lane_metadata])
     carry no inputs: ``program`` and ``tree`` are ``None``, ``leaves`` is
@@ -223,7 +235,67 @@ class BucketLanes:
     dtype: np.dtype
     dt0_leaf: int
     state_sizes: tuple = ()
+    full: np.ndarray | None = None
+    spread: np.ndarray | None = None
     link_leaves: tuple = ()
+
+
+def _full_points(layout: Any, children: tuple) -> tuple:
+    """``(full, spread)`` of the lanes ``children`` of ``layout``; ``(None, None)`` when each reads all.
+
+    A lane that reads its whole full point spreads its narrow coordinates to
+    their own positions.
+    """
+    if all(layout.spread[child] is None for child in children):
+        return None, None
+    full = np.stack([np.asarray(layout.full_columns[child]) for child in children])
+    spread = np.stack(
+        [
+            np.arange(len(layout.columns[child]))
+            if layout.spread[child] is None
+            else np.asarray(layout.spread[child])
+            for child in children
+        ]
+    )
+    return full.astype(np.int64), spread.astype(np.int64)
+
+
+def full_columns(entry: BucketLanes) -> np.ndarray:
+    """Per lane of a bucket, the joint columns of its results: its full point."""
+    return entry.gather if entry.full is None else entry.full
+
+
+def _result_width(entry: BucketLanes) -> int:
+    """The width of the gradient and matrix a bucket's lanes return."""
+    return int(entry.bucket.width) if entry.full is None else int(entry.full.shape[1])
+
+
+#: The modes whose results hold derivatives in narrow coordinates.
+_DERIVATIVE_MODES = ("blocks", "gradient", "hessian", "frozen")
+
+
+def _spread(entry: BucketLanes, call: CallOutput, positions: np.ndarray) -> CallOutput:
+    """``call`` with its gradient and matrix laid out in its lanes' full points.
+
+    ``positions`` gives, per own unit of the call, its lane's position in the
+    bucket. A padded copy of a unit keeps zeros.
+    """
+    output = call.output
+    width = _result_width(entry)
+    own = int(call.rows.shape[0])
+    at = entry.spread[positions]
+    units = np.arange(own)[:, None]
+    if output.gradient is not None:
+        narrow = np.asarray(output.gradient)
+        gradient = np.zeros((narrow.shape[0], width), dtype=narrow.dtype)
+        gradient[units, at] = narrow[:own]
+        output = eqx.tree_at(lambda result: result.gradient, output, gradient)
+    if output.normal is not None:
+        narrow = np.asarray(output.normal)
+        normal = np.zeros((narrow.shape[0], width, width), dtype=narrow.dtype)
+        normal[units[:, :, None], at[:, :, None], at[:, None, :]] = narrow[:own]
+        output = eqx.tree_at(lambda result: result.normal, output, normal)
+    return call._replace(output=output)
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -333,6 +405,7 @@ def batched_lanes(plan: Plan, joint: Any) -> BatchedLanes:
                 dtype=np.dtype(group.lanes.t0.dtype),
                 dt0_leaf=int(dt0_leaf),
                 state_sizes=(int(np.asarray(group.lanes.y0)[0].size),) * len(bucket.children),
+                **dict(zip(("full", "spread"), _full_points(layout, tuple(bucket.children)))),
                 link_leaves=tuple(
                     (_position(leaves, link.values), _position(leaves, link.tangent))
                     for link in group.lanes.links
@@ -535,6 +608,7 @@ def lane_metadata(plan: Plan, joint: Any) -> BatchedLanes:
                 dtype=np.dtype(np.asarray(first._seam.x0).dtype),
                 dt0_leaf=-1,
                 state_sizes=(size,) * len(children),
+                **dict(zip(("full", "spread"), _full_points(layout, children))),
             )
         )
         for position, (lane, child) in enumerate(zip(bucket.lanes, children)):
@@ -755,9 +829,9 @@ def _resolve(lanes: BatchedLanes, lane_ids: Any) -> tuple:
 
 
 def _one_width(lanes: BatchedLanes, ids: tuple) -> tuple:
-    """``_resolve`` of ``ids``, refusing lanes of more than one narrow width."""
+    """``_resolve`` of ``ids``, refusing lanes whose results differ in width."""
     places = _resolve(lanes, ids)
-    widths = {lanes.buckets[bucket].bucket.width for bucket, _ in places}
+    widths = {_result_width(lanes.buckets[bucket]) for bucket, _ in places}
     if len(widths) != 1:
         raise ValueError(
             f"the lanes {ids} have the narrow widths {sorted(widths)}; their results are reduced "
@@ -880,8 +954,8 @@ def _check_programs(lanes: BatchedLanes, mode: str, touched: list) -> None:
                 f"compiled, and an evaluation compiles nothing; call prepare(modes=({mode!r},)) "
                 "before evaluating it."
             )
-    if mode in ("blocks", "gradient", "hessian", "frozen"):
-        widths = {lanes.buckets[index].bucket.width for index in touched}
+    if mode in _DERIVATIVE_MODES:
+        widths = {_result_width(lanes.buckets[index]) for index in touched}
         if len(widths) > 1:
             raise ValueError(
                 f"the requested lanes have the narrow widths {sorted(widths)}, and the {mode} "
@@ -1494,6 +1568,9 @@ def evaluate(
                     links=numbers,
                 )
                 kept.extend((index, call) for call in held)
+            entry = lanes.buckets[index]
+            if entry.spread is not None and request.mode in _DERIVATIVE_MODES:
+                out = tuple(_spread(entry, call, position_of[call.columns]) for call in out)
             outputs.extend(call._replace(rows=rows[call.rows]) for call in out)
         return outputs, walls, batches, kept
 
@@ -1575,6 +1652,7 @@ __all__ = [
     "batched_lanes",
     "cut_by_member",
     "evaluate",
+    "full_columns",
     "lane_members",
     "lane_metadata",
     "placement",

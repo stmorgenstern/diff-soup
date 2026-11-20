@@ -38,6 +38,53 @@ from collections.abc import Callable, Hashable
 from threading import RLock
 from typing import Any, Optional
 
+from diff_soup._environment import CACHE_CAPACITY
+
+
+def check_capacity(capacity: Any, what: str = "cache capacity") -> int:
+    """Return ``capacity`` if it is a positive integer, else raise.
+
+    Args:
+        capacity: The value to check.
+        what: What the value is, for the message.
+
+    Returns:
+        ``capacity``.
+
+    Raises:
+        TypeError: If ``capacity`` is not an ``int`` (a ``bool`` is not).
+        ValueError: If ``capacity`` is less than one.
+    """
+    if isinstance(capacity, bool) or not isinstance(capacity, int):
+        raise TypeError(f"{what} must be an int, got {type(capacity).__name__} {capacity!r}.")
+    if capacity < 1:
+        raise ValueError(f"{what} must be at least 1, got {capacity}.")
+    return capacity
+
+
+def initial_capacity(default: int) -> int:
+    """Return the capacity a cache is created with: ``DIFFSOUP_CACHE_CAPACITY`` if set, else ``default``.
+
+    Args:
+        default: The cache's own default capacity.
+
+    Returns:
+        The capacity.
+
+    Raises:
+        ValueError: If ``DIFFSOUP_CACHE_CAPACITY`` is set to anything but a positive integer.
+    """
+    text = CACHE_CAPACITY.get()
+    if text is None:
+        return default
+    try:
+        value = int(text)
+    except ValueError:
+        raise ValueError(
+            f"{CACHE_CAPACITY.name} must be a positive integer, got {text!r}."
+        ) from None
+    return check_capacity(value, CACHE_CAPACITY.name)
+
 
 class BoundedContentCache:
     """Bounded LRU cache keyed by ``content_hash`` with id-stable values.
@@ -80,8 +127,23 @@ class BoundedContentCache:
 
     @property
     def capacity(self) -> int:
-        """Maximum number of retained entries before LRU eviction."""
+        """Maximum number of retained entries before LRU eviction.
+
+        Setting a larger value raises the limit. Setting a smaller one evicts the least
+        recently used entries down to it, and counts them in ``evictions()``.
+
+        Raises:
+            TypeError: On assignment, if the value is not an ``int``.
+            ValueError: On assignment, if the value is less than one.
+        """
         return self._capacity
+
+    @capacity.setter
+    def capacity(self, value: int) -> None:
+        check_capacity(value)
+        with self._lock:
+            self._capacity = value
+            self._evict_to_capacity()
 
     def get_or_build(
         self,

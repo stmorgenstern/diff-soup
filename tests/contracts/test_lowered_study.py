@@ -1028,3 +1028,34 @@ def _regularizer_program_size(width):
 def test_a_regularizer_block_of_any_width_lowers_to_the_same_number_of_operations():
     """A prior block over a member's 64 values traces as many operations as one over 8."""
     assert _regularizer_program_size(64) == _regularizer_program_size(8)
+
+
+@pytest.mark.parametrize("nested_at", [None, "cell"])
+def test_accepted_steps_report_the_predicted_decrease_their_gain_ratio_divides(
+    lowered, tmp_path, nested_at
+):
+    """`StepInfo.predicted` is positive on accepted steps, `rho` is the cost decrease over it
+    and the log line prints it."""
+    _, study, _ = lowered
+    steps = []
+
+    class Record(inf.Callback):
+        def on_step(self, info):
+            steps.append(info)
+
+    path = tmp_path / "fit.log"
+    small_fit(
+        study,
+        inf.TrustRegion(max_steps=6, nested_at=nested_at),
+        callbacks=(Record(), inf.LogCallback(str(path))),
+    )
+    accepted = [(before, info) for before, info in zip(steps, steps[1:]) if info.accepted]
+    assert accepted
+    for before, info in accepted:
+        assert info.predicted > 0
+        # measured 1e-12 relative difference at most, CPU workstation 2026-11-20,
+        # pytest tests/contracts/test_lowered_study.py
+        np.testing.assert_allclose(
+            info.rho, (before.cost - info.cost) / info.predicted, rtol=1e-8
+        )
+    assert "pred=" in path.read_text()

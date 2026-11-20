@@ -5,6 +5,9 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -101,3 +104,43 @@ def test_the_public_inference_problem_is_a_facade_over_a_numeric_leaf():
     leaf = problem.numeric_problem
     assert leaf is not None and not isinstance(leaf, inf.InferenceProblem)
     assert callable(inf.Study.compile_inference_problem)
+
+
+def test_set_cache_capacity_sets_every_cache_and_shrinking_evicts_the_oldest():
+    """`ds.problem.set_cache_capacity` raises each capacity; a smaller one evicts oldest first."""
+    before = ds.problem.cache_capacity()
+    try:
+        ds.problem.set_cache_capacity(40)
+        assert set(ds.problem.cache_capacity().values()) == {40}
+        cache = BoundedContentCache(capacity=3)
+        for key in "abc":
+            cache.get_or_build(key, handle=0, build_fn=object)
+        cache.capacity = 2
+        assert ("a" in cache, "b" in cache, "c" in cache, cache.evictions()) == (
+            False,
+            True,
+            True,
+            1,
+        )
+        cache.capacity = 5
+        assert (cache.capacity, len(cache)) == (5, 2)
+        for bad in (0, -3):
+            with pytest.raises(ValueError, match="at least 1"):
+                ds.problem.set_cache_capacity(bad)
+        for bad in (2.5, True):
+            with pytest.raises(TypeError):
+                ds.problem.set_cache_capacity(bad)
+        assert set(ds.problem.cache_capacity().values()) == {40}
+    finally:
+        ds.problem.set_cache_capacity(None)
+    assert ds.problem.cache_capacity() == before
+
+
+def test_the_cache_capacity_variable_sets_every_cache_at_import():
+    """`DIFFSOUP_CACHE_CAPACITY=7` in the environment gives every cache seven entries."""
+    code = "import diff_soup as ds; print(sorted(set(ds.problem.cache_capacity().values())))"
+    env = {**os.environ, "DIFFSOUP_CACHE_CAPACITY": "7", "JAX_PLATFORMS": "cpu"}
+    out = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip().splitlines()[-1] == "[7]"

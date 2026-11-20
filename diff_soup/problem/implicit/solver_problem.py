@@ -35,7 +35,7 @@ import numpy as np
 from diff_soup._errors import ConfigurationError
 from diff_soup._precision import Precision
 from diff_soup.linear import SparseTopology
-from diff_soup.problem._cache import BoundedContentCache
+from diff_soup.problem._cache import BoundedContentCache, initial_capacity
 from diff_soup.problem._ir.content_hash import _graph_callable_config_id
 from diff_soup.problem._spec.operating_modes import OPERATING_MODES
 from diff_soup.problem.implicit.consistent_init import (
@@ -903,7 +903,7 @@ class SolverView:
 # program across repeat solves of one model. Past the bound the least recently
 # used view is rebuilt on its next use, and compares equal to the one it
 # replaces.
-_SOLVER_VIEW_CACHE_CAPACITY = 32
+_SOLVER_VIEW_CACHE_CAPACITY = initial_capacity(32)
 _SOLVER_VIEW_CACHE = BoundedContentCache(capacity=_SOLVER_VIEW_CACHE_CAPACITY)
 
 # The model key of each recently presented problem object, least recently used

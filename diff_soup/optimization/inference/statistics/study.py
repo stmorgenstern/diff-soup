@@ -46,17 +46,27 @@ def _is_unique_partition(labels: tuple) -> bool:
     return len(_unique_in_order(labels)) == len(labels)
 
 
+#: The values of ``Study(reads=...)``.
+READS = ("all", "declared")
+
+
+def _model_declarations(model: Any) -> dict:
+    """The parameters a model declares, by name."""
+    declarations = {
+        candidate.name: candidate
+        for values in parameter_handles(model).values()
+        for candidate in values
+    }
+    declarations.update(
+        {candidate.name: candidate for candidate in getattr(model, "_recipe_declarations", ())}
+    )
+    return declarations
+
+
 def _validate_handle_model(handle: Any, model: Any, *, experiment_id: Hashable, declarations=None):
     """Resolve one compatible declared name on the experiment's own model."""
     if declarations is None:
-        declarations = {
-            candidate.name: candidate
-            for values in parameter_handles(model).values()
-            for candidate in values
-        }
-        declarations.update(
-            {candidate.name: candidate for candidate in getattr(model, "_recipe_declarations", ())}
-        )
+        declarations = _model_declarations(model)
     candidate = declarations.get(handle.name)
     if candidate is None:
         raise ValueError(
@@ -69,6 +79,45 @@ def _validate_handle_model(handle: Any, model: Any, *, experiment_id: Hashable, 
             f"parameter handle {handle.name!r} has decoded size {size} and learnable={handle.learnable}, but experiment {experiment_id!r} declares size {own_size} and learnable={candidate.learnable}; both must agree"
         )
     return candidate
+
+
+def _refuse_unread(hierarchy: Hierarchy, tree: Any, experiments: tuple, ids: tuple) -> None:
+    """Refuse a placed handle with a block no experiment reads.
+
+    Under ``reads="declared"`` an experiment reads a handle only if its model
+    declares it. A shared handle needs one such experiment; a handle of a
+    level needs one below every member of that level.
+
+    Raises:
+        ValueError: If no experiment declares a shared handle, or no experiment
+            below a member declares a handle of the member's level.
+    """
+    declared = [set(experiment._declarations) for experiment in experiments]
+    for handle in hierarchy.shared:
+        if not any(handle.name in names for names in declared):
+            raise ValueError(
+                f"parameter handle {handle.name!r} is placed in shared= and no experiment "
+                "declares it; declare it in an experiment's model or leave it out of the "
+                "hierarchy."
+            )
+    for position, level in enumerate(tree.names):
+        column = tree.nodes[:, position]
+        for handle in hierarchy.per.get(level, ()):
+            for node, member in enumerate(tree.members[position]):
+                below = np.flatnonzero(column == node)
+                if any(handle.name in declared[int(index)] for index in below):
+                    continue
+                where = (
+                    f"experiment {ids[int(below[0])]!r} does not declare it"
+                    if level == EXPERIMENT
+                    else f"no experiment of its member {member!r} declares it"
+                )
+                raise ValueError(
+                    f"parameter handle {handle.name!r} sits at the level {level!r}, and {where}; "
+                    "every member of a level holds its own value of the handle, which some "
+                    "experiment below it must read. Declare it in that model, or place it in "
+                    "shared= or at a level above."
+                )
 
 
 def _experiment_rows(experiment: Experiment) -> int:
@@ -136,7 +185,12 @@ def balance_owners(
         return reordered
     if isinstance(study.parameters, Hierarchy):
         # The experiments carry their members; the clusters derive from them.
-        return Study(reordered, parameters=study.parameters, independent=study.independent)
+        return Study(
+            reordered,
+            parameters=study.parameters,
+            independent=study.independent,
+            reads=study.reads,
+        )
     return Study(
         reordered,
         parameters=study.parameters,
@@ -158,6 +212,7 @@ class Study:
         parameters: A `ds.ParameterSet` or a [Hierarchy][diff_soup.optimization.inference.Hierarchy].
         clusters: A mapping from cluster name to one owner label per experiment, for a `ds.ParameterSet` only.
         independent: Whether the experiments are independent, which must be `True` for several experiments under a `ds.ParameterSet`.
+        reads: Which experiments read a placed handle. `"all"`: every experiment, whose model must declare every handle. `"declared"`: the experiments whose model declares the handle's name, with a [Hierarchy][diff_soup.optimization.inference.Hierarchy] only. Each shared handle then needs one such experiment, and each handle of a level one below every member of that level. The bounds and priors of a handle come from those experiments alone, and each experiment's solve is differentiated against the coordinates it reads.
     """
 
     experiments: tuple[Experiment, ...]
@@ -165,6 +220,7 @@ class Study:
     clusters: Mapping[str, tuple]
     independent: bool
     fingerprint: str
+    reads: str
 
     def __init__(
         self,
@@ -173,6 +229,7 @@ class Study:
         parameters: ParameterSet | Hierarchy,
         clusters: Mapping[str, Iterable[object]] | None = None,
         independent: bool | None = None,
+        reads: str = "all",
     ):
         """Validate statistical independence and cluster alignment once.
 
@@ -185,8 +242,20 @@ class Study:
                 one, a member sits under two members of the level above, two
                 members of a level print alike, or a learnable parameter is
                 placed nowhere; with a ``ParameterSet``, an experiment names
-                members in ``parameters=``.
+                members in ``parameters=``. Also if ``reads`` is not one of
+                ``"all"`` and ``"declared"``; with ``"all"``, if an
+                experiment's model lacks a handle; with ``"declared"``, if
+                ``parameters`` is a ``ParameterSet``, no experiment declares a
+                shared handle, or no experiment below a member declares a
+                handle of that member's level.
         """
+        if reads not in READS:
+            raise ValueError(f"Study reads= is 'all' or 'declared'; got {reads!r}.")
+        if reads == "declared" and not isinstance(parameters, Hierarchy):
+            raise ValueError(
+                "Study reads='declared' places the handles in an inf.Hierarchy, whose levels say "
+                "which experiments share each value; declare the study with inf.Hierarchy."
+            )
         if isinstance(experiments, Experiment):
             experiments = (experiments,)
         else:
@@ -276,6 +345,8 @@ class Study:
                     f"experiment {experiment_id!r} fixes inputs {sorted(conflicts)} that are also in the {declaration}; an input must be fixed or fitted, not both"
                 )
             for handle in parameters.handles:
+                if reads == "declared" and handle.name not in experiment._declarations:
+                    continue
                 _validate_handle_model(
                     handle,
                     experiment.model,
@@ -286,6 +357,8 @@ class Study:
         recorded_clusters = resolved_clusters
         if hierarchy is not None:
             tree = _tree(hierarchy, experiments)
+            if reads == "declared":
+                _refuse_unread(hierarchy, tree, experiments, experiment_ids)
             placed = {handle.name for handle in hierarchy.handles}
             for experiment, experiment_id in zip(experiments, experiment_ids):
                 for name, declared in experiment._declarations.items():
@@ -315,12 +388,14 @@ class Study:
             parameters=parameters,
             clusters=recorded_clusters,
             independent=bool(independent),
+            reads=reads,
         )
         object.__setattr__(self, "experiments", experiments)
         object.__setattr__(self, "parameters", parameters)
         object.__setattr__(self, "clusters", MappingProxyType(resolved_clusters))
         object.__setattr__(self, "independent", bool(independent))
         object.__setattr__(self, "fingerprint", digest)
+        object.__setattr__(self, "reads", reads)
         self._joint_bounds()
 
     @property
@@ -332,17 +407,35 @@ class Study:
         )
 
     def _parameter_groups(self, model: Any) -> ParameterGroups:
-        """Lower Recipe parameter handles into the existing named grouping machinery."""
+        """Lower Recipe parameter handles into the existing named grouping machinery.
+
+        Under ``reads="declared"`` only the handles ``model`` declares are grouped.
+        """
+        declarations = _model_declarations(model)
+
+        def read(handle: Any) -> bool:
+            return self.reads == "all" or handle.name in declarations
+
         shared = {
-            handle.name: _validate_handle_model(handle, model, experiment_id="parameter groups")
+            handle.name: _validate_handle_model(
+                handle, model, experiment_id="parameter groups", declarations=declarations
+            )
             for handle in self.parameters.shared
+            if read(handle)
         }
         local = {
-            handle.name: _validate_handle_model(handle, model, experiment_id="parameter groups")
+            handle.name: _validate_handle_model(
+                handle, model, experiment_id="parameter groups", declarations=declarations
+            )
             for handles in self.parameters.varying.values()
             for handle in handles
+            if read(handle)
         }
         return ParameterGroups(local=local, shared=shared)
+
+    def _reads(self, index: int, handle: Any) -> bool:
+        """Whether the experiment at ``index`` reads ``handle``."""
+        return self.reads == "all" or handle.name in self.experiments[index]._declarations
 
     def _ownership_clusters(self) -> tuple[str, ...]:
         """Select the varying clusters represented by the intermediate owner tier.
@@ -384,6 +477,8 @@ class Study:
         ownership_clusters = set(self._tied_clusters())
         for index, experiment in enumerate(self.experiments):
             for handle in self.parameters.handles:
+                if not self._reads(index, handle):
+                    continue
                 own = experiment._declarations[handle.name]
                 bounds = getattr(own, "bounds", None)
                 cluster = self.parameters.cluster_for(handle)
@@ -515,6 +610,7 @@ class Study:
             bounds=self._joint_bounds(),
             layout=layout,
             data_holders=holders,
+            reads=self.reads,
         )
 
     def build(
@@ -690,8 +786,12 @@ class Study:
         return children, holders
 
     def _declarations_of(self, handle: Any, indices: Iterable[int]) -> tuple:
-        """The declarations of ``handle`` in the builds of the experiments at ``indices``."""
-        return tuple(self.experiments[index]._declarations[handle.name] for index in indices)
+        """The declarations of ``handle`` in the builds of the experiments at ``indices`` that read it."""
+        return tuple(
+            self.experiments[index]._declarations[handle.name]
+            for index in indices
+            if self._reads(index, handle)
+        )
 
     def parameter_schema(self, problem: Any) -> ParameterSchema:
         """Compile handle occurrences against an already-lowered flat layout.
