@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import equinox as eqx
 import jax
@@ -96,6 +96,33 @@ class SubSaveAt:
         return hash(self) == hash(other)
 
 
+@dataclass(frozen=True, eq=False)
+class OutputFunction:
+    """An output a solve stores at its save times, computed by a function of one state.
+
+    Pass it in `SaveAt(outputs=...)` beside or in place of names. Its samples are read as `Solution.outputs[name]`.
+
+    Args:
+        name: The name the output is stored under.
+        fn: `fn(t, state, globals, theta) -> array`, called at each save time with the state in the solver's units, the bordered globals (or `None` unless `reads_globals`) and the parameters the solve integrates against.
+        shape: The shape of one sample.
+        reads_globals: Whether `fn` reads the bordered globals.
+    """
+
+    name: str
+    fn: Callable[..., Any]
+    shape: tuple[int, ...] = ()
+    reads_globals: bool = False
+
+    def __post_init__(self) -> None:
+        """Check the name and the function, and normalize the shape."""
+        if not isinstance(self.name, str) or not self.name:
+            raise ConfigurationError(f"OutputFunction needs a non-empty name; got {self.name!r}.")
+        if not callable(self.fn):
+            raise ConfigurationError(f"OutputFunction {self.name!r} needs a callable fn.")
+        object.__setattr__(self, "shape", tuple(int(d) for d in self.shape))
+
+
 @dataclass(frozen=True)
 class SaveAt:
     """Determines which times and quantities a solve saves.
@@ -115,7 +142,7 @@ class SaveAt:
         made_jump: Not supported, and must stay `False`.
         output: A `DenseOutputPolicy` for the algebraic rows of interpolated samples.
         ordered: If `True`, use `ts` as given, strictly increasing and possibly traced, without `t0`, `t1`, or `steps`.
-        outputs: Names to store in place of the state, each a declared observation, a declared field, `"state"`, or `"lambdas"`.
+        outputs: Names to store in place of the state, each a declared observation, a declared field, `"state"`, or `"lambdas"`, or an [OutputFunction][diff_soup.timestepping.saveat.OutputFunction].
     """
 
     t0: bool = False
@@ -130,26 +157,30 @@ class SaveAt:
     made_jump: bool = False
     output: Optional[DenseOutputPolicy] = None
     ordered: bool = False
-    outputs: Optional[Sequence[str]] = None
+    outputs: Optional[Sequence[Union[str, OutputFunction]]] = None
 
     def __post_init__(self) -> None:
         """Normalize ``outputs`` to a tuple of distinct names."""
         if self.outputs is None:
             return
-        names = self.outputs
-        if isinstance(names, str) or not all(isinstance(name, str) for name in names):
+        entries = self.outputs
+        if isinstance(entries, str) or not all(
+            isinstance(entry, (str, OutputFunction)) for entry in entries
+        ):
             raise ConfigurationError(
-                f"SaveAt.outputs takes a tuple of output names such as ('voltage',); got {names!r}."
+                "SaveAt.outputs takes a tuple of output names such as ('voltage',) or "
+                f"OutputFunction records; got {entries!r}."
             )
-        names = tuple(names)
-        if not names:
+        entries = tuple(entries)
+        if not entries:
             raise ConfigurationError(
                 "SaveAt.outputs names at least one output; pass outputs=None to store "
                 "the full state."
             )
+        names = [entry if isinstance(entry, str) else entry.name for entry in entries]
         if len(set(names)) != len(names):
             raise ConfigurationError(f"SaveAt.outputs names each output once; got {names!r}.")
-        object.__setattr__(self, "outputs", names)
+        object.__setattr__(self, "outputs", entries)
 
     def __hash__(self) -> int:
         """Hash over the static save flags + ``fn`` / ``subs`` identity (cache key)."""
@@ -188,11 +219,13 @@ class OutputSpec:
         name: The name the output was requested by.
         kind: ``"observable"`` (a declared observation), ``"field"`` (a
             declared field's slice of the internal state), ``"state"`` (the
-            full internal state) or ``"lambdas"`` (the bordered globals).
+            full internal state), ``"lambdas"`` (the bordered globals) or
+            ``"function"`` (an [OutputFunction][diff_soup.timestepping.saveat.OutputFunction]).
         shape: The shape of one sample.
         needs_lam: Whether evaluating the output reads the bordered globals.
         start: For a field, the first index of its slice in the state.
         stop: For a field, one past the last index of its slice.
+        fn: For a function, ``fn(t, state, globals, theta)``.
     """
 
     name: str
@@ -201,6 +234,7 @@ class OutputSpec:
     needs_lam: bool = False
     start: int = 0
     stop: int = 0
+    fn: Optional[Callable[..., Any]] = None
 
 
 @dataclass(frozen=True)
@@ -259,12 +293,14 @@ def _declared_fields(source: Any) -> tuple[tuple[str, str, int, int], ...]:
     )
 
 
-def resolve_outputs(outputs: Optional[tuple[str, ...]], problem: Any) -> OutputPlan:
+def resolve_outputs(outputs: Optional[tuple], problem: Any) -> OutputPlan:
     """Resolve ``SaveAt.outputs`` against a problem into its static output layout.
 
     Each name resolves, in this order, to a declared observation, a declared
     field (``"c_e"``, or ``"component.c_e"`` to pick one of several
-    components declaring ``c_e``), ``"state"`` or ``"lambdas"``.
+    components declaring ``c_e``), ``"state"`` or ``"lambdas"``; an
+    [OutputFunction][diff_soup.timestepping.saveat.OutputFunction] is stored
+    as it is declared.
 
     Args:
         outputs: The requested names, or ``None`` for the default layout.
@@ -287,6 +323,13 @@ def resolve_outputs(outputs: Optional[tuple[str, ...]], problem: Any) -> OutputP
     fields = _declared_fields(source)
     specs = []
     for name in outputs:
+        if isinstance(name, OutputFunction):
+            specs.append(
+                OutputSpec(
+                    name.name, "function", name.shape, needs_lam=name.reads_globals, fn=name.fn
+                )
+            )
+            continue
         if name in observables:
             record = observables[name]
             specs.append(
@@ -335,7 +378,9 @@ def output_emitter(plan: OutputPlan, problem: Any, theta: Any, dtype: Any) -> Ca
     solve's parameters ``theta`` (the explicit parameter channel the solve
     integrates against); a field is its slice of the internal state;
     ``"state"`` and ``"lambdas"`` pass the internal state and the bordered
-    globals through. ``lam`` may be ``None`` when no output reads the globals.
+    globals through; a function is called as ``fn(t, u, lam, theta)``, with
+    ``lam`` only when it reads the globals. ``lam`` may be ``None`` when no
+    output reads the globals.
     Each value is cast to ``dtype`` and shaped as its
     [OutputSpec][diff_soup.timestepping.saveat.OutputSpec] records.
     """
@@ -357,6 +402,8 @@ def output_emitter(plan: OutputPlan, problem: Any, theta: Any, dtype: Any) -> Ca
                 value = u[spec.start : spec.stop]
             elif spec.kind == "state":
                 value = u
+            elif spec.kind == "function":
+                value = spec.fn(t, u, lam if spec.needs_lam else None, theta)
             else:
                 value = lam
             rows.append(jnp.asarray(value, dtype=dtype).reshape(spec.shape))

@@ -7,6 +7,7 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
     JAX_ENABLE_X64=1 mpirun -n 3 python -m mpi4py -m benchmarks.wave2_check world link
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check measure             # cost of a wide lane
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check saves               # ... by saved times
+    JAX_ENABLE_X64=1 python -m benchmarks.wave2_check budget              # many saved times
 
 1. Observations that read the global unknowns. The schedule of
    ``benchmarks.computed_start_check`` (a held current, a held voltage, a rest) on
@@ -28,6 +29,11 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
    declarations report dimensional values, the state and ``globals`` hold internal
    ones); a fit on the lanes, and a fit of one experiment in one shoot
    (``InferenceProblem``).
+
+``budget``: a lane saves what its observations read, not its states. The wide lane on
+2,000 cells observed at 4,000 times with 16 derivative directions: its states and their
+tangents would take 4,000 x 2,000 x 17 doubles, 1.1 GB; the compiled ``blocks`` program
+has to need less than 64 MB.
 
 ``world``: the schedule study (one cell per process) or the linked study over the three
 processes of an MPI world: ``J^T J`` against the closed form, the gradient against
@@ -705,6 +711,43 @@ def measure_saves(saves=(5, 20, 80, 320), widths=(1, 16, 50)) -> None:
         MEASURE_TIMES = kept
 
 
+BUDGET_BYTES = 64 * 2**20
+
+
+def measure_budget(cells=2000, count=4000, width=16) -> None:
+    """The device memory and wall time of the wide lane at many sample times, against a budget.
+
+    Prints the memory each compiled program needs (arguments, outputs,
+    temporaries and code), the warm wall time of a ``value`` and a ``blocks``
+    evaluation, and the bytes the states and their tangents would take; asserts
+    that the ``blocks`` program fits ``BUDGET_BYTES`` and those states would not.
+    """
+    global MEASURE_TIMES
+    from diff_soup.optimization.inference.engine._request import Request
+
+    kept = MEASURE_TIMES
+    try:
+        MEASURE_TIMES = np.linspace(0.1, 2.0, count)
+        study, point = wide_study("wave2_budget", width, cells=cells)
+        lowered = ds.lower(study)
+        report = lowered.prepare(modes=("value", "blocks"))
+        needs = {record.mode: record.device_bytes for record in report.records}
+        for mode in ("value", "blocks"):
+            seconds = _timed(lambda mode=mode: lowered.evaluate(Request(mode=mode, points=point)))
+            print(f"budget, {mode}: {needs[mode] / 2**20:.1f} MB, {seconds:.3f} s")
+        states = count * cells * (1 + width) * 8
+        print(
+            f"budget, states and tangents would take {states / 2**20:.0f} MB; budget "
+            f"{BUDGET_BYTES / 2**20:.0f} MB"
+        )
+        result = lowered.evaluate(Request(mode="blocks", points=point))
+        assert np.all(result.status.ok) and np.all(np.isfinite(result.normal))
+        assert needs["blocks"] < BUDGET_BYTES < states, (needs, states)
+        print("ALL CHECKS PASSED (budget)")
+    finally:
+        MEASURE_TIMES = kept
+
+
 def one_process() -> None:
     """Every section that runs in one process."""
     report = _Report()
@@ -753,4 +796,6 @@ if __name__ == "__main__":
     if mode == "world":
         world(sys.argv[2])
     else:
-        {"one": one_process, "measure": measure, "saves": measure_saves}[mode]()
+        {"one": one_process, "measure": measure, "saves": measure_saves, "budget": measure_budget}[
+            mode
+        ]()

@@ -70,10 +70,22 @@ at the point: the value is the solve on the source's output, and the one
 ``jax.jacfwd`` of the ``blocks`` mode carries the source's coordinates by the
 chain rule.
 
+A lane's solve saves what its streams and outputs read, not its states: each
+observation is a function of one state at one time, so the solve evaluates
+every stream and every output at each sample time and saves those values
+alone (``SaveAt(outputs=...)`` with one
+[OutputFunction][diff_soup.timestepping.saveat.OutputFunction] each). A lane's
+saved memory is then its sample count times its observed values per sample,
+once for the value and once per derivative direction. A stream is evaluated at
+every sample time of its lane, its own frames or not. A slot the solve never
+reached holds the observation of the initial state. A lane whose solver
+carries ``BacksolveAdjoint``, which saves the state only, saves its states and
+observes them after the solve.
+
 A stream or an output whose observation reads the model's global unknowns
-(``LaneProgram.observe_globals``, ``output_globals``) receives each saved state
-followed by the global unknowns the solver saved at the same time; every other
-one receives the saved state alone.
+(``LaneProgram.observe_globals``, ``output_globals``) receives each state
+followed by the global unknowns at the same time; every other one receives the
+state alone.
 
 A lane whose experiment computes its initial state from its parameters
 ([ComputedInitialState][diff_soup.optimization.inference.ComputedInitialState]) starts
@@ -502,15 +514,22 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     if program.links:
         theta = _with_links(program, point, lane, theta)
     y0 = lane.y0 if program.start is None else _computed_start(program, theta, lane.y0)
+    adjoint = getattr(program.solver, "adjoint", None)
+    readers = (
+        _observation_readers(program, theta, lane.y0.dtype)
+        if _saves_observations(program)
+        else None
+    )
+    saved = None if readers is None else tuple(reader for reader, _wide in readers)
     if lane.schedule is None:
         solution = pdesolve(
             program.problem,
             program.solver,
             (lane.t0, lane.t1),
             y0,
-            saveat=SaveAt(ts=lane.times, ordered=True),
+            saveat=SaveAt(ts=lane.times, ordered=True, outputs=saved),
             theta=theta,
-            adjoint=getattr(program.solver, "adjoint", None),
+            adjoint=adjoint,
             dt0=lane.dt0,
         )
         ends = None
@@ -524,41 +543,35 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
             t_end=lane.t1,
             times=lane.times,
             theta=theta,
-            adjoint=getattr(program.solver, "adjoint", None),
+            adjoint=adjoint,
             dt0=lane.dt0,
+            outputs=saved,
         )
         ends = _segment_ends(segments, lane.t0)
-    states = solution.ys
-    valid = solution.valid_mask
-    if valid is None:
-        valid = jnp.all(jnp.isfinite(states), axis=tuple(range(1, states.ndim)))
-    # A slot the solve never reached holds no state. Give it the initial state,
-    # so an observation operator sees finite numbers there; the rows of such
-    # a slot are masked below, and a requested one fails the lane. The saved
-    # state is the leading block of the initial state when that one also
-    # carries the bordered unknowns. A computed start fills them without its derivative.
+    # A computed start fills a slot the solve never reached without its derivative.
     held = lane.y0 if program.start is None else jax.lax.stop_gradient(y0)
-    initial = jnp.reshape(jnp.asarray(held, states.dtype), (-1,))[: states[0].size]
-    filled = jnp.where(_frame_mask(valid, states), states, jnp.reshape(initial, states.shape[1:]))
-    bordered = _bordered(solution, filled, valid) if _reads_globals(program) else None
+    if readers is None:
+        valid, predicted_of, output_of = _read_states(program, lane, solution, held, theta)
+    else:
+        valid, predicted_of, output_of = _read_observations(
+            program, lane, solution, held, theta, readers
+        )
 
     rows = []
     predictions = []
     missing = jnp.zeros((), dtype=bool)
     count = jnp.zeros((), dtype=jnp.int32)
-    observe_globals = program.observe_globals or (False,) * len(program.observes)
-    for observe, stream, wide in zip(program.observes, lane.streams, observe_globals):
-        times = lane.times[stream.frame]
-        predicted = observe((bordered if wide else filled)[stream.frame], times, theta)
+    for index, stream in enumerate(lane.streams):
+        predicted = predicted_of(index, stream.frame)
         keep = _frame_mask(stream.keep, predicted)
         if stream.likelihood is None:
             residual = jnp.where(keep, stream.weight * (predicted - stream.target), 0.0)
         else:
             # A frame that is not observed gives zero rows, and its prediction
             # reaches no derivative through them.
-            held = jnp.where(keep, predicted, jax.lax.stop_gradient(predicted))
+            kept = jnp.where(keep, predicted, jax.lax.stop_gradient(predicted))
             residual = jnp.where(
-                keep, stream.likelihood.least_squares_rows(stream.target, held), 0.0
+                keep, stream.likelihood.least_squares_rows(stream.target, kept), 0.0
             )
         rows.append(jnp.reshape(residual, (-1,)))
         predictions.append(jnp.where(keep, predicted, 0.0))
@@ -571,12 +584,8 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     outputs = None
     if program.outputs:
         pieces = []
-        output_globals = program.output_globals or (False,) * len(program.outputs)
-        for observe, frame, wide in zip(program.outputs, lane.outputs, output_globals):
-            values = jax.vmap(lambda state, t, observe=observe: observe(state, t=t, theta=theta))(
-                (bordered if wide else filled)[frame], lane.times[frame]
-            )
-            pieces.append(jnp.reshape(values, (-1,)))
+        for index, frame in enumerate(lane.outputs):
+            pieces.append(jnp.reshape(output_of(index, frame), (-1,)))
             missing = missing | jnp.any(jnp.logical_not(valid[frame]))
         outputs = jnp.concatenate(pieces)
         not_finite = not_finite | jnp.logical_not(
@@ -590,6 +599,151 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
         jax.lax.stop_gradient(jnp.where(status.failed, 0.0, value)) for value in predictions
     )
     return flat_rows, outputs, (count, status, _work(solution, lane.dt0.dtype), predictions, ends)
+
+
+def _saves_observations(program: LaneProgram) -> bool:
+    """Whether the lane's solve saves its observations in place of its states.
+
+    Every lane that observes or outputs something does, except one whose
+    solver carries ``BacksolveAdjoint``, which saves the state only.
+    """
+    from diff_soup._adjoints import BacksolveAdjoint
+
+    if not (program.observes or program.outputs):
+        return False
+    return not isinstance(getattr(program.solver, "adjoint", None), BacksolveAdjoint)
+
+
+def _observation_readers(program: LaneProgram, theta: PyTree, dtype: DTypeLike) -> tuple:
+    """Per stream, then per output, the observation the solve saves and whether it reads the globals.
+
+    Each is an [OutputFunction][diff_soup.timestepping.saveat.OutputFunction]
+    of one state at one time: the stream's observation of that frame alone,
+    or the output's readout. One that reads the global unknowns receives the
+    state followed by the globals, as the saved states would give it. Its
+    shape is the one it has at ``theta``.
+    """
+    from diff_soup.problem.implicit import solver_view
+    from diff_soup.timestepping.saveat import OutputFunction
+
+    view = solver_view(program.problem)
+    n_u, n_lam = int(view.n_u), int(view.n_lam)
+    observe_globals = program.observe_globals or (False,) * len(program.observes)
+    output_globals = program.output_globals or (False,) * len(program.outputs)
+    if n_lam == 0 and (any(observe_globals) or any(output_globals)):
+        raise ValueError(
+            "an observation reads the global unknowns, and the solve saved none; the "
+            "model declares no global unknowns."
+        )
+
+    def stream_reader(observe, wide):
+        def read(t, u, lam, theta):
+            state = jnp.concatenate([u, lam]) if wide else u
+            return observe(state[None], jnp.reshape(t, (1,)), theta)[0]
+
+        return read
+
+    def output_reader(observe, wide):
+        def read(t, u, lam, theta):
+            return observe(jnp.concatenate([u, lam]) if wide else u, t=t, theta=theta)
+
+        return read
+
+    functions = [
+        (f"stream {index}", stream_reader(observe, wide), wide)
+        for index, (observe, wide) in enumerate(zip(program.observes, observe_globals))
+    ] + [
+        (f"output {index}", output_reader(observe, wide), wide)
+        for index, (observe, wide) in enumerate(zip(program.outputs, output_globals))
+    ]
+    u = jnp.zeros((n_u,), dtype)
+    lam = jnp.zeros((n_lam,), dtype)
+    t = jnp.zeros((), dtype)
+    return tuple(
+        (
+            OutputFunction(
+                name,
+                read,
+                jax.eval_shape(read, t, u, lam if wide else None, theta).shape,
+                reads_globals=wide,
+            ),
+            wide,
+        )
+        for name, read, wide in functions
+    )
+
+
+def _read_states(program, lane, solution, held, theta) -> tuple:
+    """``(valid, predicted_of, output_of)`` of a solve that saved the states.
+
+    ``predicted_of(index, frame)`` is stream ``index``'s observation of the
+    saved states at the sample slots ``frame``; ``output_of(index, frame)``
+    the same of output ``index``. A slot the solve never reached holds no
+    state: it is given the initial state, so an observation operator sees
+    finite numbers there (its rows are masked, and a requested one fails the
+    lane). The saved state is the leading block of the initial state when
+    that one also carries the bordered unknowns.
+    """
+    states = solution.ys
+    valid = solution.valid_mask
+    if valid is None:
+        valid = jnp.all(jnp.isfinite(states), axis=tuple(range(1, states.ndim)))
+    initial = jnp.reshape(jnp.asarray(held, states.dtype), (-1,))[: states[0].size]
+    filled = jnp.where(_frame_mask(valid, states), states, jnp.reshape(initial, states.shape[1:]))
+    bordered = _bordered(solution, filled, valid) if _reads_globals(program) else None
+    observe_globals = program.observe_globals or (False,) * len(program.observes)
+    output_globals = program.output_globals or (False,) * len(program.outputs)
+
+    def predicted_of(index, frame):
+        source = bordered if observe_globals[index] else filled
+        return program.observes[index](source[frame], lane.times[frame], theta)
+
+    def output_of(index, frame):
+        observe = program.outputs[index]
+        source = bordered if output_globals[index] else filled
+        return jax.vmap(lambda state, t: observe(state, t=t, theta=theta))(
+            source[frame], lane.times[frame]
+        )
+
+    return valid, predicted_of, output_of
+
+
+def _read_observations(program, lane, solution, held, theta, readers) -> tuple:
+    """``(valid, predicted_of, output_of)`` of a solve that saved the observations.
+
+    As [_read_states][diff_soup.optimization.inference.engine._kernel._read_states],
+    from the values the solve saved (``readers``, from
+    [_observation_readers][diff_soup.optimization.inference.engine._kernel._observation_readers]).
+    A slot the solve never reached holds the observation of the initial state,
+    with zero globals.
+    """
+    from diff_soup.problem.implicit import solver_view
+
+    values = tuple(solution.outputs.samples)
+    valid = solution.valid_mask
+    if valid is None:
+        valid = jnp.all(
+            jnp.stack([jnp.all(jnp.isfinite(v), axis=tuple(range(1, v.ndim))) for v in values]),
+            axis=0,
+        )
+    view = solver_view(program.problem)
+    initial = jnp.reshape(jnp.asarray(held, values[0].dtype), (-1,))[: int(view.n_u)]
+    zeros = jnp.zeros((int(view.n_lam),), values[0].dtype)
+    streams = len(program.observes)
+
+    def at(position, frame):
+        reader, wide = readers[position]
+        saved = values[position][frame]
+        fill = jax.vmap(lambda t: reader.fn(t, initial, zeros if wide else None, theta))(
+            lane.times[frame]
+        )
+        return jnp.where(_frame_mask(valid[frame], saved), saved, fill.astype(saved.dtype))
+
+    return (
+        valid,
+        (lambda index, frame: at(index, frame)),
+        (lambda index, frame: at(streams + index, frame)),
+    )
 
 
 def _zero_where_failed(status: LaneStatus, value: Array) -> Array:

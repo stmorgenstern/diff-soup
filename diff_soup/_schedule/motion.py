@@ -202,14 +202,17 @@ def _endpoint_motion(value):
     return _motion(_MOTION_ORDER, value - jax.lax.stop_gradient(value))
 
 
-def _segment_solve_impl(problem, solver, span, state, times, theta, control, options):
-    """One unchanged primal solve, with moving-boundary flow derivatives."""
+def _segment_solve_impl(problem, solver, span, state, times, theta, control, options, outputs=None):
+    """One unchanged primal solve, with moving-boundary flow derivatives.
+
+    With ``outputs`` the solve saves them at ``times`` in place of the state.
+    """
     solution = pdesolve(
         problem,
         solver,
         span,
         state,
-        saveat=SaveAt(ts=times, ordered=True),
+        saveat=SaveAt(ts=times, ordered=True, outputs=outputs),
         theta=theta,
         control_state0=control,
         **options,
@@ -218,7 +221,7 @@ def _segment_solve_impl(problem, solver, span, state, times, theta, control, opt
     return eqx.tree_at(lambda s: s.prob, solution, None)
 
 
-def _moving_solve(problem, solver, span, state, times, theta, control, options):
+def _moving_solve(problem, solver, span, state, times, theta, control, options, outputs=None):
     """The segment's solve as a function of its ends, for differentiation.
 
     The solve runs between its ends held fixed, so its adaptive mesh stays frozen.
@@ -284,5 +287,24 @@ _segment_solve = eqx.filter_custom_jvp(_segment_solve_impl)
 
 @_segment_solve.def_jvp
 def _segment_solve_jvp(primals, tangents):
-    """Differentiate the solve with its ends moving (``_moving_solve``)."""
-    return eqx.filter_jvp(_moving_solve, primals, tangents)
+    """Differentiate the solve with its ends moving (``_moving_solve``).
+
+    A solve that saves outputs in place of the state is differentiated as it
+    runs, between fixed ends at fixed sample times: the moving ends act on
+    saved states, which it does not keep. Its span and times must then carry
+    a symbolic zero tangent (``None`` here, known when the derivative is
+    traced); any other tangent there is refused.
+    """
+    outputs = primals[8] if len(primals) > 8 else None
+    if outputs is None:
+        return eqx.filter_jvp(_moving_solve, primals, tangents)
+    span_tangent, times_tangent = tangents[2], tangents[4]
+    if jax.tree_util.tree_leaves((span_tangent, times_tangent)):
+        raise NotImplementedError(
+            "solve_schedule saving outputs in place of the state has no derivative with "
+            "respect to the segment ends or the sample times (a segment duration, t0, "
+            "t_end or times): the moving ends act on saved states. Differentiate in the "
+            "parameters, the targets and the initial state only, or save the state "
+            "(outputs=None)."
+        )
+    return eqx.filter_jvp(_segment_solve_impl, primals, tangents)

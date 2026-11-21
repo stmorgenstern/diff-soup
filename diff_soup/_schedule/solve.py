@@ -16,7 +16,8 @@ from diff_soup._solution import RESULT
 from diff_soup.problem.implicit import solver_view
 from diff_soup.timestepping import ControlState
 from diff_soup.timestepping.event_records import TerminalRecord
-from diff_soup.timestepping.vsvo.solution import Solution, SolveHistory
+from diff_soup.timestepping.saveat import SaveAt, resolve_outputs
+from diff_soup.timestepping.vsvo.solution import SavedOutputs, Solution, SolveHistory
 
 # A segment that does not run still executes one solve, because under ``vmap``
 # both sides of a choice execute. That solve spans this fraction of the whole
@@ -37,6 +38,7 @@ class _Samples(NamedTuple):
     event_kinds: Any
     event_directions: Any
     result_codes: Any
+    outputs: Any = None
 
 
 class _Carry(NamedTuple):
@@ -218,6 +220,7 @@ def solve_schedule(
     adjoint: Any = None,
     dt0: Any = None,
     max_steps: int = 10_000,
+    outputs: Optional[tuple] = None,
 ) -> tuple[Solution, SegmentEnds]:
     """Solve the segments of a schedule one after another and merge their samples.
 
@@ -285,6 +288,17 @@ def solve_schedule(
     derivative is that segment's smooth endpoint limit. A fixed query crossing
     a discontinuous operating switch has no two-sided derivative.
 
+    With ``outputs``, each segment saves those outputs at the sample times in
+    place of the state (``SaveAt(outputs=...)``), and the merged solution holds
+    them in ``Solution.outputs``, taken sample by sample from the segment that
+    owns the sample as the states are; ``ys`` and ``lambdas`` are then
+    ``None``. The carried state still passes from segment to segment through
+    ``Solution.terminal``. A solve that saves outputs has no derivative with
+    respect to the segment ends or the sample times: differentiating
+    ``t0``, ``t_end``, a duration or ``times`` raises ``NotImplementedError``
+    when the derivative is traced; every other derivative is the one of the
+    outputs of the saved states.
+
     Args:
         problem: What ``pdesolve`` accepts; its model must declare an
             operational control table.
@@ -309,6 +323,11 @@ def solve_schedule(
             when a segment may carry a step, ``None`` passes the first step
             the solver is configured with (its ``dt0`` attribute), or ``0``
             when it names none.
+        outputs: What each segment saves in place of the state, as for
+            ``SaveAt(outputs=...)``: names of declared observations or fields,
+            ``"state"``, ``"lambdas"``, or
+            [OutputFunction][diff_soup.timestepping.saveat.OutputFunction]
+            records. ``None`` saves the state and the globals.
 
     Returns:
         ``(solution, ends)``: the merged ``Solution`` and the
@@ -340,6 +359,7 @@ def solve_schedule(
     _refuse_unknown_modes(schedule, tuple(table.modes))
     _refuse_empty_span(t0, t_end)
     units = _field_units(view)
+    plan = None if outputs is None else resolve_outputs(SaveAt(outputs=outputs).outputs, view)
 
     y0 = jnp.asarray(y0)
     # Wide enough to hold the solve's own precision exactly: the carried state
@@ -395,6 +415,7 @@ def solve_schedule(
                 **varying,
             ),
             dict(adjoint=adjoint, max_steps=max_steps, **extra),
+            outputs,
         )
         return solution, start, end, stop, run
 
@@ -440,6 +461,12 @@ def solve_schedule(
                 merged.event_directions, solution.event_directions, take, samples_count
             ),
             result_codes=_merge(merged.result_codes, solution.result_codes, take, samples_count),
+            outputs=None
+            if merged.outputs is None
+            else tuple(
+                _merge(old, new, take, samples_count)
+                for old, new in zip(merged.outputs, solution.outputs.samples)
+            ),
         )
         following = _Carry(
             y=jnp.where(run & solved, reached, carry.y),
@@ -487,14 +514,21 @@ def solve_schedule(
         last_start=t0 if with_terms else None,
         samples=_Samples(
             ts=jnp.full((samples_count,), jnp.nan, dtype=dtype),
-            ys=jnp.full((samples_count, n_u), jnp.nan, dtype=dtype),
-            lambdas=None if n_lam == 0 else jnp.full((samples_count, n_lam), jnp.nan, dtype=dtype),
+            ys=None if plan is not None else jnp.full((samples_count, n_u), jnp.nan, dtype=dtype),
+            lambdas=None
+            if n_lam == 0 or plan is not None
+            else jnp.full((samples_count, n_lam), jnp.nan, dtype=dtype),
             valid=jnp.zeros((samples_count,), dtype=bool),
             epochs=codes(),
             event_indices=codes(),
             event_kinds=codes(),
             event_directions=codes(),
             result_codes=codes(),
+            outputs=None
+            if plan is None
+            else tuple(
+                jnp.full((samples_count, *spec.shape), jnp.nan, dtype=dtype) for spec in plan.specs
+            ),
         ),
     )
     # A history to continue needs a later segment that may continue and a
@@ -574,6 +608,9 @@ def solve_schedule(
         stats=totals,
         result=final.result,
         terminal=terminal,
+        outputs=None
+        if plan is None
+        else SavedOutputs(plan.names, tuple(states(values) for values in merged.outputs)),
     )
 
     def per_segment(name):
