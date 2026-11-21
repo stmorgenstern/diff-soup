@@ -1,7 +1,8 @@
 """The initialization's Newton solve and its final gate.
 
 Both routes run a chord phase over one frozen factor, then exact Newton with a fresh
-matrix at every iteration, aiming at the residual 2-norm ``tol``. The joint route
+matrix at every iteration, each step halved until it meets Armijo's rule on the
+residual 2-norm, aiming at the residual 2-norm ``tol``. The joint route
 iterates on the state-aligned unknowns with the exact matrix ``K`` (the algebraic
 columns of ``F_y`` and the differential columns of ``F_ydot``); the reduced route
 iterates on the algebraic values with ``G = F_y[a, a]``. The final gate adds the
@@ -173,7 +174,9 @@ def _phased_newton(icp: ConsistentInitPlan, z0, residual_at, make_solver, scale_
     contraction and finiteness; poor contraction, a nonfinite update or
     residual, or an exhausted chord budget hands the best iterate so far to
     an exact-Newton phase that refreshes the matrix every iteration within
-    the remaining ``max_iters`` budget. Convergence is always judged on a
+    the remaining ``max_iters`` budget, halving a step that does not lower the
+    residual by Armijo's rule and stopping when no halving does. Convergence
+    is always judged on a
     freshly evaluated residual, and an unconverged solve reports itself
     honestly. A seed that already satisfies the residual gate (or is
     nonfinite) returns without factoring anything.
