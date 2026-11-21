@@ -135,6 +135,52 @@ def test_a_newton_fit_whose_radius_collapses_short_of_the_minimum_ends_stalled()
     )
 
 
+def _valley_on_a_bound(x):
+    """x0 is pulled hard toward 3 past its upper bound 1; x1 and x2 travel a curved valley."""
+    return jnp.stack(
+        [
+            10.0 * (x[0] - 3.0),
+            x[1] - 6.0 + 0.5 * x[0],
+            x[2] - 4.0,
+            0.1 * (x[1] * x[2] - 20.0),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"hessian": "gauss-newton", "linear_solver": "eigh"},
+        {"hessian": "gauss-newton", "linear_solver": "cholesky"},
+        {"hessian": "gauss-newton", "linear_solver": "qr"},
+        {"hessian": "true", "subproblem": "cg"},
+    ],
+    ids=["eigh", "cholesky", "qr", "cg"],
+)
+def test_a_newton_fit_against_a_bound_grows_its_radius_on_the_free_coordinates(options):
+    """With x0 held at its bound, the radius bounds the steps of x1 and x2 alone and doubles
+    after good steps, so the fit reaches the bounded minimum in a few steps. The step used to
+    spend the radius on x0, whose move was then clipped away, and the radius never grew."""
+    problem = inf.LeastSquaresProblem.from_residual(
+        jnp.asarray([0.5, 0.0, 0.0]),
+        _valley_on_a_bound,
+        bounds=(jnp.asarray([-5.0, -50.0, -50.0]), jnp.asarray([1.0, 50.0, 50.0])),
+    )
+    optimizer = inf.NewtonTrustRegion(
+        max_steps=30, grad_tol=1e-8, cost_tol=1e-14, x_scale=inf.ConstantScale(1.0), **options
+    )
+    fit = small_fit(problem, optimizer)
+    assert fit.converged
+    assert fit.params[0] == 1.0
+    # measured 8 steps each, |Pg| 2.3e-9 (cg 1.3e-14), x = (1, 5.44599, 3.92507); before the
+    # change MAX_STEPS at 30 with x1 = 1.28 (cg 0.76), |Pg| 5.5, the radius never growing,
+    # CPU 2026-11-21, pytest tests/public_api/test_optimizer_stops.py
+    assert fit.n_steps <= 10
+    # measured |Pg| 2.3e-9 (cg 1.3e-14), CPU 2026-11-21
+    assert fit.projected_grad_norm <= 1e-7
+    assert max(np.diff(fit.trust_region.radius_history)) > 0.0
+
+
 def _growth(start, values, scale, observe):
     """``u' = rate`` from ``u(0) = 1``, observed through ``observe`` at the suite's times."""
     spec = ds.problem("stops_growth")
