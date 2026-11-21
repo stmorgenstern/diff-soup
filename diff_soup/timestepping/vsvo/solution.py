@@ -511,6 +511,37 @@ def terminal_sample_slot(output_ts, valid_count, t, root_tolerance):
 # for output buffers that ride the ordinary carry.
 
 
+def _set_row(buffer, slot, row):
+    """``buffer`` with ``row`` written at the one slot ``slot``.
+
+    One index is unique, and saying so lets the derivative of the write touch
+    that row alone; the general rule for a write whose indices may repeat
+    masks and adds over the whole buffer.
+    """
+    if not isinstance(buffer, jax.Array):
+        # A write-only buffer of the checkpointed reverse loop takes the plain write.
+        return buffer.at[slot].set(row)
+    return buffer.at[slot].set(row, unique_indices=True)
+
+
+def _set_rows(buffer, slots, rows, write):
+    """``buffer`` with ``rows[k]`` written at ``slots[k]`` wherever ``write[k]`` holds.
+
+    ``slots`` is increasing where ``write`` holds. A row that is not written
+    targets a slot of its own past the end of the buffer and is dropped, so the
+    indices are unique and the write, its derivative included, touches only the
+    rows written: nothing of the size of the buffer is copied.
+    """
+    if not isinstance(buffer, jax.Array):
+        # A write-only buffer of the checkpointed reverse loop is written whole by
+        # its loop, never copied per attempt: the plain write to the discard row.
+        target = jnp.where(write, slots, int(buffer.shape[0]) - 1)
+        return buffer.at[target].set(rows)
+    past = int(buffer.shape[0]) + jnp.arange(int(slots.shape[0]), dtype=jnp.int32)
+    target = jnp.where(write, jnp.asarray(slots, jnp.int32), past)
+    return buffer.at[target].set(rows, mode="drop", unique_indices=True)
+
+
 def hold_pending_sample(buffers, valid_count):
     """Move the last valid row of each buffer into a pending record.
 
@@ -527,7 +558,7 @@ def hold_pending_sample(buffers, valid_count):
     safe = jnp.clip(slot, 0, max(discard - 1, 0))
     rows = tuple(buffer[safe] for buffer in buffers)
     target = jnp.where(slot >= 0, slot, discard)
-    buffers = tuple(buffer.at[target].set(jnp.nan) for buffer in buffers)
+    buffers = tuple(_set_row(buffer, target, jnp.nan) for buffer in buffers)
     return buffers, (slot, rows)
 
 
@@ -538,7 +569,7 @@ def commit_pending_sample(buffers, pending):
     slot, rows = pending
     discard = int(buffers[0].shape[0]) - 1
     target = jnp.where(slot >= 0, slot, discard)
-    return tuple(buffer.at[target].set(row) for buffer, row in zip(buffers, rows))
+    return tuple(_set_row(buffer, target, row) for buffer, row in zip(buffers, rows))
 
 
 def place_saveat_sample(buffers, pending, slot, rows, write):
@@ -560,11 +591,11 @@ def place_saveat_sample(buffers, pending, slot, rows, write):
         buffers, pending = operand
         if pending is None:
             target = jnp.where(write, slot, discard)
-            return tuple(b.at[target].set(r) for b, r in zip(buffers, rows)), None
+            return tuple(_set_row(b, target, r) for b, r in zip(buffers, rows)), None
         pending_slot, pending_rows = pending
         flush = jnp.logical_and(jnp.logical_and(write, slot != pending_slot), pending_slot >= 0)
         target = jnp.where(flush, pending_slot, discard)
-        buffers = tuple(b.at[target].set(r) for b, r in zip(buffers, pending_rows))
+        buffers = tuple(_set_row(b, target, r) for b, r in zip(buffers, pending_rows))
         pending_rows = tuple(
             jnp.where(write, jnp.asarray(r, p.dtype), p) for r, p in zip(rows, pending_rows)
         )
@@ -582,19 +613,18 @@ def _write_saveat_rows(buffers, pending, idx, rows, covered, last, any_new):
     """Write the covered rows ``rows[covered]`` at slots ``idx[covered]``.
 
     ``idx`` is increasing and every covered slot lies after the pending slot;
-    ``last`` is the largest covered slot. Uncovered rows target the discard
-    row, so the write is one scatter per buffer.
+    ``last`` is the largest covered slot. Uncovered rows are dropped, so the
+    write is one scatter per buffer that touches the covered rows alone.
     """
     discard = int(buffers[0].shape[0]) - 1
     if pending is None:
-        target = jnp.where(covered, idx, discard)
-        return tuple(b.at[target].set(r) for b, r in zip(buffers, rows)), None
+        return tuple(_set_rows(b, idx, r, covered) for b, r in zip(buffers, rows)), None
     pending_slot, pending_rows = pending
     flush = jnp.logical_and(any_new, pending_slot >= 0)
     flush_target = jnp.where(flush, pending_slot, discard)
-    buffers = tuple(b.at[flush_target].set(r) for b, r in zip(buffers, pending_rows))
-    target = jnp.where(jnp.logical_and(covered, idx != last), idx, discard)
-    buffers = tuple(b.at[target].set(r) for b, r in zip(buffers, rows))
+    buffers = tuple(_set_row(b, flush_target, r) for b, r in zip(buffers, pending_rows))
+    written = jnp.logical_and(covered, idx != last)
+    buffers = tuple(_set_rows(b, idx, r, written) for b, r in zip(buffers, rows))
     position = jnp.clip(last - idx[0], 0, int(idx.shape[0]) - 1)
     pending_rows = tuple(jnp.where(any_new, r[position], p) for r, p in zip(rows, pending_rows))
     return buffers, (jnp.where(any_new, last, pending_slot), pending_rows)
@@ -699,9 +729,10 @@ def fill_saveat_window(
     ``hi`` comes from one ``searchsorted``. At most ``window`` interpolant
     evaluations run on the fast path; a step covering more than ``window``
     save times falls back to the full-grid fill for that step, so no sample
-    is ever dropped. An attempt that covers no save time (every rejected
-    attempt among them) evaluates and writes nothing and leaves the cursor in
-    place. Each covered slot is written once, with one scatter per buffer.
+    is ever dropped. An attempt that covers no save time (every rejected attempt
+    among them) evaluates and writes nothing and leaves the cursor in place.
+    Each covered slot is written once, by a scatter of the window's rows that
+    touches only those rows.
 
     Args:
         ts_grid: The requested save times, strictly increasing, ``(n_save,)``.
@@ -731,36 +762,48 @@ def fill_saveat_window(
     window = int(window)
     hi_raw = jnp.searchsorted(ts_grid, t_acc + save_tol, side="right").astype(jnp.int32)
     hi = jnp.where(accept, jnp.maximum(hi_raw, cursor), cursor)
+
     overflow = (hi - cursor) > window
+    first = jnp.clip(cursor, 0, n_save - window)
+    idx = first + jnp.arange(window, dtype=jnp.int32)
 
-    def _fill(operand, idx):
+    def window_rows(_):
+        """The outputs at the window's slots, and which of them the attempt covers."""
+        return _covered_samples(ts_grid, idx, cursor, hi, t_prev, t_acc, interp_u, emit, interp_lam)
+
+    def full_fill(operand):
+        """Fill every covered slot of a step that covers more than a window (rare)."""
         buffers_in, pending_in = operand
-        covered, rows = _covered_samples(
-            ts_grid, idx, cursor, hi, t_prev, t_acc, interp_u, emit, interp_lam
+        every = jnp.arange(n_save, dtype=jnp.int32)
+        covered_all, rows_all = _covered_samples(
+            ts_grid, every, cursor, hi, t_prev, t_acc, interp_u, emit, interp_lam
         )
-        return _write_saveat_rows(buffers_in, pending_in, idx, rows, covered, hi - 1, hi > cursor)
+        covered_all = jnp.logical_and(covered_all, overflow)
+        return _write_saveat_rows(
+            buffers_in, pending_in, every, rows_all, covered_all, hi - 1, overflow
+        )
 
-    def _full(operand):
-        return _fill(operand, jnp.arange(n_save, dtype=jnp.int32))
-
-    def _windowed(operand):
-        start = jnp.clip(cursor, 0, n_save - window)
-        return _fill(operand, start + jnp.arange(window, dtype=jnp.int32))
-
-    def _cover(operand):
-        return jax.lax.cond(any_lane(overflow), _full, _windowed, operand)
-
-    # An attempt that covers no save time (every rejected attempt, most
-    # accepted ones) evaluates nothing; under vmap the fill runs when some
-    # lane covers a save time, and the full grid only when some lane overflows.
+    # A branch returns the window's rows, never a buffer: an attempt that covers
+    # no save time (every rejected attempt, most accepted ones) evaluates
+    # nothing, and the rows are scattered into the buffers in place, touching
+    # only themselves, so nothing of the size of the buffers is copied, for the
+    # values or for their tangents. Only a step that covers more than a window
+    # fills the whole grid in a branch that returns the buffers. Under vmap a
+    # lane writes only its own covered slots, through one of the two paths.
     covers = hi > cursor
-    # The writes already mask each lane by its own [cursor, hi) interval;
-    # both fill paths produce the same valid rows on a non-overflow lane.
-    # Select only which work the batch needs, not between whole output
-    # buffers: lane_cond would select each lane's buffers from its two
-    # branches, which holds a second copy of every buffer.
+    in_window = jnp.logical_and(covers, jnp.logical_not(overflow))
+    shapes = jax.eval_shape(window_rows, None)
+    covered, rows = jax.lax.cond(
+        any_lane(in_window),
+        window_rows,
+        lambda _: jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), shapes),
+        None,
+    )
+    buffers, pending = _write_saveat_rows(
+        tuple(buffers), pending, idx, rows, jnp.logical_and(covered, in_window), hi - 1, in_window
+    )
     buffers, pending = jax.lax.cond(
-        any_lane(covers), _cover, lambda operand: operand, (buffers, pending)
+        any_lane(overflow), full_fill, lambda operand: operand, (buffers, pending)
     )
     evaluations = jnp.where(
         covers,

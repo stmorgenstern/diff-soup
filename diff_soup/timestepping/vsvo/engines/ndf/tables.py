@@ -125,11 +125,12 @@ def update_d(d: jax.Array, dd: jax.Array, k: jax.Array) -> jax.Array:
     highest difference before the fold. ``k`` may be traced.
     """
     dd = jnp.asarray(dd, dtype=d.dtype)
-    d = d.at[k + 2].set(dd - d[k + 1])
-    d = d.at[k + 1].set(dd)
+    # Each write sets one row: declared unique, its derivative touches that row alone.
+    d = d.at[k + 2].set(dd - d[k + 1], unique_indices=True)
+    d = d.at[k + 1].set(dd, unique_indices=True)
     for i in range(MAX_ORDER, -1, -1):
         folded = d[i] + d[i + 1]
-        d = d.at[i].set(jnp.where(i <= k, folded, d[i]))
+        d = d.at[i].set(jnp.where(i <= k, folded, d[i]), unique_indices=True)
     return d
 
 
