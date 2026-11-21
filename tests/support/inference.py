@@ -42,7 +42,7 @@ def decay_recipe(
     name: str = "suite_decay",
     *,
     nodes: int = 1,
-    source: bool = False,
+    source: bool | str = False,
     rate: float = 0.45,
     rate_bounds=(0.1, 1.2),
     rate_prior=None,
@@ -50,7 +50,10 @@ def decay_recipe(
     precision=None,
     layout=None,
 ) -> Decay:
-    """A decay recipe with a learnable ``rate`` and, optionally, a learnable ``source``."""
+    """A decay recipe with a learnable ``rate`` and, optionally, a learnable ``source``.
+
+    ``source="inert"`` declares ``source`` and leaves it out of the equation.
+    """
     spec = ds.problem(name)
     spec.domain("line", cartesian_grid_1d(nodes, 0.0, 1.0, method="fvm"))
     rate_handle = spec.param(
@@ -63,7 +66,7 @@ def decay_recipe(
         )
     spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
 
-    if source:
+    if source and source != "inert":
 
         @spec.equation(writes="u", reads=("u",))
         def affine_decay(q):
@@ -165,6 +168,51 @@ def decay_study(decay: Decay, *, noisy: bool = True, **experiment: Any) -> Any:
         clusters={"cell": tuple(owner for owner, _ in CELLS)},
         independent=True,
     )
+
+
+#: Per experiment of the study of partial reads: its id, its cell and its true source.
+READS_EXPERIMENTS = (("e1", "c1", -0.05), ("e2", "c2", 0.05), ("e3", "c2", 0.0))
+#: The solver tolerances of that study: its fits then stop on the gradient, below the
+#: noise of the cost (measured: twin fits agree to 6.8e-13 relative, CPU workstation
+#: 2026-11-20, pytest tests/contracts/test_study_reads.py).
+READS_RTOL = 1e-10
+READS_ATOL = 1e-12
+
+
+def reads_study(reads: str, placement: str) -> Any:
+    """Three experiments: ``e1`` and ``e2`` read ``rate`` and ``source``, ``e3`` reads ``rate`` alone.
+
+    Under ``reads="declared"`` the model of ``e3`` does not declare ``source``;
+    under ``reads="all"`` it declares it and never reads it, an inert
+    placeholder. ``placement="shared"`` shares ``source``; ``"level"`` gives
+    each cell its own (``e1`` in ``c1``, ``e2`` and ``e3`` in ``c2``).
+    """
+    priors = {
+        "rate_prior": inf.NormalPrior(mean=0.5, scale=0.5),
+        "source_prior": inf.NormalPrior(mean=0.0, scale=0.2),
+    }
+    used = decay_recipe("reads_used", source=True, **priors)
+    third = decay_recipe(
+        "reads_inert" if reads == "all" else "reads_bare",
+        source="inert" if reads == "all" else False,
+        **priors,
+    )
+    experiments = tuple(
+        decay_experiment(
+            third if index == 2 else used,
+            name,
+            source=source,
+            noise=(index + 1) * NOISE,
+            rtol=READS_RTOL,
+            atol=READS_ATOL,
+            parameters={"cell": cell},
+        )
+        for index, (name, cell, source) in enumerate(READS_EXPERIMENTS)
+    )
+    shared = (used.rate, used.source) if placement == "shared" else (used.rate,)
+    per = {} if placement == "shared" else {"cell": (used.source,)}
+    hierarchy = inf.Hierarchy(levels=("cell",), shared=shared, per=per)
+    return inf.Study(experiments, parameters=hierarchy, reads=reads)
 
 
 def small_fit(problem, optimizer=None, **options: Any) -> Any:

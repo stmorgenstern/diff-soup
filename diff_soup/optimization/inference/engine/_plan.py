@@ -63,6 +63,7 @@ from diff_soup.optimization.inference.engine._layout import (
     lane_layout,
     lane_problems,
 )
+from diff_soup.optimization.inference.engine._links import build_link_plan
 from diff_soup.optimization.inference.statistics.measurement import Experiment
 
 WIDTH_CAP: int = 1024
@@ -183,6 +184,8 @@ class Plan:
             process: every call of a program is split over the devices of
             that axis, and every chunk width is a multiple of their number.
             ``None`` runs every call on ``device``.
+        links: The [LinkPlan][diff_soup.optimization.inference.engine._links.LinkPlan]
+            of a study whose experiments are linked, ``None`` for any other.
     """
 
     buckets: tuple
@@ -191,6 +194,7 @@ class Plan:
     device: jax.Device | None
     waste_bound: float
     mesh: Mesh | None = None
+    links: Any = None
 
     @property
     def devices(self) -> int:
@@ -587,6 +591,10 @@ def build_plan(study: Any, joint: Any, *, chunk: Any = None, device: Any = None)
     layout = lane_layout(joint)
     problems = lane_problems(joint)
     names, _ = _lane_ids(ids, every)
+    links = build_link_plan(study, layout, names)
+    if links is not None:
+        # A driven lane's narrow point holds the coordinates its links add.
+        layout = links.layout(layout)
     declared = tuple(study.experiments)
     experiments = tuple(declared[index] for index in layout.experiments)
     widths = {index: len(columns) for index, columns in enumerate(layout.columns)}
@@ -602,9 +610,15 @@ def build_plan(study: Any, joint: Any, *, chunk: Any = None, device: Any = None)
     for experiment, child in enumerate(every):
         reason = lane_refusal(child)
         if reason is not None:
+            if links is not None and _linked(links, lanes_of[experiment]):
+                raise ValueError(
+                    f"experiment {ids[experiment]!r} produces or reads a linked series, and the "
+                    f"batched lanes cannot take it: {reason}."
+                )
             refused.append(Refusal(ids[experiment], reason))
             continue
-        identity = lane_identity(child)
+        record = None if links is None else links.record(lanes_of[experiment][0])
+        identity = lane_identity(child, record)
         for index in lanes_of[experiment]:
             counts[index] = _segment_count(child)
             # A lane that follows a schedule runs another program than one that follows none.
@@ -615,6 +629,11 @@ def build_plan(study: Any, joint: Any, *, chunk: Any = None, device: Any = None)
     drafts = []
     for key, members in groups.items():
         own = [lane_frames(problems[index]) for index in members]
+        if links is not None:
+            own = [
+                links.frames(index, frames, problems[index]._union_ts)
+                for index, frames in zip(members, own)
+            ]
         for slots, positions in frame_classes(own):
             children = tuple(members[position] for position in positions)
             drafts.append((children, slots, key[1], identities[key], [own[p] for p in positions]))
@@ -643,8 +662,19 @@ def build_plan(study: Any, joint: Any, *, chunk: Any = None, device: Any = None)
         )
     buckets = tuple(buckets)
     return Plan(
-        buckets, tuple(refused), _splits(buckets, experiments), device, WASTE_BOUND, mesh=mesh
+        buckets,
+        tuple(refused),
+        _splits(buckets, experiments),
+        device,
+        WASTE_BOUND,
+        mesh=mesh,
+        links=links,
     )
+
+
+def _linked(links: Any, lanes: Any) -> bool:
+    """Whether one of ``lanes`` (indices in the lane layout) produces or reads a linked series."""
+    return any(index in links.outputs or index in links.links for index in lanes)
 
 
 def population_plan(plan: Plan, members: int, *, chunk: Any = None) -> Plan:

@@ -73,8 +73,8 @@ two minutes; per-file durations are recorded in the session report.
 7. **Hardware is gated by marker, never by a skip in the body.** A row that needs
    a device, a native backend or a process count carries `requires_cuda`,
    `requires_cudss`, `requires_klu`, `requires_superlu`, `requires_two_devices`,
-   `requires_three_devices`, `requires_four_devices` or `requires_two_processes` and
-   is never reported as passing on a host that lacks it.
+   `requires_three_devices`, `requires_four_devices`, `requires_two_processes` or
+   `requires_mpi_launch` and is never reported as passing on a host that lacks it.
    Such rows are counted as owed in the session report.
 8. **Shipped text is written for public readers.** No internal codenames, no
    migration narrative; a test's name and docstring state the claim.
@@ -86,8 +86,9 @@ The capability markers `requires_cuda`, `requires_cudss`, `requires_klu` and
 where a SuperLU_MT install is found) are declared in `pyproject.toml`; `conftest.py`
 declares `requires_two_devices` (`jax.device_count() >= 2`),
 `requires_three_devices` (`jax.device_count() >= 3`),
-`requires_four_devices` (`jax.device_count() >= 4`) and
-`requires_two_processes` (`jax.process_count() >= 2`).
+`requires_four_devices` (`jax.device_count() >= 4`),
+`requires_two_processes` (`jax.process_count() >= 2`) and `requires_mpi_launch` (`mpirun`
+on `PATH` and `mpi4py` importable: the test launches its own world of processes).
 A marked test whose capability the host lacks is skipped with the marker named in the
 reason (`owed: requires_cudss ...`), so the `-rs` summary lists the owed rows.
 
@@ -102,7 +103,7 @@ it is an opt-in tier whose flag was not passed; those skips stay skips.
 capability (`requires_cuda`, `requires_cudss`, `requires_klu`, `requires_superlu`)
 becomes a setup failure naming the marker, so a run on a host that left a backend
 unbuilt cannot pass. A missing `requires_two_devices`, `requires_three_devices`,
-`requires_four_devices` or `requires_two_processes` stays an owed skip under the flag: a device count or a process world belongs to the
+`requires_four_devices`, `requires_two_processes` or `requires_mpi_launch` stays an owed skip under the flag: a device count or a process world belongs to the
 launch, not to the build, so a one-process run lists those rows as owed and a launch
 that provides them runs them.
 

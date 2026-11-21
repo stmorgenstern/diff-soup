@@ -97,6 +97,11 @@ class JointLayout:
         state_slices: Per child, the ``(start, stop)`` of its trajectory-state block.
         n_theta_joint: Length of the joint θ-block (shared + all locals).
         n_joint: Total joint decision-vector length.
+        shared_positions: Per child, the joint columns of the shared block it reads
+            (aligned with ``shared_cols``); empty when every child reads the whole
+            shared block.
+        partial: Whether some child lacks a shared or tied group, and so reads part
+            of the shared block or of its members' blocks.
     """
 
     shared: tuple
@@ -122,6 +127,39 @@ class JointLayout:
     state_slices: tuple
     n_theta_joint: int
     n_joint: int
+    shared_positions: tuple = ()
+    partial: bool = False
+
+    def child_shared_positions(self, child_index: int) -> tuple:
+        """The joint columns of the shared block child ``child_index`` reads, aligned with ``shared_cols``."""
+        if self.shared_positions:
+            return self.shared_positions[child_index]
+        return tuple(range(self.shared_slice[0], self.shared_slice[1]))
+
+    def child_member_columns(self, child_index: int) -> tuple:
+        """The joint columns of the blocks of every member of child ``child_index``, level by level.
+
+        These are ``child_tied_columns`` when the child holds every tied group.
+        """
+        return tuple(
+            column
+            for level, member in enumerate(self.child_levels[child_index])
+            for column in range(*self.level_slices[level][member])
+        )
+
+
+def _group_widths(children: tuple, groups: tuple, widths: Optional[dict] = None) -> dict:
+    """The number of columns of each group: from the first child that holds it, else ``widths``."""
+    out = {}
+    for group in groups:
+        for child in children:
+            cols = _child_group_cols(child, group)
+            if cols:
+                out[group] = len(cols)
+                break
+        else:
+            out[group] = int((widths or {}).get(group, 0))
+    return out
 
 
 def _level_representatives(child_levels: tuple, level_ids: tuple) -> tuple:
@@ -144,6 +182,7 @@ def _build_layout(
     child_owner_indices: tuple = (),
     *,
     levels: Optional[tuple] = None,
+    widths: Optional[dict] = None,
 ) -> JointLayout:
     """Lay out the joint vector: global, tied blocks level by level, child locals, states.
 
@@ -151,6 +190,8 @@ def _build_layout(
     [_normalise_levels][diff_soup.optimization.inference.fitting._joint_groups._normalise_levels]
     returns them; without it, ``ownership_groups``, ``owner_ids`` and
     ``child_owner_indices`` declare one level whose members are the owners.
+    A child may lack a shared or tied group, which it then does not read; a
+    group no child holds takes its width from ``widths``.
     """
     if levels is not None:
         level_groups, level_ids, child_levels = levels
@@ -168,7 +209,27 @@ def _build_layout(
     shared_cols = tuple(_child_shared_cols(c, shared) for c in children)
     owner_cols = tuple(_child_owned_cols(c, tied_groups) for c in children)
     local_cols = tuple(_child_local_cols(c, shared, tied_groups) for c in children)
-    n_shared = len(shared_cols[0]) if shared_cols else 0
+    width_of = _group_widths(children, tuple(shared) + tied_groups, widths)
+    partial = any(
+        not _child_group_cols(child, group)
+        for child in children
+        for group in tuple(shared) + tied_groups
+        if width_of[group]
+    )
+    n_shared = sum(width_of[group] for group in shared)
+
+    shared_positions: tuple = ()
+    if partial:
+        starts = dict(zip(shared, np.cumsum([0] + [width_of[g] for g in shared])[:-1].tolist()))
+        shared_positions = tuple(
+            tuple(
+                column
+                for group in shared
+                if _child_group_cols(child, group)
+                for column in range(starts[group], starts[group] + width_of[group])
+            )
+            for child in children
+        )
 
     offset = n_shared
     representatives = _level_representatives(child_levels, level_ids)
@@ -177,11 +238,11 @@ def _build_layout(
     for groups, firsts in zip(level_groups, representatives):
         member_slices: list[tuple] = []
         member_group_slices: list[tuple] = []
-        for child_index in firsts:
+        for _ in firsts:
             member_start = offset
             group_slices: list[tuple] = []
             for group in groups:
-                width = len(_child_group_cols(children[child_index], group) or ())
+                width = width_of[group]
                 group_slices.append((offset, offset + width))
                 offset += width
             member_slices.append((member_start, offset))
@@ -189,13 +250,17 @@ def _build_layout(
         level_slices.append(tuple(member_slices))
         level_group_slices.append(tuple(member_group_slices))
 
+    # Per child, the columns of its members' blocks, level by level: those of
+    # the groups it holds, aligned with ``owner_cols``.
     child_tied_columns = tuple(
         tuple(
             column
             for level, member in enumerate(row)
-            for column in range(*level_slices[level][member])
+            for group, group_slice in zip(level_groups[level], level_group_slices[level][member])
+            if not partial or _child_group_cols(child, group)
+            for column in range(*group_slice)
         )
-        for row in child_levels
+        for child, row in zip(children, child_levels)
     )
     owner_columns: tuple = ()
     if level_ids:
@@ -252,6 +317,8 @@ def _build_layout(
         state_slices=tuple(state_slices),
         n_theta_joint=n_theta_joint,
         n_joint=offset,
+        shared_positions=shared_positions,
+        partial=partial,
     )
 
 
@@ -305,7 +372,10 @@ def _reconstruct_child_flat(x_joint: jax.Array, child_idx: int, layout: JointLay
     n_theta = len(child_shared_cols) + len(child_owner_cols) + len(child_local_cols)
     n_state = hi_s - lo_s
     x_child = jnp.zeros((n_theta + n_state,), dtype=x_joint.dtype)
-    if child_shared_cols:
+    if child_shared_cols and layout.shared_positions:
+        shared_values = _take_columns(x_joint, layout.shared_positions[child_idx])
+        x_child = x_child.at[jnp.asarray(child_shared_cols)].set(shared_values)
+    elif child_shared_cols:
         x_child = x_child.at[jnp.asarray(child_shared_cols)].set(
             x_joint[layout.shared_slice[0] : layout.shared_slice[1]]
         )
@@ -324,17 +394,40 @@ def _reconstruct_child_flat(x_joint: jax.Array, child_idx: int, layout: JointLay
 # ---------------------------------------------------------------------------
 
 
+def _holder(children: tuple, group: str, candidates) -> Optional[InferenceProblem]:
+    """The first child among ``candidates`` (indices) that holds ``group``."""
+    for index in candidates:
+        if _child_group_cols(children[index], group):
+            return children[index]
+    return None
+
+
 def _joint_theta_names(children: tuple, layout: JointLayout) -> tuple:
     """Per-scalar names of the global, tied (level by level), then child-local theta blocks."""
     names: list[str] = []
-    rep = children[0]
-    for col in layout.shared_cols[0]:
-        names.append(rep.theta_names[col])
+    if not layout.partial:
+        rep = children[0]
+        for col in layout.shared_cols[0]:
+            names.append(rep.theta_names[col])
+    else:
+        for group in layout.shared:
+            child = _holder(children, group, range(len(children)))
+            for col in (_child_group_cols(child, group) or ()) if child is not None else ():
+                names.append(child.theta_names[col])
     representatives = _level_representatives(layout.child_levels, layout.level_ids)
-    for groups, ids, firsts in zip(layout.level_groups, layout.level_ids, representatives):
-        for member_id, child_index in zip(ids, firsts):
-            child = children[child_index]
+    for level, (groups, ids, firsts) in enumerate(
+        zip(layout.level_groups, layout.level_ids, representatives)
+    ):
+        for member, (member_id, child_index) in enumerate(zip(ids, firsts)):
+            under = (
+                [i for i, row in enumerate(layout.child_levels) if row[level] == member]
+                if layout.partial
+                else [child_index]
+            )
             for group in groups:
+                child = _holder(children, group, under)
+                if child is None:
+                    continue
                 for col in _child_group_cols(child, group) or ():
                     names.append(f"{child.theta_names[col]}@{member_id}")
     for i, (child, cols) in enumerate(zip(children, layout.local_cols)):
@@ -351,7 +444,11 @@ def _joint_group_cols(children: tuple, layout: JointLayout) -> tuple:
     rep = children[0]
     start = 0
     for gname in layout.shared:
-        gcols = _child_group_cols(rep, gname)
+        if layout.partial:
+            holder = _holder(children, gname, range(len(children)))
+            gcols = None if holder is None else _child_group_cols(holder, gname)
+        else:
+            gcols = _child_group_cols(rep, gname)
         n = len(gcols) if gcols else 0
         group_names.append(gname)
         group_cols.append(tuple(range(start, start + n)))

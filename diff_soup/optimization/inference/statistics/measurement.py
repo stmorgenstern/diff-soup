@@ -306,6 +306,122 @@ class Measurement:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class Output:
+    """A series an experiment produces at given times, for other experiments to be driven by.
+
+    An output is read from the solution as a measurement is, and carries no data and no likelihood. An experiment declares it in `outputs=`; another experiment reads it through a [Link][diff_soup.optimization.inference.Link].
+
+    Args:
+        name: The label of the output, unique within an experiment.
+        times: The times of the series, a one-dimensional increasing array inside the experiment's `t_span`.
+        observe: The produced quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, the name of a `spec.observe` declaration, or `None` for the state.
+    """
+
+    name: str
+    times: Any
+    observe: Callable | str | None = None
+
+    def __post_init__(self):
+        """Normalize the times and the readout."""
+        if not isinstance(self.name, str) or not self.name:
+            raise TypeError("Output name must be a non-empty string.")
+        times = np.asarray(self.times, dtype=np.float64)
+        if times.ndim != 1 or times.shape[0] < 1:
+            raise ValueError(
+                f"Output {self.name!r} times must be a one-dimensional array of at least one time."
+            )
+        if np.any(np.diff(times) <= 0.0):
+            raise ValueError(f"Output {self.name!r} times must increase strictly.")
+        object.__setattr__(self, "times", jnp.asarray(times))
+        object.__setattr__(self, "observe", _observe_adapter(self.observe))
+
+
+@dataclasses.dataclass(frozen=True)
+class Link:
+    """A fixed signal of an experiment's model, given its values by another experiment's output.
+
+    The driven experiment declares it in `links=`. At every point of a fit the source experiment is solved first, and the values of its output become the values of the signal `into`; the derivative of the driven experiment's residual carries the source's parameters through them. The signal is a function the driven model declares with `spec.function(into, signal, learnable=False)` whose `values` array has one entry per time of the output. Its knots stay as declared, so the caller maps the output's times onto the driven experiment's clock.
+
+    A study with links is fitted on its lanes, `ds.lower(study)` with [TrustRegion][diff_soup.optimization.inference.TrustRegion]. The parameters that move the source's output are shared parameters of the study, declared by every experiment: a model that does not read one declares it inert. A source declares no links itself.
+
+    Args:
+        source: The id of the experiment that produces the output.
+        output: The name of the source's [Output][diff_soup.optimization.inference.Output].
+        into: The name of the driven model's fixed signal function that takes the output's values.
+    """
+
+    source: Hashable
+    output: str
+    into: str
+
+    def __post_init__(self):
+        """Check the declaration on its own; the study checks it against its experiments."""
+        try:
+            hash(self.source)
+        except TypeError as exc:
+            raise TypeError("Link source must be a hashable experiment id.") from exc
+        for name in ("output", "into"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise TypeError(f"Link {name} must be a non-empty string; got {value!r}.")
+
+
+def _signal_values(declaration: Any) -> Any:
+    """The ``values`` array of a declared signal function, or ``None`` when it holds none."""
+    values = getattr(getattr(declaration, "fn", None), "values", None)
+    if values is None or not hasattr(values, "shape") or not hasattr(values, "dtype"):
+        return None
+    if not jnp.issubdtype(values.dtype, jnp.inexact):
+        return None
+    return values
+
+
+def _check_links(experiments: tuple, experiment_ids: tuple) -> None:
+    """Refuse links that do not fit a study's experiments.
+
+    A link names another experiment of the study, an output that experiment
+    declares, and a fixed signal of the driven model whose values have one
+    entry per time of the output. A source declares no links, so links have
+    one level and no cycle.
+    """
+    by_id = dict(zip(experiment_ids, experiments))
+    for experiment, experiment_id in zip(experiments, experiment_ids):
+        for link in experiment.links:
+            named = f"experiment {experiment_id!r} links its signal {link.into!r}"
+            if link.source == experiment_id:
+                raise ValueError(
+                    f"{named} to its own output; a link reads the output of another experiment "
+                    "of the study."
+                )
+            source = by_id.get(link.source)
+            if source is None:
+                raise ValueError(
+                    f"{named} to experiment {link.source!r}, which is not in the study; its "
+                    f"experiments are {list(experiment_ids)}."
+                )
+            outputs = {output.name: output for output in source.outputs}
+            output = outputs.get(link.output)
+            if output is None:
+                raise ValueError(
+                    f"{named} to the output {link.output!r} of experiment {link.source!r}, which "
+                    f"declares the outputs {sorted(outputs)}."
+                )
+            if source.links:
+                raise ValueError(
+                    f"experiment {link.source!r} drives experiment {experiment_id!r} and is "
+                    "driven by a link itself; links have one level: a source declares no links."
+                )
+            values = _signal_values(experiment._declarations[link.into])
+            count = int(np.shape(output.times)[0])
+            if values.ndim < 1 or int(values.shape[0]) != count:
+                raise ValueError(
+                    f"{named} to the output {link.output!r} of experiment {link.source!r}, which "
+                    f"has {count} times, and the signal's values have the shape "
+                    f"{tuple(values.shape)}; give the signal one value per time of the output."
+                )
+
+
 def _check_scale_input(name: str, value: ArrayLike | Sequence) -> None:
     """Refuse a grid scale (``spec.geometry``) given a size that is not finite and positive."""
     import jax
@@ -384,6 +500,71 @@ def _checked_members(members: Any) -> dict:
     return dict(members)
 
 
+def _checked_links(experiment: Any, model: Any, declarations: dict, t_span: tuple) -> tuple:
+    """An experiment's outputs and links, checked against its model; ``(outputs, links)``.
+
+    An output lies inside ``t_span`` and a declared observation's name is
+    resolved against ``model``. A link names a fixed signal function the model
+    declares, holding a ``values`` array, once. An experiment with outputs or
+    links is solved in one shoot.
+    """
+    from diff_soup.optimization.inference.fitting.formulation import SingleShoot
+
+    outputs, links = experiment.outputs, experiment.links
+    if isinstance(outputs, Output) or isinstance(links, Link):
+        raise TypeError("Experiment outputs= and links= are tuples; write (item,) for one.")
+    outputs, links = tuple(outputs), tuple(links)
+    if not all(isinstance(item, Output) for item in outputs):
+        raise TypeError("Experiment outputs must be a tuple of Output objects.")
+    if not all(isinstance(item, Link) for item in links):
+        raise TypeError("Experiment links must be a tuple of Link objects.")
+    names = [output.name for output in outputs]
+    if len(set(names)) != len(names):
+        raise ValueError(f"Experiment output names must be unique; got {names}.")
+    targets = [link.into for link in links]
+    if len(set(targets)) != len(targets):
+        raise ValueError(f"Experiment links each fill one signal once; got the signals {targets}.")
+    t0, t1 = t_span
+    for output in outputs:
+        times = np.asarray(output.times)
+        if np.any(times < t0) or np.any(times > t1):
+            raise ValueError(f"Output {output.name!r} contains times outside t_span {t_span}.")
+    functions = sorted(name for name, handle in declarations.items() if handle.kind == "function")
+    for link in links:
+        declaration = declarations.get(link.into)
+        if declaration is None or declaration.kind != "function":
+            raise ValueError(
+                f"Link into={link.into!r} names no function of the model; it declares the "
+                f"functions {functions}."
+            )
+        if declaration.learnable:
+            raise ValueError(
+                f"Link into={link.into!r} names a learnable function; a link fills a fixed "
+                "signal, declared with spec.function(..., learnable=False)."
+            )
+        if _signal_values(declaration) is None:
+            raise ValueError(
+                f"Link into={link.into!r} names a function that holds no floating-point values "
+                "array; a link fills the values of a signal such as approx.PiecewiseLinear."
+            )
+    trajectory = experiment.trajectory
+    if (outputs or links) and trajectory is not None and not isinstance(trajectory, SingleShoot):
+        raise ValueError(
+            f"Experiment outputs= and links= are read from one solve over t_span, and "
+            f"trajectory={type(trajectory).__name__}(...) splits the span into windows; leave "
+            "trajectory=None or pass SingleShoot()."
+        )
+    outputs = tuple(
+        dataclasses.replace(
+            output, observe=_NamedObservation.of(model, output.observe, output.name)
+        )
+        if isinstance(output.observe, str)
+        else output
+        for output in outputs
+    )
+    return outputs, links
+
+
 @dataclasses.dataclass(frozen=True)
 class Experiment:
     """One solve of a model, compared against its measurements.
@@ -401,6 +582,8 @@ class Experiment:
         trajectory: [SingleShoot][diff_soup.optimization.inference.SingleShoot] or [Multishoot][diff_soup.optimization.inference.Multishoot], or `None` for one solve over `t_span`.
         schedule: An operating protocol the solve follows, a `ds.Schedule`.
         parameters: A mapping from each level of the study's [Hierarchy][diff_soup.optimization.inference.Hierarchy] to this experiment's member of it.
+        outputs: A tuple of [Output][diff_soup.optimization.inference.Output] series, with distinct names, that other experiments of a study are driven by.
+        links: A tuple of [Link][diff_soup.optimization.inference.Link], each giving a fixed signal of the model the values of another experiment's output.
     """
 
     model: Any
@@ -415,6 +598,8 @@ class Experiment:
     # A mapping from level name to member, or None; annotated Any so that a
     # wrong value reaches the refusal that explains the field.
     parameters: Any = None
+    outputs: tuple = ()
+    links: tuple = ()
     _delegate: _CompiledExperiment = dataclasses.field(init=False, repr=False, compare=False)
     _fixed_inputs: dict[str, object] = dataclasses.field(init=False, repr=False, compare=False)
     _declarations: dict[str, Any] = dataclasses.field(init=False, repr=False, compare=False)
@@ -516,6 +701,7 @@ class Experiment:
             else measurement
             for measurement in measurements
         )
+        outputs, links = _checked_links(self, model, declarations, (t0, t1))
         channels = tuple(measurement._channel() for measurement in measurements)
         delegate = _CompiledExperiment(
             problem=self.model,
@@ -528,6 +714,8 @@ class Experiment:
             schedule=self.schedule,
         )
         object.__setattr__(self, "measurements", measurements)
+        object.__setattr__(self, "outputs", outputs)
+        object.__setattr__(self, "links", links)
         object.__setattr__(self, "t_span", (t0, t1))
         object.__setattr__(self, "inputs", dict(self.inputs))
         object.__setattr__(self, "_delegate", delegate)
@@ -653,4 +841,4 @@ def require_likelihoods(source: Any, verb: str) -> None:
     )
 
 
-__all__ = ["Measurement", "Experiment"]
+__all__ = ["Measurement", "Experiment", "Output", "Link"]

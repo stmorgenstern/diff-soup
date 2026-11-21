@@ -962,6 +962,7 @@ class _JointFit:
                 failed_owners=failed_owners,
                 state=self.state(loop),
                 stationarity=float(proposal.stationarity),
+                predicted=None if invalid or not np.isfinite(predicted) else predicted,
             )
             # The stop tests of this attempt run at the start of the next proposal, at the
             # point it left, with the callbacks' request and the evaluations made; the

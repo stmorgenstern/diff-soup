@@ -34,13 +34,16 @@ def _unique_in_order(values: tuple) -> tuple:
     return tuple(out)
 
 
-def _normalise_ownership(children: tuple, shared: tuple, ownership: Any) -> tuple:
+def _normalise_ownership(
+    children: tuple, shared: tuple, ownership: Any, partial: bool = False
+) -> tuple:
     """Validate owner declarations and prepare one aligned entity partition.
 
     Returns ``(groups, owner_ids, child_owner_indices, owner_values, mapping)``.
-    Every named owner group must exist on every child. Multiple groups may be tied
-    together when they induce the same child partition; crossing partitions would
-    couple nominally local Schur blocks and are rejected.
+    Every named owner group must exist on every child; with ``partial``, on
+    one child of every owner. Multiple groups may be tied together when they
+    induce the same child partition; crossing partitions would couple
+    nominally local Schur blocks and are rejected.
     """
     n_children = len(children)
     if ownership is None:
@@ -113,7 +116,7 @@ def _normalise_ownership(children: tuple, shared: tuple, ownership: Any) -> tupl
                     f"contains {label!r}."
                 ) from exc
 
-        _require_group_on_every_child(children, group)
+        _require_group_on_every_child(children, group, partial)
         if label_vectors and labels != label_vectors[0]:
             raise ConfigurationError(
                 "All JointInferenceProblem ownership groups must use the same child partition "
@@ -141,7 +144,7 @@ def _normalise_ownership(children: tuple, shared: tuple, ownership: Any) -> tupl
     owner_values: list[np.ndarray] = []
     for owner_index, owner_id in enumerate(owner_ids):
         members = tuple(i for i, oi in enumerate(child_owner_indices) if oi == owner_index)
-        owner_values.append(_tied_values(children, groups, members, owner_id, "owner"))
+        owner_values.append(_tied_values(children, groups, members, owner_id, "owner", partial))
 
     for group in groups:
         owner_mapping[group] = {
@@ -150,11 +153,17 @@ def _normalise_ownership(children: tuple, shared: tuple, ownership: Any) -> tupl
     return groups, owner_ids, child_owner_indices, tuple(owner_values), owner_mapping
 
 
-def _require_group_on_every_child(children: tuple, group: str) -> None:
-    """Refuse a tied group that some child lacks or holds at another width."""
+def _require_group_on_every_child(children: tuple, group: str, partial: bool = False) -> None:
+    """Refuse a tied group that some child lacks or holds at another width.
+
+    With ``partial`` a child may lack the group; one child must hold it.
+    """
     reference_width = None
+    reference_child = 0
     for i, child in enumerate(children):
         cols = _child_group_cols(child, group)
+        if not cols and partial:
+            continue
         if not cols:
             raise ConfigurationError(
                 f"JointInferenceProblem ownership group {group!r} is missing or has no "
@@ -162,34 +171,55 @@ def _require_group_on_every_child(children: tuple, group: str) -> None:
                 "exist on every child."
             )
         if reference_width is None:
-            reference_width = len(cols)
+            reference_width, reference_child = len(cols), i
         elif len(cols) != reference_width:
             raise ConfigurationError(
                 f"JointInferenceProblem ownership group {group!r} has {len(cols)} "
                 f"scalar(s) on problems[{i}] but {reference_width} on "
-                "problems[0]."
+                f"problems[{reference_child}]."
             )
+    if reference_width is None:
+        raise ConfigurationError(
+            f"JointInferenceProblem ownership group {group!r} has learnable columns on no "
+            "child; a tied group must exist on one child at least."
+        )
 
 
-def _tied_values(children: tuple, groups: tuple, members: tuple, label: Hashable, noun: str):
+def _tied_values(
+    children: tuple,
+    groups: tuple,
+    members: tuple,
+    label: Hashable,
+    noun: str,
+    partial: bool = False,
+):
     """The initial values of one tied block, which every child of it must agree on.
 
     ``members`` are the indices of the children that read the block; the value
     of each group comes from the first of them and is compared with the others.
+    With ``partial`` a member may lack a group; the others give its value.
     Returns the groups' values concatenated in ``groups`` order.
     """
     pieces: list[np.ndarray] = []
     for group in groups:
-        cols0 = _child_group_cols(children[members[0]], group)
-        reference = np.asarray(children[members[0]].x0)[list(cols0)]
-        for child_index in members[1:]:
+        holders = members
+        if partial:
+            holders = tuple(i for i in members if _child_group_cols(children[i], group))
+            if not holders:
+                raise ConfigurationError(
+                    f"JointInferenceProblem {noun} {label!r} has no child that holds group "
+                    f"{group!r}; one child of every {noun} must hold each of its groups."
+                )
+        cols0 = _child_group_cols(children[holders[0]], group)
+        reference = np.asarray(children[holders[0]].x0)[list(cols0)]
+        for child_index in holders[1:]:
             cols = _child_group_cols(children[child_index], group)
             value = np.asarray(children[child_index].x0)[list(cols)]
             if not np.array_equal(value.astype(reference.dtype), reference):
                 raise ConfigurationError(
                     f"JointInferenceProblem {noun} {label!r} has inconsistent initial "
                     f"values for group {group!r} across its children "
-                    f"(problems[{members[0]}]={reference.tolist()} vs "
+                    f"(problems[{holders[0]}]={reference.tolist()} vs "
                     f"problems[{child_index}]={value.tolist()}). Give every "
                     f"child of one {noun} the same initial value."
                 )
@@ -199,14 +229,16 @@ def _tied_values(children: tuple, groups: tuple, members: tuple, label: Hashable
     return np.concatenate(pieces)
 
 
-def _normalise_levels(children: tuple, shared: tuple, levels: Any) -> tuple:
+def _normalise_levels(children: tuple, shared: tuple, levels: Any, partial: bool = False) -> tuple:
     """Validate nested levels of tied groups and prepare their member partitions.
 
     ``levels`` holds one ``(member labels, group names)`` pair per level,
     outermost first: the labels name each child's member of that level, and the
     groups take one value per member of it. Every member of an inner level sits
     under exactly one member of the level above, so the members form a tree.
-    A level may tie no group; its members then hold empty blocks.
+    A level may tie no group; its members then hold empty blocks. With
+    ``partial`` a child may lack a group, which one child of each member of
+    its level holds.
 
     Returns ``(level_groups, level_ids, child_levels, level_values, mapping)``:
     per level its group names and its member labels in first-child-occurrence
@@ -281,7 +313,7 @@ def _normalise_levels(children: tuple, shared: tuple, levels: Any) -> tuple:
             "owner-tied; put each group in exactly one ownership level."
         )
     for group in tied:
-        _require_group_on_every_child(children, group)
+        _require_group_on_every_child(children, group, partial)
 
     level_ids: list[tuple] = []
     member_rows: list[tuple] = []
@@ -323,7 +355,7 @@ def _normalise_levels(children: tuple, shared: tuple, levels: Any) -> tuple:
             children_of[member].append(child)
         level_values.append(
             tuple(
-                _tied_values(children, groups, tuple(indices), ids[member], "member")
+                _tied_values(children, groups, tuple(indices), ids[member], "member", partial)
                 for member, indices in enumerate(children_of)
             )
         )
@@ -344,13 +376,16 @@ def _normalise_levels(children: tuple, shared: tuple, levels: Any) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def _validate_and_shared_init(children: tuple, shared: tuple, shared_init: dict) -> dict:
+def _validate_and_shared_init(
+    children: tuple, shared: tuple, shared_init: dict, partial: bool = False
+) -> dict:
     """Validate shared declarations and resolve the joint shared-block values.
 
     Every shared name must be declared in every child's ``parameters.shared`` and
-    resolve to the same scalar count.  Initial values must be exactly equal across
-    children (after dtype conversion) unless an explicit joint value is supplied in
-    ``shared_init``.
+    resolve to the same scalar count; with ``partial``, in one child's at least,
+    and the children that lack it do not read it.  Initial values must be
+    exactly equal across the children that declare it (after dtype conversion)
+    unless an explicit joint value is supplied in ``shared_init``.
 
     Returns:
         ``{group_name: np.ndarray}`` — the joint initial value for each shared group.
@@ -361,8 +396,12 @@ def _validate_and_shared_init(children: tuple, shared: tuple, shared_init: dict)
     resolved: dict = {}
     for gname in shared:
         ref_cols = None
+        ref_child = 0
         per_child_vals: list[np.ndarray] = []
+        child_indices: list[int] = []
         for i, child in enumerate(children):
+            if partial and gname not in child.parameters.shared:
+                continue
             if gname not in child.parameters.shared:
                 raise ConfigurationError(
                     f"JointInferenceProblem: shared group {gname!r} is not declared in "
@@ -376,14 +415,20 @@ def _validate_and_shared_init(children: tuple, shared: tuple, shared_init: dict)
                     "resolves to no learnable columns; check the group's selector."
                 )
             if ref_cols is None:
-                ref_cols = cols
+                ref_cols, ref_child = cols, i
             elif len(cols) != len(ref_cols):
                 raise ConfigurationError(
                     f"JointInferenceProblem: shared group {gname!r} has {len(cols)} scalar(s) "
-                    f"on problems[{i}] but {len(ref_cols)} on problems[0]; shared "
+                    f"on problems[{i}] but {len(ref_cols)} on problems[{ref_child}]; shared "
                     "group structure, shape, and dtype must match across children."
                 )
             per_child_vals.append(np.asarray(child.x0)[list(cols)])
+            child_indices.append(i)
+        if ref_cols is None:
+            raise ConfigurationError(
+                f"JointInferenceProblem: shared group {gname!r} is declared in no child's "
+                "parameters.shared; a shared group must exist on one child at least."
+            )
 
         if gname in shared_init:
             init = np.asarray(shared_init[gname])
@@ -397,13 +442,13 @@ def _validate_and_shared_init(children: tuple, shared: tuple, shared_init: dict)
             continue
 
         ref = per_child_vals[0]
-        for i, v in enumerate(per_child_vals[1:], start=1):
+        for i, v in zip(child_indices[1:], per_child_vals[1:]):
             if not np.array_equal(v.astype(ref.dtype), ref):
                 raise ConfigurationError(
                     f"JointInferenceProblem: shared group {gname!r} has inconsistent initial "
                     f"values across children (problems[{i}]={v.tolist()} vs "
-                    f"problems[0]={ref.tolist()}). Make the shared initial values equal, "
-                    f"or pass an explicit joint value via shared_init={{{gname!r}: ...}}."
+                    f"problems[{ref_child}]={ref.tolist()}). Make the shared initial values "
+                    f"equal, or pass an explicit joint value via shared_init={{{gname!r}: ...}}."
                 )
         resolved[gname] = ref
     return resolved

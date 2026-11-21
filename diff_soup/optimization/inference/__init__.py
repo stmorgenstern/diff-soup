@@ -72,7 +72,12 @@ from diff_soup.optimization.inference.statistics.likelihoods import (
     Poisson,
     StudentT,
 )
-from diff_soup.optimization.inference.statistics.measurement import Experiment, Measurement
+from diff_soup.optimization.inference.statistics.measurement import (
+    Experiment,
+    Link,
+    Measurement,
+    Output,
+)
 from diff_soup.optimization.inference.statistics.parameters import Gauge
 from diff_soup.optimization.inference.statistics.practical import practical_report
 from diff_soup.optimization.inference.statistics.predict import Prediction, PredictionBand, predict
@@ -157,6 +162,8 @@ __all__ = [
     # Statistics: measurements, studies, estimation problems
     "Measurement",
     "Experiment",
+    "Output",
+    "Link",
     "Study",
     "Hierarchy",
     "balance_owners",

@@ -410,6 +410,7 @@ def study_content_fingerprint(
     parameters: object,
     clusters: Mapping[str, tuple],
     independent: bool,
+    reads: str = "all",
 ) -> str:
     """Hash the complete executable/statistical Study declaration."""
     recorder = _Recorder()
@@ -482,6 +483,26 @@ def study_content_fingerprint(
         members = getattr(experiment, "parameters", None)
         if members is not None:
             record["parameters"] = recorder.record(members, path=f"{where}.parameters")
+        # Outputs and links change what is solved. Their entries exist only for an
+        # experiment that declares them, so a study without links keeps its fingerprint.
+        outputs = getattr(experiment, "outputs", ())
+        if outputs:
+            record["outputs"] = [
+                {
+                    "name": recorder.record(output.name, path=f"{where}.outputs[{index}].name"),
+                    "times": recorder.record(output.times, path=f"{where}.outputs[{index}].times"),
+                    "observe": recorder.record(
+                        output.observe, path=f"{where}.outputs[{index}].observe"
+                    ),
+                }
+                for index, output in enumerate(outputs)
+            ]
+        links = getattr(experiment, "links", ())
+        if links:
+            record["links"] = recorder.record(
+                tuple((link.source, link.output, link.into) for link in links),
+                path=f"{where}.links",
+            )
         experiment_records.append(record)
     declaration = {
         "contract": "diff-soup-uq-study-v2",
@@ -490,6 +511,10 @@ def study_content_fingerprint(
         "clusters": recorder.record(clusters, path="clusters"),
         "independent": recorder.record(independent, path="independent"),
     }
+    # Which experiments read a placed handle. The entry exists only for a study whose
+    # experiments read the handles they declare, so every other study keeps its fingerprint.
+    if reads != "all":
+        declaration["reads"] = recorder.record(reads, path="reads")
     return hashlib.sha256(_canonical_json(declaration).encode("utf-8")).hexdigest()
 
 

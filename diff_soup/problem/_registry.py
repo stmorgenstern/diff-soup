@@ -37,14 +37,14 @@ from typing import Any, Mapping
 import equinox as eqx
 import jax
 
-from diff_soup.problem._cache import BoundedContentCache
+from diff_soup.problem._cache import BoundedContentCache, initial_capacity
 
 # Bounded capacities. 128 spec variants is generous for a single
 # inversion session (one problem family + parameter sweeps); LRU eviction past
 # that is telemetered, never silent.
-_LOWERING_CACHE_CAPACITY = 128
-_VALUE_COPY_CACHE_CAPACITY = 128
-_ANALYSIS_CACHE_CAPACITY = 128
+_LOWERING_CACHE_CAPACITY = initial_capacity(128)
+_VALUE_COPY_CACHE_CAPACITY = initial_capacity(128)
+_ANALYSIS_CACHE_CAPACITY = initial_capacity(128)
 
 # The registry's three caches.
 lowering_cache: BoundedContentCache = BoundedContentCache(capacity=_LOWERING_CACHE_CAPACITY)

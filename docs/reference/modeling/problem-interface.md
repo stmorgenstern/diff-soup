@@ -14,6 +14,10 @@ compiles it.
 
 ::: diff_soup.problem.lower
 
+::: diff_soup.problem.set_cache_capacity
+
+::: diff_soup.problem.cache_capacity
+
 ::: diff_soup.problem.EquationSet
     options:
       members: false

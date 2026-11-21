@@ -131,11 +131,13 @@ class Results:
         rows: The number of residual rows of every unit.
         normal: ``J^T J`` in narrow coordinates, shape ``(P, L, w, w)``, in
             the ``blocks`` mode, and the exact Hessian of the cost in the
-            ``hessian`` mode; ``None`` otherwise.
+            ``hessian`` mode; ``None`` otherwise. A lane that reads part of
+            its full point (``Study(reads="declared")``) has it laid out in
+            that point, zero where it reads nothing.
         gradient: ``J^T r`` in narrow coordinates, shape ``(P, L, w)``, in
             the ``blocks``, ``gradient``, ``hessian`` and ``frozen`` modes (in
             the ``frozen`` mode ``J`` is the one each unit's last ``blocks``
-            evaluation kept); ``None`` otherwise.
+            evaluation kept), laid out as ``normal``; ``None`` otherwise.
         observables: In the ``observe`` mode, ``observables[p][l][s]`` holds
             the predictions of stream ``s`` of lane ``l`` for member ``p`` at
             the lane's own frames; ``None`` otherwise.
@@ -183,6 +185,13 @@ class Results:
             ``(P, L, w)``, gathered from the processes that hold the lanes; a
             unit left out has zeros. ``None`` in one process (the diagonal is
             then read from ``normal``), and in the other modes.
+        outputs: Per requested lane that produces outputs for the lanes it
+            drives ([Link][diff_soup.optimization.inference.Link]), by its id,
+            ``(values, tangents)``: its outputs one after another, flat, of
+            shape ``(P, outputs)``, and their derivative in narrow coordinates,
+            of shape ``(P, outputs, w)`` in the ``blocks`` mode and the
+            ``gradient`` mode in forward mode, else ``None``. A unit left out
+            has zeros. ``None`` when the request holds no such lane.
 
     A unit the request left out (``Request(units=...)``) has the status kind
     ``absent``, zero cost, rows, derivatives and work, and lies outside every
@@ -206,6 +215,7 @@ class Results:
     levels: LevelBlocks | LevelGradients | None = None
     lane_seconds: Optional[np.ndarray] = None
     normal_diagonal: Optional[np.ndarray] = None
+    outputs: Optional[Mapping] = None
 
     def failures(self) -> tuple[dict, ...]:
         """The failed units, in canonical order.

@@ -24,7 +24,7 @@ from diff_soup._layout import Layout
 from diff_soup._warnings import warn_user
 from diff_soup.optimization._abc import LeastSquaresProblem, OptSolver
 from diff_soup.optimization.constraints import Constraints
-from diff_soup.optimization.inference.engine import _batched, _transport
+from diff_soup.optimization.inference.engine import _batched, _links, _transport
 from diff_soup.optimization.inference.engine._ledger import Ledger
 from diff_soup.optimization.inference.engine._levels import (
     LevelTables,
@@ -137,6 +137,14 @@ class InferenceProblem(EstimationProblem):
                     raise TypeError("InferenceProblem requires parameters= with Recipe handles.")
                 parameters = ParameterSet(shared=parameters)
             study = Study(experiments, parameters=parameters, clusters=clusters, independent=True)
+        linked = next(
+            (name for e, name in zip(study.experiments, study.experiment_ids) if e.links), None
+        )
+        if linked is not None and not isinstance(self, LoweredStudy):
+            raise ValueError(
+                f"experiment {linked!r} is driven by a link, which the lanes of a lowered study "
+                "evaluate; lower the study with ds.lower(study) and fit it with inf.TrustRegion()."
+            )
         if trajectory is not None:
             # A hierarchy study derives its clusters from the experiments' members.
             study = Study(
@@ -144,6 +152,7 @@ class InferenceProblem(EstimationProblem):
                 parameters=study.parameters,
                 clusters=None if isinstance(study.parameters, Hierarchy) else study.clusters,
                 independent=study.independent,
+                reads=study.reads,
             )
         super().__init__(
             study,
@@ -836,6 +845,10 @@ class LoweredStudy(InferenceProblem):
     def evaluate(self, request: Request) -> Results:
         """Evaluate the experiments' solves for one request, retrying failed solves.
 
+        In a study with links ([Link][diff_soup.optimization.inference.Link]) the
+        sources are solved first and the experiments they drive after, with the
+        sources' outputs and, where the mode forms derivatives, their derivative.
+
         Args:
             request: The `Request` naming the evaluation mode and the parameter points.
 
@@ -844,18 +857,30 @@ class LoweredStudy(InferenceProblem):
         """
         kinds, factors, _tolerance = self._retry
         executor = self.__dict__.get("_executor")
-        if executor is not None:
-            results = executor.evaluate(
+
+        def run(part: Request, links: Any = None) -> Results:
+            if executor is not None:
+                return executor.evaluate(
+                    self._lanes,
+                    part,
+                    cut=self.__dict__.get("_cut"),
+                    retry=(kinds, factors),
+                    longest=self._study_ledger().longest(),
+                    links=links,
+                )
+            return _batched.evaluate(
                 self._lanes,
-                request,
-                cut=self.__dict__.get("_cut"),
-                retry=(kinds, factors),
-                longest=self._study_ledger().longest(),
+                part,
+                retry_kinds=kinds,
+                retry_first_step_factors=factors,
+                links=links,
             )
+
+        links = self._lanes.plan.links
+        if links is None:
+            results = run(request)
         else:
-            results = _batched.evaluate(
-                self._lanes, request, retry_kinds=kinds, retry_first_step_factors=factors
-            )
+            results = _links.evaluate(links, self._lanes, request, run, self._ready)
         self._ledger.record(results)
         study = self.__dict__.get("_fit_of")
         if study is not None:
@@ -907,6 +932,15 @@ class LoweredStudy(InferenceProblem):
         ``"batched_lanes"``, ``problem.lanes`` is that copy and
         ``problem.joint_view()`` this study's joint problem.
         """
+        links = self.__dict__.get("_lanes")
+        if links is not None and links.plan.links is not None:
+            if "batched_lanes" not in frozenset(getattr(optimizer, "requires", ())):
+                raise ValueError(
+                    f"{type(optimizer).__name__} fits the joint residual, which solves each "
+                    "experiment alone, and the experiments of this study are linked: a driven "
+                    "experiment reads its source's solved output. Fit it on its lanes with "
+                    "inf.TrustRegion()."
+                )
         fit = self._for_fit()
         lanes = fit if self.__dict__.get("_lanes") is not None else None
         return lower_estimation(self, fit, optimizer, lanes=lanes)
@@ -1083,7 +1117,7 @@ class LoweredStudy(InferenceProblem):
         matrix = None if results.normal is None else np.zeros((n, n), dtype=point.dtype)
         for position, lane in enumerate(results.lane_ids):
             bucket, slot = self._lanes.where[lane]
-            columns = self._lanes.buckets[bucket].gather[slot]
+            columns = _batched.full_columns(self._lanes.buckets[bucket])[slot]
             if gradient is not None:
                 gradient[columns] += np.asarray(results.gradient[0, position], dtype=point.dtype)
             if matrix is not None:
@@ -1351,7 +1385,7 @@ class LoweredStudy(InferenceProblem):
         rows = np.zeros((len(self.study.experiment_ids),), dtype=np.int64)
         for position, lane in enumerate(results.lane_ids):
             bucket, slot = self._lanes.where[lane]
-            columns = self._lanes.buckets[bucket].gather[slot]
+            columns = _batched.full_columns(self._lanes.buckets[bucket])[slot]
             experiment = int(experiment_of[lane])
             scores[experiment, columns] += np.asarray(results.gradient[0, position])
             rows[experiment] += int(np.asarray(results.rows)[0, position])
