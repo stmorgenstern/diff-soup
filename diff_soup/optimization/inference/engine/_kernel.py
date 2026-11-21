@@ -813,11 +813,28 @@ def batched_kernel(program: LaneProgram, mode: str) -> Callable[[Array, LaneInpu
         whose leaves lead with the lane axis. The result leads with the lane
         axis too. The ``frozen`` kernel is ``kernel(points, lanes, jacobians)``,
         one Jacobian per lane. The program is compiled once per batch width.
+
+        A batch of one lane is solved without ``jax.vmap``: the lane is taken
+        out of the batch, solved on its own, and its result given back the
+        lane axis. Under ``jax.vmap`` the integrator's step loop selects the
+        whole carry of the batch on every step attempt, save buffers and
+        tangents included, so its cost grows with the number of sample times;
+        a lone lane has no other lane to wait for.
     """
     if mode not in _LANE_FUNCTIONS:
         raise ValueError(f"a lane kernel runs in one of the modes {MODES}; got {mode!r}.")
     function = _LANE_FUNCTIONS[mode]
-    return jax.jit(jax.vmap(lambda point, lane, *kept: function(program, point, lane, *kept)))
+    batched = jax.vmap(lambda point, lane, *kept: function(program, point, lane, *kept))
+
+    def kernel(points: Array, lanes: LaneInputs, *kept: Array) -> LaneResult:
+        # The batch width is a static shape, and each width compiles its own program.
+        if points.shape[0] != 1:
+            return batched(points, lanes, *kept)
+        point, lane, *alone = jax.tree_util.tree_map(lambda leaf: leaf[0], (points, lanes, *kept))
+        result = function(program, point, lane, *alone)
+        return jax.tree_util.tree_map(lambda leaf: jnp.asarray(leaf)[None], result)
+
+    return jax.jit(kernel)
 
 
 __all__ = [
