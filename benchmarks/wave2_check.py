@@ -9,6 +9,7 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check measure             # cost of a wide lane
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check saves               # ... by saved times
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check budget              # many saved times
+    JAX_ENABLE_X64=1 python -m benchmarks.wave2_check repeat              # a solve repeats
 
 1. Observations that read the global unknowns. The schedule of
    ``benchmarks.computed_start_check`` (a held current, a held voltage, a rest) on
@@ -51,6 +52,15 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
 2,000 cells observed at 4,000 times with 16 derivative directions: its states and their
 tangents would take 4,000 x 2,000 x 17 doubles, 1.1 GB; the compiled ``blocks`` program
 has to need less than 64 MB.
+
+``repeat``: a solve on KLU repeats bit for bit whatever the process solved before it.
+Damped oscillators ``u' = v + 0.01 u_xx + 0.1 r``, ``v' = -s(x) u - 50 v - u^3 + 10 sin 30 t``
+on 200 cells with two algebraic unknowns per cell, ``0 = k e(x) r + w - u`` and
+``0 = r + w / 2 - v``, whose pivots KLU takes on or off the diagonal by the size of
+``k e(x)``: the ``value`` and ``blocks`` evaluations at ``k = 1``, again, and again after an
+evaluation at ``k = 10^-3``, give the same bytes and the same work; the KLU counters of
+each are printed (one full factorization per slot and evaluation, refactorizations
+after it), and a digest of the bytes, to compare across processes and versions.
 
 ``world``: the schedule study (one cell per process), the linked study or the two-recipe study over the three
 processes of an MPI world: ``J^T J`` against the closed form, the gradient against
@@ -887,8 +897,8 @@ def measure(widths=(1, 8, 16, 32, 50)) -> None:
     Prints, per derivative width, the warm wall time of a ``value`` and a ``blocks``
     evaluation, the solver's work (step attempts, Newton iterations, its own
     factorizations) and the KLU extension's counters over one evaluation of each mode
-    (numeric factorizations and refactorizations, and solve calls, each call one block
-    of right-hand sides).
+    (numeric factorizations and refactorizations, of which full factorizations, and
+    solve calls, each call one block of right-hand sides).
     """
     from diff_soup.linear.klu_backend import KLUBackend
     from diff_soup.optimization.inference.engine._request import Request
@@ -926,6 +936,7 @@ def measure(widths=(1, 8, 16, 32, 50)) -> None:
             row[f"{mode} klu factor+refactor"] = int(
                 stats.get("factorizations", 0) + stats.get("refactorizations", 0)
             )
+            row[f"{mode} klu of which klu_factor"] = int(stats.get("factorizations", 0))
             row[f"{mode} klu solve calls"] = int(stats.get("solves", 0))
         rows.append(row)
         print(row, flush=True)
@@ -1010,6 +1021,90 @@ def measure_budget(cells=2000, count=4000, width=16) -> None:
         print("ALL CHECKS PASSED (budget)")
     finally:
         MEASURE_TIMES = kept
+
+
+def repeat_study(name, cells=200):
+    """The study of the ``repeat`` mode (see the module docstring); its one parameter is ``k``."""
+    spec = ds.problem(name)
+    spec.domain("line", cartesian_grid_1d(cells, 0.0, 1.0, method="fvm"))
+    k = spec.param("k", value=1.0, learnable=True)
+    stiffness = jnp.asarray(10.0 ** np.linspace(2.0, 6.0, cells))
+    small = jnp.asarray(10.0 ** np.linspace(-6.0, -1.0, cells))
+    for field, mass in (
+        ("u", "differential"),
+        ("v", "differential"),
+        ("r", "algebraic"),
+        ("w", "algebraic"),
+    ):
+        spec.field(field, mass=mass, scale=1.0, init=lambda x: jnp.zeros_like(x))
+
+    @spec.equation(writes="u", reads=("u", "v", "r"))
+    def position(q):
+        return q.v + 0.01 * q.ops.laplacian(q.u) + 0.1 * q.r
+
+    @spec.equation(writes="v", reads=("u", "v"))
+    def velocity(q):
+        return -stiffness * q.u - 50.0 * q.v - q.u**3 + 10.0 * jnp.sin(30.0 * q.t)
+
+    @spec.equation(writes="r", reads=("r", "w", "u"))
+    def first_constraint(q):
+        return q.p.k * small * q.r + q.w - q.u
+
+    @spec.equation(writes="w", reads=("r", "w", "v"))
+    def second_constraint(q):
+        return q.r + 0.5 * q.w - q.v
+
+    times = np.linspace(0.05, 1.0, 20)
+    experiment = inf.Experiment(
+        model=spec.build(),
+        solver=ds.JNDF.stock(linear="klu", rtol=1e-6, atol=1e-9),
+        t_span=(0.0, 1.0),
+        initial_state=spec.assemble_state({"u": 1.0, "v": 0.0, "r": 0.0, "w": 0.0}),
+        measurements=(_gaussian("mean", times, np.zeros(times.shape), lambda st: jnp.mean(st)),),
+        id="oscillators",
+    )
+    return inf.Study((experiment,), parameters=ds.ParameterSet(shared=(k,)))
+
+
+def repeat() -> None:
+    """A KLU solve gives the same bytes first, again, and after an unrelated solve."""
+    import hashlib
+
+    from diff_soup.linear.klu_backend import KLUBackend
+    from diff_soup.optimization.inference.engine._request import Request
+
+    lowered = ds.lower(repeat_study("wave2_repeat"))
+    lowered.prepare(modes=("value", "blocks"))
+    counters = ("factorizations", "refactorizations", "refactor_fallbacks", "rebuilds", "solves")
+
+    def run(mode, k):
+        KLUBackend.reset_native_stats()
+        r = lowered.evaluate(Request(mode=mode, points=np.asarray([k])))
+        stats = KLUBackend.native_stats()
+        arrays = [r.cost, r.work.accepts, r.work.rejects, r.work.newton_iters]
+        data = b"".join(
+            np.asarray(a).tobytes() for a in arrays + [r.normal, r.gradient] if a is not None
+        )
+        steps = (int(np.sum(r.work.accepts)), int(np.sum(r.work.rejects)))
+        return data, steps, {key: int(stats[key]) for key in counters}
+
+    for mode in ("value", "blocks"):
+        first, second = run(mode, 1.0), run(mode, 1.0)
+        other = run(mode, 1e-3)
+        third = run(mode, 1.0)
+        for tag, (data, steps, stats) in (
+            ("first", first),
+            ("again", second),
+            ("k = 1e-3", other),
+            ("after k = 1e-3", third),
+        ):
+            digest = hashlib.sha1(data).hexdigest()[:12]
+            print(
+                f"repeat, {mode}, {tag}: steps (accepted, rejected) {steps}, digest {digest}, KLU {stats}"
+            )
+        assert second[0] == first[0] and third[0] == first[0], mode
+        assert second[2] == first[2] == third[2], mode
+    print("ALL CHECKS PASSED (repeat)")
 
 
 def shape_study(name, observe, values):
@@ -1450,6 +1545,10 @@ if __name__ == "__main__":
     if mode == "world":
         world(sys.argv[2])
     else:
-        {"one": one_process, "measure": measure, "saves": measure_saves, "budget": measure_budget}[
-            mode
-        ]()
+        {
+            "one": one_process,
+            "measure": measure,
+            "saves": measure_saves,
+            "budget": measure_budget,
+            "repeat": repeat,
+        }[mode]()

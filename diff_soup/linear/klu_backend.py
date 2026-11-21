@@ -345,9 +345,12 @@ class KLUBackend(LinearSolver):
         Each lowered call names a native site on the analysis by a key
         computed from the call (created on its first run). The handler
         keeps one slot per ``(context id, slot token)`` at that site, creating
-        it on first use and refactoring it in place on later runs, so the
-        lanes of a value batch (distinct slot tokens) get one slot each and
-        every context gets its own. Both orientations factor ``A_bc``; a
+        it on first use and reusing it on later runs, so the lanes of a value
+        batch (distinct slot tokens) get one slot each and every context gets
+        its own. A slot's first factorization in each execution of a program
+        is a fresh ``klu_factor`` with its own pivoting, and later ones in the
+        same execution refactor in place, so an execution does not depend on
+        what an earlier one left in the slot. Both orientations factor ``A_bc``; a
         solve with orientation ``"AT"`` runs the transposed KLU solve.
         Complex values are factored as ``complex128`` by the complex target.
 

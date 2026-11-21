@@ -147,16 +147,16 @@ def test_each_host_library_recovers_where_its_defaults_fail():
     """A KLU refactor whose kept pivot sequence meets a zero pivot factors afresh, counts the
     fallback and solves exactly; SuperLU_MT factors an arrowhead whose natural-order LU fills
     far beyond the library's default allowance of 50 nnz(A)."""
-    analysis = analyze(SparseTopology.full(2), backend=KLU())
+    a, first = analyze(SparseTopology.full(2), backend=KLU()), [2.0, 1.0, 1.0, 2.0]
     with SolveContext() as ctx:
-        run = jax.jit(lambda v: solve(factor(analysis, v, ctx=ctx), np.asarray([1.0, 2.0]))[0])
-        run(np.asarray([2.0, 1.0, 1.0, 2.0]))
-        counts = _delta(KLU(), lambda: run(np.asarray([4.0, 2.0, 2.0, 4.0])))
+        step = lambda f, v: (refactor(f, v, True), None)  # noqa: E731
+        held = jax.jit(lambda v: jax.lax.scan(step, empty_factor(a, ctx=ctx, storage="kept"), v)[0])
+        counts = _delta(KLU(), lambda: held(np.asarray([first, [4.0, 2.0, 2.0, 4.0]])))
         assert (counts["refactorizations"], counts["refactor_fallbacks"]) == (1, 0)
-        permuted = np.asarray([0.0, 1.0, 1.0, 0.0])
-        counts = _delta(KLU(), lambda: run(permuted))
-        assert (counts["factorizations"], counts["refactor_fallbacks"]) == (1, 1)
-        np.testing.assert_allclose(run(permuted), [2.0, 1.0], **EXACT)
+        permuted = np.asarray([first, [0.0, 1.0, 1.0, 0.0]])
+        counts = _delta(KLU(), lambda: held(permuted))
+        assert (counts["factorizations"], counts["refactor_fallbacks"]) == (2, 1)
+        np.testing.assert_allclose(solve(held(permuted), [1.0, 2.0])[0], [2.0, 1.0], **EXACT)
     n, idx = 1000, np.arange(1000)
     rows = np.concatenate([idx, np.zeros(n - 1, int), idx[1:]])
     cols = np.concatenate([idx, idx[1:], np.zeros(n - 1, int)])
@@ -347,8 +347,8 @@ def test_each_call_of_a_jitted_factor_keeps_one_slot_however_often_it_runs(name)
         loop = _delta(
             backend, jax.jit(lambda: jax.lax.scan(body, 0.0 * _B, jnp.arange(1.0, 5.0))[0])
         )
-    work = [again[key] for key in ("factorizations", "refactorizations", "rebuilds")]
-    assert (first["live_slots"], work, loop["live_slots"]) == (3, [0, 3, 0], 1)
+    work = [again["factorizations"] + again["refactorizations"], again["rebuilds"]]
+    assert (first["live_slots"], work, loop["live_slots"]) == (3, [3, 0], 1)
     for k, x in zip((1.0, 2.0, 3.0), xs):
         np.testing.assert_allclose(x, np.linalg.solve(_matrix(topology, k * values), _B), **EXACT)
 

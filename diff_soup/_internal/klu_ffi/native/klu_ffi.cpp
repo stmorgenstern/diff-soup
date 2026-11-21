@@ -35,8 +35,16 @@
 // reading it. The lowering passes the call's status as the next order word, so a
 // refactorization of a slot never runs before a solve whose returned factor it refactors.
 //
-// A slot that already holds a numeric factorization is refactored with
-// klu_refactor, which keeps the pivot sequence and the storage of L and U.
+// A slot is factored afresh, with klu_factor and its partial pivoting, the
+// first time an execution of a program (XLA's run id) factors it, whatever it
+// held before: a slot outlives the execution that filled it (a later execution
+// of the same program, or of any program for shared storage, finds it), and a
+// factorization that kept the pivot sequence left there would depend on what
+// the process solved earlier, not on the execution's own inputs. Within one
+// execution a slot that already holds a numeric factorization is refactored
+// with klu_refactor, which keeps the pivot sequence and the storage of L and
+// U, so a loop that carries a factor pays one full factorization per slot and
+// execution, and an execution repeats bit for bit whatever ran before it.
 // When the refactorization meets a zero pivot, or its reciprocal pivot ratio
 // (klu_rcond) and condition estimate (klu_condest) say the kept pivot
 // sequence has become inaccurate, the slot is factored afresh with
@@ -143,6 +151,7 @@ struct Slot : slot_registry::SlotBase<Analysis> {
     int32_t status = kSingular;
     std::vector<double> values;  // nnz entries, or 2 nnz interleaved for a complex slot
     std::vector<double> csc;     // the compressed matrix, interleaved for a complex slot
+    int64_t factored_run = -1;   // the XLA execution that last factored the slot
 
     Slot() = default;
     Slot(const Slot&) = delete;
@@ -238,15 +247,19 @@ bool RefactorAccurate(Slot& slot) {
 }
 
 // Factor `values` (the caller's coordinate entries, interleaved real and imaginary parts when
-// `complex`) into `slot` and set its status. A slot that holds a factorization of the other
-// kind is factored afresh. Caller holds the library mutex. Returns an error only for a KLU
-// failure other than singularity (out of memory, integer overflow).
-ffi::Error FactorSlot(Slot& slot, const double* values, bool complex) {
+// `complex`) into `slot` for the execution `run` and set its status. A slot that holds a
+// factorization of the other kind, or one that no earlier call of `run` factored, is factored
+// afresh with its own pivoting; otherwise the slot is refactored with its pivot sequence. Caller
+// holds the library mutex. Returns an error only for a KLU failure other than singularity (out
+// of memory, integer overflow).
+ffi::Error FactorSlot(Slot& slot, const double* values, bool complex, int64_t run) {
     Registry& reg = Reg();
     Analysis& a = *slot.analysis;
     const int64_t width = complex ? 2 : 1;
     const int64_t count = width * a.nnz_entries;
-    if (slot.complex != complex) {
+    const bool fresh = slot.factored_run != run;
+    slot.factored_run = run;
+    if (fresh || slot.complex != complex) {
         slot.FreeNumeric();
         slot.complex = complex;
     }
@@ -409,7 +422,7 @@ ffi::Error FactorImpl(CallState* call, ffi::RunId run, int32_t device, ffi::Toke
     if (auto err = CheckValues(reg, *slot, values); err.failure()) {
         return err;
     }
-    if (auto err = FactorSlot(*slot, Doubles(values), kComplex<T>); err.failure()) {
+    if (auto err = FactorSlot(*slot, Doubles(values), kComplex<T>, run.run_id); err.failure()) {
         return err;
     }
     status->typed_data()[0] = slot->status;
@@ -467,7 +480,7 @@ ffi::Error RefactorImpl(CallState* call, ffi::RunId run, ffi::Token, ffi::Buffer
     if (auto err = CheckValues(reg, *slot, values); err.failure()) {
         return err;
     }
-    if (auto err = FactorSlot(*slot, Doubles(values), kComplex<T>); err.failure()) {
+    if (auto err = FactorSlot(*slot, Doubles(values), kComplex<T>, run.run_id); err.failure()) {
         return err;
     }
     status->typed_data()[0] = slot->status;
@@ -528,7 +541,7 @@ ffi::Error ApplyImpl(ffi::RunId run, ffi::Token, ffi::Buffer<T> values,
     const bool trusted = storage != 0 && slot->trusted_run == run.run_id && slot->complex == complex;
     if (!trusted && !SameValues(*slot, Doubles(values), complex)) {
         slot->trusted_run = -1;
-        if (auto err = FactorSlot(*slot, Doubles(values), complex); err.failure()) {
+        if (auto err = FactorSlot(*slot, Doubles(values), complex, run.run_id); err.failure()) {
             return err;
         }
         ++reg.stats.rebuilds;
