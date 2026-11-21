@@ -692,7 +692,9 @@ class LoweredStudy(InferenceProblem):
             route = None
         if route is not None:
             for lane, position in route.position.items():
-                members[lane] = int(route.nodes[position][0])
+                # A lane outside the intermediate levels is no member's: it keeps no affinity.
+                if not route.outside[position]:
+                    members[lane] = int(route.nodes[position][0])
         return {
             "costs": modelled_costs(metadata),
             "measured": _measured_seconds(measured, tuple(experiments)),

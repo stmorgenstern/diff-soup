@@ -224,7 +224,7 @@ def _route_tables(
     if isinstance(study.parameters, Hierarchy):
         tables = problem.tables(ids)
         members = tuple(
-            tuple(dict.fromkeys(study.clusters[name])) for name in tables.names[:-1]
+            tuple(dict.fromkeys(study._member_labels(name))) for name in tables.names[:-1]
         ) + (tuple(study.experiment_ids),)
     elif getattr(view, "owner_ids", ()):
         tables = _owner_level_tables(problem, view, ids, plan, device)
@@ -339,6 +339,11 @@ class _LaneRoute:
         self.members = members
         self.depth = len(counts)
         self.nodes = np.asarray(tables.nodes)
+        # Per lane, whether its experiment sits directly under the study, outside the
+        # intermediate levels: its nodes there are its host's, and it is the lane of no
+        # member of them.
+        outside = dict(zip(problem.study.experiment_ids, getattr(problem.study, "_outside", ())))
+        self.outside = np.asarray([bool(outside.get(lane, False)) for lane in ids], dtype=bool)
         self.dtype = dtype
         self.constraints = solver.constraints
         self.gauges = solver.gauges
@@ -368,6 +373,16 @@ class _LaneRoute:
         """
         tables, names, dtype = self.tables, self.names, self.dtype
         weights = _level_weights(weights)
+        if weights is not None and self.outside.any():
+            level = weights[0]
+            number = names.index(level) + 1 if isinstance(level, str) else int(level)
+            if number < len(tables.counts):
+                outside = [lane for lane, flag in zip(self.ids, self.outside) if flag]
+                raise ConfigurationError(
+                    f"weights= weighs the members of the level {names[number - 1]!r}, and the "
+                    f"lane(s) {outside} sit directly under the study, outside every member of "
+                    "it; weigh the experiments (the level 'experiment') instead."
+                )
         omega = _lane_weights(tables, weights, len(self.ids), dtype)
         level_one = np.ones((int(tables.counts[0]),), dtype=dtype)
         block_weights = None
@@ -483,8 +498,7 @@ class _LaneRoute:
         records = []
         for failure in results.failures():
             lane = str(failure["lane"])
-            row = self.nodes[self.position[lane]]
-            nodes = tuple(str(self.members[level][int(row[level])]) for level in range(self.depth))
+            nodes = tuple(str(label) for label in self.labels(self.position[lane]))
             rungs = tried.get((int(failure.get("member", 0)), lane), (int(failure.get("rung", 0)),))
             records.append(
                 _Failure(lane, str(failure["kind"]), float(failure["t_reached"]), nodes, rungs)
@@ -861,11 +875,20 @@ class _LaneRoute:
         sums = weigh_levels(self.tables, member_row(results.levels, row), self.weights)
         return jax.device_put(sums, self.device)
 
+    def labels(self, position: int) -> tuple:
+        """The member of every level of the lane at ``position``; ``None`` above the experiment level for a lane outside the levels."""
+        row = self.nodes[position]
+        outside = bool(self.outside[position])
+        return tuple(
+            None if outside and level < self.depth - 1 else self.members[level][int(row[level])]
+            for level in range(self.depth)
+        )
+
     def owners(self, failures: tuple) -> tuple:
         """The level-1 members of the failed lanes, each once, in lane order."""
         labels = []
         for failure in failures:
-            label = self.members[0][int(self.nodes[self.position[failure.lane]][0])]
+            label = self.labels(self.position[failure.lane])[0]
             if label not in labels:
                 labels.append(label)
         return tuple(labels)

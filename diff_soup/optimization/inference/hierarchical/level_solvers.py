@@ -68,7 +68,7 @@ class TrustRegion(OptSolver):
 
     Args:
         hessian: `"gauss-newton"` steps on the Gauss-Newton curvature, `"true"` on the exact Hessian.
-        nested_at: A level of the study's hierarchy whose members polish, each refitting its own parameters with the others held after every accepted step.
+        nested_at: A level of the study's hierarchy whose members polish, each refitting its own parameters with the others held after every accepted step. An experiment outside that level (one that names no member of it) belongs to the outer step alone: no polish solves it.
         inner: A `TrustRegion` without `nested_at` whose budget and tolerances the polish uses, `None` for two iterations per member, and `max_steps=0` for no polish.
         radius_init: The initial trust radius, in scaled parameter units.
         radius_max: The largest trust radius.

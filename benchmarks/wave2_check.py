@@ -5,6 +5,7 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check                     # one process
     JAX_ENABLE_X64=1 mpirun -n 3 python -m mpi4py -m benchmarks.wave2_check world schedule
     JAX_ENABLE_X64=1 mpirun -n 3 python -m mpi4py -m benchmarks.wave2_check world link
+    JAX_ENABLE_X64=1 mpirun -n 3 python -m mpi4py -m benchmarks.wave2_check world recipes
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check measure             # cost of a wide lane
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check saves               # ... by saved times
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check budget              # many saved times
@@ -33,12 +34,23 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
    ones); a fit on the lanes, and a fit of one experiment in one shoot
    (``InferenceProblem``).
 
+2. A hierarchy over experiments of two recipes. A source of one recipe (the schedule cell,
+   fitted ``a`` and ``s``) whose global current drives two cells of another
+   (``z' = -(a + b) z + c_0 y(t) + c_1``); both recipes declare ``a``, shared, and the cells
+   alone declare ``b`` and the array ``c`` of two entries, one value of each per cell. The
+   hierarchy takes ``a`` and ``s`` from the source's recipe and ``b`` and ``c`` from the
+   cells'; the source names no member of the level ``cell`` and sits directly under the
+   study (``reads="declared"``). ``J^T J`` and ``J^T r`` against the closed form, the
+   gradient against differences, joint and nested fits, each stopped and resumed from a
+   checkpoint, the fitted vector's groups (each shared number once), and the refusals of an
+   experiment outside the level under ``reads="all"`` and of one that declares ``b``.
+
 ``budget``: a lane saves what its observations read, not its states. The wide lane on
 2,000 cells observed at 4,000 times with 16 derivative directions: its states and their
 tangents would take 4,000 x 2,000 x 17 doubles, 1.1 GB; the compiled ``blocks`` program
 has to need less than 64 MB.
 
-``world``: the schedule study (one cell per process) or the linked study over the three
+``world``: the schedule study (one cell per process), the linked study or the two-recipe study over the three
 processes of an MPI world: ``J^T J`` against the closed form, the gradient against
 differences, fits; for the linked study also ``predict`` and the residual reports. The byte comparison of a study without the new features is the
 ``baseline`` mode of ``benchmarks.computed_start_check`` on two versions of the library.
@@ -48,6 +60,7 @@ differences, fits; for the linked study also ``predict`` and the residual report
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import warnings
 
@@ -314,6 +327,133 @@ def linked_rows(point):
             (driven_truth(a, s, point[3 + k]) - driven_truth(A_TRUE, s_true, b_true)) / SIGMA
         )
     return np.concatenate(rows)
+
+
+TWO_RECIPE_B = {"d1": 1.3, "d2": 0.9}
+TWO_RECIPE_C = {"d1": (0.8, 0.2), "d2": (1.2, -0.1)}
+
+
+def recipe_b(name, values=None):
+    """``z' = -(a + b) z + c_0 y(t) + c_1``, ``y`` piecewise linear on ``OUTPUT_TIMES`` (zeros).
+
+    It declares ``a`` under the name and the form of the source's (``global_recipe``),
+    a rate ``b`` and an array ``c`` of two entries. Returns ``(model, spec, a, b, c)``.
+    """
+    spec = ds.problem(name)
+    spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+    a = spec.param("a", value=0.5, learnable=True, bounds=(0.05, 3.0))
+    b = spec.param("b", value=0.5, learnable=True, bounds=(0.05, 3.0))
+    c = spec.param("c", value=jnp.asarray([1.0, 0.0]), learnable=True)
+    knots = jnp.asarray(OUTPUT_TIMES)
+    values = jnp.zeros(knots.shape) if values is None else jnp.asarray(values)
+    spec.function("y", PiecewiseLinear(knots, values), learnable=False)
+    spec.field("z", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
+
+    @spec.equation(writes="z", reads=("z",))
+    def relax(q):
+        return -(q.p.a + q.p.b) * q.z + q.p.c[0] * q.fn.y(q.t) + q.p.c[1]
+
+    return spec.build(), spec, a, b, c
+
+
+def recipe_b_truth(a, s, b, c):
+    """``z`` of ``recipe_b`` at ``DRIVEN_TIMES`` from ``z = 0`` at the first output time.
+
+    On each piece of the source's current, ``y = alpha + beta t`` and the forcing is
+    ``A + B t`` with ``A = c_0 alpha + c_1``, ``B = c_0 beta``; with ``k = a + b``,
+    ``z = C_0 + C_1 t + (z_0 - C_0) e^{-k t}``, ``C_1 = B / k``, ``C_0 = (A - C_1) / k``.
+    """
+    knots = OUTPUT_TIMES
+    values = truth_at(a, s, knots)[1]
+    k = a + b
+    out = []
+    for t in DRIVEN_TIMES:
+        z = 0.0
+        for left, right, start, end in zip(knots[:-1], knots[1:], values[:-1], values[1:]):
+            if left >= t:
+                break
+            span = min(right, t) - left
+            slope = c[0] * (end - start) / (right - left)
+            c1 = slope / k
+            c0 = (c[0] * start + c[1] - c1) / k
+            z = c0 + c1 * span + (z - c0) * np.exp(-k * span)
+        out.append(z)
+    return np.asarray(out)
+
+
+def two_recipe_study(name):
+    """A source of one recipe whose global current drives two cells of another.
+
+    The source (``global_recipe``, fitted ``a`` and ``s``) names no member of the level
+    ``cell``: its model declares none of the level's parameters, so under
+    ``reads="declared"`` it sits directly under the study. The cells (``recipe_b``)
+    declare ``a`` too, shared with the source; ``b`` and the array ``c`` take one value
+    per cell. The hierarchy takes ``a`` and ``s`` from the source's recipe and ``b`` and
+    ``c`` from the cells'. Returns the study and its true point
+    ``[a, s, b_d1, c_d1 (2), b_d2, c_d2 (2)]``.
+    """
+    model, a, s = global_recipe(f"{name}_source")
+    driven_model, dspec, _, b, c = recipe_b(f"{name}_cells")
+    s_true = S_TRUE["c1"]
+    u, current, _ = cell_series(A_TRUE, s_true)
+    experiments = [
+        inf.Experiment(
+            model=model,
+            solver=_solver(),
+            t_span=(0.0, 2.0),
+            initial_state=_computed_start(s),
+            measurements=(
+                _gaussian("u", SCHEDULE_TIMES, u, lambda state: state[0]),
+                _gaussian("I", GLOBAL_TIMES, current, lambda state, globals: globals[0]),
+            ),
+            id="source",
+            schedule=_schedule(),
+            outputs=(
+                inf.Output("I", times=OUTPUT_TIMES, observe=lambda state, globals: globals[0]),
+            ),
+        )
+    ]
+    for cell in TWO_RECIPE_B:
+        z = recipe_b_truth(A_TRUE, s_true, TWO_RECIPE_B[cell], TWO_RECIPE_C[cell])
+        experiments.append(
+            inf.Experiment(
+                model=driven_model,
+                solver=_solver(),
+                t_span=(float(OUTPUT_TIMES[0]), float(OUTPUT_TIMES[-1])),
+                initial_state=dspec.assemble_state({}),
+                measurements=(_gaussian("z", DRIVEN_TIMES, z, lambda st: st[0]),),
+                id=cell,
+                links=(inf.Link(source="source", output="I", into="y"),),
+                parameters={"cell": cell},
+            )
+        )
+    hierarchy = inf.Hierarchy(levels=("cell",), shared=(a, s), per={"cell": (b, c)})
+    study = inf.Study(tuple(experiments), parameters=hierarchy, reads="declared")
+    truth = np.asarray(
+        [A_TRUE, s_true]
+        + [value for cell in TWO_RECIPE_B for value in (TWO_RECIPE_B[cell], *TWO_RECIPE_C[cell])]
+    )
+    return study, truth
+
+
+def two_recipe_rows(point):
+    """The whitened rows of ``two_recipe_study`` at ``[a, s, b_d1, c_d1, b_d2, c_d2]``."""
+    a, s = point[0], point[1]
+    s_true = S_TRUE["c1"]
+    got = cell_series(a, s)[:2]
+    want = cell_series(A_TRUE, s_true)[:2]
+    rows = [(np.concatenate(got) - np.concatenate(want)) / SIGMA]
+    for k, cell in enumerate(TWO_RECIPE_B):
+        own = point[2 + 3 * k : 5 + 3 * k]
+        z = recipe_b_truth(a, s, own[0], own[1:])
+        rows.append(
+            (z - recipe_b_truth(A_TRUE, s_true, TWO_RECIPE_B[cell], TWO_RECIPE_C[cell])) / SIGMA
+        )
+    return np.concatenate(rows)
+
+
+TWO_RECIPE_POINT = np.asarray([0.7, 1.7, 1.1, 0.9, 0.1, 1.0, 1.1, 0.0])
+TWO_RECIPE_START = np.asarray([0.6, 1.2, 0.7, 1.0, 0.0, 0.7, 1.0, 0.0])
 
 
 def closed_form_blocks(rows_of, point, step=1e-6):
@@ -931,21 +1071,173 @@ def section_shapes(report) -> None:
         assert report[f"shape {label}, cost vs closed form"] < 1e-6
 
 
+def check_two_recipe_names(report, lowered, label="two recipes"):
+    """The fitted vector names each shared number once and each cell's own numbers once per cell."""
+    groups = tuple(lowered.param_group_names)
+    columns = tuple(tuple(int(c) for c in cols) for cols in lowered.param_group_cols)
+    report[f"{label} fitted groups"] = groups
+    assert groups == ("a", "s", "b@d1", "c@d1", "b@d2", "c@d2"), groups
+    assert columns == ((0,), (1,), (2,), (3, 4), (5,), (6, 7)), columns
+    assert lowered.n_params == 8
+
+
+def _stop_at_second_step():
+    class StopAtSecondStep(inf.Callback):
+        def __init__(self):
+            self.steps = 0
+
+        def on_step(self, info):
+            self.steps += 1
+            if self.steps == 2:
+                raise inf.StopFit()
+
+    return StopAtSecondStep()
+
+
+def section_two_recipes(report) -> None:
+    """A hierarchy over experiments of two recipes, the source outside the level ``cell``.
+
+    ``two_recipe_study``: ``J^T J`` and ``J^T r`` against the closed form and the gradient
+    against five-point differences; the gradient mode against the blocks; joint and nested
+    (``nested_at="cell"``) fits from a wrong start; for each, a fit stopped after two steps
+    resumed from its checkpoint to the uninterrupted fit's end; the fitted vector's groups.
+    The driven lanes (``a``, ``b``, ``c``: four coordinates) are wider than their source
+    (``a``, ``s``). Then the refusals: the source outside the level under ``reads="all"``,
+    and an experiment outside the level whose model declares a parameter of the level.
+    """
+    import shutil
+    import tempfile
+
+    study, truth = two_recipe_study("wave2_two_recipes")
+    assert study.clusters["cell"] == (None, "d1", "d2")
+    lowered = ds.lower(study)
+    lowered.prepare(modes=("value", "blocks", "gradient", "frozen"))
+    check_two_recipe_names(report, lowered)
+    point = TWO_RECIPE_POINT
+    cost, gradient, matrix, failed = lowered.gauss_newton_fn(point)
+    jtj, jtr = closed_form_blocks(two_recipe_rows, point)
+    report["two recipes cost vs closed form"] = relative(
+        cost, 0.5 * np.sum(two_recipe_rows(point) ** 2)
+    )
+    report["two recipes J^T J vs closed form"] = relative(matrix, jtj)
+    report["two recipes J^T r vs closed form"] = relative(gradient, jtr)
+    report["two recipes J^T r vs differences"] = relative(gradient, differences(lowered, point))
+    report["two recipes gradient mode vs blocks"] = relative(
+        lowered.value_and_gradient(point).gradients[0], gradient
+    )
+    assert failed == 0
+    for key in (
+        "cost vs closed form",
+        "J^T J vs closed form",
+        "J^T r vs closed form",
+        "J^T r vs differences",
+        "gradient mode vs blocks",
+    ):
+        assert report[f"two recipes {key}"] < 1e-6, (key, report[f"two recipes {key}"])
+    for nested_at in (None, "cell"):
+        kind = "nested" if nested_at else "joint"
+        straight = fit(lowered, TWO_RECIPE_START, nested_at=nested_at)
+        report[f"two recipes {kind} fit error"] = relative(straight.params, truth)
+        assert report[f"two recipes {kind} fit error"] < 1e-6, straight.params
+        folder = tempfile.mkdtemp(prefix="wave2_two_recipes_")
+        try:
+            stopped = fit(
+                lowered,
+                TWO_RECIPE_START,
+                nested_at=nested_at,
+                callbacks=(_stop_at_second_step(),),
+                checkpoint=folder,
+            )
+            assert stopped.status is inf.TerminationStatus.STOPPED
+            resumed = fit(lowered, TWO_RECIPE_START, nested_at=nested_at, checkpoint=folder)
+            report[f"two recipes {kind} checkpoint resumed == straight"] = bool(
+                resumed.n_steps == straight.n_steps
+                and np.array_equal(np.asarray(resumed.params), np.asarray(straight.params))
+            )
+            assert report[f"two recipes {kind} checkpoint resumed == straight"]
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    # The refusals: outside the level under reads="all", and outside while declaring b.
+    experiments = study.experiments
+    try:
+        inf.Study(experiments, parameters=study.parameters)
+    except ValueError as error:
+        # Under reads="all" every model declares every placed parameter; the source does not.
+        report["two recipes outside under reads='all' refused"] = str(error)[:100]
+        assert "absent from experiment 'source'" in str(error)
+    else:  # pragma: no cover
+        raise AssertionError("an experiment outside the levels under reads='all' was accepted")
+    declares_b = (
+        experiments[0],
+        experiments[1],
+        dataclasses.replace(experiments[2], parameters=None),
+    )
+    try:
+        inf.Study(declares_b, parameters=study.parameters, reads="declared")
+    except ValueError as error:
+        report["two recipes outside declaring b refused"] = str(error)[:100]
+        assert "'b'" in str(error) and "outside" in str(error)
+    else:  # pragma: no cover
+        raise AssertionError("an experiment outside the levels that declares b was accepted")
+
+
 def one_process() -> None:
     """Every section that runs in one process."""
     report = _Report()
+    section_two_recipes(report)
     section_globals(report)
     section_shapes(report)
     print("ALL CHECKS PASSED (one process)")
 
 
+def world_checkpoints(lowered, start) -> dict:
+    """Joint and nested fits stopped after two steps and resumed from their checkpoints, in a run of several processes.
+
+    Process 0 runs the fits (the others serve its requests), so the folder is its own.
+    """
+    import shutil
+    import tempfile
+
+    out = {}
+    for nested_at in (None, "cell"):
+        kind = "nested" if nested_at else "joint"
+        folder = tempfile.mkdtemp(prefix="wave2_world_")
+        try:
+            straight = fit(lowered, start, nested_at=nested_at)
+            stopped = fit(
+                lowered,
+                start,
+                nested_at=nested_at,
+                callbacks=(_stop_at_second_step(),),
+                checkpoint=folder,
+            )
+            assert stopped.status is inf.TerminationStatus.STOPPED
+            resumed = fit(lowered, start, nested_at=nested_at, checkpoint=folder)
+            out[f"{kind} checkpoint resumed == straight"] = bool(
+                resumed.n_steps == straight.n_steps
+                and np.array_equal(np.asarray(resumed.params), np.asarray(straight.params))
+            )
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+    return out
+
+
 def world(kind: str) -> None:
-    """``schedule`` (the globals study, one cell per process) or ``link`` over the MPI world."""
+    """``schedule`` (the globals study, one cell per process), ``link`` or ``recipes`` over the MPI world."""
     from mpi4py import MPI
 
     if kind == "schedule":
         study, truth = global_study("wave2_world_globals")
         point, start, rows_of, nested = SCHEDULE_POINT, SCHEDULE_START, global_rows, ()
+    elif kind == "recipes":
+        study, truth = two_recipe_study("wave2_world_two_recipes")
+        point, start, rows_of, nested = (
+            TWO_RECIPE_POINT,
+            TWO_RECIPE_START,
+            two_recipe_rows,
+            ("cell",),
+        )
     else:
         study, truth = linked_global_study("wave2_world_linked")
         point, start, rows_of, nested = LINK_POINT, LINK_START, linked_rows, ("cell",)
@@ -963,6 +1255,9 @@ def world(kind: str) -> None:
         for nested_at in (None, *nested):
             result = fit(lowered, start, nested_at=nested_at)
             out[f"{'nested' if nested_at else 'joint'} fit error"] = relative(result.params, truth)
+        if kind == "recipes":
+            check_two_recipe_names(_Report(), lowered)
+            out.update(world_checkpoints(lowered, start))
         if kind == "link":
             linked = link_reports(lowered, point)
             with warnings.catch_warnings():
@@ -980,6 +1275,8 @@ def world(kind: str) -> None:
         for key, value in out.items():
             if key.endswith(("closed form", "differences", "fit error")):
                 assert value < 1e-6, (key, value)
+            if key.endswith("resumed == straight"):
+                assert value, key
         print(f"ALL CHECKS PASSED ({kind}, world of three)")
 
 

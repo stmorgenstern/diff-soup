@@ -172,11 +172,18 @@ class _NestedFit(_JointFit):
             self.modes = ("value", "blocks", "frozen")
         self.cut = route.names.index(solver.nested_at) + 1
         self.members = tuple(route.members[self.cut - 1])
-        self.lane_member = np.asarray(route.nodes[:, self.cut - 1], dtype=np.int64)
+        # Every lane's member of the cut level, -1 for a lane outside the intermediate
+        # levels: it belongs to the outer problem, and the polish neither solves it nor
+        # counts it in a member's cost.
+        self.lane_member = np.where(
+            route.outside, -1, np.asarray(route.nodes[:, self.cut - 1], dtype=np.int64)
+        )
         if frozen and getattr(route.problem, "_lanes", None) is not None:
             # On a CPU every call of the blocks and frozen programs holds one member's lanes,
-            # so a frozen request of the polish runs the calls of the members still in it only.
-            cut_by_member(route.problem._lanes, dict(zip(route.ids, self.lane_member.tolist())))
+            # so a frozen request of the polish runs the calls of the members still in it only;
+            # the lanes outside the levels form one group of their own.
+            groups = np.where(self.lane_member < 0, len(self.members), self.lane_member)
+            cut_by_member(route.problem._lanes, dict(zip(route.ids, groups.tolist())))
         # The member of the cut level of every joint column; set by the fit's first ``blocks``.
         self.owners: np.ndarray | None = None
         # The member of the cut level of every regularizer block; set at its first cost.
@@ -489,7 +496,10 @@ class _NestedFit(_JointFit):
         Every regularizer block counts with the route's weight of that block.
         """
         lanes = self.route.omega * np.asarray(lane_costs, dtype=np.float64)
-        costs = np.bincount(self.lane_member, weights=lanes, minlength=len(self.members))
+        inside = self.lane_member >= 0
+        costs = np.bincount(
+            self.lane_member[inside], weights=lanes[inside], minlength=len(self.members)
+        )
         if not self.regularized:
             return costs
         member, blocks = self.block_split(point)
@@ -607,16 +617,20 @@ class _NestedFit(_JointFit):
     def failed_members(self, failures: tuple) -> np.ndarray:
         """The members of the cut level that the failed lanes belong to, each once, in order."""
         position = self.route.position
-        return np.unique(
-            np.asarray(
-                [self.lane_member[position[failure.lane]] for failure in failures], dtype=np.int64
-            )
+        members = np.asarray(
+            [self.lane_member[position[failure.lane]] for failure in failures], dtype=np.int64
         )
+        return np.unique(members[members >= 0])
 
     def member_lanes(self, members: np.ndarray) -> tuple:
         """The ids of the lanes of ``members`` (one flag per member of the cut level), in lane order."""
-        chosen = np.asarray(members, dtype=bool)[self.lane_member]
+        chosen = self.of_members(members)
         return tuple(self.route.ids[position] for position in np.flatnonzero(chosen))
+
+    def of_members(self, flags: np.ndarray) -> np.ndarray:
+        """Per lane, the flag of its member of the cut level; ``False`` for a lane outside the levels."""
+        flags = np.asarray(flags, dtype=bool)
+        return (self.lane_member >= 0) & flags[np.maximum(self.lane_member, 0)]
 
     def lane_costs_of(self, results: Any, costs: np.ndarray) -> np.ndarray:
         """``costs``, one per planned lane, with those of the lanes ``results`` holds replaced."""
@@ -729,6 +743,11 @@ class _NestedFit(_JointFit):
             if not failures:
                 return point, lane_costs, system, ()
             pending = self.failed_members(failures)
+            if not pending.size:
+                # Only lanes outside the levels failed: they read the outer values alone,
+                # which the polish holds, so no member's retreat can solve them.
+                work.record(attempt, failures, inner=True)
+                return point, None, None, failures
             unlogged = failures
             while pending.size:
                 if np.any(tried[pending] >= allowed):
@@ -1094,7 +1113,7 @@ class _NestedFit(_JointFit):
                 # the matrix their last blocks request kept: their nodes take it, and the
                 # exit's request of every lane gives the system where the polish ends.
                 at_trial = self.lane_costs_of(trial_results, lane_costs)
-                lane_costs = np.where(accepted[self.lane_member], at_trial, lane_costs)
+                lane_costs = np.where(self.of_members(accepted), at_trial, lane_costs)
                 frozen = route.frozen_system(system, trial_results, combined)
                 cost = self.cost_at(lane_costs, x)
                 system = _spliced(system, frozen, self.cut, accepted, x, cost)
@@ -1103,7 +1122,11 @@ class _NestedFit(_JointFit):
             # (1) of the next iteration: the system at the members' new point. The last
             # iteration requests every lane there, and so does one whose moved members
             # hold every lane; an earlier one the lanes of the members that moved.
-            every = k == int(limit) or not active.any() or bool(np.all(accepted[self.lane_member]))
+            every = (
+                k == int(limit)
+                or not active.any()
+                or bool(np.all(accepted[self.lane_member[self.lane_member >= 0]]))
+            )
             base = _Point(previous, system, lane_costs)
             x, lane_costs, system, partial = self.settle(
                 x, base, accepted, every, state.radii, retreats, attempt, state.codes, active

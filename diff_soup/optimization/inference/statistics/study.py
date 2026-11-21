@@ -120,6 +120,52 @@ def _refuse_unread(hierarchy: Hierarchy, tree: Any, experiments: tuple, ids: tup
                 )
 
 
+def _refuse_outside(hierarchy: Hierarchy, tree: Any, experiments: tuple, reads: str) -> None:
+    """Refuse an experiment that names no member of the intermediate levels and may not stand outside them.
+
+    Such an experiment sits directly under the study. It may do so only under
+    ``reads="declared"`` and only when its model declares no parameter placed
+    at a level, the experiment level included: it reads the shared values
+    alone, and holds no block of any level.
+
+    Raises:
+        ValueError: If such an experiment is in a study with ``reads="all"``,
+            or its model declares a parameter placed at a level.
+    """
+    if not any(tree.outside):
+        return
+    levels = tuple(hierarchy.levels)
+    for experiment, experiment_id, outside in zip(experiments, tree.ids, tree.outside):
+        if not outside:
+            continue
+        missing = (
+            f"experiment {experiment_id!r} names no member of level(s) "
+            f"{', '.join(repr(level) for level in levels)}"
+        )
+        if reads != "declared":
+            raise ValueError(
+                f"{missing}; the study's hierarchy has the levels "
+                f"{', '.join(repr(level) for level in levels)}, and every experiment names one "
+                "member of each in parameters=. Under Study(reads='declared') an experiment that "
+                "declares no parameter placed at a level may name none."
+            )
+        for level in levels + (EXPERIMENT,):
+            for handle in hierarchy.per.get(level, ()):
+                if handle.name not in experiment._declarations:
+                    continue
+                remedy = (
+                    "name its members in parameters="
+                    if level != EXPERIMENT
+                    else "name its members in parameters=, or place the parameter in shared= or "
+                    "at an intermediate level"
+                )
+                raise ValueError(
+                    f"{missing}, and its model declares {handle.name!r}, placed at the level "
+                    f"{level!r}. An experiment outside the intermediate levels reads the shared "
+                    f"values alone; {remedy}."
+                )
+
+
 def _experiment_rows(experiment: Experiment) -> int:
     """The number of observed values an experiment contributes: its residual rows."""
     return sum(
@@ -207,6 +253,10 @@ class Study:
 
     With a [Hierarchy][diff_soup.optimization.inference.Hierarchy], each experiment names its members in its own `parameters=`. With a `ds.ParameterSet`, `clusters=` gives the owner of each experiment for each cluster.
 
+    The experiments may be built from several recipes. A placed parameter is identified by its name: under `reads="declared"` each experiment reads the placed parameters its model declares, and every declaration of one name must agree in decoded size, learnability and bounds.
+
+    Under `reads="declared"` an experiment whose model declares none of the parameters placed at the intermediate levels may name no member of them. It then sits directly under the study, reads the shared values alone, and its `clusters` entry at every intermediate level is `None`. Such an experiment may not declare a parameter placed at the level `"experiment"` either. A nested trust region (`inf.TrustRegion(nested_at=...)`) solves it in the outer step only: the members' polish holds the outer values, on which alone it depends. A bootstrap and a fit weighted by the members of an intermediate level refuse such a study, since the experiment is in no member.
+
     Args:
         experiments: One [Experiment][diff_soup.optimization.inference.Experiment] or a non-empty iterable of them, with distinct ids.
         parameters: A `ds.ParameterSet` or a [Hierarchy][diff_soup.optimization.inference.Hierarchy].
@@ -244,10 +294,13 @@ class Study:
                 placed nowhere; with a ``ParameterSet``, an experiment names
                 members in ``parameters=``. Also if ``reads`` is not one of
                 ``"all"`` and ``"declared"``; with ``"all"``, if an
-                experiment's model lacks a handle; with ``"declared"``, if
+                experiment's model lacks a handle or an experiment names no
+                member of the intermediate levels; with ``"declared"``, if
                 ``parameters`` is a ``ParameterSet``, no experiment declares a
-                shared handle, or no experiment below a member declares a
-                handle of that member's level.
+                shared handle, no experiment below a member declares a
+                handle of that member's level, an experiment that names no
+                member declares a parameter placed at a level, or no
+                experiment names members.
         """
         if reads not in READS:
             raise ValueError(f"Study reads= is 'all' or 'declared'; got {reads!r}.")
@@ -355,8 +408,11 @@ class Study:
                 )
 
         recorded_clusters = resolved_clusters
+        outside: tuple = ()
         if hierarchy is not None:
             tree = _tree(hierarchy, experiments)
+            outside = tuple(tree.outside)
+            _refuse_outside(hierarchy, tree, experiments, reads)
             if reads == "declared":
                 _refuse_unread(hierarchy, tree, experiments, experiment_ids)
             placed = {handle.name for handle in hierarchy.handles}
@@ -376,7 +432,10 @@ class Study:
             # The clusters of a hierarchy study are derived from the members
             # the experiments name; the fingerprint records them there.
             resolved_clusters = {
-                level: tuple(tree.members[position][int(node)] for node in tree.nodes[:, position])
+                level: tuple(
+                    None if outside and outside[index] else tree.members[position][int(node)]
+                    for index, node in enumerate(tree.nodes[:, position])
+                )
                 for position, level in enumerate(hierarchy.levels)
             }
             resolved_clusters[EXPERIMENT] = experiment_ids
@@ -396,6 +455,8 @@ class Study:
         object.__setattr__(self, "independent", bool(independent))
         object.__setattr__(self, "fingerprint", digest)
         object.__setattr__(self, "reads", reads)
+        # Per experiment, whether it sits directly under the study (``()`` when none does).
+        object.__setattr__(self, "_outside", outside if any(outside) else ())
         self._joint_bounds()
 
     @property
@@ -432,6 +493,20 @@ class Study:
             if read(handle)
         }
         return ParameterGroups(local=local, shared=shared)
+
+    def _member_labels(self, level: str) -> tuple:
+        """Each experiment's member of ``level``; an experiment outside the levels takes its host's.
+
+        The host is the first experiment that names members. An experiment
+        outside the levels reads none of its host's values, so its blocks
+        there are zero; the joint layout and the level tables take the host
+        so that the tree of members stays whole.
+        """
+        labels = tuple(self.clusters[level])
+        if not self._outside:
+            return labels
+        host = labels[self._outside.index(False)]
+        return tuple(host if outside else label for label, outside in zip(labels, self._outside))
 
     def _reads(self, index: int, handle: Any) -> bool:
         """Whether the experiment at ``index`` reads ``handle``."""
@@ -589,15 +664,16 @@ class Study:
         n_experiments = len(self.experiments)
         levels = tuple(
             (
-                tuple(self.clusters[name]),
+                self._member_labels(name),
                 tuple(handle.name for handle in hierarchy.per.get(name, ())),
             )
             for name in tied
         )
         # The owner tier as the placement plan reads it: its groups and the
         # member of each experiment.
+        owners = self._member_labels(tied[0])
         ownership = {
-            handle.name: {index: self.clusters[tied[0]][index] for index in range(n_experiments)}
+            handle.name: {index: owners[index] for index in range(n_experiments)}
             for handle in hierarchy.per.get(tied[0], ())
         }
         shared = tuple(handle.name for handle in hierarchy.shared)
@@ -833,7 +909,12 @@ class Study:
 
         for cluster, handles in self.parameters.varying.items():
             labels = tuple(self.clusters[cluster])
-            owners = _unique_in_order(labels)
+            # An experiment outside the intermediate levels is the member of none of them.
+            owners = _unique_in_order(
+                label
+                for index, label in enumerate(labels)
+                if cluster == EXPERIMENT or not self._outside or not self._outside[index]
+            )
             child_local = cluster not in set(self._tied_clusters())
             for handle in handles:
                 size, decode = parameter_decoder(handle)
@@ -856,7 +937,12 @@ class Study:
                         raise ValueError(
                             f"owner group {group_name!r} has {len(columns)} columns; expected {size}."
                         )
-                    members = [index for index, label in enumerate(labels) if label == owner]
+                    members = [
+                        index
+                        for index, label in enumerate(labels)
+                        if label == owner
+                        and (cluster == EXPERIMENT or not self._outside or not self._outside[index])
+                    ]
                     occurrences.append(
                         ParameterOccurrence(
                             owner=owner,

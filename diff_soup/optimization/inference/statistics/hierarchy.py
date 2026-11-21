@@ -41,6 +41,16 @@ class Hierarchy:
     in `shared` or under one level of `per`, and experiments that name the same member share its
     values.
 
+    A parameter is identified by its name, so the handles may come from the recipes of several
+    experiments: a handle stands for the parameter of its name in every experiment that reads
+    it, and the declarations of that name must agree in decoded size, learnability and bounds.
+    Two handles of one name are refused, whichever recipes they come from.
+
+    Under `Study(reads="declared")` an experiment whose model declares none of the parameters
+    placed at the intermediate levels may name no member of them: it sits directly under the
+    study and reads the shared values alone. It holds no block of any intermediate level, so
+    the fitted vector has no values for it there.
+
     Args:
         levels: The level names between the study and its experiments, outermost first, or
             `None` to take them from the keys of `per`.
@@ -70,8 +80,8 @@ class Hierarchy:
                 an iterable of Recipe handles.
             ValueError: If ``levels`` lists ``"experiment"`` or a name twice,
                 ``per`` names a level that is not declared, no parameter is
-                placed, a parameter is placed twice or is not learnable, the
-                handles come from several Recipes, or two handles share a name.
+                placed, a parameter is placed twice or is not learnable, or
+                two handles share a name.
         """
         if per is None:
             per = {}
@@ -138,12 +148,6 @@ class Hierarchy:
                 f"Hierarchy places {twice} more than once; place each parameter in shared= or "
                 "at exactly one level of per=."
             )
-        namespaces = {handle.identity[0] for handle in all_handles}
-        if len(namespaces) > 1:
-            raise ValueError(
-                "Hierarchy handles must come from one Recipe declaration; "
-                "mixing same-named handles from independent specs is ambiguous."
-            )
         names = [handle.name for handle in all_handles]
         repeated_names = sorted({name for name in names if names.count(name) > 1})
         if repeated_names:
@@ -209,6 +213,11 @@ class _Tree:
             the ``(N_l,)`` int32 node indices at level ``l - 1``.
         widths: ``(g, v_1, ..., v_D)``, the decoded sizes of the shared
             handles and of each level's handles.
+        outside: Per experiment, whether it names no member of the
+            intermediate levels and so sits directly under the study. Its
+            row of ``nodes`` above the experiment level is that of its host,
+            the first experiment that names members; it reads none of the
+            host's values.
     """
 
     names: tuple
@@ -217,6 +226,7 @@ class _Tree:
     nodes: np.ndarray
     parents: tuple
     widths: tuple
+    outside: tuple = ()
 
     @property
     def depth(self) -> int:
@@ -235,9 +245,15 @@ def _tree(hierarchy: Hierarchy, experiments: Any) -> _Tree:
     Node indices follow first appearance over the experiments in study order,
     which is also the order of the members' blocks in the fitted vector.
 
+    An experiment that names no member of any intermediate level is
+    ``outside``: it takes the nodes of its host, the first experiment that
+    names members, above the experiment level. The Study decides whether it
+    may stand outside.
+
     Raises:
         ValueError: If an experiment names a level the hierarchy does not have
-            or misses one, two members of a level print alike, or a member sits
+            or names some levels and misses others, no experiment names
+            members, two members of a level print alike, or a member sits
             under two members of the level above.
     """
     experiments = tuple(experiments)
@@ -264,13 +280,21 @@ def _tree(hierarchy: Hierarchy, experiments: Any) -> _Tree:
                 )
             raise ValueError(message)
         missing = [level for level in levels if level not in named]
-        if missing:
-            raise ValueError(
-                f"experiment {experiment_id!r} names no member of level(s) {_quoted(missing)}; "
-                f"the study's hierarchy has the levels {_levels_text(levels)}, and every "
-                "experiment names one member of each in parameters=."
-            )
-        rows.append(tuple(named[level] for level in levels))
+        if missing and len(missing) < len(levels):
+            raise ValueError(_missing_text(experiment_id, missing, levels))
+        rows.append(None if missing else tuple(named[level] for level in levels))
+
+    # An experiment that names no member of any level sits directly under the
+    # study; the Study admits it only when it reads no value of those levels.
+    # Its nodes are those of the first experiment that names members (its
+    # host), so the tree stays whole: it reads none of the host's values, and
+    # every block it adds there is zero.
+    outside = tuple(row is None for row in rows)
+    if any(outside):
+        host = next((row for row in rows if row is not None), None)
+        if host is None:
+            raise ValueError(_missing_text(ids[0], levels, levels))
+        rows = [host if row is None else row for row in rows]
 
     members: list[tuple] = []
     columns: list[tuple] = []
@@ -347,6 +371,16 @@ def _tree(hierarchy: Hierarchy, experiments: Any) -> _Tree:
         nodes=nodes,
         parents=tuple(parents),
         widths=widths,
+        outside=outside,
+    )
+
+
+def _missing_text(experiment_id: object, missing: Iterable[object], levels: tuple) -> str:
+    """The refusal of an experiment that names no member of the levels ``missing``."""
+    return (
+        f"experiment {experiment_id!r} names no member of level(s) {_quoted(missing)}; "
+        f"the study's hierarchy has the levels {_levels_text(levels)}, and every "
+        "experiment names one member of each in parameters=."
     )
 
 

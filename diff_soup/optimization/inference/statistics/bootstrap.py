@@ -239,6 +239,15 @@ def bootstrap(
         if state is None or "fingerprint" not in state
         else str(np.asarray(state["fingerprint"]))
     )
+    study = getattr(problem, "study", None)
+    if getattr(study, "_outside", ()):
+        outside = [i for i, flag in zip(study.experiment_ids, study._outside) if flag]
+        raise ValueError(
+            f"experiment(s) {outside} name no member of the study's levels and sit directly "
+            "under the study; the bootstrap resamples members of a level, and an experiment "
+            "outside every member is in no resampled unit. Bootstrap a study whose "
+            "experiments each name their members."
+        )
     if saved is not None and saved != str(problem.parameter_schema.fingerprint):
         raise ValueError(
             "fit= was made on another study than problem=; bootstrap the fit with the lowered "
