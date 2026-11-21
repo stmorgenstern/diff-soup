@@ -592,6 +592,29 @@ class _CompiledExperiment:
         Returns:
             A `Predictor` carrying ``x0`` and the closure.
         """
+        return self._predictor(parameters)
+
+    def _predictor(
+        self,
+        parameters: ParameterGroups | None = None,
+        channels: tuple | None = None,
+        signals: tuple = (),
+    ) -> Predictor:
+        """The prediction closure of `predictor`, over other channels or with signals set.
+
+        Args:
+            parameters: As for `predictor`.
+            channels: The channels to predict, in place of the experiment's
+                own; ``None`` predicts the experiment's own. Their names key
+                the cache, so they are fixed per experiment (its outputs).
+            signals: Per fixed signal function whose values the closure takes
+                as numbers, ``(name, shape)``. The closure's vector then holds
+                the parameters followed by each signal's values, flattened, in
+                this order; the solve reads them in place of the declared ones.
+
+        Returns:
+            A `Predictor`; its ``x0`` and ``theta_names`` cover the parameters only.
+        """
         from diff_soup.optimization.inference.fitting._forward_seam import (
             build_forward_seam,
             resolve_forward_adjoint,
@@ -609,19 +632,33 @@ class _CompiledExperiment:
         theta_spec, groups = _resolve_parameters(parameters, self.problem)
         # Resolved group records contain names and frozensets of selected leaf
         # identities, so equivalent declarations have a stable hashable key.
-        cached = self._predictor_cache.get(groups)
+        own = channels is None
+        channels = self.channels if own else tuple(channels)
+        signals = tuple((name, tuple(int(n) for n in shape)) for name, shape in signals)
+        key = groups if own and not signals else (groups, tuple(c.name for c in channels), signals)
+        cached = self._predictor_cache.get(key)
         if cached is not None:
             return cached
 
         seam = build_forward_seam(self.problem, theta_spec)
         solver = resolve_forward_adjoint(self.solver)
-        streams = tuple(_PredictionStream(c) for c in self.channels)
+        streams = tuple(_PredictionStream(c) for c in channels)
         initial = self.initial_state
+        decision_to_theta = None
+        if signals:
+            decision_to_theta = _signals_theta(seam, signals)
         if isinstance(initial, ComputedInitialState):
             y0 = jnp.asarray(_computed_start_template(seam, initial))
 
-            def decision_to_y0(x):
-                return _computed_start(seam, initial, x)
+            if decision_to_theta is None:
+
+                def decision_to_y0(x):
+                    return _computed_start(seam, initial, x)
+
+            else:
+
+                def decision_to_y0(x):
+                    return jnp.asarray(initial.fn(decision_to_theta(x)))
 
         else:
             y0 = jnp.asarray(_initial_state_array(initial))
@@ -632,17 +669,40 @@ class _CompiledExperiment:
             y0=y0,
             solver=solver,
             t0=float(self.t_span[0]),
+            decision_to_theta=decision_to_theta,
             decision_to_y0=decision_to_y0,
             schedule=_lowered_schedule(self.schedule, self.problem),
         )
         predictor = Predictor(
             x0=seam.x0,
             theta_names=tuple(seam.theta_names),
-            channel_names=tuple(c.name for c in self.channels),
+            channel_names=tuple(c.name for c in channels),
             _predict=predict,
         )
-        self._predictor_cache[groups] = predictor
+        self._predictor_cache[key] = predictor
         return predictor
+
+
+def _signals_theta(seam: Any, signals: tuple) -> Callable:
+    """``vector -> theta`` for a vector of the parameters followed by the values of ``signals``.
+
+    Each signal ``(name, shape)`` is a fixed signal function of the model; its
+    values replace the declared ones, as a link's do on a lane.
+    """
+    from diff_soup.optimization.inference.engine._links import SignalHandle
+    from diff_soup.problem._registry import theta_replace
+
+    width = int(np.asarray(seam.x0).shape[0])
+    sizes = tuple(int(np.prod(shape, dtype=np.int64)) for _, shape in signals)
+
+    def decision_to_theta(vector: Array) -> PyTree:
+        values, offset = {}, width
+        for (name, shape), size in zip(signals, sizes):
+            values[SignalHandle(name)] = vector[offset : offset + size].reshape(shape)
+            offset += size
+        return theta_replace(seam.theta_of(vector[:width]), values, caller="Link")
+
+    return decision_to_theta
 
 
 # ---------------------------------------------------------------------------

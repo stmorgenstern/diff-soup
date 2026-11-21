@@ -343,12 +343,15 @@ def _attach_diagnostics(result: OptResult, problem: Any) -> OptResult:
     from diff_soup.optimization.inference.fitting.diagnostics import compute_diagnostics
 
     diagnostic_problem = getattr(problem, "diagnostic_problem", problem)
-    diag = compute_diagnostics(
-        diagnostic_problem,
-        result.params,
-        residual=result.info.get("final_data_residual"),
-        jacobian=result.info.get("final_data_jacobian"),
-    )
+    if _linked_lanes(problem):
+        diag = _linked_diagnostics(problem, diagnostic_problem, result.params)
+    else:
+        diag = compute_diagnostics(
+            diagnostic_problem,
+            result.params,
+            residual=result.info.get("final_data_residual"),
+            jacobian=result.info.get("final_data_jacobian"),
+        )
     diag = dataclasses.replace(
         diag,
         ad_mode=result.info.get("ad_mode"),
@@ -360,6 +363,42 @@ def _attach_diagnostics(result: OptResult, problem: Any) -> OptResult:
     window_states = getattr(diagnostic_problem, "window_states_of", None)
     ws = window_states(result.params) if callable(window_states) else None
     return dataclasses.replace(result, diagnostics=diag, window_states=ws)
+
+
+def _linked_lanes(problem: Any) -> bool:
+    """Whether ``problem`` is a lowered study whose experiments are linked."""
+    lanes = getattr(problem, "__dict__", {}).get("_lanes")
+    return lanes is not None and lanes.plan.links is not None
+
+
+def _linked_diagnostics(problem: Any, diagnostic_problem: Any, params: Any) -> Any:
+    """The diagnostics of a fit of a lowered study with links, from its lanes.
+
+    The joint residual of ``diagnostic_problem`` solves each experiment alone, so
+    a driven experiment there reads its signal as declared. The conditioning
+    here comes from the lanes' ``J^T J`` at ``params`` (through the ``n x n``
+    matrix ``sqrt(L) V^T`` of its eigenpairs, which has the same column norms,
+    singular values and conditioning per group), and the cost of each
+    measurement of each experiment from predictions that follow the links.
+    """
+    from diff_soup.optimization.inference.fitting.diagnostics import compute_diagnostics
+    from diff_soup.optimization.inference.statistics._analysis import measurement_costs
+
+    matrix = np.asarray(problem.gauss_newton_fn(np.asarray(params))[2], dtype=np.float64)
+    matrix = 0.5 * (matrix + matrix.T)
+    # A column the residual does not move has a zero diagonal; it stays exactly zero.
+    live = np.flatnonzero(np.diag(matrix) > 0.0)
+    eigenvalues, eigenvectors = np.linalg.eigh(matrix[np.ix_(live, live)])
+    surrogate = np.zeros_like(matrix)
+    surrogate[: live.size, live] = (
+        np.sqrt(np.clip(eigenvalues, 0.0, None))[:, None] * eigenvectors.T
+    )
+    return compute_diagnostics(
+        diagnostic_problem,
+        params,
+        jacobian=surrogate,
+        series_cost=measurement_costs(problem, params),
+    )
 
 
 def _recorded_fingerprint(result: OptResult) -> Optional[str]:

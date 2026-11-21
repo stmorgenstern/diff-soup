@@ -101,7 +101,9 @@ def residual_report(problem, fit, *, experiment_id=None) -> ResidualReport:
     """Standardize the residuals of each measurement by its likelihood at a fit, and flag departures from the noise model.
 
     Under the declared noise model the standardized residuals have mean zero, standard deviation
-    one, and no lag-1 autocorrelation.
+    one, and no lag-1 autocorrelation. An experiment driven by a
+    [`Link`][diff_soup.optimization.inference.Link] is predicted with its source's output at the
+    same point.
 
     Args:
         problem: An [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] whose measurements
@@ -114,18 +116,25 @@ def residual_report(problem, fit, *, experiment_id=None) -> ResidualReport:
         A `ResidualReport` with one entry per measurement in `channels`, and the departures in
             words in `flags`.
     """
-    from diff_soup.optimization.inference.statistics._analysis import experiment_view
+    from diff_soup.optimization.inference.statistics._analysis import study_predictor
     from diff_soup.optimization.inference.statistics.information import _point
     from diff_soup.optimization.inference.statistics.measurement import require_likelihoods
 
     require_likelihoods(problem, "residual_report")
 
-    experiment, parameters, columns = experiment_view(problem, experiment_id)
-    return _residual_report(experiment, _point(problem, fit)[columns], parameters=parameters)
+    experiment, parameters, columns, predict = study_predictor(problem, experiment_id)
+    point = _point(problem, fit)
+    if not experiment.links:
+        return _residual_report(experiment, point[columns], parameters=parameters)
+    return _residual_report(experiment, point[columns], predictions=predict(jnp.asarray(point))[0])
 
 
 def _residual_report(
-    experiment, x_flat: ArrayLike, *, parameters: ParameterGroups | None = None
+    experiment,
+    x_flat: ArrayLike,
+    *,
+    parameters: ParameterGroups | None = None,
+    predictions: dict | None = None,
 ) -> ResidualReport:
     """Check each scored channel's residuals against its declared likelihood.
 
@@ -141,6 +150,9 @@ def _residual_report(
             converged theta block).
         parameters: Optional parameter groups selecting the learnable theta;
             must match the groups the vector ``x_flat`` was fitted with.
+        predictions: The predictions at ``x_flat`` by channel name, made by the
+            caller (those of an experiment driven by links); ``None`` runs the
+            experiment's own prediction closure.
 
     Returns:
         A [ResidualReport][].
@@ -148,8 +160,11 @@ def _residual_report(
     Raises:
         ValueError: If no response channel has attached data.
     """
-    predict = experiment.predictor(parameters=parameters)
-    preds, _ = predict(jnp.asarray(x_flat))
+    if predictions is None:
+        predict = experiment.predictor(parameters=parameters)
+        preds, _ = predict(jnp.asarray(x_flat))
+    else:
+        preds = predictions
 
     channels: dict = {}
     flags: list = []

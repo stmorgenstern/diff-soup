@@ -21,7 +21,10 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
    gradient mode against the blocks, the reverse-mode gradient, and a joint fit. Then a
    linked pair whose source output is the global ``I``: two driven cells
    ``z' = -b z + y(t)`` on the piecewise-linear signal of the source's current, under
-   ``reads="declared"``; the same comparisons, joint and nested fits. Then a lane
+   ``reads="declared"``; the same comparisons, joint and nested fits; ``predict`` of a
+   driven cell against a solve with the source's series supplied by hand, its
+   derivative against the closed form, and the residual reports and the fit's
+   diagnostics, whose costs per measurement sum to the study's cost. Then a lane
    without a schedule: ``u' = -a u`` with a global ``g`` closed by ``g = 2 u``, observed
    directly and through a declaration, and ``u`` from the state and through a
    declaration, against the closed form, with unit scales and with a field of scale 10
@@ -37,7 +40,7 @@ has to need less than 64 MB.
 
 ``world``: the schedule study (one cell per process) or the linked study over the three
 processes of an MPI world: ``J^T J`` against the closed form, the gradient against
-differences, fits. The byte comparison of a study without the new features is the
+differences, fits; for the linked study also ``predict`` and the residual reports. The byte comparison of a study without the new features is the
 ``baseline`` mode of ``benchmarks.computed_start_check`` on two versions of the library.
 """
 
@@ -46,6 +49,7 @@ differences, fits. The byte comparison of a study without the new features is th
 from __future__ import annotations
 
 import sys
+import warnings
 
 import diff_soup as ds  # diff_soup before jax
 import jax.numpy as jnp
@@ -224,6 +228,26 @@ def global_rows(point):
     return np.concatenate(rows)
 
 
+def driven_recipe(name, values=None):
+    """``z' = -b z + y(t)`` with ``y`` piecewise linear on ``OUTPUT_TIMES``, its values ``values`` (zeros).
+
+    Returns ``(model, spec)``.
+    """
+    dspec = ds.problem(name)
+    dspec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+    dspec.param("b", value=0.5, learnable=True, bounds=(0.05, 3.0))
+    knots = jnp.asarray(OUTPUT_TIMES)
+    values = jnp.zeros(knots.shape) if values is None else jnp.asarray(values)
+    dspec.function("y", PiecewiseLinear(knots, values), learnable=False)
+    dspec.field("z", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
+
+    @dspec.equation(writes="z", reads=("z",))
+    def relax(q):
+        return -q.p.b * q.z + q.fn.y(q.t)
+
+    return dspec.build(), dspec
+
+
 def linked_global_study(name):
     """A schedule cell whose global current, an output, drives ``z' = -b z + y(t)`` in two cells.
 
@@ -233,18 +257,7 @@ def linked_global_study(name):
     ``[a, s, b_source, b_d1, b_d2]``.
     """
     model, a, s = global_recipe(f"{name}_source", inert_b=True)
-    dspec = ds.problem(f"{name}_driven")
-    dspec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
-    dspec.param("b", value=0.5, learnable=True, bounds=(0.05, 3.0))
-    knots = jnp.asarray(OUTPUT_TIMES)
-    dspec.function("y", PiecewiseLinear(knots, jnp.zeros(knots.shape)), learnable=False)
-    dspec.field("z", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
-
-    @dspec.equation(writes="z", reads=("z",))
-    def relax(q):
-        return -q.p.b * q.z + q.fn.y(q.t)
-
-    driven_model = dspec.build()
+    driven_model, dspec = driven_recipe(f"{name}_driven")
     s_true = S_TRUE["c1"]
     u, current, _ = cell_series(A_TRUE, s_true)
     experiments = [
@@ -313,6 +326,108 @@ def closed_form_blocks(rows_of, point, step=1e-6):
         columns.append((rows_of(point + shift) - rows_of(point - shift)) / (2 * step))
     J = np.stack(columns, axis=1)
     return J.T @ J, J.T @ rows
+
+
+def link_reports(lowered, point):
+    """What ``predict`` and the residual reports say of the linked study at ``point``.
+
+    ``predict`` of the driven cell ``d1`` from two draws at ``point`` (its band's mean
+    is the prediction there) against a direct solve of the driven model with the
+    source's current at ``OUTPUT_TIMES`` supplied by hand (the closed form) and against
+    the closed form of ``z``; the derivative of that prediction (the linearization
+    ``predict`` makes from a fit) against central differences of the closed form, in
+    every column, the source's ``a`` and ``s`` included; the residual report of every
+    experiment and the cost per measurement against the study's cost. Returns the
+    numbers by name.
+    """
+    import jax
+
+    from diff_soup.optimization.inference.statistics._analysis import (
+        measurement_costs,
+        study_predictor,
+    )
+
+    a, s, b = point[0], point[1], point[3]
+    out = {}
+    draws = inf.Draws(
+        values=jnp.asarray(np.stack([point, point]))[None],
+        names=tuple(f"x{k}" for k in range(point.size)),
+        info={},
+        _parameter_schema=lowered.parameter_schema,
+    )
+    predicted = np.asarray(inf.predict(lowered, draws, experiment_id="d1")["z"].mean)
+    source_current = truth_at(a, s, OUTPUT_TIMES)[1]
+    model, spec = driven_recipe(f"wave2_by_hand_{lowered.processes}", source_current)
+    by_hand = inf.Experiment(
+        model=model,
+        solver=_solver(),
+        t_span=(float(OUTPUT_TIMES[0]), float(OUTPUT_TIMES[-1])),
+        initial_state=spec.assemble_state({}),
+        measurements=(
+            _gaussian("z", DRIVEN_TIMES, np.zeros(DRIVEN_TIMES.shape), lambda st: st[0]),
+        ),
+    )
+    solved, failed = by_hand.predictor()(jnp.asarray([b]))
+    assert not bool(failed)
+    out["predict d1 vs solve with the source's series by hand"] = relative(predicted, solved["z"])
+    out["predict d1 vs closed form"] = relative(predicted, driven_truth(a, s, b))
+    _, _, _, predict = study_predictor(lowered, "d1")
+    jacobian = np.asarray(jax.jacfwd(lambda x: predict(x)[0]["z"])(jnp.asarray(point)))
+    step, columns = 1e-6, []
+    for k in range(point.size):
+        shift = np.zeros(point.size)
+        shift[k] = step
+        plus, minus = point + shift, point - shift
+        columns.append(
+            (driven_truth(plus[0], plus[1], plus[3]) - driven_truth(minus[0], minus[1], minus[3]))
+            / (2 * step)
+        )
+    out["predict d1 derivative vs closed form"] = relative(jacobian, np.stack(columns, axis=1))
+    cost = float(lowered.value_and_gradient(point).values[0])
+    reports = {
+        experiment_id: inf.residual_report(lowered, point, experiment_id=experiment_id)
+        for experiment_id in ("source", "d1", "d2")
+    }
+    summed = sum(c.cost for r in reports.values() for c in r.channels.values()) / 2
+    out["residual reports, sum of costs vs study cost"] = relative(summed, cost)
+    rows = (driven_truth(a, s, b) - driven_truth(A_TRUE, S_TRUE["c1"], DRIVEN_B["d1"])) / SIGMA
+    out["residual report d1 vs closed form"] = relative(
+        reports["d1"].channels["z"].cost, np.sum(rows**2)
+    )
+    costs, names = measurement_costs(lowered, point)
+    out["cost per measurement, sum vs study cost"] = relative(sum(costs), cost)
+    out["cost per measurement, names"] = names
+    return out
+
+
+def check_link_reports(report, numbers, label="link"):
+    """Record ``link_reports`` numbers and assert each comparison."""
+    for key, value in numbers.items():
+        report[f"{label} {key}"] = value
+        if key != "cost per measurement, names":
+            assert value < 1e-6, (key, value)
+    assert numbers["cost per measurement, names"] == (
+        ("source", "u"),
+        ("source", "I"),
+        ("d1", "z"),
+        ("d2", "z"),
+    )
+
+
+def check_link_diagnostics(report, result, label="link"):
+    """Check a fit's diagnostics on the linked study.
+
+    The costs per measurement sum to the fit's cost, and only the source's unused ``b``
+    is flagged as not moving the residual.
+    """
+    diagnostics = result.diagnostics
+    report[f"{label} fit diagnostics, cost per measurement minus cost"] = abs(
+        sum(diagnostics.per_series_cost) - float(result.cost)
+    )
+    report[f"{label} fit diagnostics, warnings"] = diagnostics.warnings
+    assert report[f"{label} fit diagnostics, cost per measurement minus cost"] < 1e-10
+    assert len(diagnostics.warnings) == 1 and "('b@source',)" in diagnostics.warnings[0]
+    assert diagnostics.series_names[2] == ("d1", "z")
 
 
 CLOSURE_CELLS = ("c1", "c2")
@@ -468,6 +583,13 @@ def section_globals(report) -> None:
         key = f"link {'nested' if nested_at else 'joint'} fit error"
         report[key] = relative(result.params, link_truth)
         assert report[key] < 1e-6, result.params
+
+    # predict and the residual reports of the linked study follow its links.
+    check_link_reports(report, link_reports(lowered, LINK_POINT))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = inf.optsolve(lowered.with_start(LINK_START), inf.TrustRegion(max_steps=60))
+    check_link_diagnostics(report, result)
 
     # A lane without a schedule: a global g closed by g = 2 u, observed directly and
     # through a declaration; with unit scales, and with a field of scale 10 beside a
@@ -748,10 +870,72 @@ def measure_budget(cells=2000, count=4000, width=16) -> None:
         MEASURE_TIMES = kept
 
 
+def shape_study(name, observe, values):
+    """``u' = -a u`` on one cell from ``u(0) = 1``, one measurement ``observe`` of ``values``.
+
+    The model declares ``"u"`` (a scalar, the mean of ``u``) and ``"u field"`` (the
+    field, of shape ``(1,)`` on the one cell). Returns the study.
+    """
+    spec = ds.problem(name)
+    spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+    a = spec.param("a", value=0.5, learnable=True, bounds=(0.05, 3.0))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    spec.observe.scalar(name="u", fn=lambda q: jnp.mean(q.u))
+    spec.observe.field(name="u field", fn=lambda q: q.u)
+
+    @spec.equation(writes="u", reads=("u",))
+    def decay(q):
+        return -q.p.a * q.u
+
+    experiment = inf.Experiment(
+        model=spec.build(),
+        solver=_solver(),
+        t_span=(0.0, 2.0),
+        initial_state=spec.assemble_state({"u": 1.0}),
+        measurements=(_gaussian("u", SCHEDULE_TIMES, values, observe),),
+        id="cell",
+    )
+    return inf.Study((experiment,), parameters=inf.Hierarchy(shared=(a,)))
+
+
+def section_shapes(report) -> None:
+    """A measurement's values have its observation's shape at each time, or it is refused.
+
+    An observation of shape ``(1,)`` (the state of the one cell, by a function and by
+    the declared field) measured with values of shape ``(times,)`` is refused when the
+    study is lowered; with values of shape ``(times, 1)``, and a scalar observation
+    (by a function and by the declared scalar) with values of shape ``(times,)``,
+    give one cost, the closed form's.
+    """
+    values = np.exp(-A_TRUE * SCHEDULE_TIMES)
+    point = np.asarray([0.7])
+    expected = 0.5 * np.sum(((np.exp(-0.7 * SCHEDULE_TIMES) - values) / SIGMA) ** 2)
+    for label, observe in (("function", lambda st: st), ("declared", "u field")):
+        try:
+            ds.lower(shape_study(f"wave2_shape_refused_{label}", observe, values))
+        except ValueError as error:
+            report[f"shape (1,) by {label} with values (times,) refused"] = str(error)
+            assert "(1,)" in str(error) and "()" in str(error)
+        else:  # pragma: no cover
+            raise AssertionError(f"an observation of shape (1,) by {label} was not refused")
+    for label, observe, given in (
+        ("(1,) by function, values (times, 1)", lambda st: st, values[:, None]),
+        ("(1,) declared, values (times, 1)", "u field", values[:, None]),
+        ("scalar by function, values (times,)", lambda st: st[0], values),
+        ("scalar declared, values (times,)", "u", values),
+    ):
+        lowered = ds.lower(shape_study(f"wave2_shape_{len(report)}", observe, given))
+        lowered.prepare(modes=("value", "gradient"))
+        cost = float(lowered.value_and_gradient(point).values[0])
+        report[f"shape {label}, cost vs closed form"] = relative(cost, expected)
+        assert report[f"shape {label}, cost vs closed form"] < 1e-6
+
+
 def one_process() -> None:
     """Every section that runs in one process."""
     report = _Report()
     section_globals(report)
+    section_shapes(report)
     print("ALL CHECKS PASSED (one process)")
 
 
@@ -779,6 +963,14 @@ def world(kind: str) -> None:
         for nested_at in (None, *nested):
             result = fit(lowered, start, nested_at=nested_at)
             out[f"{'nested' if nested_at else 'joint'} fit error"] = relative(result.params, truth)
+        if kind == "link":
+            linked = link_reports(lowered, point)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                diagnosed = inf.optsolve(lowered.with_start(start), inf.TrustRegion(max_steps=60))
+    if MPI.COMM_WORLD.rank == 0 and kind == "link":
+        check_link_reports(_Report(), linked, label="link world,")
+        check_link_diagnostics(_Report(), diagnosed, label="link world,")
     if MPI.COMM_WORLD.rank == 0:
         for key, value in out.items():
             print(f"{kind} world, {key}: {value}")

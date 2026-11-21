@@ -80,8 +80,8 @@ class OptDiagnostics:
         window_obs_rank: Per fitted window start, the rank of the window's observations with respect to it.
         continuity_defect_wrms: Per window boundary, the root mean square of the continuity mismatch, in state units.
         continuity_unrepresented: Per window boundary, the weighted continuity mismatch a reduced `StateBasis` cannot represent.
-        per_series_cost: The cost of each measurement stream, or of each window under `Windows.from_data`.
-        series_names: The stream names, parallel to `per_series_cost`, or `None`.
+        per_series_cost: The cost of each measurement stream, or of each window under `Windows.from_data`; in a lowered study with links, of each measurement of each experiment, summing to the cost.
+        series_names: The stream names, parallel to `per_series_cost`, or `None`; in a lowered study with links, pairs `(experiment id, measurement name)`.
         param_group_names: The names of the parameter groups.
         param_group_cond: The condition number of each parameter group, parallel to `param_group_names`, `nan` for learnable-function weights.
         ad_mode: The derivative mode of the gradient.
@@ -276,6 +276,7 @@ def compute_diagnostics(
     jacobian: Optional[np.ndarray] = None,
     theta_cond_warn: float = _THETA_COND_WARN,
     emit_warning: bool = True,
+    series_cost: Optional[tuple] = None,
 ) -> OptDiagnostics:
     """Build [OptDiagnostics][] at the converged params.
 
@@ -298,6 +299,8 @@ def compute_diagnostics(
             warning (default ``1e8``).
         emit_warning: Whether to emit the real warning (set ``False`` to
             collect the note without raising under ``-W error``).
+        series_cost: ``(costs, names)`` of the measurement streams, computed by
+            the caller, in place of splitting the residual of ``problem``.
 
     Returns:
         A frozen [OptDiagnostics][].
@@ -371,7 +374,10 @@ def compute_diagnostics(
             logger.warning(msg)
 
     # --- per-stream cost split (by name when available) ------------------
-    per_series, series_names = _per_series_cost(problem, x_flat, residual)
+    if series_cost is None:
+        per_series, series_names = _per_series_cost(problem, x_flat, residual)
+    else:
+        per_series, series_names = series_cost
 
     # --- per-parameter-group conditioning --------------------------------
     # A fit of network weights alone builds no Jacobian; its groups report nan.

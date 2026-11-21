@@ -831,6 +831,10 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
     propagated. From [`Draws`][diff_soup.optimization.inference.Draws], the band is the mean and spread of the
     predictions over the draws.
 
+    An experiment driven by a [`Link`][diff_soup.optimization.inference.Link] is predicted with
+    its source's output at the same point, from a solve of the source, and its band carries
+    the source's parameters through that output.
+
     Args:
         problem: The [`InferenceProblem`][diff_soup.optimization.inference.InferenceProblem] of the fit or
             the draws.
@@ -848,7 +852,7 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
     from statistics import NormalDist
 
     from diff_soup.optimization.inference.fitting._layout import require_layout
-    from diff_soup.optimization.inference.statistics._analysis import experiment_view
+    from diff_soup.optimization.inference.statistics._analysis import study_predictor
     from diff_soup.optimization.inference.statistics.laplace import laplace
     from diff_soup.optimization.inference.statistics.sample import Draws
 
@@ -856,8 +860,7 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
         raise ValueError('predict kind must be "latent" or "predictive".')
     if not 0 < level < 1:
         raise ValueError("predict level must lie between zero and one.")
-    experiment, parameters, columns = experiment_view(problem, experiment_id)
-    predictor = experiment.predictor(parameters=parameters)
+    experiment, _, _, predictor = study_predictor(problem, experiment_id)
     z = NormalDist().inv_cdf((1 + level) / 2)
     if isinstance(fit_or_draws, Draws):
         schema = fit_or_draws._parameter_schema
@@ -867,16 +870,16 @@ def predict(problem, fit_or_draws, *, experiment_id=None, kind="latent", level=0
             )
         require_layout(problem, schema, where="predict draws")
         values = fit_or_draws.values.reshape(-1, problem.n_params)
-        predictions, failed = jax.jit(jax.vmap(lambda x: predictor(x[columns])))(values)
+        predictions, failed = jax.jit(jax.vmap(predictor))(values)
         if bool(jnp.any(failed)):
             raise RuntimeError("predict encountered a failed forward solve.")
         covariance = None
     else:
         post = laplace(problem, fit_or_draws)
-        predictions, failed = predictor(post.mode[columns])
+        predictions, failed = predictor(post.mode)
         if bool(failed):
             raise RuntimeError("predict encountered a failed forward solve.")
-        jacobians = jax.jacfwd(lambda x: predictor(x[columns])[0])(post.mode)
+        jacobians = jax.jacfwd(lambda x: predictor(x)[0])(post.mode)
         covariance = post.covariance_action
     bands = {}
     for measurement, channel in zip(experiment.measurements, experiment.channels):

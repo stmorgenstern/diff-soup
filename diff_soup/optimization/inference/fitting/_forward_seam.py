@@ -852,6 +852,44 @@ def union_prediction_factory(
     return predict, tuple(plans), union_ts, solve_probe
 
 
+def check_stream_shapes(seam: ForwardSeam, streams: tuple, y0: jax.Array) -> None:
+    """Refuse a stream whose values do not have its observation's shape at one time.
+
+    A stream's values hold one entry per time, ``values.shape[1:]`` the shape of
+    one observation; its observation is read abstractly (``jax.eval_shape``) on
+    one state of the model at its starting parameters. Comparing an observation
+    of another shape would broadcast over the times and score every pair of
+    times. A stream without values is not checked.
+
+    Raises:
+        ValueError: If a stream's values have another shape per time than its
+            observation, naming both shapes.
+    """
+    from diff_soup.problem.implicit import solver_view
+
+    checked = [s for s in streams if getattr(s, "values", None) is not None]
+    if not checked:
+        return
+    view = solver_view(seam.problem)
+    n_u, n_lam = int(view.n_u), int(view.n_lam)
+    theta = seam.theta_of(jnp.asarray(seam.x0))
+    dtype = jnp.asarray(y0).dtype
+    for s in checked:
+        # A saved state holds the fields; one that reads the globals gets them after it.
+        size = n_u + (n_lam if reads_globals(s.observable) else 0)
+        frame = jax.ShapeDtypeStruct((1, size), dtype)
+        when = jax.ShapeDtypeStruct((1,), dtype)
+        observed = tuple(jax.eval_shape(lambda u, t: s.observe(u, t, theta), frame, when).shape)
+        values = tuple(np.shape(s.values))
+        if observed[1:] != values[1:]:
+            raise ValueError(
+                f"measurement {s.name!r}: its observation has the shape {observed[1:]} at one "
+                f"time, and its values have the shape {values[1:]} per time (values of shape "
+                f"{values}); give the values the shape (times{''.join(f', {n}' for n in observed[1:])}) "
+                "of the observation at each time."
+            )
+
+
 def union_residual_factory(
     seam: ForwardSeam,
     *,
@@ -894,6 +932,7 @@ def union_residual_factory(
         dict whose ``"n"`` counts forward solves performed at trace time (one per
         residual evaluation — the single-solve invariant).
     """
+    check_stream_shapes(seam, streams, y0)
     predict, plans, union_ts, solve_probe = union_prediction_factory(
         seam,
         streams=streams,
