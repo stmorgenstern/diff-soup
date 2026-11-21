@@ -87,8 +87,9 @@ def consistent_initial_state(
     """Solve for a consistent initial state of a DAE at `t0`.
 
     It holds the differential values of `y0` and solves for the algebraic values and the
-    differential slopes with Newton's method. The result is differentiable with respect to
-    `t0`, `y0`, `theta` and `control`.
+    differential slopes with Newton's method, a step that does not lower the residual's
+    2-norm by Armijo's rule halved until it does. The result is differentiable with respect
+    to `t0`, `y0`, `theta` and `control`.
 
     Args:
         problem: The problem from `spec.build()`, or a `MassProblem` or `ImplicitProblem`.
