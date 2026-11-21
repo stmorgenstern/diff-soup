@@ -122,6 +122,15 @@ def _k_solver(icp, t, y, ydot, theta, control):
 #: fraction of the previous norm hands the solve to fresh-Jacobian Newton.
 _CHORD_CONTRACTION_LIMIT = 0.5
 
+#: Sufficient decrease of an exact-Newton step: a step of length ``λ`` along the
+#: Newton direction is taken when its residual 2-norm is at most ``1 - α λ`` times
+#: the current one (Armijo's rule, α = 1e-4; Kelley, Solving Nonlinear Equations
+#: with Newton's Method, SIAM 2003, §1.10.1).
+_ARMIJO = 1e-4
+
+#: The most halvings of one exact-Newton step, a shortest step of ``2**-30``.
+_MAX_HALVINGS = 30
+
 
 def _residual_scale(icp: ConsistentInitPlan, t, y, ydot, theta, control):
     """``‖|F_y| |y| + |F_ydot| |ydot|‖₂`` over the rows the solve drives to zero.
@@ -207,19 +216,58 @@ def _phased_newton(icp: ConsistentInitPlan, z0, residual_at, make_solver, scale_
             z, r, it = z0, r0, it0
 
         def exact_going(carry):
-            """Iterate while unconverged, within budget, and finite."""
-            _z, r, it = carry
+            """Iterate while unconverged, within budget, finite, and not stalled."""
+            _z, r, it, stalled = carry
             norm = jnp.linalg.norm(r)
-            return (it < icp.max_iters) & (norm > icp.tol) & jnp.isfinite(norm)
+            return (it < icp.max_iters) & (norm > icp.tol) & jnp.isfinite(norm) & (~stalled)
 
         def exact_step(carry):
-            """One exact Newton update with a fresh iteration matrix."""
-            z, r, it = carry
-            solve = make_solver(z)
-            z_new = z - solve(r)
-            return z_new, residual_at(z_new), it + 1
+            """One exact Newton update with a fresh iteration matrix, halved until it decreases.
 
-        return jax.lax.while_loop(exact_going, exact_step, (z, r, it))
+            The full step is taken whenever it meets Armijo's rule, so an iteration that
+            converges monotonically is unchanged. A step that raises the residual, or
+            leaves it nonfinite (a linearization far from the root, as of an
+            exponential rate at a small exchange current, overshoots the root many
+            times over), is halved until it meets the rule. No length down to
+            ``2**-_MAX_HALVINGS`` meeting it (the residual at its rounding floor, or
+            no descent along the Newton direction) keeps the iterate and stops the
+            iteration; the final gate then judges it.
+            """
+            z, r, it, _stalled = carry
+            dz = make_solver(z)(r)
+            norm = jnp.linalg.norm(r)
+
+            def sufficient(length, trial, r_trial):
+                n_trial = jnp.linalg.norm(r_trial)
+                return (
+                    jnp.isfinite(n_trial)
+                    & jnp.all(jnp.isfinite(trial))
+                    & (n_trial <= (1.0 - _ARMIJO * length) * norm)
+                )
+
+            def too_long(state):
+                length, trial, r_trial, halvings = state
+                return (~sufficient(length, trial, r_trial)) & (halvings < _MAX_HALVINGS)
+
+            def halve(state):
+                length, _trial, _r_trial, halvings = state
+                length = 0.5 * length
+                trial = z - length * dz
+                return length, trial, residual_at(trial), halvings + 1
+
+            full = z - dz
+            length, trial, r_trial, _ = jax.lax.while_loop(
+                too_long,
+                halve,
+                (jnp.ones((), norm.dtype), full, residual_at(full), jnp.asarray(0, jnp.int32)),
+            )
+            taken = sufficient(length, trial, r_trial)
+            return jnp.where(taken, trial, z), jnp.where(taken, r_trial, r), it + 1, ~taken
+
+        z, r, it, _ = jax.lax.while_loop(
+            exact_going, exact_step, (z, r, it, jnp.asarray(False))
+        )
+        return z, r, it
 
     def already_done(_):
         """The seed already meets the gate (or is nonfinite): no solve."""
