@@ -427,12 +427,12 @@ def test_two_fits_of_one_study_make_the_same_attempts(joint_fit, again):
     """A later fit of the study, after the module's other fits, repeats the first fit's
     attempts and ends at its point and cost to the last bit."""
     counts = ("attempts", "accepted", "blocks", "value")
-    # measured 5 attempts, 5 accepted, 6 blocks and 5 value requests, CPU VM 2026-10-22,
-    # pytest tests/contracts/test_lowered_study.py
+    # measured 5 attempts, 5 accepted, 6 blocks and 6 value requests (one the start's cost),
+    # Mac 2026-11-21, pytest tests/contracts/test_lowered_study.py
     assert (
         {name: int(again.work[name]) for name in counts}
         == {name: int(joint_fit.work[name]) for name in counts}
-        == {"attempts": 5, "accepted": 5, "blocks": 6, "value": 5}
+        == {"attempts": 5, "accepted": 5, "blocks": 6, "value": 6}
     )
     np.testing.assert_array_equal(again.params, joint_fit.params)
     assert again.cost == joint_fit.cost

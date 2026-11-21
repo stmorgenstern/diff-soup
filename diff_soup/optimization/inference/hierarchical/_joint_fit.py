@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -253,6 +254,10 @@ class _JointFit:
         self.matrix = "hessian" if solver.hessian == "true" else "blocks"
         # The modes the fit evaluates, compiled before its first request.
         self.modes = ("value", self.matrix)
+        # The mode of the request that gave the lane costs held at the current point, or
+        # None for the matrix's request. The gain ratio compares costs of one mode: the
+        # trial's (``trial_pass``), so the matrix's request supplies no cost to it.
+        self.cost_mode: str | None = None
         # The bound of the gradient's error at the current point, from the lanes'
         # tolerances and blocks.
         self.floor = _GradientFloor(solver, route)
@@ -285,8 +290,9 @@ class _JointFit:
     ) -> tuple:
         """The consistency re-solve after the lanes ``raised`` moved to a higher rung at a trial.
 
-        One ``value`` request at the current point ``point`` over those lanes,
-        each at its new rung. Returns the current lane costs with theirs
+        One request at the current point ``point`` over those lanes, each at
+        its new rung, in the mode of the lane costs held there
+        (``cost_mode``, ``value`` before any). Returns the current lane costs with theirs
         replaced by the re-solved ones, and the change of the weighted cost;
         a lane that does not solve there keeps its cost. Each lane's switch is
         recorded with its old rung ``before``, its new rung, and its cost at the
@@ -295,7 +301,7 @@ class _JointFit:
         route, work = self.route, self.work
         positions = np.sort(np.asarray(raised, dtype=np.int64))
         lanes = tuple(route.ids[position] for position in positions)
-        results = self.evaluate("value", point, lanes)
+        results = self.evaluate(self.cost_mode or "value", point, lanes)
         work.rung_switch_resolves += 1
         failed = {failure.lane for failure in route.failures(results)}
         costs = np.asarray(results.cost, dtype=np.float64)[0]
@@ -382,6 +388,11 @@ class _JointFit:
         """The mode of the request at an attempt's trial: ``value``."""
         return "value"
 
+    def started_at(
+        self, point: np.ndarray, system: elimination.LevelSystem, lane_costs: np.ndarray
+    ) -> None:
+        """Take ``system`` and ``lane_costs`` as the current point's, after their costs changed mode."""
+
     def accept(
         self,
         loop: LoopState,
@@ -394,14 +405,69 @@ class _JointFit:
     ) -> tuple:
         """The system and lane costs at the accepted trial ``loop.point``; ``loop.cost`` is set there.
 
-        One request of the matrix's mode at the trial. ``system`` is the
-        system the attempt stepped on and ``results`` the trial's request;
+        One request of the matrix's mode at the trial, for the matrix and the
+        gradient; the lane costs and ``loop.cost`` are the trial request's
+        (``results``), so that the next gain ratio compares the costs of two
+        requests of one mode. ``system`` is the system the attempt stepped on;
         the nested mode polishes from them and moves ``loop.point``,
         ``loop.cost`` and ``loop.scale`` to where its polish ended.
         """
-        system, lane_costs = self.blocks(loop.point, start=False)
+        lane_costs = np.array(results.cost, dtype=np.float64)[0]
+        self.cost_mode = self.trial_pass()
+        system, lane_costs = self.matrix_at(loop.point, lane_costs)
         loop.cost = float(system.cost)
         return system, lane_costs
+
+    def cost_at(self, lane_costs: np.ndarray, point: np.ndarray) -> float:
+        """The cost at ``point`` from every lane's cost there: the weighted lanes and the regularizer."""
+        blocks = self.route.regularizer_at(point)
+        regularizer = 0.0 if blocks is None else float(blocks[1])
+        return (
+            float(np.sum(self.route.omega * np.asarray(lane_costs, dtype=np.float64))) + regularizer
+        )
+
+    def matrix_at(self, point: np.ndarray, lane_costs: np.ndarray) -> tuple:
+        """The system at ``point`` from a request of the matrix's mode, its cost from ``lane_costs``.
+
+        ``lane_costs`` are the lanes' costs at ``point`` in ``cost_mode``; a
+        lane the request moved to a higher rung is solved again there in that
+        mode (``resolve``). Returns the system, whose cost is that of the lane
+        costs, and the lane costs.
+        """
+        before = self.work.lane_rungs.copy()
+        system, _ = self.blocks(point, start=False)
+        raised = np.flatnonzero(self.work.lane_rungs > before)
+        if raised.size:
+            lane_costs, _ = self.resolve(point, raised, before, lane_costs)
+        return self.with_cost(system, self.cost_at(lane_costs, point)), lane_costs
+
+    def with_cost(self, system: elimination.LevelSystem, cost: float) -> elimination.LevelSystem:
+        """``system`` with its cost replaced by ``cost``."""
+        return dataclasses.replace(system, cost=jnp.asarray(cost, dtype=system.root.dtype))
+
+    def costs_in(self, mode: str, point: np.ndarray, lane_costs: np.ndarray) -> np.ndarray:
+        """Every lane's cost at the current point ``point`` from a request in ``mode``.
+
+        The lane costs held there are returned as they are when they come from
+        a request of that mode; else one request of every lane in ``mode``
+        gives them (``work.cost_passes``): at the start, after a resume, and
+        when the trials' mode changes. A lane that does not solve there in that
+        mode is refused, as at an accepted point.
+        """
+        if self.cost_mode == mode:
+            return lane_costs
+        route = self.route
+        results = self.evaluate(mode, point)
+        self.work.cost_passes += 1
+        failures, ignored = route.weigh(route.failures(results))
+        self.work.record(self.work.attempts, ignored, inner=False)
+        if failures:
+            raise ValueError(
+                f"lane(s) {_failures_text(failures)} failed at an accepted point in the {mode} "
+                f"mode; every lane has to solve at an accepted point."
+            )
+        self.cost_mode = mode
+        return np.array(results.cost, dtype=np.float64)[0]
 
     def verdict(
         self,
@@ -825,8 +891,12 @@ class _JointFit:
         self.step_settings = self.settings(tolerances, n_constraints)
         route.problem.prepare(modes=self.modes)
         system, lane_costs = self.blocks(x, start=state is None)
+        self.cost_mode = None
         x, system, lane_costs = self.at_start(x, system, lane_costs, fresh=state is None)
-        cost = float(system.cost)
+        lane_costs = self.costs_in(self.trial_pass(), x, lane_costs)
+        cost = self.cost_at(lane_costs, x)
+        system = self.with_cost(system, cost)
+        self.started_at(x, system, lane_costs)
         if state is None:
             # A fresh fit's first record holds the retries of the start's request.
             record = self.record(float("nan"), float("nan"), False, x, ())
@@ -896,8 +966,15 @@ class _JointFit:
                 trial_cost = float("inf")
                 rejection_reason = "the trial predicate rejected the point"
             else:
+                mode = self.trial_pass()
+                if self.cost_mode != mode:
+                    # The trials' mode changed: the current point's costs in the new one.
+                    lane_costs = self.costs_in(mode, loop.point, lane_costs)
+                    loop.cost = self.cost_at(lane_costs, loop.point)
+                    system = self.with_cost(system, loop.cost)
+                    self.started_at(loop.point, system, lane_costs)
                 before = work.lane_rungs.copy()
-                results = self.evaluate(self.trial_pass(), trial)
+                results = self.evaluate(mode, trial)
                 # A failed lane of weight zero is outside the objective: logged, ignored.
                 failures, ignored = route.weigh(route.failures(results))
                 work.record(attempt, ignored, inner=False)

@@ -118,6 +118,9 @@ class _Work:
         self.lane_first_steps = np.zeros((len(route.ids),), dtype=np.float64)
         self.retries = np.zeros((len(route.ids),), dtype=np.int64)
         self.rung_switch_resolves = 0
+        # The requests that evaluated every lane's cost at the current point in the mode of
+        # the trials, when the costs held there came from another kind of request.
+        self.cost_passes = 0
         # The frozen requests made (the nested mode's polish on kept Jacobians).
         self.frozen = 0
         # The retry records and the rung switches since the last attempt record.
@@ -205,6 +208,7 @@ class _Work:
                 np.asarray([values.get(lane, 0) for lane in self.route.ids], dtype=dtype),
             )
         self.rung_switch_resolves = _saved_count(state, "work.rung_switch_resolves")
+        self.cost_passes = _saved_count(state, "work.cost_passes")
         self.frozen = _saved_count(state, "work.frozen")
         if self.inner_members is not None:
             for name in ("inner_iterations", "inner_rejections", "inner_unconverged"):
@@ -305,6 +309,7 @@ class _Work:
         entries["lane_first_steps"] = self.lane_first_steps.copy()
         entries["retries"] = self.retries.copy()
         entries["rung_switch_resolves"] = np.asarray(self.rung_switch_resolves, dtype=np.int64)
+        entries["cost_passes"] = np.asarray(self.cost_passes, dtype=np.int64)
         entries["frozen"] = np.asarray(self.frozen, dtype=np.int64)
         if self.inner_members is not None:
             entries["inner_members"] = _strings(self.inner_members)

@@ -42,7 +42,9 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
    cells'; the source names no member of the level ``cell`` and sits directly under the
    study (``reads="declared"``). ``J^T J`` and ``J^T r`` against the closed form, the
    gradient against differences, joint and nested fits, each stopped and resumed from a
-   checkpoint, the fitted vector's groups (each shared number once), and the refusals of an
+   checkpoint, the fitted vector's groups (each shared number once), ``predict`` of a cell
+   and of the source, the residual reports, the costs per measurement and a fit's
+   diagnostics, and the refusals of an
    experiment outside the level under ``reads="all"`` and of one that declares ``b``.
 
 ``budget``: a lane saves what its observations read, not its states. The wide lane on
@@ -1094,6 +1096,85 @@ def _stop_at_second_step():
     return StopAtSecondStep()
 
 
+def two_recipe_reports(lowered, point):
+    """What ``predict``, the residual reports and the costs per measurement say of ``two_recipe_study`` at ``point``.
+
+    ``predict`` of the cell ``d1`` from two draws at ``point`` and of the source's current
+    against the closed form; the derivative of the cell's prediction against central
+    differences of the closed form in every column, the source's ``a`` and ``s``
+    included; the residual report of every experiment (``d1``'s cost against the closed
+    form) and the costs per measurement, each summed against the study's cost. Returns
+    the numbers by name.
+    """
+    import jax
+
+    from diff_soup.optimization.inference.statistics._analysis import (
+        measurement_costs,
+        study_predictor,
+    )
+
+    def z_of(x):
+        return recipe_b_truth(x[0], x[1], x[2], x[3:5])
+
+    out = {}
+    draws = inf.Draws(
+        values=jnp.asarray(np.stack([point, point]))[None],
+        names=tuple(f"x{k}" for k in range(point.size)),
+        info={},
+        _parameter_schema=lowered.parameter_schema,
+    )
+    predicted = np.asarray(inf.predict(lowered, draws, experiment_id="d1")["z"].mean)
+    out["predict d1 vs closed form"] = relative(predicted, z_of(point))
+    source = np.asarray(inf.predict(lowered, draws, experiment_id="source")["I"].mean)
+    out["predict source current vs closed form"] = relative(
+        source, truth_at(point[0], point[1], GLOBAL_TIMES)[1]
+    )
+    _, _, _, predict = study_predictor(lowered, "d1")
+    jacobian = np.asarray(jax.jacfwd(lambda x: predict(x)[0]["z"])(jnp.asarray(point)))
+    step, columns = 1e-6, []
+    for k in range(point.size):
+        shift = np.zeros(point.size)
+        shift[k] = step
+        columns.append((z_of(point + shift) - z_of(point - shift)) / (2 * step))
+    out["predict d1 derivative vs closed form"] = relative(jacobian, np.stack(columns, axis=1))
+    cost = float(lowered.value_and_gradient(point).values[0])
+    reports = {
+        experiment_id: inf.residual_report(lowered, point, experiment_id=experiment_id)
+        for experiment_id in ("source", "d1", "d2")
+    }
+    summed = sum(c.cost for r in reports.values() for c in r.channels.values()) / 2
+    out["residual reports, sum of costs vs study cost"] = relative(summed, cost)
+    want = recipe_b_truth(A_TRUE, S_TRUE["c1"], TWO_RECIPE_B["d1"], TWO_RECIPE_C["d1"])
+    out["residual report d1 vs closed form"] = relative(
+        reports["d1"].channels["z"].cost, np.sum(((z_of(point) - want) / SIGMA) ** 2)
+    )
+    costs, names = measurement_costs(lowered, point)
+    out["cost per measurement, sum vs study cost"] = relative(sum(costs), cost)
+    assert names == (("source", "u"), ("source", "I"), ("d1", "z"), ("d2", "z")), names
+    return out
+
+
+def check_two_recipe_reports(report, lowered, start, label="two recipes"):
+    """Record ``two_recipe_reports`` at ``TWO_RECIPE_POINT`` and a fit's diagnostics, and assert them.
+
+    The fit's costs per measurement sum to its cost, and no parameter is flagged.
+    """
+    for key, value in two_recipe_reports(lowered, TWO_RECIPE_POINT).items():
+        report[f"{label} {key}"] = value
+        assert value < 1e-6, (key, value)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = inf.optsolve(lowered.with_start(start), inf.TrustRegion(max_steps=60))
+    diagnostics = result.diagnostics
+    report[f"{label} fit diagnostics, cost per measurement minus cost"] = abs(
+        sum(diagnostics.per_series_cost) - float(result.cost)
+    )
+    report[f"{label} fit diagnostics, warnings"] = diagnostics.warnings
+    assert report[f"{label} fit diagnostics, cost per measurement minus cost"] < 1e-10
+    assert not diagnostics.warnings, diagnostics.warnings
+    assert diagnostics.series_names == (("source", "u"), ("source", "I"), ("d1", "z"), ("d2", "z"))
+
+
 def section_two_recipes(report) -> None:
     """A hierarchy over experiments of two recipes, the source outside the level ``cell``.
 
@@ -1158,6 +1239,8 @@ def section_two_recipes(report) -> None:
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    check_two_recipe_reports(report, lowered, TWO_RECIPE_START)
+
     # The refusals: outside the level under reads="all", and outside while declaring b.
     experiments = study.experiments
     try:
@@ -1182,10 +1265,91 @@ def section_two_recipes(report) -> None:
         raise AssertionError("an experiment outside the levels that declares b was accepted")
 
 
+def offset_costs(lowered, offsets):
+    """Make ``lowered`` add ``offsets[mode]`` to every lane's cost of a request in ``mode``.
+
+    A hook of this check, not of the library: the instance's ``evaluate`` is wrapped, and
+    ``offsets`` (a dict) is read at every request, so the caller changes it between fits.
+    """
+    plain = lowered.evaluate
+
+    def evaluate(request):
+        results = plain(request)
+        offset = offsets.get(request.mode, 0.0)
+        if offset:
+            results = dataclasses.replace(results, cost=np.asarray(results.cost) + offset)
+        return results
+
+    object.__setattr__(lowered, "evaluate", evaluate)
+
+
+def section_cost_modes(report) -> None:
+    """The gain ratio compares the costs of two requests of one mode.
+
+    On ``two_recipe_study``, joint and nested fits with every lane's cost of the ``blocks``
+    requests raised and lowered by ``1e-4`` take the steps of the fits without an offset:
+    the same accepted and rejected attempts at the same points and the same costs in the step
+    log; the fit makes one request for the costs beyond those of the trials
+    (``work["cost_passes"]``, at the start). With the cost of the trials' requests (``value``, and ``frozen`` in
+    the nested fit) raised by ``1e-4`` per lane, every logged cost moves by three times
+    that, and the attempts are those of the fit without an offset until the stop tests,
+    which read the cost's size, end it.
+    """
+    study, _ = two_recipe_study("wave2_cost_modes")
+    lowered = ds.lower(study)
+    lowered.prepare(modes=("value", "blocks", "gradient", "frozen"))
+    offsets: dict = {}
+    offset_costs(lowered, offsets)
+
+    class Log(inf.Callback):
+        def __init__(self):
+            self.rows = []
+
+        def on_step(self, info):
+            self.rows.append((bool(info.accepted), float(info.cost), np.array(info.params)))
+
+    def run(nested_at, given):
+        offsets.clear()
+        offsets.update(given)
+        log = Log()
+        result = fit(lowered, TWO_RECIPE_START, nested_at=nested_at, callbacks=(log,))
+        return result, log.rows
+
+    for nested_at in (None, "cell"):
+        kind = "nested" if nested_at else "joint"
+        plain, rows = run(nested_at, {})
+        report[f"cost modes {kind}, accepted"] = [row[0] for row in rows]
+        report[f"cost modes {kind}, cost requests at the start"] = int(plain.work["cost_passes"])
+        assert plain.work["cost_passes"] == 1
+        for offset in (1e-4, -1e-4):
+            _, shifted = run(nested_at, {"blocks": offset})
+            same = len(shifted) == len(rows) and all(
+                a[0] == b[0] and a[1] == b[1] and np.array_equal(a[2], b[2])
+                for a, b in zip(rows, shifted)
+            )
+            report[f"cost modes {kind}, blocks costs {offset:+g}: the same steps and costs"] = same
+            assert same
+        _, raised = run(nested_at, {"value": 1e-4, "frozen": 1e-4})
+        common = min(len(rows), len(raised))
+        prefix = all(
+            a[0] == b[0] and np.array_equal(a[2], b[2]) for a, b in zip(rows[:common], raised)
+        )
+        shifts = np.asarray([b[1] - a[1] for a, b in zip(rows[:common], raised)])
+        report[f"cost modes {kind}, trial costs +1e-4: the same steps for"] = (
+            f"{common} of {len(rows)}"
+        )
+        report[f"cost modes {kind}, trial costs +1e-4: logged cost shift minus 3e-4"] = float(
+            np.max(np.abs(shifts - 3e-4))
+        )
+        assert prefix and common >= len(rows) - 3
+        assert report[f"cost modes {kind}, trial costs +1e-4: logged cost shift minus 3e-4"] < 1e-12
+
+
 def one_process() -> None:
     """Every section that runs in one process."""
     report = _Report()
     section_two_recipes(report)
+    section_cost_modes(report)
     section_globals(report)
     section_shapes(report)
     print("ALL CHECKS PASSED (one process)")
@@ -1257,6 +1421,7 @@ def world(kind: str) -> None:
             out[f"{'nested' if nested_at else 'joint'} fit error"] = relative(result.params, truth)
         if kind == "recipes":
             check_two_recipe_names(_Report(), lowered)
+            check_two_recipe_reports(_Report(), lowered, start, label="two recipes world,")
             out.update(world_checkpoints(lowered, start))
         if kind == "link":
             linked = link_reports(lowered, point)

@@ -66,6 +66,13 @@ class TrustRegion(OptSolver):
     It needs a study lowered with `ds.lower(study)`. Box bounds are kept. Pass `checkpoint=` to
     `ds.optimization.optsolve` to save the fit and resume it later.
 
+    A step is judged on costs of one kind of request: the trial's request (`value`, or the
+    nested mode's `frozen` pass while its polish runs on them) and the cost at the current
+    point from a request of the same mode, the accepted trial's own. The `blocks` request at
+    an accepted point gives the step's matrix and gradient, never a cost. The costs the step
+    log reports are these. The fit evaluates the start point's costs in the trials' mode once,
+    and again only when that mode changes (`OptResult.work["cost_passes"]`).
+
     Args:
         hessian: `"gauss-newton"` steps on the Gauss-Newton curvature, `"true"` on the exact Hessian.
         nested_at: A level of the study's hierarchy whose members polish, each refitting its own parameters with the others held after every accepted step. An experiment outside that level (one that names no member of it) belongs to the outer step alone: no polish solves it.
