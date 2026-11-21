@@ -343,6 +343,143 @@ def linked_rows(point):
     return np.concatenate(rows)
 
 
+class KnottedLinear(PiecewiseLinear):
+    """A piecewise-linear signal that names its knots as well as its values among its arrays."""
+
+    def learnable_paths(self) -> tuple[str, ...]:
+        return ("knots", "values")
+
+
+# The driven signals of ``signal_study``: knots that are not the output's times, and slopes.
+SIGNAL_KNOTS = 0.2 + 0.9 * OUTPUT_TIMES
+SIGNAL_SLOPES = 0.3 * np.cos(4.0 * OUTPUT_TIMES)
+
+
+def signal_of(kind, values):
+    """The driven signal ``kind`` ("knotted" or "hermite") with ``values``."""
+    from diff_soup.optimization.inference.approx import CubicHermite
+
+    values = jnp.asarray(values)
+    if kind == "knotted":
+        return KnottedLinear(jnp.asarray(SIGNAL_KNOTS), values)
+    return CubicHermite(jnp.asarray(OUTPUT_TIMES), values, jnp.asarray(SIGNAL_SLOPES))
+
+
+def signal_recipe(name, signal):
+    """``z' = -b z + y(t)`` with the fixed signal ``y`` given. Returns ``(model, spec)``."""
+    dspec = ds.problem(name)
+    dspec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
+    dspec.param("b", value=0.5, learnable=True, bounds=(0.05, 3.0))
+    dspec.function("y", signal, learnable=False)
+    dspec.field("z", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
+
+    @dspec.equation(writes="z", reads=("z",))
+    def relax(q):
+        return -q.p.b * q.z + q.fn.y(q.t)
+
+    return dspec.build(), dspec
+
+
+SIGNAL_CELLS = ("knotted", "hermite")
+
+
+def signal_study(name):
+    """The source of ``linked_global_study`` driving a ``KnottedLinear`` and a ``CubicHermite`` signal.
+
+    Each driven cell has its own model; its signal holds zeros until the link fills its
+    values. Its data are zeros. The point is ``[a, s, b_source, b_knotted, b_hermite]``.
+    """
+    model, a, s = global_recipe(f"{name}_source", inert_b=True)
+    u, current, _ = cell_series(A_TRUE, S_TRUE["c1"])
+    experiments = [
+        inf.Experiment(
+            model=model,
+            solver=_solver(),
+            t_span=(0.0, 2.0),
+            initial_state=_computed_start(s),
+            measurements=(
+                _gaussian("u", SCHEDULE_TIMES, u, lambda state: state[0]),
+                _gaussian("I", GLOBAL_TIMES, current, lambda state, globals: globals[0]),
+            ),
+            id="source",
+            schedule=_schedule(),
+            outputs=(
+                inf.Output("I", times=OUTPUT_TIMES, observe=lambda state, globals: globals[0]),
+            ),
+            parameters={"cell": "source"},
+        )
+    ]
+    for cell in SIGNAL_CELLS:
+        driven_model, dspec = signal_recipe(
+            f"{name}_{cell}", signal_of(cell, np.zeros(OUTPUT_TIMES.shape))
+        )
+        experiments.append(
+            inf.Experiment(
+                model=driven_model,
+                solver=_solver(),
+                t_span=(float(OUTPUT_TIMES[0]), float(OUTPUT_TIMES[-1])),
+                initial_state=dspec.assemble_state({}),
+                measurements=(
+                    _gaussian("z", DRIVEN_TIMES, np.zeros(DRIVEN_TIMES.shape), lambda st: st[0]),
+                ),
+                id=cell,
+                links=(inf.Link(source="source", output="I", into="y"),),
+                parameters={"cell": cell},
+            )
+        )
+    source_b = experiments[0]._declarations["b"]
+    hierarchy = inf.Hierarchy(levels=("cell",), shared=(a, s), per={"cell": (source_b,)})
+    return inf.Study(tuple(experiments), parameters=hierarchy, reads="declared")
+
+
+SIGNAL_POINT = np.asarray([0.7, 1.7, 0.5, 1.1, 1.0])
+
+
+def section_link_signals(report) -> None:
+    """A link fills only the signal's values: its other arrays keep what the model declared.
+
+    For each driven cell, ``predict`` at ``SIGNAL_POINT`` against a direct solve of its
+    model with the source's current (closed form) given by hand as the signal's values,
+    on its own knots and slopes; then the study's ``J^T r`` against differences.
+    """
+    lowered = ds.lower(signal_study("wave2_signals"))
+    lowered.prepare(modes=("value", "blocks", "gradient", "frozen"))
+    point = SIGNAL_POINT
+    draws = inf.Draws(
+        values=jnp.asarray(np.stack([point, point]))[None],
+        names=tuple(f"x{k}" for k in range(point.size)),
+        info={},
+        _parameter_schema=lowered.parameter_schema,
+    )
+    source_current = truth_at(point[0], point[1], OUTPUT_TIMES)[1]
+    for k, cell in enumerate(SIGNAL_CELLS):
+        predicted = np.asarray(inf.predict(lowered, draws, experiment_id=cell)["z"].mean)
+        model, spec = signal_recipe(f"wave2_signal_by_hand_{cell}", signal_of(cell, source_current))
+        by_hand = inf.Experiment(
+            model=model,
+            solver=_solver(),
+            t_span=(float(OUTPUT_TIMES[0]), float(OUTPUT_TIMES[-1])),
+            initial_state=spec.assemble_state({}),
+            measurements=(
+                _gaussian("z", DRIVEN_TIMES, np.zeros(DRIVEN_TIMES.shape), lambda st: st[0]),
+            ),
+        )
+        solved, failed = by_hand.predictor()(jnp.asarray([point[3 + k]]))
+        assert not bool(failed)
+        report[f"signal {cell}: predict vs solve with the source's series by hand"] = relative(
+            predicted, solved["z"]
+        )
+    _, gradient, _, failed = lowered.gauss_newton_fn(point)
+    assert failed == 0
+    report["signal J^T r vs differences"] = relative(gradient, differences(lowered, point))
+    for key in (
+        "signal knotted: predict vs solve with the source's series by hand",
+        "signal hermite: predict vs solve with the source's series by hand",
+        "signal J^T r vs differences",
+    ):
+        assert report[key] < 1e-6, (key, report[key])
+
+
 TWO_RECIPE_B = {"d1": 1.3, "d2": 0.9}
 TWO_RECIPE_C = {"d1": (0.8, 0.2), "d2": (1.2, -0.1)}
 
@@ -1481,6 +1618,7 @@ def section_cost_modes(report) -> None:
 def one_process() -> None:
     """Every section that runs in one process."""
     report = _Report()
+    section_link_signals(report)
     section_two_recipes(report)
     section_cost_modes(report)
     section_globals(report)

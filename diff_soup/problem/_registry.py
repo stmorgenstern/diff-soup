@@ -678,6 +678,20 @@ def theta_replace(theta: Any, values: Mapping, *, caller: str) -> Any:
     return jax.tree_util.tree_unflatten(treedef, leaves)
 
 
+def theta_replace_signal_values(theta: Any, values: Mapping, *, caller: str) -> Any:
+    """Return ``theta`` with the ``values`` array of each signal function set to its given array.
+
+    The function's other arrays (knots, slopes) keep what ``theta`` holds.
+    """
+    modules = {
+        handle: eqx.tree_at(
+            lambda fn: fn.values, theta_value(theta, handle, caller=caller), array
+        )
+        for handle, array in values.items()
+    }
+    return theta_replace(theta, modules, caller=caller)
+
+
 def _is_array_like(value: Any) -> bool:
     """Whether ``value`` is a number or an array, as opposed to a module or container."""
     import numbers

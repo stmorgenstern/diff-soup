@@ -687,10 +687,11 @@ def _signals_theta(seam: Any, signals: tuple) -> Callable:
     """``vector -> theta`` for a vector of the parameters followed by the values of ``signals``.
 
     Each signal ``(name, shape)`` is a fixed signal function of the model; its
-    values replace the declared ones, as a link's do on a lane.
+    ``values`` array replaces the declared one, as a link's does on a lane; its
+    other arrays (knots, slopes) stay as declared.
     """
     from diff_soup.optimization.inference.engine._links import SignalHandle
-    from diff_soup.problem._registry import theta_replace
+    from diff_soup.problem._registry import theta_replace_signal_values
 
     width = int(np.asarray(seam.x0).shape[0])
     sizes = tuple(int(np.prod(shape, dtype=np.int64)) for _, shape in signals)
@@ -700,7 +701,7 @@ def _signals_theta(seam: Any, signals: tuple) -> Callable:
         for (name, shape), size in zip(signals, sizes):
             values[SignalHandle(name)] = vector[offset : offset + size].reshape(shape)
             offset += size
-        return theta_replace(seam.theta_of(vector[:width]), values, caller="Link")
+        return theta_replace_signal_values(seam.theta_of(vector[:width]), values, caller="Link")
 
     return decision_to_theta
 

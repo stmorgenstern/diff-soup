@@ -413,20 +413,21 @@ def _end_sensitivity(ends: Optional[Array], point: Array) -> Optional[Array]:
 
 
 def _with_links(program: LaneProgram, point: Array, lane: LaneInputs, theta: PyTree) -> PyTree:
-    """``theta`` with the values of every linked signal set from the lane's links.
+    """``theta`` with the ``values`` array of every linked signal set from the lane's links.
 
     The values are ``values + tangent (x - x0)``, ``x`` the lane's narrow point
     at the source's coordinates and ``x0`` the same entries held constant: equal
-    to ``values`` at the point, with the derivative ``tangent`` in ``x``.
+    to ``values`` at the point, with the derivative ``tangent`` in ``x``. The
+    signal's other arrays (knots, slopes) keep what ``theta`` holds.
     """
-    from diff_soup.problem._registry import theta_replace
+    from diff_soup.problem._registry import theta_replace_signal_values
 
     replaced = {}
     for handle, link in zip(program.links, lane.links):
         moved = point[link.columns]
         step = moved - jax.lax.stop_gradient(moved)
         replaced[handle] = link.values + jnp.tensordot(link.tangent, step, axes=1)
-    return theta_replace(theta, replaced, caller="Link")
+    return theta_replace_signal_values(theta, replaced, caller="Link")
 
 
 def _computed_start(program: LaneProgram, theta: PyTree, like: Array) -> Array:
