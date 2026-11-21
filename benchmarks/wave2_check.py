@@ -5,6 +5,8 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check                     # one process
     JAX_ENABLE_X64=1 mpirun -n 3 python -m mpi4py -m benchmarks.wave2_check world schedule
     JAX_ENABLE_X64=1 mpirun -n 3 python -m mpi4py -m benchmarks.wave2_check world link
+    JAX_ENABLE_X64=1 python -m benchmarks.wave2_check measure             # cost of a wide lane
+    JAX_ENABLE_X64=1 python -m benchmarks.wave2_check saves               # ... by saved times
 
 1. Observations that read the global unknowns. The schedule of
    ``benchmarks.computed_start_check`` (a held current, a held voltage, a rest) on
@@ -20,8 +22,12 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
    ``z' = -b z + y(t)`` on the piecewise-linear signal of the source's current, under
    ``reads="declared"``; the same comparisons, joint and nested fits. Then a lane
    without a schedule: ``u' = -a u`` with a global ``g`` closed by ``g = 2 u``, observed
-   directly and through a declaration, against ``2 s e^{-a t}``, a fit on the lanes and
-   a fit of one experiment in one shoot (``InferenceProblem``).
+   directly and through a declaration, and ``u`` from the state and through a
+   declaration, against the closed form, with unit scales and with a field of scale 10
+   beside a global of scale 100 (the closures are written in internal units, the
+   declarations report dimensional values, the state and ``globals`` hold internal
+   ones); a fit on the lanes, and a fit of one experiment in one shoot
+   (``InferenceProblem``).
 
 ``world``: the schedule study (one cell per process) or the linked study over the three
 processes of an MPI world: ``J^T J`` against the closed form, the gradient against
@@ -306,19 +312,25 @@ def closed_form_blocks(rows_of, point, step=1e-6):
 CLOSURE_CELLS = ("c1", "c2")
 
 
-def closure_study(name):
+def closure_study(name, field_scale=1.0, global_scale=1.0):
     """``u' = -a u`` with a global ``g`` closed by ``g = 2 u``, no schedule; two cells sharing ``a``.
 
-    Each cell starts from its true ``u(0) = s`` and observes ``g`` twice: directly
-    (``observe(state, globals)``) and through the declaration ``"g"``. Returns the study and
+    The equations and the closure are written, as every closure of the library, in the
+    solver's internal units: the dimensional value of ``u`` is ``field_scale`` times its
+    internal value, that of ``g`` is ``global_scale`` times its own. Each cell starts from
+    its true dimensional ``u(0) = s`` and observes ``g`` and ``u`` four ways: ``g`` directly
+    (``observe(state, globals)``, internal, ``2 u_int``), ``g`` through the declaration
+    ``"g"`` (dimensional, ``global_scale * 2 u_int``), ``u`` from the state (internal) and
+    through the declaration ``"u"`` (dimensional, ``s e^{-a t}``). Returns the study and
     the handle ``a``.
     """
     spec = ds.problem(name)
     spec.domain("line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm"))
     a = spec.param("a", value=0.5, learnable=True, bounds=(0.05, 3.0))
-    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
-    spec.global_var("g", initial=0.0)
+    spec.field("u", mass="differential", scale=field_scale, init=lambda x: jnp.ones_like(x))
+    spec.global_var("g", initial=0.0, scale=global_scale)
     spec.observe.scalar(name="g", fn=lambda q: q["g"])
+    spec.observe.scalar(name="u", fn=lambda q: jnp.mean(q.u))
 
     @spec.equation(writes="u", reads=("u",))
     def decay(q):
@@ -333,16 +345,23 @@ def closure_study(name):
     model = spec.build()
     experiments = []
     for cell in CLOSURE_CELLS:
-        values = 2.0 * S_TRUE[cell] * np.exp(-A_TRUE * SCHEDULE_TIMES)
+        series = closure_series(A_TRUE, S_TRUE[cell], field_scale, global_scale)
+        observes = (
+            lambda st, globals: globals[0],
+            "g",
+            lambda st: st[0],
+            "u",
+        )
+        names = ("g direct", "g declared", "u state", "u declared")
         experiments.append(
             inf.Experiment(
                 model=model,
                 solver=_solver(),
                 t_span=(0.0, 2.0),
                 initial_state=spec.assemble_state({"u": S_TRUE[cell]}),
-                measurements=(
-                    _gaussian("g direct", SCHEDULE_TIMES, values, lambda st, globals: globals[0]),
-                    _gaussian("g declared", SCHEDULE_TIMES, values, "g"),
+                measurements=tuple(
+                    _gaussian(label, SCHEDULE_TIMES, values, observe)
+                    for label, values, observe in zip(names, series, observes)
                 ),
                 id=cell,
             )
@@ -350,14 +369,29 @@ def closure_study(name):
     return inf.Study(tuple(experiments), parameters=inf.Hierarchy(shared=(a,))), a
 
 
-def closure_rows(point):
-    """The whitened rows of ``closure_study`` at ``[a]``: ``2 s e^{-a t}`` twice per cell."""
-    rows = []
-    for cell in CLOSURE_CELLS:
-        got = 2.0 * S_TRUE[cell] * np.exp(-point[0] * SCHEDULE_TIMES)
-        want = 2.0 * S_TRUE[cell] * np.exp(-A_TRUE * SCHEDULE_TIMES)
-        rows += [(got - want) / SIGMA] * 2
-    return np.concatenate(rows)
+def closure_series(a, s, field_scale=1.0, global_scale=1.0):
+    """The four series of one cell of ``closure_study`` at ``SCHEDULE_TIMES``, in closed form.
+
+    ``u_int = s e^{-a t} / field_scale`` and ``g_int = 2 u_int``; the declarations report
+    ``global_scale * g_int`` and ``field_scale * u_int``.
+    """
+    u_int = s * np.exp(-a * SCHEDULE_TIMES) / field_scale
+    g_int = 2.0 * u_int
+    return g_int, global_scale * g_int, u_int, field_scale * u_int
+
+
+def closure_rows_of(field_scale=1.0, global_scale=1.0):
+    """The whitened rows of ``closure_study`` at ``[a]`` in closed form, as a function of the point."""
+
+    def rows(point):
+        out = []
+        for cell in CLOSURE_CELLS:
+            got = closure_series(point[0], S_TRUE[cell], field_scale, global_scale)
+            want = closure_series(A_TRUE, S_TRUE[cell], field_scale, global_scale)
+            out += [(x - y) / SIGMA for x, y in zip(got, want)]
+        return np.concatenate(out)
+
+    return rows
 
 
 LINK_POINT = np.asarray([0.7, 1.7, 0.5, 1.1, 1.0])
@@ -430,23 +464,38 @@ def section_globals(report) -> None:
         assert report[key] < 1e-6, result.params
 
     # A lane without a schedule: a global g closed by g = 2 u, observed directly and
-    # through a declaration; and the same experiment fitted in one shoot.
-    study, model_a = closure_study("wave2_closure")
-    lowered = ds.lower(study)
-    lowered.prepare(modes=("value", "blocks", "gradient"))
+    # through a declaration; with unit scales, and with a field of scale 10 beside a
+    # global of scale 100; the unit-scale experiment also fitted in one shoot.
     point = np.asarray([0.7])
-    cost, gradient, matrix, failed = lowered.gauss_newton_fn(point)
-    jtj, jtr = closed_form_blocks(closure_rows, point)
-    report["no schedule J^T J vs closed form"] = relative(matrix, jtj)
-    report["no schedule J^T r vs closed form"] = relative(gradient, jtr)
-    report["no schedule J^T r vs differences"] = relative(gradient, differences(lowered, point))
-    assert failed == 0
-    for key in ("J^T J vs closed form", "J^T r vs closed form", "J^T r vs differences"):
-        assert report[f"no schedule {key}"] < 1e-6, (key, report[f"no schedule {key}"])
-    report["no schedule joint fit error"] = relative(
-        fit(lowered, np.asarray([0.4])).params, np.asarray([A_TRUE])
-    )
-    assert report["no schedule joint fit error"] < 1e-6
+    for label, field_scale, global_scale in (
+        ("no schedule", 1.0, 1.0),
+        ("scaled (u 10, g 100)", 10.0, 100.0),
+    ):
+        study, model_a = closure_study(
+            f"wave2_closure_{int(field_scale)}_{int(global_scale)}", field_scale, global_scale
+        )
+        rows_of = closure_rows_of(field_scale, global_scale)
+        lowered = ds.lower(study)
+        lowered.prepare(modes=("value", "blocks", "gradient"))
+        cost, gradient, matrix, failed = lowered.gauss_newton_fn(point)
+        jtj, jtr = closed_form_blocks(rows_of, point)
+        report[f"{label} cost vs closed form"] = relative(cost, 0.5 * np.sum(rows_of(point) ** 2))
+        report[f"{label} J^T J vs closed form"] = relative(matrix, jtj)
+        report[f"{label} J^T r vs closed form"] = relative(gradient, jtr)
+        report[f"{label} J^T r vs differences"] = relative(gradient, differences(lowered, point))
+        assert failed == 0
+        for key in (
+            "cost vs closed form",
+            "J^T J vs closed form",
+            "J^T r vs closed form",
+            "J^T r vs differences",
+        ):
+            assert report[f"{label} {key}"] < 1e-6, (label, key, report[f"{label} {key}"])
+        report[f"{label} joint fit error"] = relative(
+            fit(lowered, np.asarray([0.4])).params, np.asarray([A_TRUE])
+        )
+        assert report[f"{label} joint fit error"] < 1e-6
+    study, model_a = closure_study("wave2_closure_shoot")
     shoot = inf.InferenceProblem(study.experiments[0], parameters=model_a)
     one_shoot = inf.optsolve(shoot, inf.LevenbergMarquardt(max_steps=40), diagnostics=False)
     report["no schedule one-shoot fit error"] = relative(one_shoot.params, np.asarray([A_TRUE]))
@@ -474,6 +523,186 @@ def section_globals(report) -> None:
         report["globals on a model without them refused"] = str(error)[:90]
     else:  # pragma: no cover
         raise AssertionError("an observation of globals on a model without them was not refused")
+
+
+MEASURE_CELLS = 4000
+MEASURE_TIMES = np.linspace(0.1, 2.0, 20)
+
+
+def wide_study(name, width, cells=MEASURE_CELLS):
+    """A wide lane: ``u' = D u_xx - k(x) u^3 + 4 sin(20 t) g(x)`` on ``cells`` cells, ``width`` rates.
+
+    ``k`` is one learnable array of ``width`` entries, each the rate of one band of cells,
+    so the lane has ``width`` derivative directions. Solved with KLU; the mean of ``u`` is
+    observed at 20 times. Returns the study and its point (every rate at 1).
+    """
+    spec = ds.problem(name)
+    spec.domain("line", cartesian_grid_1d(cells, 0.0, 1.0, method="fvm"))
+    k = spec.param("k", value=jnp.ones(width), learnable=True)
+    band = jnp.asarray(np.minimum(np.arange(cells) * width // cells, width - 1))
+    bump = jnp.asarray(np.exp(-(((np.arange(cells) + 0.5) / cells - 0.5) ** 2) / 0.02))
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+
+    @spec.equation(writes="u", reads=("u",))
+    def reaction_diffusion(q):
+        return 0.05 * q.ops.laplacian(q.u) - q.p.k[band] * q.u**3 + 4.0 * jnp.sin(20.0 * q.t) * bump
+
+    model = spec.build()
+    solver = ds.JNDF.stock(linear="klu", rtol=1e-8, atol=1e-10)
+    values = np.zeros(MEASURE_TIMES.shape)
+    experiment = inf.Experiment(
+        model=model,
+        solver=solver,
+        t_span=(0.0, 2.0),
+        initial_state=spec.assemble_state({"u": 1.0}),
+        measurements=(_gaussian("mean", MEASURE_TIMES, values, lambda st: jnp.mean(st)),),
+        id="wide",
+    )
+    return inf.Study((experiment,), parameters=ds.ParameterSet(shared=(k,))), np.ones(width)
+
+
+def _timed(evaluate, repeats=3):
+    """The smallest wall time of ``repeats`` warm calls, after one call that compiles."""
+    import time
+
+    evaluate()
+    best = float("inf")
+    for _ in range(repeats):
+        start = time.perf_counter()
+        evaluate()
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+def linear_costs(n, widths, repeats=20):
+    """Warm wall time of one KLU factorization followed by one solve of ``w`` right-hand sides.
+
+    On the pattern of a one-dimensional three-point stencil of ``n`` unknowns, the pattern
+    of the wide lane's iteration matrix. Returns ``{w: seconds}``.
+    """
+    import time
+
+    import jax
+
+    from diff_soup.linear import KLU, SolveContext, SparseTopology, analyze, factor, solve
+
+    index = np.arange(n)
+    rows = np.concatenate([index, index[1:], index[:-1]])
+    cols = np.concatenate([index, index[:-1], index[1:]])
+    analysis = analyze(SparseTopology(rows, cols, n), backend=KLU())
+    values = jnp.asarray(np.concatenate([np.full(n, 4.0), np.full(2 * n - 2, -1.0)]))
+
+    def best(fn, *args):
+        jax.block_until_ready(fn(*args))
+        times = []
+        for _ in range(repeats):
+            start = time.perf_counter()
+            jax.block_until_ready(fn(*args))
+            times.append(time.perf_counter() - start)
+        return min(times)
+
+    ctx = SolveContext()
+    solves = {}
+    for width in widths:
+        b = jnp.ones((width, n))
+        solves[width] = best(
+            jax.jit(lambda v, b: solve(factor(analysis, v, ctx=ctx), b)[0]), values, b
+        )
+    return solves
+
+
+def measure(widths=(1, 8, 16, 32, 50)) -> None:
+    """Where the time of one ``blocks`` evaluation of a wide lane goes, on KLU.
+
+    Prints, per derivative width, the warm wall time of a ``value`` and a ``blocks``
+    evaluation, the solver's work (step attempts, Newton iterations, its own
+    factorizations) and the KLU extension's counters over one evaluation of each mode
+    (numeric factorizations and refactorizations, and solve calls, each call one block
+    of right-hand sides).
+    """
+    from diff_soup.linear.klu_backend import KLUBackend
+    from diff_soup.optimization.inference.engine._request import Request
+
+    rows = []
+    for width in widths:
+        study, point = wide_study(f"wave2_wide_{width}", width)
+        lowered = ds.lower(study)
+        lowered.prepare(modes=("value", "blocks"))
+        counted = {}
+        times = {}
+        for mode in ("value", "blocks"):
+            request = Request(mode=mode, points=point)
+
+            def run(request=request):
+                return lowered.evaluate(request)
+
+            times[mode] = _timed(run)
+            KLUBackend.reset_native_stats()
+            results = run()
+            counted[mode] = (dict(KLUBackend.native_stats()), results.work)
+        work = counted["value"][1]
+        row = {
+            "width": width,
+            "value s": times["value"],
+            "blocks s": times["blocks"],
+            "accepted": int(np.sum(work.accepts)),
+            "rejected": int(np.sum(work.rejects)),
+            "attempts": int(np.sum(work.trial_steps)),
+            "newton": int(np.sum(work.newton_iters)),
+            "solver factorizations": int(np.sum(work.factorizations)),
+        }
+        for mode in ("value", "blocks"):
+            stats = counted[mode][0]
+            row[f"{mode} klu factor+refactor"] = int(
+                stats.get("factorizations", 0) + stats.get("refactorizations", 0)
+            )
+            row[f"{mode} klu solve calls"] = int(stats.get("solves", 0))
+        rows.append(row)
+        print(row, flush=True)
+    for width, seconds in linear_costs(MEASURE_CELLS, widths).items():
+        print(
+            f"KLU on {MEASURE_CELLS} unknowns, factor + one solve of {width} columns: {seconds:.2e} s"
+        )
+    base = rows[0]
+    print("width, blocks - value (s), per direction over width 1 (s), per direction / value")
+    for row in rows:
+        extra = row["blocks s"] - row["value s"]
+        slope = (
+            (row["blocks s"] - base["blocks s"]) / (row["width"] - base["width"])
+            if row["width"] != base["width"]
+            else float("nan")
+        )
+        print(row["width"], round(extra, 4), round(slope, 5), round(slope / row["value s"], 4))
+
+
+def measure_saves(saves=(5, 20, 80, 320), widths=(1, 16, 50)) -> None:
+    """Warm wall time of a ``value`` and a ``blocks`` evaluation of the wide lane, by saved times and width.
+
+    Also prints the cost of one derivative direction, in seconds and in value solves,
+    from the widths' slope.
+    """
+    global MEASURE_TIMES
+    from diff_soup.optimization.inference.engine._request import Request
+
+    kept = MEASURE_TIMES
+    print("saves, width, value s, blocks s")
+    try:
+        for count in saves:
+            MEASURE_TIMES = np.linspace(0.1, 2.0, count)
+            times = {}
+            for width in widths:
+                study, point = wide_study(f"wave2_saves_{count}_{width}", width)
+                lowered = ds.lower(study)
+                lowered.prepare(modes=("value", "blocks"))
+                value = _timed(lambda: lowered.evaluate(Request(mode="value", points=point)))
+                blocks = _timed(lambda: lowered.evaluate(Request(mode="blocks", points=point)))
+                times[width] = (value, blocks)
+                print(count, width, round(value, 4), round(blocks, 4), flush=True)
+            (v0, b0), (_, b1) = times[widths[0]], times[widths[-1]]
+            slope = (b1 - b0) / (widths[-1] - widths[0])
+            print(f"saves {count}: one direction {slope:.4f} s = {slope / v0:.2f} value solves")
+    finally:
+        MEASURE_TIMES = kept
 
 
 def one_process() -> None:
@@ -524,4 +753,4 @@ if __name__ == "__main__":
     if mode == "world":
         world(sys.argv[2])
     else:
-        {"one": one_process}[mode]()
+        {"one": one_process, "measure": measure, "saves": measure_saves}[mode]()

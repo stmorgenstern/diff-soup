@@ -64,7 +64,8 @@ class _GlobalsObservation:
     saved fields, the global unknowns of the model at the same time (the
     bordered vector: a cell's terminal current or potential held by an
     operational control), in the order of ``model.global_layout()`` and in the
-    solver's units, as the saved fields are. A solve over the span (the lanes of
+    solver's internal units, as the saved fields are: the dimensional value of a
+    global declared with ``scale=`` is that scale times the value received. A solve over the span (the lanes of
     a lowered study, or an experiment fitted in one shoot) hands such an
     observation the saved fields and the saved global unknowns one after the
     other, ``fields`` entries then the globals; this readout splits them. Two readouts over the same function and the same
@@ -245,7 +246,7 @@ class Measurement:
         values: The observed values with one row per time, or a function of no arguments returning them, called once when first needed.
         weight: A positive weight on the squared residual, a scalar or an array that broadcasts against `values`.
         likelihood: The noise model, such as [Gaussian][diff_soup.optimization.inference.Gaussian].
-        observe: The observed quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, the name of a `spec.observe` declaration, or `None` for the state. A function that also names a `globals` parameter, `observe(state, globals)`, receives the model's global unknowns at the same time, in the order of `model.global_layout()` and in the solver's units, as `state`; a declaration that reads a global receives them too. See [Output][diff_soup.optimization.inference.Output] for the times they are read at.
+        observe: The observed quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, the name of a `spec.observe` declaration, or `None` for the state. A function that also names a `globals` parameter, `observe(state, globals)`, receives the model's global unknowns at the same time, in the order of `model.global_layout()` and in the solver's internal units, as `state` is (a dimensional value is its scale times the internal one); a declaration that reads a global receives them too and reports a dimensional value. See [Output][diff_soup.optimization.inference.Output] for the times they are read at.
         mask: One boolean per time, `True` where the time carries a measurement.
         shape: The shape of `values`, checked against them.
         dtype: The dtype of `values`, checked against them.
