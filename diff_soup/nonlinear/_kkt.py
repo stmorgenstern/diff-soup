@@ -55,8 +55,9 @@ exact inverse of their matrix: a route of an inexact backend is accepted by
 ``exact=False``) and refused by
 [RouteFactor][diff_soup.nonlinear._kkt.RouteFactor].
 
-The small bordered-global (Schur) block is solved with a Tikhonov-regularized
-dense solve, [_stable_small_solve][diff_soup.nonlinear._kkt._stable_small_solve].
+The small bordered-global (Schur) block is solved with a dense solve whose
+Tikhonov term is relative to each row's scale,
+[_stable_small_solve][diff_soup.nonlinear._kkt._stable_small_solve].
 """
 
 from __future__ import annotations
@@ -593,18 +594,48 @@ class RouteFactor:
         return report.ok
 
 
-def _stable_small_solve(mat: jax.Array, rhs: jax.Array, eps: float) -> jax.Array:
+def _regularized_schur(mat: jax.Array, eps: float) -> jax.Array:
+    """A Schur complement with its Tikhonov term, ``eps`` relative to each row's own scale.
+
+    Row ``i`` gets ``eps * s_i`` on its diagonal, ``s_i = max_j |mat[i, j]|``
+    (1 for a row of zeros): the absolute ``eps`` of the row-equilibrated block.
+    A row's equation written in other units then gives the same solve, so a
+    bordered global whose Schur complement is small in the problem's units (a
+    terminal current that barely depends on its potential, as at a nearly
+    blocked electrode) is solved without the bias an absolute ``eps`` of that
+    size puts on it, while a singular block still solves finitely. The row
+    scale is held out of differentiation, so a derivative sees a fixed
+    Tikhonov term.
+
+    Args:
+        mat: Schur-complement matrix, shape ``(m, m)``.
+        eps: Tikhonov magnitude relative to each row's largest entry.
+
+    Returns:
+        The regularized matrix, shape ``(m, m)``.
+    """
+    scale = jax.lax.stop_gradient(jnp.max(jnp.abs(mat), axis=1, initial=0.0))
+    scale = jnp.where(scale > 0, scale, jnp.ones_like(scale))
+    return mat + jnp.diag(jnp.asarray(eps, dtype=mat.dtype) * scale)
+
+
+def _stable_small_solve(
+    mat: jax.Array, rhs: jax.Array, eps: float, *, transpose: bool = False
+) -> jax.Array:
     """Regularized small-block solve for Schur complement systems.
 
-    Uses LU-based ``jnp.linalg.solve`` with Tikhonov regularisation (``eps * I``)
-    instead of the slower SVD-based ``pinv``. The ``eps * I`` term is applied
-    **only here** -- callers pass the raw Schur complement without extra
-    regularisation.
+    Uses LU-based ``jnp.linalg.solve`` with the row-relative Tikhonov term of
+    [_regularized_schur][diff_soup.nonlinear._kkt._regularized_schur] instead of
+    the slower SVD-based ``pinv``. The term is applied **only here** (and in the
+    border cache's factor, which reproduces this solve) -- callers pass the raw
+    Schur complement without extra regularisation.
 
     Args:
         mat: Schur-complement matrix, shape ``(m, m)``.
         rhs: Right-hand side, shape ``(m,)``.
-        eps: Tikhonov regularisation magnitude.
+        eps: Tikhonov magnitude relative to each row's largest entry.
+        transpose: Solve with the transpose of ``mat``'s regularized matrix,
+            the exact adjoint of the solve with ``mat``.
 
     Returns:
         The regularised solution, shape ``(m,)`` (zeros when ``m == 0``).
@@ -612,10 +643,8 @@ def _stable_small_solve(mat: jax.Array, rhs: jax.Array, eps: float) -> jax.Array
     m = mat.shape[0]
     if m == 0:
         return jnp.zeros_like(rhs)
-    eye = jnp.eye(m, dtype=mat.dtype)
-    reg = jnp.asarray(eps, dtype=mat.dtype)
-    mat_reg = mat + reg * eye
-    return jnp.linalg.solve(mat_reg, rhs)
+    mat_reg = _regularized_schur(mat, eps)
+    return jnp.linalg.solve(mat_reg.T if transpose else mat_reg, rhs)
 
 
 def _cast_like(x: jax.Array, like: jax.Array) -> jax.Array:
@@ -772,7 +801,9 @@ def kkt_solve_transposed(rf, B, C, D, ct_u, ct_lam, schur_eps):
     sol = _cast_like(sol, ct_u)
     x_ct = sol[0]
     x_Ct = sol[1:].T
-    schur_t = D.T - B.T @ x_Ct
-    q = _stable_small_solve(schur_t, ct_lam - B.T @ x_ct, schur_eps)
+    # The forward Schur complement solved transposed: the exact adjoint of
+    # kkt_solve's solve, whose Tikhonov term follows the forward block's rows.
+    schur = (D.T - B.T @ x_Ct).T
+    q = _stable_small_solve(schur, ct_lam - B.T @ x_ct, schur_eps, transpose=True)
     p = x_ct - x_Ct @ q
     return p, q
