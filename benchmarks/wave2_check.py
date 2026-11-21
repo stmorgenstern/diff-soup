@@ -10,6 +10,8 @@ Not part of the benchmark suite: a hand-run check, printed and asserted.
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check saves               # ... by saved times
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check budget              # many saved times
     JAX_ENABLE_X64=1 python -m benchmarks.wave2_check repeat              # a solve repeats
+    JAX_ENABLE_X64=1 python -m benchmarks.wave2_check repeat cudss        # ... on cuDSS (a card)
+    JAX_ENABLE_X64=1 python -m benchmarks.wave2_check measure cudss       # wide lane on cuDSS
 
 1. Observations that read the global unknowns. The schedule of
    ``benchmarks.computed_start_check`` (a held current, a held voltage, a rest) on
@@ -809,7 +811,7 @@ MEASURE_CELLS = 4000
 MEASURE_TIMES = np.linspace(0.1, 2.0, 20)
 
 
-def wide_study(name, width, cells=MEASURE_CELLS):
+def wide_study(name, width, cells=MEASURE_CELLS, linear="klu"):
     """A wide lane: ``u' = D u_xx - k(x) u^3 + 4 sin(20 t) g(x)`` on ``cells`` cells, ``width`` rates.
 
     ``k`` is one learnable array of ``width`` entries, each the rate of one band of cells,
@@ -828,7 +830,7 @@ def wide_study(name, width, cells=MEASURE_CELLS):
         return 0.05 * q.ops.laplacian(q.u) - q.p.k[band] * q.u**3 + 4.0 * jnp.sin(20.0 * q.t) * bump
 
     model = spec.build()
-    solver = ds.JNDF.stock(linear="klu", rtol=1e-8, atol=1e-10)
+    solver = ds.JNDF.stock(linear=linear, rtol=1e-8, atol=1e-10)
     values = np.zeros(MEASURE_TIMES.shape)
     experiment = inf.Experiment(
         model=model,
@@ -891,21 +893,59 @@ def linear_costs(n, widths, repeats=20):
     return solves
 
 
-def measure(widths=(1, 8, 16, 32, 50)) -> None:
-    """Where the time of one ``blocks`` evaluation of a wide lane goes, on KLU.
+def _backend(linear):
+    """The solver's ``linear`` for a name of this module: ``"cudss-deterministic"`` is cuDSS's deterministic mode."""
+    if linear == "cudss-deterministic":
+        from diff_soup.linear import CuDSS
+
+        return CuDSS(deterministic=True)
+    return linear
+
+
+def linear_counters(linear):
+    """``(reset, read)`` of the native counters of the linear solver ``"klu"`` or ``"cudss..."``.
+
+    ``read()`` returns the counters this module prints: numeric factorizations (full
+    ones, and refactorizations in place), solve calls, and for cuDSS the analyses
+    (cold, seeded, and again on a side whose analysis came from other values).
+    """
+    if linear == "klu":
+        from diff_soup.linear.klu_backend import KLUBackend
+
+        keys = ("factorizations", "refactorizations", "refactor_fallbacks", "rebuilds", "solves")
+        reset, stats = KLUBackend.reset_native_stats, KLUBackend.native_stats
+    else:
+        from diff_soup.linear import CuDSS
+
+        keys = (
+            "factorizations",
+            "refactorizations",
+            "cold_analyses",
+            "seeded_analyses",
+            "reanalyses",
+            "rebuilds",
+            "solves",
+        )
+        reset, stats = CuDSS.reset_contract_stats, CuDSS.contract_stats
+    return reset, lambda: {key: int(stats().get(key, 0)) for key in keys}
+
+
+def measure(widths=(1, 8, 16, 32, 50), linear="klu") -> None:
+    """Where the time of one ``blocks`` evaluation of a wide lane goes, on KLU or cuDSS.
 
     Prints, per derivative width, the warm wall time of a ``value`` and a ``blocks``
     evaluation, the solver's work (step attempts, Newton iterations, its own
-    factorizations) and the KLU extension's counters over one evaluation of each mode
-    (numeric factorizations and refactorizations, of which full factorizations, and
-    solve calls, each call one block of right-hand sides).
+    factorizations) and the linear solver's counters over one evaluation of each mode
+    (``linear_counters``: full factorizations, refactorizations, solve calls, each call
+    one block of right-hand sides, and cuDSS's analyses).
     """
-    from diff_soup.linear.klu_backend import KLUBackend
     from diff_soup.optimization.inference.engine._request import Request
+
+    reset, read = linear_counters(linear)
 
     rows = []
     for width in widths:
-        study, point = wide_study(f"wave2_wide_{width}", width)
+        study, point = wide_study(f"wave2_wide_{linear}_{width}", width, linear=linear)
         lowered = ds.lower(study)
         lowered.prepare(modes=("value", "blocks"))
         counted = {}
@@ -917,9 +957,9 @@ def measure(widths=(1, 8, 16, 32, 50)) -> None:
                 return lowered.evaluate(request)
 
             times[mode] = _timed(run)
-            KLUBackend.reset_native_stats()
+            reset()
             results = run()
-            counted[mode] = (dict(KLUBackend.native_stats()), results.work)
+            counted[mode] = (read(), results.work)
         work = counted["value"][1]
         row = {
             "width": width,
@@ -932,18 +972,15 @@ def measure(widths=(1, 8, 16, 32, 50)) -> None:
             "solver factorizations": int(np.sum(work.factorizations)),
         }
         for mode in ("value", "blocks"):
-            stats = counted[mode][0]
-            row[f"{mode} klu factor+refactor"] = int(
-                stats.get("factorizations", 0) + stats.get("refactorizations", 0)
-            )
-            row[f"{mode} klu of which klu_factor"] = int(stats.get("factorizations", 0))
-            row[f"{mode} klu solve calls"] = int(stats.get("solves", 0))
+            row.update({f"{mode} {linear} {key}": value for key, value in counted[mode][0].items()})
         rows.append(row)
         print(row, flush=True)
-    for width, seconds in linear_costs(MEASURE_CELLS, widths).items():
-        print(
-            f"KLU on {MEASURE_CELLS} unknowns, factor + one solve of {width} columns: {seconds:.2e} s"
-        )
+    if linear == "klu":
+        for width, seconds in linear_costs(MEASURE_CELLS, widths).items():
+            print(
+                f"KLU on {MEASURE_CELLS} unknowns, factor + one solve of {width} columns: "
+                f"{seconds:.2e} s"
+            )
     base = rows[0]
     print("width, blocks - value (s), per direction over width 1 (s), per direction / value")
     for row in rows:
@@ -1023,7 +1060,7 @@ def measure_budget(cells=2000, count=4000, width=16) -> None:
         MEASURE_TIMES = kept
 
 
-def repeat_study(name, cells=200):
+def repeat_study(name, cells=200, linear="klu"):
     """The study of the ``repeat`` mode (see the module docstring); its one parameter is ``k``."""
     spec = ds.problem(name)
     spec.domain("line", cartesian_grid_1d(cells, 0.0, 1.0, method="fvm"))
@@ -1057,7 +1094,7 @@ def repeat_study(name, cells=200):
     times = np.linspace(0.05, 1.0, 20)
     experiment = inf.Experiment(
         model=spec.build(),
-        solver=ds.JNDF.stock(linear="klu", rtol=1e-6, atol=1e-9),
+        solver=ds.JNDF.stock(linear=_backend(linear), rtol=1e-6, atol=1e-9),
         t_span=(0.0, 1.0),
         initial_state=spec.assemble_state({"u": 1.0, "v": 0.0, "r": 0.0, "w": 0.0}),
         measurements=(_gaussian("mean", times, np.zeros(times.shape), lambda st: jnp.mean(st)),),
@@ -1066,27 +1103,26 @@ def repeat_study(name, cells=200):
     return inf.Study((experiment,), parameters=ds.ParameterSet(shared=(k,)))
 
 
-def repeat() -> None:
-    """A KLU solve gives the same bytes first, again, and after an unrelated solve."""
+def repeat(linear="klu") -> None:
+    """A solve on ``linear`` gives the same bytes first, again, and after an unrelated solve."""
     import hashlib
 
-    from diff_soup.linear.klu_backend import KLUBackend
     from diff_soup.optimization.inference.engine._request import Request
 
-    lowered = ds.lower(repeat_study("wave2_repeat"))
+    lowered = ds.lower(repeat_study(f"wave2_repeat_{linear}", linear=linear))
     lowered.prepare(modes=("value", "blocks"))
-    counters = ("factorizations", "refactorizations", "refactor_fallbacks", "rebuilds", "solves")
+    reset, read = linear_counters(linear)
 
     def run(mode, k):
-        KLUBackend.reset_native_stats()
+        reset()
         r = lowered.evaluate(Request(mode=mode, points=np.asarray([k])))
-        stats = KLUBackend.native_stats()
+        stats = read()
         arrays = [r.cost, r.work.accepts, r.work.rejects, r.work.newton_iters]
         data = b"".join(
             np.asarray(a).tobytes() for a in arrays + [r.normal, r.gradient] if a is not None
         )
         steps = (int(np.sum(r.work.accepts)), int(np.sum(r.work.rejects)))
-        return data, steps, {key: int(stats[key]) for key in counters}
+        return data, steps, stats
 
     for mode in ("value", "blocks"):
         first, second = run(mode, 1.0), run(mode, 1.0)
@@ -1100,11 +1136,13 @@ def repeat() -> None:
         ):
             digest = hashlib.sha1(data).hexdigest()[:12]
             print(
-                f"repeat, {mode}, {tag}: steps (accepted, rejected) {steps}, digest {digest}, KLU {stats}"
+                f"repeat, {linear}, {mode}, {tag}: steps (accepted, rejected) {steps}, "
+                f"digest {digest}, {stats}"
             )
         assert second[0] == first[0] and third[0] == first[0], mode
-        assert second[2] == first[2] == third[2], mode
-    print("ALL CHECKS PASSED (repeat)")
+        # A first evaluation also counts the analyses that create the solver's storage.
+        assert second[2] == third[2] and (linear != "klu" or first[2] == second[2]), mode
+    print(f"ALL CHECKS PASSED (repeat, {linear})")
 
 
 def shape_study(name, observe, values):
@@ -1544,11 +1582,9 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "one"
     if mode == "world":
         world(sys.argv[2])
+    elif mode in ("measure", "repeat"):
+        {"measure": measure, "repeat": repeat}[mode](
+            linear=sys.argv[2] if len(sys.argv) > 2 else "klu"
+        )
     else:
-        {
-            "one": one_process,
-            "measure": measure,
-            "saves": measure_saves,
-            "budget": measure_budget,
-            "repeat": repeat,
-        }[mode]()
+        {"one": one_process, "saves": measure_saves, "budget": measure_budget}[mode]()
