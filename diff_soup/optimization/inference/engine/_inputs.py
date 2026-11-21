@@ -414,6 +414,20 @@ def lane_group(
     )
 
 
+def _start_function(child: Any) -> Any:
+    """``start(theta)`` of an experiment whose initial state is computed, else ``None``.
+
+    The lanes of one program share their identity, which records the function, so
+    the first lane's serves them all.
+    """
+    from diff_soup.optimization.inference.fitting.formulation import ComputedInitialState
+
+    initial = getattr(child, "initial_state", None)
+    if not isinstance(initial, ComputedInitialState):
+        return None
+    return initial.fn
+
+
 def _reverse_solver(child: Any) -> Any:
     """The solver ``child`` takes reverse-mode gradients with, or ``None`` without a Hessian.
 
@@ -538,6 +552,7 @@ def _lane_group(
         if links is None
         else tuple(slot.into for slot in links.links.get(selected[0], ())),
         link_coordinates=0 if links is None else links.link_coordinates(selected[0]),
+        start=_start_function(first),
     )
     columns, frozen, y0, t0, t1, times, streams, dt0, schedule, outputs, linked = jax.device_put(
         _stack(lanes), device

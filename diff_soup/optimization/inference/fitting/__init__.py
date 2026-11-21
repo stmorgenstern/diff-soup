@@ -13,6 +13,7 @@ from diff_soup.optimization.inference.fitting.diagnostics import (
     OptDiagnostics,
 )
 from diff_soup.optimization.inference.fitting.formulation import (
+    ComputedInitialState,
     FixedInitialState,
     LearnedInitialState,
     LeastSquares,
@@ -49,6 +50,7 @@ __all__ = [
     "Multishoot",
     "FixedInitialState",
     "LearnedInitialState",
+    "ComputedInitialState",
     "learnables",
     # Windows and continuity
     "Windows",

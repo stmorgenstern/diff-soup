@@ -13,7 +13,7 @@ the plan uses for it:
 
 | component | covers |
 |---|---|
-| lane kind | how the experiment is fitted: in one shoot, in windows, or with a learned initial state |
+| lane kind | how the experiment is fitted: in one shoot, in windows, or with a learned initial state; and the function of a start computed from the parameters |
 | precision | the model's dtype policy and the dtype of its parameters |
 | layout | the model's ``Layout`` |
 | model content | the model's content key: equations, domains, boundary conditions, scales and the values their closures capture, with layout and precision folded in |
@@ -253,6 +253,7 @@ def _components(child: Any, recorder: _IdentityRecorder, links: Any = None) -> t
     streams; ``None`` leaves the streams as they are.
     """
     from diff_soup.optimization.inference.fitting._joint_structure import _child_mode
+    from diff_soup.optimization.inference.fitting.formulation import ComputedInitialState
 
     seam = child._seam
     view = seam.problem
@@ -292,6 +293,11 @@ def _components(child: Any, recorder: _IdentityRecorder, links: Any = None) -> t
     }
     if links is not None:
         values["streams"] = values["streams"] + (links,)
+    # A start computed from the parameters is part of the program; a fixed start is a
+    # number of the lane and leaves the component as it was.
+    initial = getattr(child, "initial_state", None)
+    if isinstance(initial, ComputedInitialState):
+        values["lane kind"] = (values["lane kind"], ("computed start", initial.fn))
     # A model without a declared content key is known by the object that built it.
     source_key = signature.source_key
     by_object = isinstance(source_key, tuple) and bool(source_key) and source_key[0] == "identity"

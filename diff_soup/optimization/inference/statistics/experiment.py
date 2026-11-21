@@ -299,7 +299,8 @@ class _CompiledExperiment:
             state array, or an initial-state policy carrying it —
             ``FixedInitialState(y0)`` (the default reading of a bare array) or
             ``LearnedInitialState(guess)``, which fits the state along with the
-            parameters. A policy's own ``time`` is replaced by the start of
+            parameters, or ``ComputedInitialState(fn)``, which computes it from
+            the parameters. A policy's own ``time`` is replaced by the start of
             this span, which is the instant the state stands for.
         channels: The measurement `Channel` declarations.
         controls: Conditioning inputs by name (measured drives, boundary
@@ -329,12 +330,14 @@ class _CompiledExperiment:
     def __post_init__(self):
         """Validate channel uniqueness, data binding, and source overlap."""
         from diff_soup.optimization.inference.fitting.formulation import (
+            ComputedInitialState,
             InitialState,
             _initial_state_array,
         )
 
         if (
             isinstance(self.initial_state, InitialState)
+            and not isinstance(self.initial_state, ComputedInitialState)
             and _initial_state_array(self.initial_state) is None
         ):
             raise ValueError(
@@ -588,7 +591,12 @@ class _CompiledExperiment:
             resolve_forward_adjoint,
             union_prediction_factory,
         )
-        from diff_soup.optimization.inference.fitting.formulation import _initial_state_array
+        from diff_soup.optimization.inference.fitting.formulation import (
+            ComputedInitialState,
+            _computed_start,
+            _computed_start_template,
+            _initial_state_array,
+        )
         from diff_soup.optimization.inference.fitting.inference_problem import _lowered_schedule
         from diff_soup.optimization.inference.fitting.parameter_groups import _resolve_parameters
 
@@ -602,12 +610,23 @@ class _CompiledExperiment:
         seam = build_forward_seam(self.problem, theta_spec)
         solver = resolve_forward_adjoint(self.solver)
         streams = tuple(_PredictionStream(c) for c in self.channels)
+        initial = self.initial_state
+        if isinstance(initial, ComputedInitialState):
+            y0 = jnp.asarray(_computed_start_template(seam, initial))
+
+            def decision_to_y0(x):
+                return _computed_start(seam, initial, x)
+
+        else:
+            y0 = jnp.asarray(_initial_state_array(initial))
+            decision_to_y0 = None
         predict, _, _, _ = union_prediction_factory(
             seam,
             streams=streams,
-            y0=jnp.asarray(_initial_state_array(self.initial_state)),
+            y0=y0,
             solver=solver,
             t0=float(self.t_span[0]),
+            decision_to_y0=decision_to_y0,
             schedule=_lowered_schedule(self.schedule, self.problem),
         )
         predictor = Predictor(

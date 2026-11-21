@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Optional
 
 import equinox as eqx
@@ -130,6 +130,70 @@ class LearnedInitialState(InitialState):
     time: float = 0.0
 
 
+class ComputedInitialState(InitialState):
+    """An initial state computed from the experiment's parameters at every evaluation.
+
+    `fn(theta)` receives the model's parameter values, read as `theta[handle]` with the
+    objects `spec.param` returned, and returns the state at the start of the span, laid
+    out as a fixed initial state is (for a recipe, as `spec.assemble_state` lays it out).
+    A start that reads a fitted parameter moves with it, and every derivative of the fit
+    carries that motion. The algebraic unknowns of the returned state are guesses, made
+    consistent by the solve as they are for a fixed state.
+
+    `fn` is called inside the compiled solve: it is traced, differentiated in forward
+    and reverse mode and batched with `jax.vmap`, so it uses `jax.numpy`, reads no value
+    on the host, and returns an array of one shape whatever the parameters. It is also
+    called once when the experiment is lowered, at its starting parameters, to fix that
+    shape.
+
+    Pass it as `initial_state=` of an
+    [Experiment][diff_soup.optimization.inference.Experiment] solved in one shoot.
+    Under `Study(reads="declared")` the parameters `fn` reads are read by that
+    experiment: `theta` holds only the parameters its model declares. A study records
+    `fn` in its fingerprint by its code and the values it closes over, so those values
+    are arrays, parameter handles, plain containers or functions of them, not the
+    recipe's `spec` itself.
+
+    ```python
+    s = spec.param("s", value=1.0, learnable=True)
+    rest = spec.assemble_state({"u": 0.0})
+    unit = spec.assemble_state({"u": 1.0}) - rest
+    start = inf.ComputedInitialState(lambda theta: rest + unit * theta[s])
+    experiment = inf.Experiment(model, solver, (0.0, 2.0), start, measurements)
+    ```
+
+    Attributes:
+        fn: The map from the model's parameter values to the initial state.
+        time: The start time, which the experiment sets to the start of its span.
+    """
+
+    fn: Callable = eqx.field(static=True)
+    time: float = 0.0
+
+    def __check_init__(self):
+        """Refuse a start that is not a function."""
+        if not callable(self.fn):
+            raise TypeError(
+                "ComputedInitialState takes a function of the parameter values, "
+                f"fn(theta) -> state; got {type(self.fn).__name__}."
+            )
+
+
+def _computed_start(seam: Any, initial_state: ComputedInitialState, x: Any) -> Any:
+    """The state ``initial_state`` computes at the flat fitted-parameter vector ``x`` of ``seam``."""
+    return jnp.asarray(initial_state.fn(seam.theta_of(x)))
+
+
+def _computed_start_template(seam: Any, initial_state: ComputedInitialState) -> np.ndarray:
+    """The state ``initial_state`` computes at the seam's starting parameters, on the host.
+
+    It fixes the shape of the state, and stands in for the start wherever a number is
+    needed outside a solve: a size, a digest, the filler of a sample slot the solve did
+    not reach.
+    """
+    return np.asarray(_computed_start(seam, initial_state, jnp.asarray(seam.x0)))
+
+
 def _initial_state_array(
     initial_state: InitialState | ArrayLike | Sequence,
 ) -> ArrayLike | Sequence | None:
@@ -137,8 +201,10 @@ def _initial_state_array(
 
     A policy carries it as ``y0`` (fixed) or ``guess`` (learned); a bare array
     is the state itself. The array is what a prediction or a provenance digest
-    reads, whichever policy holds it.
+    reads, whichever policy holds it. A computed start carries none: ``None``.
     """
+    if isinstance(initial_state, ComputedInitialState):
+        return None
     if isinstance(initial_state, LearnedInitialState):
         return initial_state.guess
     if isinstance(initial_state, FixedInitialState):

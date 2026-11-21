@@ -75,6 +75,7 @@ from diff_soup.optimization.inference.fitting._windows_dv import (
 )
 from diff_soup.optimization.inference.fitting.bounds import Bounds
 from diff_soup.optimization.inference.fitting.formulation import (
+    ComputedInitialState,
     FixedInitialState,
     InitialState,
     LearnedInitialState,
@@ -84,6 +85,8 @@ from diff_soup.optimization.inference.fitting.formulation import (
     SingleShoot,
     Trajectory,
     _check_initial_state_time,
+    _computed_start,
+    _computed_start_template,
     _FrozenStateMultishoot,
 )
 from diff_soup.optimization.inference.fitting.parameter_groups import (
@@ -343,6 +346,12 @@ class InferenceProblem:
             )
         if trial_predicate is not None and not callable(trial_predicate):
             raise TypeError("InferenceProblem 'trial_predicate' must be callable or None.")
+        if isinstance(initial_state, ComputedInitialState) and isinstance(trajectory, Multishoot):
+            raise ValueError(
+                "InferenceProblem: a ComputedInitialState starts one solve over the span, and "
+                "a Multishoot trajectory starts each window from its own state; pass "
+                "trajectory=SingleShoot() with a computed start."
+            )
         if schedule is not None and isinstance(trajectory, Multishoot):
             raise ValueError(
                 "InferenceProblem 'schedule' is solved in a single shoot over the span, and "
@@ -361,7 +370,9 @@ class InferenceProblem:
         _check_initial_state_time(initial_state, series)
         t0 = (
             float(initial_state.time)
-            if isinstance(initial_state, (FixedInitialState, LearnedInitialState))
+            if isinstance(
+                initial_state, (FixedInitialState, LearnedInitialState, ComputedInitialState)
+            )
             else None
         )
         theta_spec, groups = _resolve_parameters(parameters, problem)
@@ -460,7 +471,10 @@ class InferenceProblem:
         theta_spec, groups = _resolve_parameters(self._parameters_argument, self.problem)
         t0 = (
             float(self.initial_state.time)
-            if isinstance(self.initial_state, (FixedInitialState, LearnedInitialState))
+            if isinstance(
+                self.initial_state,
+                (FixedInitialState, LearnedInitialState, ComputedInitialState),
+            )
             else None
         )
         if isinstance(self.trajectory, SingleShoot):
@@ -525,6 +539,15 @@ class InferenceProblem:
 
             def decision_to_y0(x):
                 return y0_arr.at[diff_indices].set(x[n_theta:])
+
+        elif isinstance(init, ComputedInitialState):
+            # The start is computed from the parameters inside every solve; the value at
+            # the starting parameters fixes its shape and serves the host baseline.
+            y0_arr = jnp.asarray(_computed_start_template(seam, init))
+            x0 = np.asarray(seam.x0)
+
+            def decision_to_y0(x):
+                return _computed_start(seam, init, x)
 
         else:
             y0 = init.y0 if isinstance(init, FixedInitialState) else None

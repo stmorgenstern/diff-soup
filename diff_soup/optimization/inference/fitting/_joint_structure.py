@@ -16,7 +16,10 @@ from diff_soup._layout import Layout
 from diff_soup.optimization.inference.engine._plan import n_padded, refuse_shared_storage
 from diff_soup.optimization.inference.fitting._joint_groups import _normalise_ownership
 from diff_soup.optimization.inference.fitting._joint_layout import _child_n_theta
-from diff_soup.optimization.inference.fitting.formulation import LearnedInitialState
+from diff_soup.optimization.inference.fitting.formulation import (
+    ComputedInitialState,
+    LearnedInitialState,
+)
 from diff_soup.optimization.inference.fitting.inference_problem import InferenceProblem
 
 
@@ -83,6 +86,10 @@ def _is_homogeneous(children: tuple) -> bool:
     # The batched kernel solves one span without a protocol; a child that follows
     # a schedule is evaluated through its own residual.
     if any(_follows_schedule(c) for c in children):
+        return False
+    # Nor does it compute a start from the parameters: such a child, too, is
+    # evaluated through its own residual.
+    if any(isinstance(c.initial_state, ComputedInitialState) for c in children):
         return False
     if len(children) < 2:
         return len(children) == 1 and _child_mode(children[0]) in batchable

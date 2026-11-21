@@ -71,12 +71,21 @@ def _resolve_child_y0(child: InferenceProblem) -> np.ndarray:
 
     Only children whose initial state is fixed reach the batched kernels; a child
     that learns its initial state is classified ``"latent"`` and reconstructs that
-    state from its own slice of the joint decision vector.
+    state from its own slice of the joint decision vector. A child whose start is
+    computed from its parameters gives the state at its starting parameters: the
+    lanes of the engine take its shape from it and compute the start inside their
+    solve, and the joint's own batched kernels never take such a child.
     """
-    from diff_soup.optimization.inference.fitting.formulation import FixedInitialState
+    from diff_soup.optimization.inference.fitting.formulation import (
+        ComputedInitialState,
+        FixedInitialState,
+        _computed_start_template,
+    )
     from diff_soup.optimization.inference.fitting.inference_problem import _resolve_y0
 
     init = child.initial_state
+    if isinstance(init, ComputedInitialState):
+        return _computed_start_template(child._seam, init)
     y0 = init.y0 if isinstance(init, FixedInitialState) else None
     return np.asarray(_resolve_y0(child.data, y0))
 

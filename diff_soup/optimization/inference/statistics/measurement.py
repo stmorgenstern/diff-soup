@@ -565,6 +565,29 @@ def _checked_links(experiment: Any, model: Any, declarations: dict, t_span: tupl
     return outputs, links
 
 
+def _check_computed_start(initial_state: Any, trajectory: Any) -> None:
+    """Refuse a start computed from the parameters where it cannot act.
+
+    A [ComputedInitialState][diff_soup.optimization.inference.ComputedInitialState] starts
+    one solve over the span. Windows of a multiple-shooting trajectory start from their
+    own states, measured or fitted, so the computed start would not reach them.
+
+    Raises:
+        ValueError: If the start is computed and ``trajectory`` is a ``Multishoot``.
+    """
+    from diff_soup.optimization.inference.fitting.formulation import (
+        ComputedInitialState,
+        Multishoot,
+    )
+
+    if isinstance(initial_state, ComputedInitialState) and isinstance(trajectory, Multishoot):
+        raise ValueError(
+            "Experiment initial_state=ComputedInitialState(...) starts one solve over "
+            "t_span, and trajectory=Multishoot(...) starts each window from its own state; "
+            "leave trajectory=None or pass SingleShoot()."
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class Experiment:
     """One solve of a model, compared against its measurements.
@@ -575,7 +598,7 @@ class Experiment:
         model: The built problem, or a Recipe template built with the template arguments in `inputs`.
         solver: The time-stepping solver used for every solve of the fit.
         t_span: The interval `(t0, t1)` of the solve, with `t0 < t1`.
-        initial_state: The state the solve starts from at `t0`.
+        initial_state: The state the solve starts from at `t0`: an array, a [FixedInitialState][diff_soup.optimization.inference.FixedInitialState], a [LearnedInitialState][diff_soup.optimization.inference.LearnedInitialState] fitted with the parameters, or a [ComputedInitialState][diff_soup.optimization.inference.ComputedInitialState] computed from them at every evaluation.
         measurements: A non-empty tuple of [Measurement][diff_soup.optimization.inference.Measurement] with distinct names.
         inputs: Template arguments and fixed parameter values for this experiment alone, by name.
         id: A hashable name for the experiment, or `None` to build one from `inputs` or, without inputs, to number the experiment.
@@ -629,6 +652,7 @@ class Experiment:
                 "(SingleShoot or Multishoot), or None for a single shoot over t_span; "
                 f"got {type(self.trajectory).__name__}."
             )
+        _check_computed_start(self.initial_state, self.trajectory)
         if not isinstance(self.inputs, Mapping):
             raise TypeError("Experiment inputs must be a mapping of named conditioning inputs.")
         if self.parameters is not None:

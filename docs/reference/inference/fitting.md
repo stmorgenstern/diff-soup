@@ -73,6 +73,10 @@ shooting](../../overview/inference/multiple-shooting.md)).
     options:
       members: false
 
+::: diff_soup.optimization.inference.ComputedInitialState
+    options:
+      members: false
+
 ---
 
 ### Bounds and regularization

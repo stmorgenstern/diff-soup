@@ -22,6 +22,7 @@ from diff_soup.optimization.inference.fitting.callbacks import (
 )
 from diff_soup.optimization.inference.fitting.diagnostics import OptDiagnostics
 from diff_soup.optimization.inference.fitting.formulation import (
+    ComputedInitialState,
     FixedInitialState,
     LearnedInitialState,
     LeastSquares,
@@ -130,6 +131,7 @@ __all__ = [
     "FirstStep",
     "FixedInitialState",
     "LearnedInitialState",
+    "ComputedInitialState",
     "learnables",
     "Bounds",
     "Tikhonov",

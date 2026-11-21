@@ -69,6 +69,12 @@ entries of its narrow point at the source's coordinates and ``x0`` their value
 at the point: the value is the solve on the source's output, and the one
 ``jax.jacfwd`` of the ``blocks`` mode carries the source's coordinates by the
 chain rule.
+
+A lane whose experiment computes its initial state from its parameters
+([ComputedInitialState][diff_soup.optimization.inference.ComputedInitialState]) starts
+from ``start(theta)``, formed from the same parameter values as the solve, links
+included, in place of its ``y0``; every mode differentiates through it as it
+differentiates through the solve.
 """
 
 from __future__ import annotations
@@ -142,6 +148,9 @@ class LaneProgram:
             point that only its links read: its source's coordinates its model
             does not declare. Their place in the parameter vector is one past
             its end, and they are dropped there.
+        start: For an experiment whose initial state is computed from its
+            parameters, ``start(theta)`` returning that state, in the shape of
+            the lane's ``y0``; ``None`` for a lane that starts from its ``y0``.
     """
 
     problem: Any
@@ -155,6 +164,7 @@ class LaneProgram:
     outputs: tuple = ()
     links: tuple = ()
     link_coordinates: int = 0
+    start: Optional[Callable] = None
 
 
 class StreamInputs(eqx.Module):
@@ -209,7 +219,10 @@ class LaneInputs(eqx.Module):
         columns: Per narrow coordinate, its position in the flat
             fitted-parameter vector of the lane's experiment.
         frozen: The parameters of the experiment that are not fitted.
-        y0: The initial state.
+        y0: The initial state. For a lane whose program computes its start
+            from the parameters (``LaneProgram.start``), the state at the
+            experiment's starting parameters, which gives the shape and fills
+            a sample slot the solve did not reach.
         t0: The time of the initial state.
         t1: The end of the span, the last sample time.
         times: The sample times, strictly increasing. Entries after ``t1`` pad
@@ -393,6 +406,18 @@ def _with_links(program: LaneProgram, point: Array, lane: LaneInputs, theta: PyT
     return theta_replace(theta, replaced, caller="Link")
 
 
+def _computed_start(program: LaneProgram, theta: PyTree, like: Array) -> Array:
+    """The initial state ``program.start`` computes from ``theta``, in the shape and dtype of ``like``."""
+    value = jnp.asarray(program.start(theta), dtype=like.dtype)
+    if value.shape != like.shape:
+        raise ValueError(
+            f"the initial state computed from the parameters has shape {value.shape}, and "
+            f"at the experiment's starting parameters it had shape {like.shape}; the start "
+            "has to keep one shape whatever the parameters."
+        )
+    return value
+
+
 def _solve(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     """Solve one lane and return its residual rows and what describes the solve.
 
@@ -441,12 +466,13 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     theta = eqx.combine(program.unflatten(flat), lane.frozen)
     if program.links:
         theta = _with_links(program, point, lane, theta)
+    y0 = lane.y0 if program.start is None else _computed_start(program, theta, lane.y0)
     if lane.schedule is None:
         solution = pdesolve(
             program.problem,
             program.solver,
             (lane.t0, lane.t1),
-            lane.y0,
+            y0,
             saveat=SaveAt(ts=lane.times, ordered=True),
             theta=theta,
             adjoint=getattr(program.solver, "adjoint", None),
@@ -458,7 +484,7 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
             program.problem,
             program.solver,
             lane.schedule,
-            lane.y0,
+            y0,
             t0=lane.t0,
             t_end=lane.t1,
             times=lane.times,
@@ -475,8 +501,9 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     # so an observation operator sees finite numbers there; the rows of such
     # a slot are masked below, and a requested one fails the lane. The saved
     # state is the leading block of the initial state when that one also
-    # carries the bordered unknowns.
-    initial = jnp.reshape(jnp.asarray(lane.y0, states.dtype), (-1,))[: states[0].size]
+    # carries the bordered unknowns. A computed start fills them without its derivative.
+    held = lane.y0 if program.start is None else jax.lax.stop_gradient(y0)
+    initial = jnp.reshape(jnp.asarray(held, states.dtype), (-1,))[: states[0].size]
     filled = jnp.where(_frame_mask(valid, states), states, jnp.reshape(initial, states.shape[1:]))
 
     rows = []
