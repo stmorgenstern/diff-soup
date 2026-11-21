@@ -47,7 +47,7 @@ from jaxtyping import PyTree
 from diff_soup._logging import log as logger
 from diff_soup._schedule.records import ScheduleArrays
 from diff_soup.optimization.inference.fitting._lane_map import lane_map
-from diff_soup.optimization.inference.fitting.series import Series
+from diff_soup.optimization.inference.fitting.series import Series, reads_globals
 from diff_soup.problem._registry import theta_leaf_keys, theta_mask, theta_table
 from diff_soup.problem.implicit.solver_problem import SolverView
 from diff_soup.timestepping.vsvo.solution import Solution
@@ -790,12 +790,15 @@ def union_prediction_factory(
     # Bind the per-stream observe/frame-times outside the closure. Frame times
     # feed time-aware observables and the trial theta feeds
     # parameter-dependent observables; operators that read neither ignore them.
+    # A stream whose observation reads the global unknowns receives each saved
+    # state followed by the global unknowns saved at the same time.
     bound = tuple(
         (
             jnp.asarray(p.frame_indices),
             None if p.keep_indices is None else jnp.asarray(p.keep_indices),
             s.observe,
             jnp.asarray(union_ts[p.frame_indices]),
+            reads_globals(s.observable),
         )
         for p, s in zip(plans, streams)
     )
@@ -829,9 +832,17 @@ def union_prediction_factory(
                 adjoint=adjoint,
             )
         ys = sol.ys
+        bordered = None
+        if any(entry[4] for entry in bound):
+            if sol.lambdas is None:
+                raise ValueError(
+                    "an observation reads the global unknowns, and the solve saved none; "
+                    "the model declares no global unknowns."
+                )
+            bordered = jnp.concatenate([ys, jnp.asarray(sol.lambdas, dtype=ys.dtype)], axis=-1)
         preds = []
-        for frame_idx, keep_idx, observe, frame_ts in bound:
-            obs_pred = observe(ys[frame_idx], frame_ts, theta)
+        for frame_idx, keep_idx, observe, frame_ts, wide in bound:
+            obs_pred = observe((bordered if wide else ys)[frame_idx], frame_ts, theta)
             if keep_idx is not None:
                 obs_pred = obs_pred[keep_idx]
             preds.append(obs_pred)

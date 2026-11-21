@@ -190,6 +190,16 @@ class _ObservableOperator(ObservationOperator):
         """
         return bool(getattr(self.fn, "is_full_state", False))
 
+    @property
+    def reads_globals(self) -> bool:
+        """Whether the readout reads the model's global unknowns.
+
+        True for a measurement whose function names a ``globals`` parameter and
+        for a declared observation that reads a global; the readout then
+        receives each saved state followed by the global unknowns.
+        """
+        return bool(getattr(self.fn, "reads_globals", False))
+
     def _theta_for_call(self, theta: PyTree) -> PyTree:
         """Select the theta the readout sees (bound > trial-if-declared > None)."""
         if self.theta is not None:

@@ -32,7 +32,7 @@ from diff_soup.optimization.inference.fitting._sharding import (
 from diff_soup.optimization.inference.fitting.inference_problem import (
     InferenceProblem,
 )
-from diff_soup.optimization.inference.fitting.series import Series
+from diff_soup.optimization.inference.fitting.series import Series, reads_globals
 from diff_soup.timestepping.vsvo.solution import Solution
 
 
@@ -280,6 +280,9 @@ def _build_homogeneous_residual(
             for s in rep.data
         )
         observes = tuple(s.observe for s in rep.data)
+        # A stream whose observation reads the global unknowns receives each saved
+        # state followed by the global unknowns saved at the same time.
+        wides = tuple(reads_globals(s.observable) for s in rep.data)
         y0s = jnp.stack([jnp.asarray(_single_shoot_data(c)) for c in children])
         targets = tuple(
             jnp.stack([jnp.asarray(c.data[i].values) for c in children])
@@ -294,12 +297,24 @@ def _build_homogeneous_residual(
             sol = pdesolve(
                 seam.problem, forward, t_span, y0, saveat=saveat, theta=theta, adjoint=adjoint
             )
+            states = sol.ys
+            bordered = None
+            if any(wides):
+                if sol.lambdas is None:
+                    raise ValueError(
+                        "an observation reads the global unknowns, and the solve saved none; "
+                        "the model declares no global unknowns."
+                    )
+                bordered = jnp.concatenate(
+                    [states, jnp.asarray(sol.lambdas, dtype=states.dtype)], axis=-1
+                )
             rows = []
-            for frame_idx, frame_ts, keep_idx, observe, target, weight in zip(
+            for frame_idx, frame_ts, keep_idx, observe, wide, target, weight in zip(
                 frame_indices,
                 frame_times,
                 keep_indices,
                 observes,
+                wides,
                 targets_c,
                 weights_c,
             ):
@@ -308,7 +323,9 @@ def _build_homogeneous_residual(
                 # passes both trial theta and frame time; the homogeneous joint
                 # kernel must do the same or direct kinetic/readout derivatives
                 # silently disappear in a multi-experiment fit.
-                r = weight * (observe(sol.ys[frame_idx], frame_ts, theta) - target)
+                r = weight * (
+                    observe((bordered if wide else states)[frame_idx], frame_ts, theta) - target
+                )
                 if keep_idx is not None:
                     r = r[keep_idx]
                 rows.append(jnp.reshape(r, (-1,)))

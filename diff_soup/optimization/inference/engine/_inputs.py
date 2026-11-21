@@ -65,7 +65,7 @@ from diff_soup.optimization.inference.engine._layout import (
     lane_problems,
 )
 from diff_soup.optimization.inference.engine._reducers import TreeTables, tree_tables
-from diff_soup.optimization.inference.fitting.series import Series
+from diff_soup.optimization.inference.fitting.series import Series, reads_globals
 
 Array = jax.Array
 
@@ -536,6 +536,9 @@ def _lane_group(
         owner_of_lane.append(layout.nodes[index])
         local.append(np.asarray(layout.local[index], dtype=np.int32))
 
+    output_slots = () if links is None else links.outputs.get(selected[0], ())
+    observe_globals = tuple(reads_globals(series.observable) for series in _lane_streams(first))
+    output_globals = tuple(reads_globals(slot.observe) for slot in output_slots)
     program = LaneProgram(
         problem=first._seam.problem,
         solver=first.solver,
@@ -553,6 +556,8 @@ def _lane_group(
         else tuple(slot.into for slot in links.links.get(selected[0], ())),
         link_coordinates=0 if links is None else links.link_coordinates(selected[0]),
         start=_start_function(first),
+        observe_globals=observe_globals if any(observe_globals) else (),
+        output_globals=output_globals if any(output_globals) else (),
     )
     columns, frozen, y0, t0, t1, times, streams, dt0, schedule, outputs, linked = jax.device_put(
         _stack(lanes), device

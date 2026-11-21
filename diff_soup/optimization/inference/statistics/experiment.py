@@ -205,6 +205,11 @@ class _ChannelOperator(ObservationOperator):
         """
         return self.kernel is None and self.observable.is_full_state
 
+    @property
+    def reads_globals(self) -> bool:
+        """Whether the channel's readout reads the model's global unknowns."""
+        return self.observable.reads_globals
+
     def predict(self, u: Array, t: PyTree, theta: PyTree) -> Array:
         """Thread time/theta through the observable, then apply the kernel."""
         return _apply_kernel(self.kernel, self.observable.predict(u, t, theta))
@@ -243,6 +248,7 @@ class _PredictionStream:
             jnp.zeros((jnp.asarray(channel.saveat).shape[0],)),
             observable=_channel_operator(channel),
         )
+        self.observable = self._series.observable
 
     def observe(self, states, ts=None, theta=None):
         return self._series.observe(states, ts, theta)

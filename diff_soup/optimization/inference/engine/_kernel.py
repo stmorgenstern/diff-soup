@@ -70,6 +70,11 @@ at the point: the value is the solve on the source's output, and the one
 ``jax.jacfwd`` of the ``blocks`` mode carries the source's coordinates by the
 chain rule.
 
+A stream or an output whose observation reads the model's global unknowns
+(``LaneProgram.observe_globals``, ``output_globals``) receives each saved state
+followed by the global unknowns the solver saved at the same time; every other
+one receives the saved state alone.
+
 A lane whose experiment computes its initial state from its parameters
 ([ComputedInitialState][diff_soup.optimization.inference.ComputedInitialState]) starts
 from ``start(theta)``, formed from the same parameter values as the solve, links
@@ -151,6 +156,10 @@ class LaneProgram:
         start: For an experiment whose initial state is computed from its
             parameters, ``start(theta)`` returning that state, in the shape of
             the lane's ``y0``; ``None`` for a lane that starts from its ``y0``.
+        observe_globals: Per stream, whether its observation reads the global
+            unknowns: it then receives each saved state followed by the global
+            unknowns saved at the same time. Empty when no stream reads them.
+        output_globals: The same per output.
     """
 
     problem: Any
@@ -165,6 +174,8 @@ class LaneProgram:
     links: tuple = ()
     link_coordinates: int = 0
     start: Optional[Callable] = None
+    observe_globals: tuple = ()
+    output_globals: tuple = ()
 
 
 class StreamInputs(eqx.Module):
@@ -418,6 +429,30 @@ def _computed_start(program: LaneProgram, theta: PyTree, like: Array) -> Array:
     return value
 
 
+def _reads_globals(program: LaneProgram) -> bool:
+    """Whether a stream or an output of the program reads the global unknowns."""
+    return any(program.observe_globals) or any(program.output_globals)
+
+
+def _bordered(solution: Solution, filled: Array, valid: Array) -> Array:
+    """The saved fields followed by the saved global unknowns, one row per sample slot.
+
+    The global unknowns are the solver's own saved values (``solution.lambdas``):
+    at a sample time inside an accepted step, the step's dense output of every
+    unknown, the one the fields come from; on a lane that follows a schedule,
+    those of the segment that owns the sample. A slot the solve never reached
+    holds zeros; its rows are masked, and a requested one fails the lane.
+    """
+    if solution.lambdas is None:
+        raise ValueError(
+            "an observation reads the global unknowns, and the solve saved none; the "
+            "model declares no global unknowns."
+        )
+    lambdas = jnp.asarray(solution.lambdas, dtype=filled.dtype)
+    lambdas = jnp.where(_frame_mask(valid, lambdas), lambdas, jnp.zeros((), dtype=filled.dtype))
+    return jnp.concatenate([filled, lambdas], axis=-1)
+
+
 def _solve(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     """Solve one lane and return its residual rows and what describes the solve.
 
@@ -505,14 +540,16 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     held = lane.y0 if program.start is None else jax.lax.stop_gradient(y0)
     initial = jnp.reshape(jnp.asarray(held, states.dtype), (-1,))[: states[0].size]
     filled = jnp.where(_frame_mask(valid, states), states, jnp.reshape(initial, states.shape[1:]))
+    bordered = _bordered(solution, filled, valid) if _reads_globals(program) else None
 
     rows = []
     predictions = []
     missing = jnp.zeros((), dtype=bool)
     count = jnp.zeros((), dtype=jnp.int32)
-    for observe, stream in zip(program.observes, lane.streams):
+    observe_globals = program.observe_globals or (False,) * len(program.observes)
+    for observe, stream, wide in zip(program.observes, lane.streams, observe_globals):
         times = lane.times[stream.frame]
-        predicted = observe(filled[stream.frame], times, theta)
+        predicted = observe((bordered if wide else filled)[stream.frame], times, theta)
         keep = _frame_mask(stream.keep, predicted)
         if stream.likelihood is None:
             residual = jnp.where(keep, stream.weight * (predicted - stream.target), 0.0)
@@ -534,9 +571,10 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     outputs = None
     if program.outputs:
         pieces = []
-        for observe, frame in zip(program.outputs, lane.outputs):
+        output_globals = program.output_globals or (False,) * len(program.outputs)
+        for observe, frame, wide in zip(program.outputs, lane.outputs, output_globals):
             values = jax.vmap(lambda state, t, observe=observe: observe(state, t=t, theta=theta))(
-                filled[frame], lane.times[frame]
+                (bordered if wide else filled)[frame], lane.times[frame]
             )
             pieces.append(jnp.reshape(values, (-1,)))
             missing = missing | jnp.any(jnp.logical_not(valid[frame]))

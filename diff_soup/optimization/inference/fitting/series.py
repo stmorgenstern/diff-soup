@@ -79,6 +79,25 @@ def observes_full_state(observable: ObservationOperator) -> bool:
     return bool(getattr(observable, "is_full_state", False))
 
 
+def reads_globals(observable: Any) -> bool:
+    """Whether an observation reads the model's global unknowns besides the saved fields.
+
+    Such an observation receives each saved state followed by the global unknowns
+    saved at the same time: a measurement's function that names a ``globals``
+    parameter, or a model's declared observation that reads a global. Every
+    other observation receives the saved state alone. An operator that reads
+    them declares ``reads_globals``, as one that reports the state unchanged
+    declares ``is_full_state``.
+
+    Args:
+        observable: The stream's observation operator, or an output's readout.
+
+    Returns:
+        ``True`` when the observation reads the global unknowns.
+    """
+    return bool(getattr(observable, "reads_globals", False))
+
+
 class Component(ObservationOperator):
     """Observe one component of the nodal state by indexing its last axis.
 

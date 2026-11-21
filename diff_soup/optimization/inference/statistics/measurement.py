@@ -56,6 +56,83 @@ class _ObserveAdapter:
         return self.observe(state)
 
 
+@dataclasses.dataclass(frozen=True)
+class _GlobalsObservation:
+    """Call a user ``observe`` that reads the model's global unknowns, ``observe(state, globals)``.
+
+    A function whose signature names a ``globals`` parameter receives, beside the
+    saved fields, the global unknowns of the model at the same time (the
+    bordered vector: a cell's terminal current or potential held by an
+    operational control), in the order of ``model.global_layout()`` and in the
+    solver's units, as the saved fields are. A solve over the span (the lanes of
+    a lowered study, or an experiment fitted in one shoot) hands such an
+    observation the saved fields and the saved global unknowns one after the
+    other, ``fields`` entries then the globals; this readout splits them. Two readouts over the same function and the same
+    field count compare equal, so experiments that share one keep one batched
+    program.
+
+    Attributes:
+        observe: The user's function.
+        accepts_t: Whether it takes ``t=``.
+        accepts_theta: Whether it takes ``theta=``.
+        fields: The number of field unknowns of the model, set by the experiment
+            from its model; ``None`` before.
+    """
+
+    observe: Callable
+    accepts_t: bool
+    accepts_theta: bool
+    fields: int | None = None
+
+    @property
+    def reads_globals(self) -> bool:
+        """Always true: the lanes pass this readout the saved global unknowns."""
+        return True
+
+    @property
+    def is_full_state(self) -> bool:
+        """False: the readout is not the solver state."""
+        return False
+
+    def bound(self, model: Any, name: str) -> _GlobalsObservation:
+        """This readout with the field count of ``model``.
+
+        Raises:
+            ValueError: If ``model`` has no global unknowns.
+        """
+        if int(model.constraint_dim()) == 0:
+            raise ValueError(
+                f"{name!r} observe= reads globals=, and the model has no global unknowns; "
+                "observe a field, or declare the global with spec.global_var(...)."
+            )
+        return dataclasses.replace(self, fields=int(model.state_size()))
+
+    def __call__(self, state, *, t=None, theta=None):
+        """Evaluate the readout on the saved fields followed by the saved global unknowns."""
+        state = jnp.asarray(state)
+        if self.fields is None or state.shape[-1] <= self.fields:
+            raise ValueError(
+                "this observation reads globals=, and it was called with the fields alone; "
+                "the global unknowns at a sample time are supplied by a solve over the span "
+                "(the lanes of ds.lower(study), or one shoot), not by windows of a trajectory."
+            )
+        keywords = {"globals": state[..., self.fields :]}
+        if self.accepts_t:
+            keywords["t"] = t
+        if self.accepts_theta:
+            keywords["theta"] = theta
+        return self.observe(state[..., : self.fields], **keywords)
+
+
+def _bound_observe(observe: Any, model: Any, name: str) -> Any:
+    """``observe`` resolved against ``model``: a declared observation's name, or a readout of globals."""
+    if isinstance(observe, str):
+        return _NamedObservation.of(model, observe, name)
+    if isinstance(observe, _GlobalsObservation):
+        return observe.bound(model, name)
+    return observe
+
+
 @dataclasses.dataclass(frozen=True, eq=False)
 class _NamedObservation:
     """Read one declared observation (``spec.observe.*``) of a model, in dimensional units.
@@ -96,6 +173,17 @@ class _NamedObservation:
     def __hash__(self) -> int:
         return hash((self.name, self.key))
 
+    @property
+    def reads_globals(self) -> bool:
+        """Whether the declared observation reads a global unknown of the model.
+
+        The lanes then pass it the saved global unknowns after the fields.
+        """
+        record = next(
+            item for item in getattr(self.model, "observables", ()) if item.name == self.name
+        )
+        return any(read[0] == "global" for read in getattr(record, "reads", ()))
+
     def __call__(self, state, *, t=None, theta=None):
         """Evaluate the observation on one solver state at time ``t``."""
         model = self.model
@@ -115,7 +203,7 @@ def _observe_adapter(observe: Callable | str | None) -> Callable | str:
     """Accept the friendly ``observe(state)`` and advanced keyword signatures."""
     if observe is None:
         return _ObserveAdapter(None, False, False)
-    if isinstance(observe, (_ObserveAdapter, _NamedObservation)):
+    if isinstance(observe, (_ObserveAdapter, _NamedObservation, _GlobalsObservation)):
         return observe
     if isinstance(observe, str):
         # A declared observation's name, resolved against the model by Experiment.
@@ -135,6 +223,9 @@ def _observe_adapter(observe: Callable | str | None) -> Callable | str:
     has_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
     accepts_t = has_kwargs or "t" in names
     accepts_theta = has_kwargs or "theta" in names
+    if "globals" in names:
+        # Only a parameter named globals asks for them; **kwargs does not.
+        return _GlobalsObservation(observe, accepts_t, accepts_theta)
     if accepts_t and accepts_theta:
         # A fully compatible callable keeps its identity: the joint selects its
         # batched kernel by static observable equality.
@@ -154,7 +245,7 @@ class Measurement:
         values: The observed values with one row per time, or a function of no arguments returning them, called once when first needed.
         weight: A positive weight on the squared residual, a scalar or an array that broadcasts against `values`.
         likelihood: The noise model, such as [Gaussian][diff_soup.optimization.inference.Gaussian].
-        observe: The observed quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, the name of a `spec.observe` declaration, or `None` for the state.
+        observe: The observed quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, the name of a `spec.observe` declaration, or `None` for the state. A function that also names a `globals` parameter, `observe(state, globals)`, receives the model's global unknowns at the same time, in the order of `model.global_layout()` and in the solver's units, as `state`; a declaration that reads a global receives them too. See [Output][diff_soup.optimization.inference.Output] for the times they are read at.
         mask: One boolean per time, `True` where the time carries a measurement.
         shape: The shape of `values`, checked against them.
         dtype: The dtype of `values`, checked against them.
@@ -312,10 +403,12 @@ class Output:
 
     An output is read from the solution as a measurement is, and carries no data and no likelihood. An experiment declares it in `outputs=`; another experiment reads it through a [Link][diff_soup.optimization.inference.Link].
 
+    An output or a measurement may read the global unknowns of the model, such as a cell's terminal current or potential held by `spec.control.operational`: its function names a `globals` parameter, or it names a declaration that reads a global. In a solve over the span (the lanes of `ds.lower(study)`, or an experiment fitted in one shoot) it then receives the global unknowns the solver saved at each sample time, from the same dense output of the accepted step as the fields, with their derivative in every mode. On a lane that follows a schedule, a sample at the time a segment ends belongs to that segment: it reads the value the segment reached there, before the next segment's operating condition applies.
+
     Args:
         name: The label of the output, unique within an experiment.
         times: The times of the series, a one-dimensional increasing array inside the experiment's `t_span`.
-        observe: The produced quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, the name of a `spec.observe` declaration, or `None` for the state.
+        observe: The produced quantity: a function `observe(state)`, optionally taking `t=` and `theta=`, or `observe(state, globals)`; the name of a `spec.observe` declaration; or `None` for the state.
     """
 
     name: str
@@ -555,10 +648,8 @@ def _checked_links(experiment: Any, model: Any, declarations: dict, t_span: tupl
             "trajectory=None or pass SingleShoot()."
         )
     outputs = tuple(
-        dataclasses.replace(
-            output, observe=_NamedObservation.of(model, output.observe, output.name)
-        )
-        if isinstance(output.observe, str)
+        dataclasses.replace(output, observe=_bound_observe(output.observe, model, output.name))
+        if isinstance(output.observe, (str, _GlobalsObservation))
         else output
         for output in outputs
     )
@@ -719,9 +810,9 @@ class Experiment:
         measurements = tuple(
             dataclasses.replace(
                 measurement,
-                observe=_NamedObservation.of(model, measurement.observe, measurement.name),
+                observe=_bound_observe(measurement.observe, model, measurement.name),
             )
-            if isinstance(measurement.observe, str)
+            if isinstance(measurement.observe, (str, _GlobalsObservation))
             else measurement
             for measurement in measurements
         )
