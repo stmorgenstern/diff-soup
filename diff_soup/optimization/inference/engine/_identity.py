@@ -23,7 +23,7 @@ the plan uses for it:
 | solver | type, options, tolerances, linear backend, adjoint |
 | fitted parameters | names and count of the fitted parameters |
 | fixed-parameter shapes | leaf paths, shapes and dtypes of the parameters that are not fitted |
-| streams | per stream the lanes score, its name, the shape of one frame, its observation operator with the values it holds, and the family of its likelihood object: type, static fields, and leaf paths, dtypes and shapes per frame |
+| streams | per stream the lanes score, its name, the shape of one frame, its observation operator with the values it holds, and the family of its likelihood object: type, static fields, and leaf paths, dtypes and shapes per frame; for a lane that produces outputs for other lanes or is driven by them, those outputs and links |
 
 Parameter values, initial states, spans, sample times, targets, weights, masks,
 the numbers of a likelihood and frame counts enter the program as arguments and
@@ -246,8 +246,12 @@ def _lane_streams(child: Any) -> tuple:
     return (_window_streams(child)[1],)
 
 
-def _components(child: Any, recorder: _IdentityRecorder) -> tuple:
-    """The record of every component of ``child``, in the order of ``LANE_COMPONENTS``."""
+def _components(child: Any, recorder: _IdentityRecorder, links: Any = None) -> tuple:
+    """The record of every component of ``child``, in the order of ``LANE_COMPONENTS``.
+
+    ``links`` is the record of the lane's outputs and links, folded into its
+    streams; ``None`` leaves the streams as they are.
+    """
     from diff_soup.optimization.inference.fitting._joint_structure import _child_mode
 
     seam = child._seam
@@ -286,6 +290,8 @@ def _components(child: Any, recorder: _IdentityRecorder) -> tuple:
             for series in _lane_streams(child)
         ),
     }
+    if links is not None:
+        values["streams"] = values["streams"] + (links,)
     # A model without a declared content key is known by the object that built it.
     source_key = signature.source_key
     by_object = isinstance(source_key, tuple) and bool(source_key) and source_key[0] == "identity"
@@ -304,7 +310,7 @@ def _sha256(record: Any) -> str:
     return hashlib.sha256(_canonical_json(record).encode("utf-8")).hexdigest()
 
 
-def lane_identity(child: Any) -> LaneIdentity:
+def lane_identity(child: Any, links: Any = None) -> LaneIdentity:
     """The identity of the lanes of one experiment of a joint problem.
 
     Every lane of the experiment has it: the lanes of its windows differ only
@@ -312,12 +318,18 @@ def lane_identity(child: Any) -> LaneIdentity:
 
     Args:
         child: One experiment's fitted problem, an entry of ``joint.problems``.
+        links: The record of the outputs the lane produces for other lanes
+            and of the links that drive it
+            ([LinkPlan.record][diff_soup.optimization.inference.engine._links.LinkPlan.record]),
+            part of its streams; ``None`` for a lane with neither.
 
     Returns:
         The [LaneIdentity][diff_soup.optimization.inference.engine._identity.LaneIdentity].
     """
     recorder = _IdentityRecorder()
-    components = tuple((name, _sha256(record)) for name, record in _components(child, recorder))
+    components = tuple(
+        (name, _sha256(record)) for name, record in _components(child, recorder, links)
+    )
     return LaneIdentity(
         digest=_sha256([list(pair) for pair in components]),
         components=components,

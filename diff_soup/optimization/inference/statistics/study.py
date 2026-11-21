@@ -21,7 +21,7 @@ from diff_soup.optimization.inference.fitting.joint import JointInferenceProblem
 from diff_soup.optimization.inference.fitting.parameter_groups import ParameterGroups
 from diff_soup.optimization.inference.statistics._fingerprint import study_content_fingerprint
 from diff_soup.optimization.inference.statistics.hierarchy import EXPERIMENT, Hierarchy, _tree
-from diff_soup.optimization.inference.statistics.measurement import Experiment
+from diff_soup.optimization.inference.statistics.measurement import Experiment, _check_links
 from diff_soup.problem._registry import parameter_handles
 from diff_soup.problem.parameters import (
     ParameterEntry,
@@ -326,6 +326,7 @@ class Study:
         )
         if len(set(experiment_ids)) != len(experiment_ids):
             raise ValueError(f"Study experiment IDs must be unique; got {experiment_ids}.")
+        _check_links(experiments, experiment_ids)
         if hierarchy is None:
             for experiment, experiment_id in zip(experiments, experiment_ids):
                 if experiment.parameters:

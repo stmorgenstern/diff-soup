@@ -1,16 +1,16 @@
 {
   "budgets": {
-    "test_files": 53,
-    "test_functions": 510,
-    "collected_tests": 868,
-    "source_lines": 18411
+    "test_files": 55,
+    "test_functions": 526,
+    "collected_tests": 902,
+    "source_lines": 18989
   },
   "tier_budgets": {
     "public_api": {
-      "files": 21,
-      "functions": 210,
-      "collected": 334,
-      "lines": 6812
+      "files": 22,
+      "functions": 222,
+      "collected": 359,
+      "lines": 7069
     },
     "contracts": {
       "files": 23,
@@ -25,10 +25,10 @@
       "lines": 471
     },
     "multi_device": {
-      "files": 4,
-      "functions": 32,
-      "collected": 34,
-      "lines": 1121
+      "files": 5,
+      "functions": 36,
+      "collected": 43,
+      "lines": 1266
     },
     "integration": {
       "files": 2,
@@ -139,6 +139,9 @@
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
     "tests/contracts/test_coloring.py",
+    "tests/support/links.py",
+    "tests/public_api/test_links.py",
+    "tests/multi_device/test_linked_world.py",
     "tests/contracts/test_study_reads.py",
     "tests/multi_device/test_study_reads_world.py",
     "tests/support/study_reads_world.py"
@@ -195,6 +198,8 @@
     "tests/public_api/test_control.py",
     "tests/contracts/test_jacobian_pattern.py",
     "tests/contracts/test_coloring.py",
+    "tests/public_api/test_links.py",
+    "tests/multi_device/test_linked_world.py",
     "tests/contracts/test_study_reads.py",
     "tests/multi_device/test_study_reads_world.py"
   ],
@@ -402,6 +407,14 @@
     {
       "file": "tests/contracts/test_coloring.py",
       "feature": "Sparse-matrix colorings: every kind and order decompresses its exact products, refused patterns, seeded recovery"
+    },
+    {
+      "file": "tests/public_api/test_links.py",
+      "feature": "Linked experiments: Output and Link, a lane driven by another lane's solved series, its Gauss-Newton and gradient-mode derivative against central differences, the driven lane against a separate solve on the source's output, joint and nested TrustRegion fits, a failed source failing the lanes it drives, the refusals of the declaration, of a source moved by a parameter its driven lanes do not read, and of fits off the lanes"
+    },
+    {
+      "file": "tests/multi_device/test_linked_world.py",
+      "feature": "Linked experiments over an mpirun world of three processes: the source and the lanes it drives on different ranks, the derivative against central differences, joint and nested fits"
     },
     {
       "file": "tests/contracts/test_study_reads.py",

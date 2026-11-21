@@ -164,9 +164,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help=(
             "fail, rather than skip, a test whose build capability (requires_cuda, "
             "requires_cudss, requires_klu, requires_superlu) this host does not provide; a "
-            "missing requires_two_devices, requires_three_devices, requires_four_devices or "
-            "requires_two_processes stays an owed skip, since a device count or a process world "
-            "belongs to the launch, not to the build"
+            "missing requires_two_devices, requires_three_devices, requires_four_devices, "
+            "requires_two_processes or requires_mpi_launch stays an owed skip, since a device count "
+            "or a process world belongs to the launch, not to the build"
         ),
     )
 

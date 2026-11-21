@@ -55,6 +55,7 @@ from diff_soup.optimization.inference.engine._kernel import (
     LaneInputs,
     LaneProgram,
     LaneResult,
+    LinkInputs,
     StreamInputs,
 )
 from diff_soup.optimization.inference.engine._layout import (
@@ -432,11 +433,19 @@ def _lane_group(
     frames: Any,
     segments: Any,
     device: jax.Device | None = None,
+    links: Any = None,
 ) -> LaneGroup:
     """``lane_group`` of the lanes ``layout`` places, whose fitted problems are ``every``.
 
     The lanes' numbers are moved to ``device``, the default device for ``None``.
+    ``links`` is the plan's
+    [LinkPlan][diff_soup.optimization.inference.engine._links.LinkPlan], or ``None``: a
+    source lane then also samples its linked outputs, whose times join its
+    sample times, and a driven lane carries its links' numbers, zero until an
+    evaluation gives them.
     """
+    from diff_soup.optimization.inference.engine import _links
+
     n_children = len(every)
     selected = tuple(range(n_children)) if children is None else tuple(sorted(set(children)))
     if not selected or selected[0] < 0 or selected[-1] >= n_children:
@@ -453,6 +462,11 @@ def _lane_group(
     point_width = layout.widths[selected[0]]
 
     own = tuple(lane_frames(child) for child in problems)
+    if links is not None:
+        own = tuple(
+            links.frames(index, counts, child._union_ts)
+            for index, counts, child in zip(selected, own, problems)
+        )
     slots = smallest_frames(own) if frames is None else _slots(frames, own, lane_ids)
 
     # A lane's place among the lanes of its experiment picks its span of that experiment.
@@ -479,6 +493,8 @@ def _lane_group(
         if experiment not in spans:
             spans[experiment] = _lane_spans(child, dtype)
         y0, times, streams = spans[experiment][index - first_lane[experiment]]
+        if links is not None:
+            times = links.times(index, times)
         if times.shape[0] < 2 or np.any(np.diff(times) <= 0):
             raise ValueError(
                 f"the sample times of experiment {lane!r} have to increase strictly from the "
@@ -498,6 +514,8 @@ def _lane_group(
                 ),
                 _configured_first_step(child.solver, lane, dtype),
                 None if schedules is None else schedules[position],
+                () if links is None else _links.output_frames(links, index, times),
+                () if links is None else _links.link_inputs(links, index, dtype),
             )
         )
         gather.append(columns)
@@ -513,8 +531,15 @@ def _lane_group(
         point_width=point_width,
         reverse=not bool(getattr(getattr(first.solver, "adjoint", None), "is_forward_only", True)),
         reverse_solver=_reverse_solver(first),
+        outputs=()
+        if links is None
+        else tuple(slot.observe for slot in links.outputs.get(selected[0], ())),
+        links=()
+        if links is None
+        else tuple(slot.into for slot in links.links.get(selected[0], ())),
+        link_coordinates=0 if links is None else links.link_coordinates(selected[0]),
     )
-    columns, frozen, y0, t0, t1, times, streams, dt0, schedule = jax.device_put(
+    columns, frozen, y0, t0, t1, times, streams, dt0, schedule, outputs, linked = jax.device_put(
         _stack(lanes), device
     )
     return LaneGroup(
@@ -534,6 +559,11 @@ def _lane_group(
             ),
             dt0=dt0,
             schedule=schedule,
+            outputs=tuple(outputs),
+            links=tuple(
+                LinkInputs(values=values, tangent=tangent, columns=place)
+                for values, tangent, place in linked
+            ),
         ),
         gather=jax.device_put(np.stack(gather).astype(np.int32), device),
         lane_ids=lane_ids,

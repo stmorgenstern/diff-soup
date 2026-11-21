@@ -28,6 +28,13 @@ evaluation keeps there for the ``frozen`` requests of the same fit. A request
 of many members is sent in groups of members whose sums fit the wire budget;
 each process keeps its members' Jacobians by their numbers in the request.
 
+A request of a study with links ([Link][diff_soup.optimization.inference.Link]) is two
+evaluations ([evaluate][diff_soup.optimization.inference.engine._links.evaluate]): the
+first replies carry the outputs of the source lanes each process holds (an array
+after the level sums), and the header of the second carries the driven lanes'
+link values, sent as one array after the points. The lanes may sit on any
+processes.
+
 What a series of evaluations learns (the step memory that orders a call's
 units, the inputs kept on the device) belongs to the lanes it went through on
 process 0: the lowered study's own, or a fit's own copy (every fit of a
@@ -205,6 +212,65 @@ def _numbers_per_member(tables: LevelTables, mode: str) -> int:
     return int(size)
 
 
+def _packed_links(links: Mapping | None) -> tuple:
+    """``(layout, numbers)``: the driven lanes' link values as one float64 array and its layout.
+
+    ``layout`` holds per link ``(lane, values shape, tangents shape or None)``;
+    both are ``None`` without links.
+    """
+    if not links:
+        return None, None
+    layout, pieces = [], []
+    for lane, given in links.items():
+        for values, tangents in given:
+            values = np.asarray(values, dtype=np.float64)
+            layout.append((lane, values.shape, None if tangents is None else np.shape(tangents)))
+            pieces.append(values.reshape(-1))
+            if tangents is not None:
+                pieces.append(np.asarray(tangents, dtype=np.float64).reshape(-1))
+    return tuple(layout), np.ascontiguousarray(np.concatenate(pieces))
+
+
+def _unpacked_links(header: Mapping) -> dict | None:
+    """The link values ``_packed_links`` packed, from an ``EVALUATE`` header; ``None`` without."""
+    layout = header.get("links")
+    if layout is None:
+        return None
+    numbers = np.asarray(header["link_numbers"])
+    links: dict = {}
+    offset = 0
+
+    def take(shape: tuple) -> np.ndarray:
+        nonlocal offset
+        size = int(np.prod(shape, dtype=np.int64))
+        piece = numbers[offset : offset + size].reshape(shape)
+        offset += size
+        return piece
+
+    for lane, values_shape, tangents_shape in layout:
+        values = take(values_shape)
+        tangents = None if tangents_shape is None else take(tangents_shape)
+        links.setdefault(lane, []).append((values, tangents))
+    return {lane: tuple(given) for lane, given in links.items()}
+
+
+def _unpacked_outputs(reply: Mapping, flat: np.ndarray) -> dict:
+    """A reply's source outputs, lane id to ``(values, tangents)``, from its last array."""
+    outputs: dict = {}
+    offset = 0
+    for lane, values_shape, tangents_shape in reply["outputs"]:
+        pieces = []
+        for shape in (values_shape, tangents_shape):
+            if shape is None:
+                pieces.append(None)
+                continue
+            size = int(np.prod(shape, dtype=np.int64))
+            pieces.append(flat[offset : offset + size].reshape(shape))
+            offset += size
+        outputs[lane] = tuple(pieces)
+    return outputs
+
+
 class Cluster:
     """What every process of a run holds: the transport, the placement, its own lanes, the tables.
 
@@ -324,6 +390,7 @@ class Cluster:
             return {"error": (type(error).__name__, str(error)), "lane_ids": ()}, ()
 
     def _local_evaluate(self, header: Mapping, points: np.ndarray) -> tuple:
+        links = _unpacked_links(header)
         shard = self._cut_shard(header)
         chosen = tuple(header["chosen"])
         columns = [c for c, lane in enumerate(chosen) if lane in self.mine]
@@ -358,6 +425,7 @@ class Cluster:
             retry_kinds=kinds,
             retry_first_step_factors=factors,
             member_keys=header.get("member_keys"),
+            links=links,
         )
         origin = shard.origin
         reply = {
@@ -388,6 +456,16 @@ class Cluster:
                 reply["normal_diagonal"] = np.array(
                     np.diagonal(results.normal, axis1=-2, axis2=-1), dtype=np.float64
                 )
+        if results.outputs:
+            # The outputs of this process's source lanes, as one array after the level sums.
+            layout, pieces = [], []
+            for lane, (values, tangents) in results.outputs.items():
+                layout.append((lane, values.shape, None if tangents is None else tangents.shape))
+                pieces.append(np.asarray(values, dtype=np.float64).reshape(-1))
+                if tangents is not None:
+                    pieces.append(np.asarray(tangents, dtype=np.float64).reshape(-1))
+            reply["outputs"] = tuple(layout)
+            arrays = arrays + (np.concatenate(pieces),)
         return reply, arrays
 
     def _cut_shard(self, header: Mapping) -> Shard:
@@ -527,6 +605,9 @@ class Worker(Cluster):
             message = header["message"]
             if message == "EVALUATE":
                 points = transport.array(header["points_shape"], header["points_dtype"])
+                if header.get("links") is not None:
+                    header = dict(header)
+                    header["link_numbers"] = transport.array((header["links_size"],), np.float64)
                 reply, arrays = self.evaluate(header, points)
                 transport.reply(reply, arrays)
             elif message == "PREPARE":
@@ -593,6 +674,7 @@ class Coordinator(Cluster):
         cut: tuple[int, int | None] | None,
         retry: tuple,
         longest: float,
+        links: Mapping | None = None,
     ) -> Results:
         """Evaluate ``request`` over every process; the results in canonical order.
 
@@ -605,12 +687,16 @@ class Coordinator(Cluster):
                 population.
             retry: ``(retry_kinds, retry_first_step_factors)``.
             longest: The longest seconds one evaluation of a lane took so far.
+            links: The link values of the requested driven lanes, as
+                [evaluate][diff_soup.optimization.inference.engine._batched.evaluate]
+                takes them; ``None`` for a request of no driven lane.
 
         Returns:
             The [Results][diff_soup.optimization.inference.engine.Results]: ``levels`` holds
             every member's sums over the level tables in the ``blocks``,
             ``hessian``, ``gradient`` and ``frozen`` modes; ``normal``,
-            ``gradient`` and ``observables`` are ``None``.
+            ``gradient`` and ``observables`` are ``None``; ``outputs`` holds the
+            requested source lanes' outputs.
 
         Raises:
             ValueError: As a lowered study's ``evaluate`` in one process, and
@@ -686,6 +772,18 @@ class Coordinator(Cluster):
                 None if present is None else present[rows],
                 members[rows],
                 _batched.lane_members(lanes),
+                None
+                if links is None
+                else {
+                    lane: tuple(
+                        (
+                            np.asarray(values)[rows],
+                            None if slopes is None else np.asarray(slopes)[rows],
+                        )
+                        for values, slopes in given
+                    )
+                    for lane, given in links.items()
+                },
             )
             parts.append((int(rows.shape[0]), replies))
         return _results(mode, chosen, members, bucket_of, parts, present, tables)
@@ -705,14 +803,17 @@ class Coordinator(Cluster):
         present: np.ndarray | None,
         keys: np.ndarray,
         lane_members: dict | None = None,
+        links: Mapping | None = None,
     ) -> list:
         """Every process's reply for one group of members, in rank order.
 
         ``keys`` are the members' numbers in the request, by which every
         process keeps their Jacobians for the ``frozen`` mode; ``lane_members``
-        is every lane's member of a fit cut by member, or ``None``.
+        is every lane's member of a fit cut by member, or ``None``; ``links``
+        the driven lanes' link values of the group's members, or ``None``.
         """
         points = np.ascontiguousarray(points)
+        layout, numbers = _packed_links(links)
         header = {
             "message": "EVALUATE",
             "cut": cut,
@@ -728,11 +829,17 @@ class Coordinator(Cluster):
             "retry": (tuple(retry[0]), tuple(float(f) for f in retry[1])),
             "points_shape": points.shape,
             "points_dtype": points.dtype.str,
+            "links": layout,
+            "links_size": 0 if numbers is None else int(numbers.shape[0]),
         }
         transport = self.transport
         transport.broadcast(header)
         transport.broadcast_array(points)
-        own = self.local_evaluate(header, points)
+        if numbers is not None:
+            transport.broadcast_array(numbers)
+        own = self.local_evaluate(
+            header if numbers is None else {**header, "link_numbers": numbers}, points
+        )
         placement = self.placement
         most = max(
             sum(1 for lane in chosen if placement.rank_of.get(lane) == rank)
@@ -916,6 +1023,7 @@ def _results(
     retries = []
     summed: tuple[str, int] | None = None
     group_sums = []
+    outputs: dict = {}
     start = 0
     for count, replies in parts:
         total = None
@@ -952,6 +1060,18 @@ def _results(
                 entry = dict(record)
                 entry["member"] = int(members[start + int(record["member"])])
                 retries.append(entry)
+            if "outputs" in reply:
+                for lane, given in _unpacked_outputs(reply, arrays[-1]).items():
+                    held = outputs.get(lane)
+                    if held is None:
+                        held = tuple(
+                            None if piece is None else np.zeros(shape[:1] + piece.shape[1:])
+                            for piece in given
+                        )
+                        outputs[lane] = held
+                    for target, piece in zip(held, given):
+                        if piece is not None:
+                            target[here] = piece
             if "levels" in reply:
                 level_kind, specs = reply["levels"]
                 flat = arrays[0]
@@ -1000,6 +1120,7 @@ def _results(
         levels=levels,
         lane_seconds=lane_seconds,
         normal_diagonal=normal_diagonal,
+        outputs=types.MappingProxyType(outputs) if outputs else None,
     )
 
 
