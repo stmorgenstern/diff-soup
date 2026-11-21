@@ -29,8 +29,10 @@ iteration; every composition of ``jax.jvp``, ``jax.grad``, ``jax.jit`` and
 Differentiable inputs are ``q``, ``theta``, and ``control``. The step time and
 leading coefficient come from the realized adaptive schedule and are
 gradient-dead, as are initial guesses and the acceptance flag. An unaccepted
-primal (``ok`` false) has no supported derivative: its tangents are NaN, and
-its input tangents are zeroed first, so a reverse pass gives an attempt that
+primal (``ok`` false) has no supported derivative: its tangents are NaN, no
+sensitivity matrix is built, factored or solved for it (a conditional that a
+batch runs only where some lane converged), and its input tangents are zeroed
+first, so a reverse pass gives an attempt that
 is discarded (or not accepted) exact zero input cotangents even where the
 residual's partials at its failed iterate are infinite. A singular
 sensitivity solve gives non-finite derivatives on every backend.
@@ -525,19 +527,32 @@ def _implicit_step_root_jvp(
         return plan._residual(t, y_star, cj * y_star + q_in, theta_in, control_in)
 
     _, rhs_dot = jax.jvp(step_residual, (q, theta, control), (dq, dtheta, dcontrol))
-    dy = _sensitivity_solve(
-        plan,
-        backend,
-        analysis,
-        analysis if reverse_analysis is None else reverse_analysis,
-        t,
-        y_star,
-        ydot_star,
-        theta,
-        control,
-        cj,
-        -rhs_dot,
-        certificate=offering,
+
+    def root_tangent(rhs_dot):
+        """The implicit-function tangent of a valid root: one sensitivity solve."""
+        return _sensitivity_solve(
+            plan,
+            backend,
+            analysis,
+            analysis if reverse_analysis is None else reverse_analysis,
+            t,
+            y_star,
+            ydot_star,
+            theta,
+            control,
+            cj,
+            -rhs_dot,
+            certificate=offering,
+        )
+
+    # An attempt whose corrector failed builds, factors and solves nothing: its tangent is
+    # poisoned below anyway (and its pullback, the transposed branch, solves nothing either).
+    dy = lane_cond(
+        jnp.asarray(ok),
+        root_tangent,
+        lambda _: jnp.zeros_like(y_star),
+        rhs_dot,
+        false_is_free=True,
     )
     return out, (
         poison(dy, jnp.asarray(ok)),
