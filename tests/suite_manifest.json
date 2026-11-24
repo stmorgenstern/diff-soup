@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 55,
-    "test_functions": 530,
-    "collected_tests": 910,
-    "source_lines": 19196
+    "test_functions": 531,
+    "collected_tests": 912,
+    "source_lines": 19276
   },
   "tier_budgets": {
     "public_api": {
       "files": 22,
-      "functions": 225,
-      "collected": 366,
-      "lines": 7231
+      "functions": 226,
+      "collected": 368,
+      "lines": 7311
     },
     "contracts": {
       "files": 23,
@@ -270,7 +270,7 @@
     },
     {
       "file": "tests/public_api/test_measurements.py",
-      "feature": "Measurements: Measurement and Experiment, likelihood families, observation operators, windows and multishoot continuity, sensitivity labels, float32 evaluation"
+      "feature": "Measurements: Measurement and Experiment, a measurement at one time, likelihood families, observation operators, windows and multishoot continuity, sensitivity labels, float32 evaluation"
     },
     {
       "file": "tests/public_api/test_surface.py",

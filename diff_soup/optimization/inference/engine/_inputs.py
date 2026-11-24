@@ -509,7 +509,14 @@ def _lane_group(
         y0, times, streams = spans[experiment][index - first_lane[experiment]]
         if links is not None:
             times = links.times(index, times)
-        if times.shape[0] < 2 or np.any(np.diff(times) <= 0):
+        if times.shape[0] < 2:
+            # One time is the start alone: the lane would solve over no span.
+            raise ValueError(
+                f"experiment {lane!r} is measured only at the time of its initial state, "
+                f"{float(times[0])!r}; a lane solves from there to its last sample time, so "
+                "give it a sample time after the start."
+            )
+        if np.any(np.diff(times) <= 0):
             raise ValueError(
                 f"the sample times of experiment {lane!r} have to increase strictly from the "
                 "time of its initial state."
