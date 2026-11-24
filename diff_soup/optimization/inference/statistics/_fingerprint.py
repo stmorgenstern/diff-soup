@@ -44,6 +44,30 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+#: The metadata key of a dataclass field that is left out of a record while it
+#: holds its default. A setting added to an existing type carries it, so that a
+#: declaration that leaves the setting at its default keeps the fingerprint and
+#: the bucket identities it had before the setting existed; set to anything
+#: else, the setting is recorded and changes them.
+OMIT_AT_DEFAULT = "fingerprint_omit_at_default"
+
+
+def _recorded(value: object, field: dataclasses.Field) -> bool:
+    """Whether ``field`` of the dataclass ``value`` enters its record.
+
+    A field marked ``fingerprint=False`` never does. A new setting at its
+    default is not part of a study's identity: a field marked
+    ``OMIT_AT_DEFAULT`` is left out while it equals its declared default.
+    """
+    if not field.metadata.get("fingerprint", True):
+        return False
+    if not field.metadata.get(OMIT_AT_DEFAULT, False):
+        return True
+    current, default = getattr(value, field.name), field.default
+    at_default = type(current) is type(default) and current == default
+    return not at_default
+
+
 class _Recorder:
     """Convert supported objects to deterministic JSON-compatible records."""
 
@@ -212,7 +236,7 @@ class _Recorder:
                             ),
                         }
                         for field in dataclasses.fields(value)
-                        if field.metadata.get("fingerprint", True)
+                        if _recorded(value, field)
                     ],
                 },
             )

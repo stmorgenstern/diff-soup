@@ -50,6 +50,11 @@ from .common.contract import pack_state
 from .common.driver import DriverConfig, run_engine
 from .solution import Solution
 
+# Settings added after studies were saved with these solvers: at their
+# defaults they stay out of a study's fingerprint and bucket identities (the
+# rule is the fingerprint recorder's, statistics/_fingerprint.py, OMIT_AT_DEFAULT).
+_NEW_SETTING = {"fingerprint_omit_at_default": True}
+
 # The linear backend names a concrete sparse-direct or dense solver. The
 # constructor only validates the name here; a concrete engine resolves it to
 # a backend when it is built.
@@ -262,7 +267,7 @@ class _VSVOSolver(eqx.Module):
     precision: Precision = eqx.field(static=True, default_factory=Precision)
     jacobian_values_dtype: Any = eqx.field(static=True, default=None)
     profile: ExecutionProfile = _stock_profile("qndf")
-    max_steps: int = eqx.field(static=True, default=10_000)
+    max_steps: int = eqx.field(static=True, default=10_000, metadata=_NEW_SETTING)
 
     def __post_init__(self) -> None:
         """Validate the linear-backend name, the corrector-band scale and the step budget."""
@@ -562,8 +567,8 @@ class JIDA(_VSVOSolver):
     # instance rides as static metadata).
     id: Any = eqx.field(static=True, default=None, converter=_normalize_id_mask)
     adjoint: Any = eqx.field(static=True, default=None)
-    growth_after_failure: float | None = eqx.field(static=True, default=None)
-    growth_hold_steps: int = eqx.field(static=True, default=1)
+    growth_after_failure: float | None = eqx.field(static=True, default=None, metadata=_NEW_SETTING)
+    growth_hold_steps: int = eqx.field(static=True, default=1, metadata=_NEW_SETTING)
 
     def __post_init__(self) -> None:
         """Validate the initialization mode and the growth limit after a rejected attempt.
