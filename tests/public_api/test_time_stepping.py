@@ -447,3 +447,55 @@ def test_a_tight_atol_solve_finishes_where_its_corrections_reach_the_rounding_fl
     assert solution.result == ds.RESULT.SUCCESS
     exact = jax.vmap(analytical, in_axes=(0, None))(ts, theta)
     np.testing.assert_allclose(solution.ys, exact, rtol=0.0, atol=_FLOOR_BOUND)
+
+
+def _growth_after_rejections(solution, hold):
+    """The largest ratio of the step an accepted attempt chooses to the step before it, over the
+    ``hold`` accepted attempts that follow each rejected one (the trace's ``h`` is the step an
+    attempt chooses for the next one)."""
+    n = int(solution.stats.trial_steps)
+    accepted = np.asarray(solution.trace.header.accepted)[:n]
+    chosen = np.asarray(solution.trace.header.h)[:n]
+    left, ratios = 0, [0.0]
+    for j in range(1, n):
+        if not accepted[j]:
+            left = hold
+        elif left:
+            ratios.append(chosen[j] / chosen[j - 1])
+            left -= 1
+    return max(ratios)
+
+
+# measured 7.2e-7 between the end states with and without the limit (each 3.0e-5 from the
+# solve at rtol 1e-10), CPU Mac 2026-11-24, pytest tests/public_api/test_time_stepping.py
+_LIMITED_BOUND = 1e-5
+
+
+def test_a_growth_limit_after_a_rejected_step_holds_the_step_and_keeps_the_solution():
+    """Van der Pol at mu = 8: the controller doubles the step right after a rejected attempt;
+    with growth_after_failure=1 and growth_hold_steps=3 no step grows in the three accepted
+    steps after one, and the end state stays within the tolerance of the solve without it."""
+
+    def solve(**limit):
+        return ds.pdesolve(
+            ds.MassProblem(
+                rhs=lambda t, y, theta, control: jnp.stack(
+                    (y[1], theta * ((1.0 - y[0] ** 2) * y[1] - y[0]))
+                ),
+                mass=ds.MassOperator.identity(2),
+                structure=ds.DAEStructure(differential_vars=np.ones((2,), dtype=bool)),
+            ),
+            ds.JIDA(linear="dense", **_TIGHT, **limit),
+            (0.0, 20.0),
+            jnp.asarray([2.0, 0.0]),
+            theta=jnp.asarray(8.0),
+            dt0=1e-6,
+            max_steps=4000,
+            trace=True,
+        )
+
+    free, held = solve(), solve(growth_after_failure=1.0, growth_hold_steps=3)
+    assert _growth_after_rejections(free, 3) == 2.0
+    # measured 1.0 exactly: the limit sets the ratio to growth_after_failure where it binds
+    assert _growth_after_rejections(held, 3) <= 1.0 and bool(held.ok)
+    np.testing.assert_allclose(held.ys[-1], free.ys[-1], rtol=0.0, atol=_LIMITED_BOUND)

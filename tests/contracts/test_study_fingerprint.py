@@ -238,3 +238,48 @@ def test_the_lane_log_likelihood_carries_no_effect_batches_and_differentiates(la
     np.testing.assert_allclose(batched, single, rtol=1e-9)
     gradient = jax.jit(jax.jacfwd(lanes.log_likelihood))(x0)
     assert gradient.shape == x0.shape and bool(jnp.all(jnp.isfinite(gradient)))
+
+
+#: The study fingerprint and bucket digests of the decay study (JNDF) and of its rate observed
+#: by a stock JIDA, computed on dev/lfp-overhaul at cee23bc, before the solvers had max_steps,
+#: growth_after_failure and growth_hold_steps (CPU Mac, Python 3.12, JAX 0.11.2; a record holds
+#: the bytecode of the study's functions, so another Python minor version gives other values).
+_IDENTITY_BEFORE_NEW_SETTINGS = {
+    "decay": (
+        "5dc11faa2590398a9a18215816635217a57f3df5f7f661968ddd5775e37263b7",
+        ("1dad31183261ed5ef37b6ddbaf3924b6e15c9f8b9ce0af8c164a8f61257aa899",),
+    ),
+    "jida": (
+        "9d59a8b96d83c2d5d522730190644ac1b027416a9982a23877cbfe0434529688",
+        ("85580d624d8a35ca167cf53cdba1c3b9444e7a99ba195bb2b8b9bcb62b9cd848",),
+    ),
+}
+
+
+def _identity(study):
+    return study.fingerprint, tuple(b.full_identity.digest for b in ds.lower(study).plan().buckets)
+
+
+def _jida_study(decay, **settings):
+    experiment = inf.Experiment(
+        model=decay.model,
+        solver=ds.JIDA.stock(linear="dense", **settings),
+        t_span=(0.0, float(TIMES[-1])),
+        initial_state=decay.initial_state,
+        measurements=(mean_measurement(decay_values()),),
+        id="jida",
+    )
+    return inf.Study((experiment,), parameters=ds.ParameterSet(shared=(decay.rate,)))
+
+
+def test_a_new_solver_setting_at_its_default_leaves_the_study_identity_as_it_was():
+    """A study whose solvers leave max_steps, growth_after_failure and growth_hold_steps at their
+    defaults keeps the fingerprint and bucket digests it had before those settings existed;
+    setting any of them changes both."""
+    decay = decay_recipe("pinned_identity", source=True)
+    assert _identity(decay_study(decay)) == _IDENTITY_BEFORE_NEW_SETTINGS["decay"]
+    assert _identity(_jida_study(decay)) == _IDENTITY_BEFORE_NEW_SETTINGS["jida"]
+    before = _IDENTITY_BEFORE_NEW_SETTINGS["jida"]
+    for setting in ({"max_steps": 20_000}, {"growth_after_failure": 1.0}, {"growth_hold_steps": 3}):
+        changed = _identity(_jida_study(decay, **setting))
+        assert changed[0] != before[0] and changed[1] != before[1]

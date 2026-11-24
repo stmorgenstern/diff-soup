@@ -688,7 +688,7 @@ class Experiment:
 
     Args:
         model: The built problem, or a Recipe template built with the template arguments in `inputs`.
-        solver: The time-stepping solver used for every solve of the fit.
+        solver: The time-stepping solver used for every solve of the fit. Its `max_steps` bounds the step attempts of each solve, and of each segment of a schedule.
         t_span: The interval `(t0, t1)` of the solve, with `t0 < t1`.
         initial_state: The state the solve starts from at `t0`: an array, a [FixedInitialState][diff_soup.optimization.inference.FixedInitialState], a [LearnedInitialState][diff_soup.optimization.inference.LearnedInitialState] fitted with the parameters, or a [ComputedInitialState][diff_soup.optimization.inference.ComputedInitialState] computed from them at every evaluation.
         measurements: A non-empty tuple of [Measurement][diff_soup.optimization.inference.Measurement] with distinct names.

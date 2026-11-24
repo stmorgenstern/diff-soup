@@ -207,6 +207,10 @@ def _merge(merged: Any, part: Any, take: Any, count: int) -> Any:
     return jnp.where(mask, part.astype(merged.dtype), merged)
 
 
+#: The step budget of a segment whose solver names none.
+_DEFAULT_MAX_STEPS = 10_000
+
+
 def solve_schedule(
     problem: Any,
     solver: Any,
@@ -219,7 +223,7 @@ def solve_schedule(
     theta: Any = None,
     adjoint: Any = None,
     dt0: Any = None,
-    max_steps: int = 10_000,
+    max_steps: Optional[int] = None,
     outputs: Optional[tuple] = None,
 ) -> tuple[Solution, SegmentEnds]:
     """Solve the segments of a schedule one after another and merge their samples.
@@ -314,8 +318,12 @@ def solve_schedule(
             pad and are not valid.
         theta: The parameters, as for ``pdesolve``.
         adjoint: The differentiation strategy, as for ``pdesolve``.
-        max_steps: Step-attempt budget for each segment, as for ``pdesolve``.
-            The default is 10,000, including rejected attempts.
+        max_steps: The step budget of each segment: the number of step
+            attempts, rejected ones included, after which the segment's solve
+            stops with ``RESULT.MAX_STEPS`` and the schedule stops with it.
+            ``None`` takes the solver's ``max_steps`` attribute (10,000 on
+            ``JIDA``, ``JBDF`` and ``JNDF`` unless set), or 10,000 for a
+            solver that has none.
         dt0: The first step a segment's solve starts from when it carries no
             step, passed to its ``pdesolve`` as ``dt0=``; ``0`` lets the
             integrator estimate it, and it may be traced. ``None`` passes no
@@ -342,6 +350,9 @@ def solve_schedule(
             ``stop_kind`` entry is nonzero, or the problem translates its initial
             state in a way the carried state cannot be mapped back through.
     """
+    if max_steps is None:
+        max_steps = getattr(solver, "max_steps", None)
+        max_steps = _DEFAULT_MAX_STEPS if max_steps is None else int(max_steps)
     if not isinstance(schedule, ScheduleArrays):
         raise TypeError(
             f"schedule must be a ScheduleArrays; got {type(schedule).__name__}. Lower a "

@@ -261,3 +261,67 @@ def test_a_blind_scalar_beside_a_network_still_raises_the_identifiability_warnin
         fit = inf.optsolve(problem, optimizer)
     # The report covers the one scalar column, not the seven network weights.
     assert fit.diagnostics.theta_singular_values.shape == (1,)
+
+
+#: One segment of the oscillator below takes 15,700 step attempts at these tolerances, more
+#: than the default budget of 10,000, and each half of it 7,850 (CPU Mac 2026-11-24).
+_SPAN = 100.0
+_OSCILLATOR = {"linear": "dense", "rtol": 1e-8, "atol": 1e-10}
+
+
+def _oscillator_study(*, schedule, segments=1, **budget):
+    """A unit oscillator, one period per unit time, over ``_SPAN``: under a current held by a
+    schedule of ``segments`` equal holds, or with no control and one solve over the span."""
+    spec = ds.problem(f"fits_oscillator_{schedule}").domain(
+        "line", cartesian_grid_1d(1, 0.0, 1.0, method="fvm")
+    )
+    rate = spec.param("rate", value=1.0, learnable=True)
+    spec.field("a", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    spec.field("v", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
+    spec.observe.scalar(name="position", fn=lambda q: jnp.mean(q.a))
+    spec.equation(writes="a", reads=("v",))(lambda q: 2.0 * jnp.pi * q.v)
+    start, held = jnp.asarray([1.0, 0.0]), None
+    if schedule:
+        spec.global_var("I_cell", initial=0.0, mass="algebraic")
+        spec.observe.scalar(name="current", fn=lambda q: q["I_cell"])
+        spec.equation(writes="v", reads=("a", "I_cell"))(
+            lambda q: -2.0 * jnp.pi * q.p.rate * q.a + q["I_cell"]
+        )
+        spec.control.operational(
+            name="terminal", current="current", voltage="position", current_unknown="I_cell"
+        )
+        start = jnp.asarray([1.0, 0.0, 0.0])
+        held = ds.Schedule([ds.Segment(current=0.1, duration=_SPAN / segments)] * segments)
+    else:
+        spec.equation(writes="v", reads=("a",))(lambda q: -2.0 * jnp.pi * q.p.rate * q.a)
+    times = jnp.linspace(10.0, _SPAN, 10)
+    experiment = inf.Experiment(
+        model=spec.build(),
+        solver=ds.JIDA(**_OSCILLATOR, **budget),
+        t_span=(0.0, _SPAN),
+        initial_state=start,
+        measurements=(
+            inf.Measurement("position", times, jnp.zeros_like(times), observe="position"),
+        ),
+        schedule=held,
+        id="oscillator",
+    )
+    study = ds.lower(inf.Study((experiment,), parameters=ds.ParameterSet(shared=(rate,))))
+    study.prepare(modes=("gradient",))
+    return study.value_and_gradient(np.asarray([1.0]))
+
+
+@pytest.mark.parametrize("schedule", [True, False], ids=["schedule", "single-solve"])
+def test_the_step_budget_of_an_experiments_solve_is_its_solvers_max_steps(schedule):
+    """A solve that needs more step attempts than the default 10,000 fails its lane with the
+    kind max_steps, and solves with the solver's max_steps raised; under a schedule the budget
+    is each segment's, so the same schedule cut into two holds solves at the default, to the
+    same cost."""
+    capped = _oscillator_study(schedule=schedule)
+    raised = _oscillator_study(schedule=schedule, max_steps=20_000)
+    assert [entry["kind"] for entry in capped.failures] == ["max_steps"] and not raised.failures
+    if schedule:
+        cut = _oscillator_study(schedule=schedule, segments=2)
+        # measured 1.2e-6 relative (the steps differ after the cut), CPU Mac 2026-11-24,
+        # pytest tests/public_api/test_fits.py
+        np.testing.assert_allclose(cut.values, raised.values, rtol=1e-5)
