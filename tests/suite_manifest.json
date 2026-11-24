@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 55,
-    "test_functions": 527,
-    "collected_tests": 906,
-    "source_lines": 19035
+    "test_functions": 528,
+    "collected_tests": 908,
+    "source_lines": 19099
   },
   "tier_budgets": {
     "public_api": {
       "files": 22,
-      "functions": 223,
-      "collected": 363,
-      "lines": 7115
+      "functions": 224,
+      "collected": 365,
+      "lines": 7179
     },
     "contracts": {
       "files": 23,
@@ -246,7 +246,7 @@
     },
     {
       "file": "tests/public_api/test_fits.py",
-      "feature": "Fits: single, joint and lowered-study fits through optsolve with every public optimizer, bounds, a constrained fit and its derivative in args, the result contract"
+      "feature": "Fits: single, joint and lowered-study fits through optsolve with every public optimizer, bounds, a constrained fit and its derivative in args, the result contract, the step budget of an experiment's solve"
     },
     {
       "file": "tests/public_api/test_optimizer_stops.py",

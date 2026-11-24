@@ -487,7 +487,10 @@ def _solve_lane(program: LaneProgram, point: Array, lane: LaneInputs) -> tuple:
     continues the integrator where the one before it ended (step size, order
     and history of past steps); across a switch that changes what the row
     demands it restarts at order one from the carried step. Every other
-    segment starts afresh from the lane's ``dt0``.
+    segment starts afresh from the lane's ``dt0``. The step budget of the
+    solve, and of each segment, is the solver's ``max_steps`` (10,000 step
+    attempts unless the solver sets it); a solve that spends it fails the lane
+    with the kind ``max_steps``.
 
     A driven lane's linked signals take their values from its links
     (``_with_links``) before the solve. A source lane reads each output at its

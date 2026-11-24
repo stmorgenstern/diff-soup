@@ -248,6 +248,10 @@ class _VSVOSolver(eqx.Module):
         jacobian_values_dtype: Leave it unset, and set `Precision.jacobian_values_dtype` on the
             problem instead.
         profile: The `ExecutionProfile`, by default the class's `stock` profile.
+        max_steps: The step budget of a solve that names none, default `10_000`: the number of
+            step attempts, rejected ones included, after which the solve stops with
+            `RESULT.MAX_STEPS`. It also sizes the output buffers. A schedule solve gives it to
+            each segment, and so does the solve of an experiment in a fit.
     """
 
     rtol: float = 1e-6
@@ -258,9 +262,10 @@ class _VSVOSolver(eqx.Module):
     precision: Precision = eqx.field(static=True, default_factory=Precision)
     jacobian_values_dtype: Any = eqx.field(static=True, default=None)
     profile: ExecutionProfile = _stock_profile("qndf")
+    max_steps: int = eqx.field(static=True, default=10_000)
 
     def __post_init__(self) -> None:
-        """Validate the linear-backend name and the corrector-band scale."""
+        """Validate the linear-backend name, the corrector-band scale and the step budget."""
         if not isinstance(self.linear, LinearSolver) and (
             not isinstance(self.linear, str) or self.linear.lower() not in _LINEAR_NAMES
         ):
@@ -274,6 +279,15 @@ class _VSVOSolver(eqx.Module):
             raise ConfigurationError(
                 "newton_tol_factor must be a positive corrector-band scale; "
                 f"got {self.newton_tol_factor!r}."
+            )
+        if (
+            isinstance(self.max_steps, (bool, np.bool_))
+            or not isinstance(self.max_steps, (int, np.integer))
+            or int(self.max_steps) < 1
+        ):
+            raise ConfigurationError(
+                f"max_steps must be a whole number of step attempts, at least 1; got "
+                f"{self.max_steps!r}."
             )
         if int(self.ic_max_newton_iters) < 1:
             raise ConfigurationError(
@@ -349,7 +363,7 @@ class _VSVOSolver(eqx.Module):
         hmax: float = 0.0,
         dt0: float | Any = 0.0,
         max_order: int = 5,
-        max_steps: int = 10_000,
+        max_steps: int | None = None,
         max_events: int = 16,
         event: Any = None,
         control_state0: Any = None,
@@ -377,7 +391,9 @@ class _VSVOSolver(eqx.Module):
             hmax: The largest step size, `0` to leave it to the engine.
             dt0: The first step size, `0` to estimate it.
             max_order: The highest integration order, at most `5`.
-            max_steps: The step budget, which also sizes the output buffers.
+            max_steps: The number of step attempts, rejected ones included, after which the solve
+                stops with `RESULT.MAX_STEPS`; it also sizes the output buffers. `None` takes the
+                solver's `max_steps`.
             max_events: The capacity of the event log, past which `event_log.overflow` is set.
             event: An event or event set to monitor.
             control_state0: The initial control values, `{name: value}` for a Recipe with bound
@@ -433,7 +449,7 @@ class _VSVOSolver(eqx.Module):
         if lambda0 is not None:
             y0 = pack_state(y0, lambda0)
         cfg = DriverConfig(
-            max_steps=max_steps,
+            max_steps=self.max_steps if max_steps is None else max_steps,
             max_order=max_order,
             max_events=max_events,
             trace=trace,
