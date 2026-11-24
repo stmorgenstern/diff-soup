@@ -28,7 +28,9 @@ from diff_soup.optimization.inference.fitting.result import (
     TrustRegionReport,
 )
 from diff_soup.optimization.inference.fitting.scales import HessianScale, JacScale, XScale
+from diff_soup.optimization.solvers._barrier import bounds_from
 from diff_soup.optimization.solvers._loop import cost_threshold, trial_valid
+from diff_soup.optimization.solvers._projected_newton import binding_split, free_model
 from diff_soup.optimization.solvers._termination import (
     DEFAULT_COST_ATOL,
     DEFAULT_COST_TOL,
@@ -303,15 +305,31 @@ class NewtonTrustRegion(OptSolver):
         ``attempt`` is the model at the step's start: the point, its gradient, the
         model matrix (``None`` for the matrix-free Hessian), the scale, the
         Hessian-vector product, and the decrease predicted for the step taken.
-        The model's own step is its step within ``radius_max``.
+        The model's own step is its step within ``radius_max``, on the free coordinates
+        when there are bounds, as the solve steps.
         """
         point, gradient, matrix, scale, model_hvp, predicted = attempt
-        if matrix is not None:
-            step, decrease, _multiplier = _more_sorensen(matrix, gradient, scale, self.radius_max)
-        else:
-            step, decrease, *_ = _steihaug_cg(model_hvp, gradient, scale, self.radius_max, cg_iters)
         if bounds is not None:
-            step = jnp.clip(point + step, lb, ub) - point
+            box = bounds_from(lb, ub)
+            keep, onto = binding_split(point, gradient, box, self.radius_max / scale)
+            model_matrix = None if matrix is None else free_model(matrix, gradient, keep, scale)[0]
+            model_gradient = keep * gradient
+
+            def subproblem_hvp(vector):
+                return keep * model_hvp(keep * vector)
+
+        else:
+            model_matrix, model_gradient, subproblem_hvp = matrix, gradient, model_hvp
+        if matrix is not None:
+            step, decrease, _multiplier = _more_sorensen(
+                model_matrix, model_gradient, scale, self.radius_max
+            )
+        else:
+            step, decrease, *_ = _steihaug_cg(
+                subproblem_hvp, model_gradient, scale, self.radius_max, cg_iters
+            )
+        if bounds is not None:
+            step = jnp.clip(point + keep * step + onto, lb, ub) - point
             product = matrix @ step if matrix is not None else model_hvp(step)
             decrease = -(gradient @ step + 0.5 * step @ product)
         return model_held_the_step(float(local_value(decrease)), predicted, threshold)
@@ -342,9 +360,10 @@ class NewtonTrustRegion(OptSolver):
         n_segments = int(problem.n_segments)
         reg = NoReg() if problem.regularization is None else problem.regularization
         bounds = problem.bounds
-        lb = ub = None
+        lb = ub = box = None
         if bounds is not None:
             lb, ub = (jnp.asarray(side) for side in bounds)
+            box = bounds_from(lb, ub)
             x = jnp.clip(x, lb, ub)
         if not trial_valid(problem, x):
             raise ValueError("NewtonTrustRegion initial point failed the trial predicate.")
@@ -600,19 +619,40 @@ class NewtonTrustRegion(OptSolver):
                 status = TerminationStatus.GRAD_TOL
                 break
 
+            # On a box the step is Bertsekas' (as the projected Newton loop takes it): a
+            # coordinate at its bound with the gradient pushing out is held and moved onto
+            # the bound, and the subproblem, with its radius, is the model on the others.
+            keep = jnp.ones_like(x)
+            onto = jnp.zeros_like(x)
+            model_B, model_g, model_jacobian = B, g, current_jacobian
+            if bounds is not None:
+                keep, onto = binding_split(x, g, box, radius / scale)
+                model_g = keep * g
+                if B is not None:
+                    model_B = free_model(B, g, keep, scale)[0]
+                if resolved_linear_solver == "qr":
+                    # QR factors the Jacobian of the model: the free columns, and rows
+                    # giving the held coordinates the free model's diagonal.
+                    held_rows = jnp.diag(jnp.sqrt(jnp.diag(model_B) * (1.0 - keep)))
+                    model_jacobian = jnp.concatenate(
+                        (current_jacobian * keep[None, :], held_rows), axis=0
+                    )
+
             model_hvp = None
             if resolved_subproblem == "exact":
                 if resolved_linear_solver == "eigh":
-                    proposed_step, predicted, multiplier = _more_sorensen(B, g, scale, radius)
+                    proposed_step, predicted, multiplier = _more_sorensen(
+                        model_B, model_g, scale, radius
+                    )
                 else:
                     proposed_step, predicted, multiplier, used_fallback, factorizations = (
                         _factorized_psd_trust_region(
-                            B,
-                            g,
+                            model_B,
+                            model_g,
                             scale,
                             radius,
                             resolved_linear_solver,
-                            current_jacobian,
+                            model_jacobian,
                         )
                     )
                     counts["factorization_fallback"] += int(local_value(used_fallback))
@@ -639,9 +679,15 @@ class NewtonTrustRegion(OptSolver):
                         reg_product = jax.jvp(jax.grad(reg.penalty), (x,), (vector,))[1]
                         return data_product + reg_product
 
+                subproblem_hvp = model_hvp
+                if bounds is not None:
+
+                    def subproblem_hvp(vector, model_hvp=model_hvp, keep=keep):
+                        return keep * model_hvp(keep * vector)
+
                 proposed_step, predicted, products, _boundary, _negative = _steihaug_cg(
-                    model_hvp,
-                    g,
+                    subproblem_hvp,
+                    model_g,
                     scale,
                     radius,
                     cg_iters,
@@ -651,9 +697,11 @@ class NewtonTrustRegion(OptSolver):
 
             trial = x + proposed_step
             if bounds is not None:
-                trial = jnp.clip(trial, lb, ub)
+                trial = jnp.clip(x + keep * proposed_step + onto, lb, ub)
             actual_step = trial - x
-            scaled_step_norm = float(local_value(jnp.linalg.norm(scale * actual_step)))
+            # Whether the step reached the radius is read on the free coordinates, which
+            # the radius bounds; a held coordinate's move onto its bound does not count.
+            scaled_step_norm = float(local_value(jnp.linalg.norm(scale * keep * actual_step)))
             step_norm = float(local_value(jnp.linalg.norm(actual_step)))
             if bounds is not None:
                 if B is not None:

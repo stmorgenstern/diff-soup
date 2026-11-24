@@ -207,18 +207,52 @@ def _binding(
     return lower, upper
 
 
-def _proposal(state: InnerState, bounds: Bounds, step: TrustRegionStep) -> Float[Array, "n"]:
-    """The projected trial point of one step."""
-    x, gradient, hessian, radius = state.x, state.gradient, state.hessian, state.radius
+def binding_split(
+    x: Float[Array, "n"],
+    gradient: Float[Array, "n"],
+    bounds: Bounds,
+    radius: Float[ArrayLike, "..."],
+) -> tuple[Float[Array, "n"], Float[Array, "n"]]:
+    """The free mask and the move of the binding coordinates onto their bounds.
+
+    Returns `(keep, onto)`: `keep` is 1 on the free coordinates and 0 on the binding ones
+    of [_binding][]; `onto` moves each binding coordinate toward its bound by at most
+    `radius` (a scalar, or one radius per coordinate) and is 0 on the free ones.
+    """
     lower, upper = _binding(x, gradient, bounds)
     keep = (~(lower | upper)).astype(x.dtype)
-    big = 1.0 + jnp.sqrt(jnp.sum(hessian**2))
-    reduced = keep[:, None] * hessian * keep[None, :] + jnp.diag((1.0 - keep) * big)
-    free = keep * step(reduced, keep * gradient, radius)
     below, above = distances(x, bounds)
     onto = jnp.where(lower, -jnp.minimum(below, radius), 0.0) + jnp.where(
         upper, jnp.minimum(above, radius), 0.0
     )
+    return keep, onto
+
+
+def free_model(
+    hessian: Float[Array, "n n"],
+    gradient: Float[Array, "n"],
+    keep: Float[Array, "n"],
+    scale: Float[ArrayLike, "..."] = 1.0,
+) -> tuple[Float[Array, "n n"], Float[Array, "n"]]:
+    """The quadratic model restricted to the coordinates `keep` marks free.
+
+    The held coordinates are decoupled with zero gradient and a diagonal that, in the
+    coordinates `scale * x` a scaled subproblem works in, is above the free block's
+    spectrum, so the model's step there is zero and the radius is spent on the free ones.
+    """
+    inv_scale = 1.0 / jnp.broadcast_to(jnp.asarray(scale, hessian.dtype), keep.shape)
+    big = 1.0 + jnp.sqrt(jnp.sum((inv_scale[:, None] * hessian * inv_scale[None, :]) ** 2))
+    held = (1.0 - keep) * big / inv_scale**2
+    reduced = keep[:, None] * hessian * keep[None, :] + jnp.diag(held)
+    return reduced, keep * gradient
+
+
+def _proposal(state: InnerState, bounds: Bounds, step: TrustRegionStep) -> Float[Array, "n"]:
+    """The projected trial point of one step."""
+    x, gradient, hessian, radius = state.x, state.gradient, state.hessian, state.radius
+    keep, onto = binding_split(x, gradient, bounds, radius)
+    reduced, free_gradient = free_model(hessian, gradient, keep)
+    free = keep * step(reduced, free_gradient, radius)
     return project(x + free + onto, bounds)
 
 

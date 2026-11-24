@@ -39,6 +39,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
+from diff_soup.nonlinear._kkt import _regularized_schur
 from diff_soup.utils.lanes import lane_cond
 
 __all__ = [
@@ -162,8 +163,10 @@ def refresh_border_cache(
     the supplied blocks and solver, so the caller must pass the blocks the
     current generation counters describe.
 
-    The LU factor is taken of ``schur + regularization * I`` — the same
-    regularized matrix the correctors' small-system solve uses — so
+    The LU factor is taken of ``schur`` with ``regularization`` relative to
+    each row's largest entry on its diagonal
+    ([_regularized_schur][diff_soup.nonlinear._kkt._regularized_schur]) — the
+    same regularized matrix the correctors' small-system solve uses — so
     [border_cache_solve][] reproduces that solve exactly.
 
     Args:
@@ -180,8 +183,8 @@ def refresh_border_cache(
         b_block: The current ``B`` block, shape ``(n_state, n_border)``.
         c_block: The current ``C`` block, shape ``(n_border, n_state)``.
         d_block: The current ``D`` block, shape ``(n_border, n_border)``.
-        regularization: Tikhonov magnitude added to ``schur`` before
-            factoring.
+        regularization: Tikhonov magnitude, relative to each row's largest
+            entry, added to ``schur``'s diagonal before factoring.
 
     Returns:
         ``(cache, du_b_built, schur_built)`` — the fully valid record and
@@ -222,10 +225,7 @@ def refresh_border_cache(
     def _rebuild_schur(c: BorderSchurCache) -> BorderSchurCache:
         """Assemble the Schur complement, factor it, and re-key both tiers."""
         schur = d_block - c_block @ c.du_b
-        n_border = schur.shape[0]
-        eye = jnp.eye(n_border, dtype=schur.dtype)
-        reg = jnp.asarray(regularization, dtype=schur.dtype)
-        lu, piv = jax.scipy.linalg.lu_factor(schur + reg * eye)
+        lu, piv = jax.scipy.linalg.lu_factor(_regularized_schur(schur, regularization))
         schur_generation = c.schur_generation + 1
         return eqx.tree_at(
             lambda r: (
