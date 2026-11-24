@@ -226,3 +226,83 @@ def test_a_float32_problem_evaluates_in_float32_and_agrees_with_float64(precisio
     # pytest tests/public_api/test_measurements.py
     np.testing.assert_allclose(fit32.params, fit64.params, rtol=1e-4)
     np.testing.assert_allclose(post32.marginal_sd(), post64.marginal_sd(), rtol=1e-3)
+
+
+#: Solver settings of the single-time studies (requested tolerances, not asserted bounds).
+_SINGLE_TOLERANCES = {"rtol": 1e-10, "atol": 1e-12}
+
+
+def _single_time_model(schedule):
+    """A two-cell decay of learnable ``rate``: held under a current schedule through an
+    operational table, or alone."""
+    spec = ds.problem(f"single_time_{schedule}").domain(
+        "line", cartesian_grid_1d(2, 0.0, 1.0, method="fvm")
+    )
+    rate = spec.param("rate", value=0.8, learnable=True)
+    spec.field("u", mass="differential", scale=1.0, init=lambda x: jnp.full_like(x, 2.0))
+    if not schedule:
+        spec.observe.scalar(name="mean", fn=lambda q: jnp.mean(q.u))
+        spec.equation(writes="u", reads=("u",))(lambda q: -q.p.rate * q.u)
+        return spec.build(), rate, jnp.asarray([2.0, 2.0]), None
+    spec.global_var("I_cell", initial=0.0, mass="algebraic")
+    spec.observe.scalar(name="current", fn=lambda q: q["I_cell"])
+    spec.observe.scalar(name="mean", fn=lambda q: jnp.mean(q.u) - 2.0 * q["I_cell"])
+    spec.equation(writes="u", reads=("u", "I_cell"))(lambda q: -q.p.rate * q.u + q["I_cell"])
+    spec.control.operational(
+        name="terminal", current="current", voltage="mean", current_unknown="I_cell"
+    )
+    held = ds.Schedule(
+        [ds.Segment(current=0.5, duration=0.4), ds.Segment(current=-0.2, duration=0.6)]
+    )
+    return spec.build(), rate, jnp.asarray([2.0, 2.0, 0.0]), held
+
+
+def _single_time_study(schedule, scales):
+    """One experiment measured once at t = 0.7, by one measurement per noise scale given."""
+    model, rate, start, held = _single_time_model(schedule)
+    measured = tuple(
+        inf.Measurement(f"m{index}", [0.7], [1.3], observe="mean", likelihood=inf.Gaussian(scale=s))
+        for index, s in enumerate(scales)
+    )
+    experiment = inf.Experiment(
+        model=model,
+        solver=ds.JIDA(linear="dense", **_SINGLE_TOLERANCES),
+        t_span=(0.0, 1.0),
+        initial_state=start,
+        measurements=measured,
+        schedule=held,
+        id="cell",
+    )
+    study = ds.lower(inf.Study((experiment,), parameters=ds.ParameterSet(shared=(rate,))))
+    study.prepare(modes=("gradient",))
+    return study
+
+
+# measured 3.1e-16 and 1.8e-16 relative between the costs, CPU Mac 2026-11-24,
+# pytest tests/public_api/test_measurements.py
+_SINGLE_COST_BOUND = 1e-12
+# measured fitted rates equal to 1e-15 relative, CPU Mac 2026-11-24, same run
+_SINGLE_FIT_BOUND = 1e-10
+# measured 5.6e-8 and 1.1e-8 relative from central differences at h = 1e-5, CPU Mac
+# 2026-11-24, same run
+_SINGLE_GRADIENT_BOUND = 1e-6
+
+
+@pytest.mark.parametrize("schedule", [True, False], ids=["schedule", "single-solve"])
+def test_a_measurement_at_one_time_scores_as_that_time_twice_at_double_variance(schedule):
+    """A measurement at a single time gives the cost and the fitted rate of the same time
+    measured twice with twice its noise variance, and its gradient matches central differences."""
+    once = _single_time_study(schedule, (0.02,))
+    twice = _single_time_study(schedule, (0.02 * np.sqrt(2.0),) * 2)
+    x, h = np.asarray([0.6]), 1e-5
+    value = once.value_and_gradient(x)
+    np.testing.assert_allclose(
+        value.values, twice.value_and_gradient(x).values, rtol=_SINGLE_COST_BOUND
+    )
+    fits = [
+        inf.optsolve(s, inf.TrustRegion(max_steps=30), diagnostics=False) for s in (once, twice)
+    ]
+    np.testing.assert_allclose(fits[0].params, fits[1].params, rtol=_SINGLE_FIT_BOUND)
+    step = once.value_and_gradient(np.stack([x + h, x - h]))
+    difference = (step.values[0] - step.values[1]) / (2 * h)
+    np.testing.assert_allclose(value.gradients[0], difference, rtol=_SINGLE_GRADIENT_BOUND)

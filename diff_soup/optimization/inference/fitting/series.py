@@ -184,7 +184,7 @@ class Series(eqx.Module):
 
     Attributes:
         name: Unique stream name within a problem (e.g. ``"concentration"``).
-        ts: Observation times, shape ``(n_frames,)``.
+        ts: Observation times, shape ``(n_frames,)``, one frame or more.
         values: Observed values in observable space, shape ``(n_frames, ...)``.
         observable: The
             [ObservationOperator][diff_soup.optimization.inference.data.base.ObservationOperator]
@@ -255,8 +255,8 @@ class Series(eqx.Module):
         ts_arr = jnp.asarray(ts, dtype=dt)
         if ts_arr.ndim != 1:
             raise ValueError(f"Series.ts must be 1-D (n_frames,); got shape {ts_arr.shape}.")
-        if ts_arr.shape[0] < 2:
-            raise ValueError(f"Series.ts must have at least 2 frames; got {ts_arr.shape[0]}.")
+        if ts_arr.shape[0] < 1:
+            raise ValueError("Series.ts must hold at least one frame; got none.")
         self.name = name
         self.ts = ts_arr
         self.values = jnp.asarray(values, dtype=dt)
