@@ -254,6 +254,10 @@ class IDAEngineCarry(eqx.Module):
             (the flash order-raise gate; capped like the reference
             constant-``(h, k)`` counter). ``None`` under the source
             controller, so a source-profile carry has no extra leaves.
+        growth_hold: The number of accepted steps that still have their
+            growth limited after the last rejected attempt (``int32``), or
+            ``None`` when the engine sets no limit (``growth_after_failure``
+            is ``None``), so such a carry has no extra leaf.
     """
 
     state: IDAState
@@ -293,6 +297,7 @@ class IDAEngineCarry(eqx.Module):
     # ``None`` for the engine's uniform scalar. Runtime data, so it rides the
     # carry (the engine itself stays static configuration).
     atol_rows: Any = None
+    growth_hold: Any = None
 
 
 class IDAHistory(eqx.Module):
@@ -382,6 +387,13 @@ class IDAEngine(eqx.Module):
         controller_law: The flash controller's step-size law (``"pi"`` or
             ``"h211b"``); read only under ``controller_mode="flash"``.
         trace_kind: The per-step trace family name.
+        growth_after_failure: The largest ratio of the next step to the step
+            just accepted, for ``growth_hold_steps`` accepted steps after a
+            rejected attempt (an error-test failure or a corrector that did
+            not converge), or ``None`` for no limit beyond the controller's
+            own.
+        growth_hold_steps: The number of accepted steps after a rejected
+            attempt whose growth ``growth_after_failure`` limits.
     """
 
     backend: Any = eqx.field(static=True)
@@ -401,6 +413,8 @@ class IDAEngine(eqx.Module):
     jacobian_values_dtype: Any = eqx.field(static=True, default=None)
     ic_tol: Optional[float] = eqx.field(static=True, default=None)
     ic_rtol: Optional[float] = eqx.field(static=True, default=None)
+    growth_after_failure: Optional[float] = eqx.field(static=True, default=None)
+    growth_hold_steps: int = eqx.field(static=True, default=1)
 
     # -- helpers -----------------------------------------------------------
     def _id_mask(self, problem, dtype) -> jax.Array:
@@ -549,6 +563,7 @@ class IDAEngine(eqx.Module):
             border_cache=record.border_cache,
             held_current=jnp.asarray(False),
             atol_rows=atol_rows,
+            growth_hold=self._no_hold(),
         )
 
     def _fresh_carry(
@@ -706,9 +721,14 @@ class IDAEngine(eqx.Module):
             border_cache=initial_border_cache(n_u, n_lam, dtype) if n_lam > 0 else None,
             held_current=jnp.asarray(False),
             atol_rows=atol_rows,
+            growth_hold=self._no_hold(),
         )
 
     # -- one retry-loop pass ----------------------------------------------
+    def _no_hold(self):
+        """The growth hold a carry starts with: zero steps, or ``None`` without a limit."""
+        return None if self.growth_after_failure is None else jnp.asarray(0, jnp.int32)
+
     def decision_template(self):
         """Zero-valued decision inputs of one attempt, the shape a replay records.
 
@@ -1000,6 +1020,35 @@ class IDAEngine(eqx.Module):
             )
         else:
             flash_mem_next = None
+        # A limit on growth after a rejected attempt: for growth_hold_steps
+        # accepted steps after one, the next step is at most
+        # growth_after_failure times the step just accepted. Absent the
+        # setting this block is not built and the controller is untouched.
+        if self.growth_after_failure is None:
+            growth_hold_next = None
+        else:
+            held = carry.growth_hold > 0
+            ceiling = jnp.asarray(self.growth_after_failure, dtype) * jnp.abs(hh)
+            capped = held & (jnp.abs(new_state_acc.hh) > ceiling)
+            new_state_acc = eqx.tree_at(
+                lambda s: (s.hh, s.eta),
+                new_state_acc,
+                jax.lax.stop_gradient(
+                    (
+                        jnp.where(capped, jnp.sign(new_state_acc.hh) * ceiling, new_state_acc.hh),
+                        jnp.where(
+                            capped,
+                            jnp.asarray(self.growth_after_failure, dtype),
+                            new_state_acc.eta,
+                        ),
+                    )
+                ),
+            )
+            growth_hold_next = jnp.where(
+                accept,
+                jnp.maximum(carry.growth_hold - 1, 0),
+                jnp.asarray(int(self.growth_hold_steps), jnp.int32),
+            ).astype(jnp.int32)
         # The scaled local-error vector is not carried here: the driver reports
         # ck*enorm_k as the error estimate and exposes no consumer for a full
         # scaled-error vector, so it is never materialized.
@@ -1180,6 +1229,7 @@ class IDAEngine(eqx.Module):
             border_cache=nls.border_cache_out,
             held_current=jnp.ones_like(carry.held_current),
             atol_rows=carry.atol_rows,
+            growth_hold=growth_hold_next,
         )
 
         err_estimate = ck * enorm_k
@@ -1408,6 +1458,8 @@ def _build_ida_engine(
     jacobian_values_dtype=None,
     ic_tol=None,
     ic_rtol=None,
+    growth_after_failure=None,
+    growth_hold_steps=1,
 ):
     """Construct the engine (uncached).
 
@@ -1432,6 +1484,8 @@ def _build_ida_engine(
         jacobian_values_dtype=jacobian_values_dtype,
         ic_tol=None if ic_tol is None else float(ic_tol),
         ic_rtol=None if ic_rtol is None else float(ic_rtol),
+        growth_after_failure=None if growth_after_failure is None else float(growth_after_failure),
+        growth_hold_steps=int(growth_hold_steps),
     )
 
 
@@ -1452,6 +1506,8 @@ def ida_engine(
     jacobian_values_dtype=None,
     ic_tol: Optional[float] = None,
     ic_rtol: Optional[float] = None,
+    growth_after_failure: Optional[float] = None,
+    growth_hold_steps: int = 1,
 ) -> IDAEngine:
     """Build the implicit-DAE engine kernel from a solver profile.
 
@@ -1491,6 +1547,10 @@ def ida_engine(
             (``None`` = derived from ``atol``).
         ic_rtol: Relative tolerance of the consistent-initialization solve
             (``None`` = ``rtol``).
+        growth_after_failure: The largest ratio of the next step to the
+            step just accepted for ``growth_hold_steps`` accepted steps after
+            a rejected attempt, or ``None`` (default) for no limit.
+        growth_hold_steps: The number of accepted steps that limit holds.
 
     Returns:
         The configured [IDAEngine][].
@@ -1510,6 +1570,8 @@ def ida_engine(
             jacobian_values_dtype,
             None if ic_tol is None else float(ic_tol),
             None if ic_rtol is None else float(ic_rtol),
+            None if growth_after_failure is None else float(growth_after_failure),
+            int(growth_hold_steps),
         )
     except TypeError:
         # A per-row atol (or another unhashable input) cannot key the memo;
@@ -1528,6 +1590,8 @@ def ida_engine(
             jacobian_values_dtype,
             ic_tol,
             ic_rtol,
+            growth_after_failure,
+            growth_hold_steps,
         )
 
 

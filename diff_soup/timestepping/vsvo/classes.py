@@ -541,6 +541,13 @@ class JIDA(_VSVOSolver):
             structure.
         adjoint: The default differentiation strategy, where `None` is forward mode and
             `CheckpointAdjoint()` supports `jax.grad`.
+        growth_after_failure: The largest ratio of a step to the step accepted before it, for
+            `growth_hold_steps` accepted steps after a rejected attempt (a failed error test or a
+            corrector that did not converge), at least `1`; `None` (default) leaves the growth to
+            the step controller, which may double the step on every accepted step. A solve that
+            continues from an earlier solve's history starts with no steps held.
+        growth_hold_steps: The number of accepted steps after a rejected attempt whose growth
+            `growth_after_failure` limits, default `1`.
     """
 
     method_source = "ida"
@@ -555,9 +562,11 @@ class JIDA(_VSVOSolver):
     # instance rides as static metadata).
     id: Any = eqx.field(static=True, default=None, converter=_normalize_id_mask)
     adjoint: Any = eqx.field(static=True, default=None)
+    growth_after_failure: float | None = eqx.field(static=True, default=None)
+    growth_hold_steps: int = eqx.field(static=True, default=1)
 
     def __post_init__(self) -> None:
-        """Validate the initialization mode.
+        """Validate the initialization mode and the growth limit after a rejected attempt.
 
         The ``id`` differential-row mask is normalized to a static tuple by its
         field converter
@@ -577,6 +586,20 @@ class JIDA(_VSVOSolver):
                 "JIDA.ic_mode must be one of {'assume_consistent', "
                 "'y_fixed_ydot', 'ya_ydp', 'ya_ydp_euler'}; "
                 f"got {self.ic_mode!r}."
+            )
+        if self.growth_after_failure is not None and not float(self.growth_after_failure) >= 1.0:
+            raise ConfigurationError(
+                "growth_after_failure is the largest ratio of a step to the one before it, at "
+                f"least 1, or None; got {self.growth_after_failure!r}."
+            )
+        if (
+            isinstance(self.growth_hold_steps, (bool, np.bool_))
+            or not isinstance(self.growth_hold_steps, (int, np.integer))
+            or int(self.growth_hold_steps) < 1
+        ):
+            raise ConfigurationError(
+                "growth_hold_steps must be a whole number of accepted steps, at least 1; got "
+                f"{self.growth_hold_steps!r}."
             )
 
     def _default_consistent_ic(self) -> bool:
@@ -609,6 +632,8 @@ class JIDA(_VSVOSolver):
             id=self.id,
             ic_mode=self.ic_mode,
             jacobian_values_dtype=precision.jacobian_values_dtype,
+            growth_after_failure=self.growth_after_failure,
+            growth_hold_steps=self.growth_hold_steps,
             **options,
         )
 

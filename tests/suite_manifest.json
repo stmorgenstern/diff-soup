@@ -1,16 +1,16 @@
 {
   "budgets": {
     "test_files": 55,
-    "test_functions": 528,
-    "collected_tests": 908,
-    "source_lines": 19099
+    "test_functions": 529,
+    "collected_tests": 909,
+    "source_lines": 19151
   },
   "tier_budgets": {
     "public_api": {
       "files": 22,
-      "functions": 224,
-      "collected": 365,
-      "lines": 7179
+      "functions": 225,
+      "collected": 366,
+      "lines": 7231
     },
     "contracts": {
       "files": 23,
@@ -226,7 +226,7 @@
     },
     {
       "file": "tests/public_api/test_time_stepping.py",
-      "feature": "Time stepping: the engine x linear-backend matrix on closed forms, the jit, AD, vmap, dtype and hash safety matrix, solver statistics, float32 routes, float32 recipe assembly and a float32 periodic problem, and precision inheritance"
+      "feature": "Time stepping: the engine x linear-backend matrix on closed forms, the jit, AD, vmap, dtype and hash safety matrix, solver statistics, float32 routes, float32 recipe assembly and a float32 periodic problem, and precision inheritance, a growth limit after a rejected step"
     },
     {
       "file": "tests/public_api/test_solve_outputs.py",
