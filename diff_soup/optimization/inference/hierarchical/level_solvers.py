@@ -71,7 +71,10 @@ class TrustRegion(OptSolver):
     point from a request of the same mode, the accepted trial's own. The `blocks` request at
     an accepted point gives the step's matrix and gradient, never a cost. The costs the step
     log reports are these. The fit evaluates the start point's costs in the trials' mode once,
-    and again only when that mode changes (`OptResult.work["cost_passes"]`).
+    and again only when that mode changes (`OptResult.work["cost_passes"]`). A trial accepted
+    on its cost whose `blocks` request then fails is invalid, like one whose own request fails:
+    the fit stays at the point it stepped from, with that point's matrix, and quarters the
+    radius.
 
     Args:
         hessian: `"gauss-newton"` steps on the Gauss-Newton curvature, `"true"` on the exact Hessian.
@@ -85,7 +88,7 @@ class TrustRegion(OptSolver):
         cost_tol: The tolerance on the change in the objective relative to the objective, or `None` for the dtype's default.
         cost_atol: An absolute floor under the cost-change test, zero when `None`.
         stationarity_tol: The relative predicted decrease below which the fit ends, or `None` for the larger of `cost_tol` and three times the measured noise.
-        max_consecutive_invalid_trials: The number of trials in a row with failed solves that ends the fit as `STALLED`.
+        max_consecutive_invalid_trials: The number of trials in a row with failed solves, in the trial's own request or in the `blocks` request at a trial its cost accepted, that ends the fit as `STALLED`.
         noise_trial_limit: A rejected trial counts as noise only when its predicted decrease is within this multiple of the study's evaluation noise.
         noise_relaxed_ratio: If `True`, the ratio of achieved to predicted decrease allows for the measured evaluation noise.
         gradient_floor: The relative accuracy of the derivatives, below which the fit ends `DERIVATIVE_ACCURACY`, `"auto"` to derive it from the solvers' `rtol`, or `None`.
@@ -371,8 +374,9 @@ class TrustRegion(OptSolver):
             TypeError: If ``problem`` is neither an optimization problem nor
                 a lowered study.
             ValueError: If a lane that no rung solves fails at the start
-                point or at an accepted point (a resumed point included), the
-                start point fails the trial predicate, or ``state`` was saved
+                point, at a resumed point or at the current point (a trial
+                whose ``blocks`` request fails is invalid instead), the start
+                point fails the trial predicate, or ``state`` was saved
                 by another solver, mode, cut level, problem or number of
                 coordinates.
         """
