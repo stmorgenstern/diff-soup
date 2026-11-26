@@ -16,7 +16,10 @@ from diff_soup.optimization.inference.engine._batched import cut_by_member
 from diff_soup.optimization.inference.fitting.result import OptResult, StepInfo
 from diff_soup.optimization.inference.hierarchical import _level_elimination as elimination
 from diff_soup.optimization.inference.hierarchical import _polish_program as polish
-from diff_soup.optimization.inference.hierarchical._joint_fit import _JointFit
+from diff_soup.optimization.inference.hierarchical._joint_fit import (
+    _AcceptedPointFailure,
+    _JointFit,
+)
 from diff_soup.optimization.inference.hierarchical._lane_route import (
     _LABEL,
     _Failure,
@@ -148,10 +151,13 @@ class _NestedFit(_JointFit):
     it. The polish ends with a ``blocks`` request of every lane where it
     ended, the attempt's one, whose point, cost and system are the next
     attempt's. A member whose lanes fail at its polished point retreats along
-    its polish step. The members' radii and locks carry from one polish to
-    the next. With no polish iterations, or the polish switched off, the
-    trial's request is ``value`` and the fit makes the joint mode's attempts;
-    a polish in which no member iterates does too.
+    its polish step. A lane that fails in the ``blocks`` request at the
+    accepted trial itself (before the polish, or where a polish that kept no
+    member's move ends) makes the trial invalid, as in the joint mode. The
+    members' radii and locks carry from one polish to the next. With no
+    polish iterations, or the polish switched off, the trial's request is
+    ``value`` and the fit makes the joint mode's attempts; a polish in which
+    no member iterates does too.
     """
 
     def __init__(self, solver: TrustRegion, route: _LaneRoute, callbacks: tuple):
@@ -304,17 +310,20 @@ class _NestedFit(_JointFit):
                     str(self.route.ids[position]),
                     NONFINITE_BLOCKS,
                     float("nan"),
-                    (),
+                    tuple(str(label) for label in self.route.labels(int(position))),
                     (int(self.work.lane_rungs[position]),),
                 )
                 for position in np.flatnonzero(np.isin(self.lane_member, np.flatnonzero(broken)))
             )
             where = "the start point" if start else "an accepted point"
-            raise ValueError(
+            message = (
                 f"lane(s) {_failures_text(failures)} of {self.solver.nested_at} member(s) "
                 f"{[self.members[int(member)] for member in np.flatnonzero(broken)]} failed at "
                 f"{where} in the blocks mode; every lane has to solve at {where}."
             )
+            if start:
+                raise ValueError(message)
+            raise _AcceptedPointFailure(message, failures)
         return system, lane_costs
 
     def at_start(
@@ -392,6 +401,42 @@ class _NestedFit(_JointFit):
         return self.polish(
             loop, system, lane_costs, attempt=attempt, predicted=predicted, level=level
         )
+
+    def before_accept(self, loop: LoopState) -> dict:
+        """The joint fit's ``before_accept``, with the members' numbers where the attempt stepped from.
+
+        Also the lane costs of the latest request of every lane and the current
+        point, which the polish's requests can change.
+        """
+        kept = super().before_accept(loop)
+        kept["stepped_from"] = self.stepped_from
+        kept["trial_lanes"] = self.trial_lanes
+        kept["current"] = self.current
+        return kept
+
+    def leave_trial(
+        self,
+        kept: dict,
+        loop: LoopState,
+        system: elimination.LevelSystem,
+        lane_costs: np.ndarray,
+    ) -> tuple:
+        """The joint fit's ``leave_trial``; with the frozen pass, the lanes' Jacobians kept again.
+
+        A trial's ``blocks`` request, and the polish's, replace the Jacobians
+        the lanes keep for the frozen pass; with that pass on, one ``blocks``
+        request at the point (``matrix_at``) keeps theirs there again, and its
+        system and lane costs, of that point, are the ones held.
+        """
+        system, lane_costs = super().leave_trial(kept, loop, system, lane_costs)
+        self.stepped_from = kept["stepped_from"]
+        self.trial_lanes = kept["trial_lanes"]
+        self.current = kept["current"]
+        if "frozen" in self.modes:
+            system, lane_costs = self.matrix_at(loop.point, lane_costs)
+            loop.cost = float(system.cost)
+            self.started_at(loop.point, system, lane_costs)
+        return system, lane_costs
 
     def polish(
         self,

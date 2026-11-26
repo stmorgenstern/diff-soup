@@ -727,8 +727,8 @@ def test_a_member_whose_step_cannot_be_bracketed_is_held_when_asked(attempt):
 def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_in_the_polish():
     """A member whose lanes solve at a finite cost but give non-finite Gauss-Newton blocks at its
     polished point has its lanes recorded as failed: it retreats along its polish step and goes
-    back to where its lanes solved, at a finite cost; at an accepted step such blocks end the fit
-    with an error naming the member."""
+    back to where its lanes solved, at a finite cost; at an accepted trial such blocks make the
+    trial invalid, and a fit whose every trial meets them stalls naming the member's lane."""
     from tests.support.inference import (
         NOISE,
         TIMES,
@@ -781,8 +781,8 @@ def test_a_member_with_non_finite_sensitivities_at_a_finite_cost_retreats_in_the
     assert np.isfinite(fit.cost) and int(fit.work["inner_retreats"][1]) > 0
     assert {str(kind) for kind in fit.work["failure_kind"]} == {"nonfinite_blocks_at_finite_cost"}
     assert all(fit.work["failure_inner"])
-    with pytest.raises(ValueError, match="cell-b"):
-        small_fit(lowered, inf.TrustRegion(max_steps=6, nested_at="cell"))
+    stalled = small_fit(lowered, inf.TrustRegion(max_steps=6, nested_at="cell"))
+    assert stalled.status is inf.TerminationStatus.STALLED and "cell-b" in stalled.message
 
 
 def _banded_toy(name, band, hump=None):

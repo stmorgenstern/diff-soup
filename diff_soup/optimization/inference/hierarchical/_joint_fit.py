@@ -117,6 +117,21 @@ class _TrialAnswer(NamedTuple):
     failed: jax.Array
 
 
+class _AcceptedPointFailure(ValueError):
+    """A lane of nonzero weight failed in the request of the matrix's mode at an accepted point.
+
+    ``failures`` are the failed lanes and ``ignored`` the failed lanes of weight
+    zero that the request has not logged. At a resumed point it ends the fit as
+    the ``ValueError`` it is; at a trial the loop accepted on its cost the loop
+    makes that trial invalid instead.
+    """
+
+    def __init__(self, message: str, failures: tuple, ignored: tuple = ()):
+        super().__init__(message)
+        self.failures = failures
+        self.ignored = ignored
+
+
 def _rows_solve(rows, system, gradient, coordinates, radius, point, settings, bounds) -> tuple:
     """``propose``'s ``solve`` under the inequality rows ``rows`` (a ``RowSet``), traced.
 
@@ -323,6 +338,9 @@ class _JointFit:
 
         Every lane of nonzero weight, that is: a failed lane of weight zero is
         logged as ignored. Returns the system and the lane costs at ``point``.
+        A failed lane of nonzero weight raises ``ValueError`` at the start and
+        ``_AcceptedPointFailure`` elsewhere, before the failed lanes of weight
+        zero are logged.
         """
         route = self.route
         results = self.evaluate(self.matrix, point)
@@ -333,9 +351,11 @@ class _JointFit:
                 "has to solve at the start point."
             )
         if failures:
-            raise ValueError(
+            raise _AcceptedPointFailure(
                 f"lane(s) {_failures_text(failures)} failed at an accepted point in the "
-                f"{self.matrix} mode; every lane has to solve at an accepted point."
+                f"{self.matrix} mode; every lane has to solve at an accepted point.",
+                failures,
+                ignored,
             )
         self.work.record(self.work.attempts, ignored, inner=False)
         system = route.system(results, point)
@@ -410,12 +430,61 @@ class _JointFit:
         (``results``), so that the next gain ratio compares the costs of two
         requests of one mode. ``system`` is the system the attempt stepped on;
         the nested mode polishes from them and moves ``loop.point``,
-        ``loop.cost`` and ``loop.scale`` to where its polish ended.
+        ``loop.cost`` and ``loop.scale`` to where its polish ended. A lane that
+        fails in the request of the matrix's mode raises
+        ``_AcceptedPointFailure``, and the loop makes the trial invalid
+        (``leave_trial``).
         """
         lane_costs = np.array(results.cost, dtype=np.float64)[0]
         self.cost_mode = self.trial_pass()
         system, lane_costs = self.matrix_at(loop.point, lane_costs)
         loop.cost = float(system.cost)
+        return system, lane_costs
+
+    def before_accept(self, loop: LoopState) -> dict:
+        """What ``accept`` can change before its request of the matrix's mode fails.
+
+        The loop's point, cost and scale, every lane's rung and rung-0 first
+        step as the trial's request left them, the mode of the lane costs, the
+        held nodes and the gradient floor's terms; ``leave_trial`` puts them
+        back.
+        """
+        work, floor = self.work, self.floor
+        return {
+            "point": loop.point,
+            "cost": loop.cost,
+            "scale": loop.scale,
+            "lane_rungs": work.lane_rungs.copy(),
+            "lane_first_steps": work.lane_first_steps.copy(),
+            "cost_mode": self.cost_mode,
+            "held": work.held,
+            "floor": (floor.current, floor.latest),
+        }
+
+    def leave_trial(
+        self,
+        kept: dict,
+        loop: LoopState,
+        system: elimination.LevelSystem,
+        lane_costs: np.ndarray,
+    ) -> tuple:
+        """Stay at the point the attempt stepped from: its accepted trial's matrix request failed.
+
+        Puts back what ``before_accept`` kept and counts the trial as not
+        accepted. Every lane holds the rung the trial's own request left it
+        at: the rungs the failed request raised are dropped, so that the lane
+        costs held at the point stay those of the rungs the lanes hold, as
+        after any rejected trial. Returns ``system`` and ``lane_costs``, the
+        point's own, which stay.
+        """
+        work = self.work
+        loop.point, loop.cost, loop.scale = kept["point"], kept["cost"], kept["scale"]
+        loop.accepted -= 1
+        work.lane_rungs[:] = kept["lane_rungs"]
+        work.lane_first_steps[:] = kept["lane_first_steps"]
+        self.cost_mode = kept["cost_mode"]
+        work.held = kept["held"]
+        self.floor.current, self.floor.latest = kept["floor"]
         return system, lane_costs
 
     def cost_at(self, lane_costs: np.ndarray, point: np.ndarray) -> float:
@@ -1000,10 +1069,11 @@ class _JointFit:
                     trial_cost = route.trial_cost(results, trial)
 
             predicted = float(proposal.predicted)
+            step_radius = loop.radius
             rho, accepted, radius, reason, after = self.judge(
                 loop,
                 loop.cost,
-                self.outcome_of(proposal, loop.radius, trial_ok, invalid, trial_cost),
+                self.outcome_of(proposal, step_radius, trial_ok, invalid, trial_cost),
             )
             rho, accepted = float(rho), bool(accepted)
             loop.radius = float(radius)
@@ -1012,16 +1082,50 @@ class _JointFit:
 
             level = float(proposal.level)
             if accepted:
+                kept = self.before_accept(loop)
                 loop.point = trial
                 loop.accepted += 1
-                system, lane_costs = self.accept(
-                    loop,
-                    system,
-                    results,
-                    attempt=attempt,
-                    predicted=predicted,
-                    level=None if np.isnan(level) else level,
-                )
+                try:
+                    system, lane_costs = self.accept(
+                        loop,
+                        system,
+                        results,
+                        attempt=attempt,
+                        predicted=predicted,
+                        level=None if np.isnan(level) else level,
+                    )
+                except _AcceptedPointFailure as error:
+                    # No step can be taken from a point whose matrix is not computed: the
+                    # fit stays where it was, and the trial is judged again as invalid,
+                    # like one whose own request failed.
+                    system, lane_costs = self.leave_trial(kept, loop, system, lane_costs)
+                    failures, invalid = error.failures, True
+                    work.record(attempt, error.ignored, inner=False)
+                    work.invalid_trials += 1
+                    work.record(attempt, failures, inner=False)
+                    failed_owners = route.owners(failures)
+                    rejection_reason = (
+                        f"the lane solve failed in the {self.matrix} mode at the trial for "
+                        f"experiment(s) {_listed(failure.lane for failure in failures)} ("
+                        + _listed(
+                            failure.kind
+                            + (
+                                f" at t = {failure.t_reached:.6g}"
+                                if np.isfinite(failure.t_reached)
+                                else ""
+                            )
+                            for failure in failures
+                        )
+                        + ")"
+                    )
+                    rho, accepted, radius, reason, after = self.judge(
+                        loop,
+                        loop.cost,
+                        self.outcome_of(proposal, step_radius, trial_ok, True, float("inf")),
+                    )
+                    rho, accepted = float(rho), bool(accepted)
+                    loop.radius = float(radius)
+                    assert_decision(accepted)
             work.attempted(accepted)
             loop.radius_history.append(loop.radius)
             loop.keep(after.trials)

@@ -90,7 +90,9 @@ class _Work:
     request solved at a higher rung than it asked for is asked for at that rung
     from then on, with the first step of the rung-0 solve that rung scales as
     its base; a lane that solved at rung 0 keeps the first step its solve took
-    as its base. A rung is never lowered.
+    as its base. A rung is never lowered, except that a trial accepted on its
+    cost whose matrix request then failed takes the rungs that request raised
+    with it: every lane holds the rung the trial's own request left it at.
     """
 
     COUNTS = (
