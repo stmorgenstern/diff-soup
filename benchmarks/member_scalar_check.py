@@ -186,7 +186,8 @@ def main() -> int:
         from diff_soup.timestepping.tolerances import resolve_for_problem
 
         resolved = resolve_for_problem(
-            ds.ToleranceSpec(rtol=RTOL, atol={"differential": 1e-10, "algebraic": 1e-7}), problem
+            ds.ToleranceSpec(rtol=RTOL, atol={"differential": 1e-10, "algebraic": 1e-7}),
+            ds.solver_view(problem),
         )
         atol_layer = np.asarray(view.field(jnp.asarray(resolved.atol[:n]), "layer"))
         print(f"  role tolerance on layer rows: {np.unique(atol_layer)} (differential 1e-10)")
