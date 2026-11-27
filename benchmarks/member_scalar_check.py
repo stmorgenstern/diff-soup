@@ -6,7 +6,7 @@ Not part of the benchmark suite: a hand-run check on a GPU with cuDSS, printed a
     JAX_ENABLE_X64=1 python benchmarks/member_scalar_check.py pullbacks
 
 ``pullbacks`` prints only the cost of the iteration matrix's assembly (held rows,
-pullbacks, colours) at 8 and 64 members whose scalar rows read shared host unknowns,
+pullbacks, colours) at 8 and 64 members whose scalar rows read host unknowns,
 before and after the recolouring pass chose its shared columns again, and the matrix
 against a dense ``jax.jacfwd`` (see ``pullbacks``).
 
@@ -165,20 +165,30 @@ def reference(cbar0, times, steps=40_000):
     return out[:, 0], out[:, 1]
 
 
-def build_count(count: int, tag: str = ""):
-    """A host of two unknowns, ``ce`` and ``film``, and ``count`` members of ``N_MAX`` sites.
+HOSTS = 8  # host unknowns every member's rate row reads
 
-    Each member's ``rate`` row reads its sites and ``ce`` (a wide row, recovered by
-    pullback), and its ``layer`` row reads ``rate``, ``layer`` and ``film``: every
-    ``layer`` row reads the one host column ``film``. Returns the problem and ``theta``.
+
+def build_count(count: int, tag: str = ""):
+    """A host of ``HOSTS + 1`` unknowns and ``count`` members of ``N_MAX`` sites.
+
+    Each member's ``rate`` row reads ``rate`` and the host unknowns ``h0`` .. ``h7``
+    (a row wider than the rest, recovered by pullback with the host columns left to the
+    colouring), and its ``layer`` row reads ``rate``, ``layer`` and the host unknown
+    ``film``: every ``layer`` row reads the one host column ``film``, as each platelet's
+    layer reads the film on the gold. The sites' rows are a diffusion. Returns the problem
+    and ``theta``.
     """
     spec = ds.problem(f"member_scalar_pullbacks_{count}{tag}").domain(
         "cell", cartesian_grid_1d(1, 0.0, 1.0, method="fvm")
     )
-    ce = spec.field("ce", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    hosts = [
+        spec.field(f"h{j}", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+        for j in range(HOSTS)
+    ]
     film = spec.field("film", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
     spec.param("k", value=K, learnable=True)
-    spec.equation(writes="ce", reads=("ce",))(lambda q: -0.1 * q.ce)
+    for j in range(HOSTS):
+        spec.equation(writes=f"h{j}", reads=(f"h{j}",))(lambda q, j=j: -0.1 * getattr(q, f"h{j}"))
     spec.equation(writes="film", reads=("film",))(lambda q: G + 0.0 * q.film)
     names = ("c", "rate", "layer")
     members = spec.family(
@@ -193,24 +203,36 @@ def build_count(count: int, tag: str = ""):
     members.field_decl("rate", mass="algebraic", shape=(1,))
     members.field_decl("layer", mass="differential", shape=(1,))
 
-    def relax(q, m):
-        return DIFF * q.ops.laplacian(q.c) - m.a * (q.c - 1.0)
-
     def rate_row(q, m):
-        host = jnp.reshape(q.ce, (-1,))[0]
-        return q.rate - jnp.mean(relax(q, m)) * host
+        drive = sum((j + 1.0) * jnp.reshape(getattr(q, f"h{j}"), (-1,))[0] for j in range(HOSTS))
+        return q.rate - m.a * drive
 
     def layer_row(q, m):
         shared = jnp.reshape(q.film, (-1,))[0]
         return q.p.k * smooth_abs(q.rate, EPS) * (shared - q.layer)
 
-    members.equation(writes="c", reads=("c",))(relax)
-    members.equation(writes="rate", reads=("c", "rate", "ce"))(rate_row)
+    members.equation(writes="c", reads=("c",))(lambda q, m: DIFF * q.ops.laplacian(q.c) - m.a * (q.c - 1.0))
+    members.equation(writes="rate", reads=("rate", *(f"h{j}" for j in range(HOSTS))))(rate_row)
     members.equation(writes="layer", reads=("layer", "rate", "film"))(layer_row)
-    spec.couple(ce, onto="p", at=np.zeros(count, dtype=np.int64))
-    spec.couple(film, onto="p", at=np.zeros(count, dtype=np.int64))
+    for host in (*hosts, film):
+        spec.couple(host, onto="p", at=np.zeros(count, dtype=np.int64))
     problem = spec.build()
     return problem, ds.default_theta(problem)
+
+
+def held_by_field(problem, held) -> str:
+    """The held rows counted by member field, the rest as host rows."""
+    view = problem.family_view("p")
+    index = jnp.arange(int(problem.state_size()), dtype=jnp.float64)
+    parts = []
+    taken = 0
+    for name in ("c", "rate", "layer"):
+        rows = np.asarray(view.field(index, name)).astype(np.int64).ravel()
+        count = int(np.isin(held, rows).sum())
+        taken += count
+        parts.append(f"{name} {count}")
+    parts.append(f"host {int(np.asarray(held).size) - taken}")
+    return ", ".join(parts)
 
 
 def pullbacks() -> int:
@@ -240,7 +262,7 @@ def pullbacks() -> int:
         return share
 
     print(f"devices {jax.devices()}")
-    print("members | rule   | n    | held rows | pullbacks | colours | max |assembled - dense|")
+    print("members | rule   | n    | held rows | pullbacks | colours | max |assembled - dense| | held rows by field")
     counts = {}
     for count in (8, 64):
         for rule in ("before", "now"):
@@ -250,6 +272,7 @@ def pullbacks() -> int:
                 sv = ds.solver_view(problem)
                 lin = sv.plan.linearization
                 held = int(np.asarray(lin.held_rows).size)
+                kinds = held_by_field(problem, np.asarray(lin.held_rows))
                 state, slope = jax.random.uniform(
                     jax.random.PRNGKey(3), (2, sv.n), minval=0.5, maxval=1.5
                 )
@@ -265,10 +288,12 @@ def pullbacks() -> int:
             err = float(np.abs(assembled - np.asarray(dense)).max())
             print(
                 f"  {count:5d} | {rule:6s} | {sv.n:4d} | {held:9d} | {lin.pullback_count:9d} | "
-                f"{lin.color_count:7d} | {err:.2e}"
+                f"{lin.color_count:7d} | {err:.2e} | held: {kinds}"
             )
             check(f"{count} members, {rule}: max |assembled - dense|", err, 1e-12)
             counts[(count, rule)] = lin.pullback_count
+    check("pullbacks at 64 members, before - at 8 (the fault reproduced, at least 2)",
+          2.0 - float(counts[(64, "before")] - counts[(8, "before")]), 0.0)
     check("pullbacks at 64 members - at 8 (now)", float(abs(counts[(64, "now")] - counts[(8, "now")])), 0.0)
     print("\n" + ("all checks pass" if not failures else f"FAILED: {failures}"))
     return 1 if failures else 0
