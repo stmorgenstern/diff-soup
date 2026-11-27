@@ -267,12 +267,21 @@ def _member_blocks(problem: Any, family: Any) -> list:
 
 
 def member_schur_layout(problem: Any, *, n_dofs: Optional[int] = None) -> Any:
-    """The `MemberSchurLayout` of every family member of a lowered problem.
+    """The [`MemberSchurLayout`][diff_soup.linear.MemberSchurLayout] of every family member of a built problem.
 
     Each member's grid unknowns are its fields that have one entry per grid
     point, site by site with the fields in declaration order inside a site; its
-    scalars are its fields of one entry. Every unknown in no family member
-    (components, host fields, globals) is shared.
+    scalars are its fields of one entry, algebraic or differential. Every
+    unknown in no family member (components, host fields, globals) is shared.
+    Public as `ds.linear.member_schur_layout`.
+
+    !!! example
+
+        ```python
+        problem = spec.build()
+        layout = ds.linear.member_schur_layout(problem)
+        solver = ds.JIDA.stock(linear=ds.linear.MemberSchur(layout, shared=ds.linear.CuDSS()))
+        ```
 
     Args:
         problem: The lowered problem (`spec.build()`).

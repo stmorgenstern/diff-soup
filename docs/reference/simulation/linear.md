@@ -57,6 +57,18 @@ These take arguments, so they are passed as objects.
     options:
       members: false
 
+::: diff_soup.linear.MemberSchur
+    options:
+      members: false
+
+::: diff_soup.linear.MemberSchurLayout
+    options:
+      members: false
+
+::: diff_soup.problem._ir._low_rank.member_schur_layout
+    options:
+      show_root_full_path: false
+
 ::: diff_soup.linear.Woodbury
     options:
       members: false

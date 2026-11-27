@@ -74,6 +74,46 @@ Run such a program on the CPU device, with
 Reading batched solves and the per-backend batch rules are covered in
 [batched solves](batched-solves.md).
 
+## Families of members
+
+`ds.linear.MemberSchur` solves the iteration matrix of a problem whose
+families hold many members, such as the particles of an electrode, by
+eliminating every member at once and factoring only what the members
+share.
+
+- A member is one member of a family (`spec.family`): its grid fields,
+  which have one value per site of the member domain, and its scalars,
+  the fields declared with `shape=(1,)`, algebraic or differential.
+  Every other unknown (component fields, the fields of other domains,
+  globals) is shared.
+- The member's grid rows must couple sites at most one site apart, as
+  a radius-one stencil on a one-dimensional member grid does. A
+  quantity that every site reads, such as the member's mean, is
+  declared as a member scalar.
+- A member may have any number of scalars. A scalar's row and column
+  may be full over its own member, and its row may read shared
+  unknowns.
+- Members interact only through shared unknowns. An entry that joins a
+  scalar of one member to another member makes that scalar shared; one
+  that joins the sites of two members is refused.
+- Members may differ in their number of sites, as in a family declared
+  with `nodes=`.
+
+`ds.linear.member_schur_layout(problem)` reads the members of a built
+problem, and the layout is passed to the backend with the exact backend
+that factors the shared system:
+
+```python
+problem = spec.build()
+layout = ds.linear.member_schur_layout(problem)
+linear = ds.linear.MemberSchur(layout, shared=ds.linear.CuDSS(), elimination="cyclic")
+solver = ds.JIDA.stock(linear=linear)
+```
+
+`elimination=` selects how each member's chain of sites is eliminated:
+`"thomas"` sweeps along the chain, `"cyclic"` is block cyclic reduction,
+which suits a GPU, and `"native"` is a threaded kernel on the CPU.
+
 ## Status reporting
 
 A factorization that meets a zero pivot reports `SolveStatus.SINGULAR`,

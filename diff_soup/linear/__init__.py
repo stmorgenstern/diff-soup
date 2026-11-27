@@ -40,7 +40,8 @@ Structured backends serve operators with a known structure in pure JAX:
 ``MemberBlock`` (banded member blocks and a retained Schur complement,
 described by a ``MemberBlockLayout``), ``MemberSchur`` (members eliminated
 in JAX and their shared Schur complement factored by another exact backend,
-described by a ``MemberSchurLayout``) and ``Woodbury`` (an operator with a
+described by a ``MemberSchurLayout``, which ``member_schur_layout`` reads from
+a built problem's families) and ``Woodbury`` (an operator with a
 low-rank term ``U W^T``, declared by a ``LowRankTerm``, over a factor of the
 base operator from any exact backend).
 
@@ -152,8 +153,22 @@ __all__ = [
     "MemberBlockLayout",
     "MemberSchur",
     "MemberSchurLayout",
+    "member_schur_layout",
     "Woodbury",
     # Iterative solves
     "Krylov",
     "gmres",
 ]
+
+
+def __getattr__(name: str):
+    """``member_schur_layout``, imported on first use.
+
+    It reads a lowered problem, so it lives in the problem layer, which imports
+    this package; importing it here at module load would be a cycle.
+    """
+    if name == "member_schur_layout":
+        from diff_soup.problem._ir._low_rank import member_schur_layout
+
+        return member_schur_layout
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
