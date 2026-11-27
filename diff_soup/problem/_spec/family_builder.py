@@ -725,8 +725,11 @@ class _FamilyHandle:
         """Declare a member field, a profile on the member domain or a per-member scalar.
 
         A profile has one value per member-domain node. `shape=(1,)` declares a
-        per-member scalar, which must be `mass="algebraic"` and is closed by its own
-        member equation.
+        per-member scalar, one unknown per member written by its own member
+        equation. An algebraic scalar `s` solves `0 = f`; a differential one
+        solves `ds/dt = f` with a unit mass row, keeps its initial value through
+        consistent initialization, and enters the error norm like any
+        differential unknown.
 
         Args:
             name: Member field name, unique in the family.
@@ -763,22 +766,14 @@ class _FamilyHandle:
             member_size = 1
             for s in shape_k:
                 member_size *= s
-            if shape_k == (1,) and n_nodes != 1:
-                if mass != "algebraic":
-                    raise ValueError(
-                        f"family {self.name!r} field {name!r}: a per-member scalar "
-                        f"(shape (1,)) must be mass='algebraic' (0 = f, closed by "
-                        f"its own member equation); received mass={mass!r}. A "
-                        "differential per-member scalar has no member mass row; "
-                        "declare it algebraic, or make it a profile field on the "
-                        "member domain."
-                    )
-            elif member_size != n_nodes:
+            # A per-member scalar (shape (1,)) may be algebraic or differential:
+            # one row per member either way. Any other shape is a profile.
+            if shape_k != (1,) and member_size != n_nodes:
                 raise ValueError(
                     f"family {self.name!r} field {name!r}: a multi-dim member field "
                     f"(shape {shape_k}) is not supported: a family member field is "
-                    "a single 1-D radial profile or a per-member algebraic scalar "
-                    "(shape=(1,), mass='algebraic'). Reformulate the physics on the "
+                    "a single 1-D radial profile or a per-member scalar "
+                    "(shape=(1,)). Reformulate the physics on the "
                     "shared unit ball with the size entering only as the scalar "
                     "D_s/R^2."
                 )

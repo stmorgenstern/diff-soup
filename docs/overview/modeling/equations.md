@@ -213,8 +213,12 @@ def member_decay(q, m):
   own member equation (a surface rate, an overpotential). It reads
   the member's profile fields, `members.field(name).surface()`
   projects its only value, and its Jacobian blocks against the
-  profile fields are exact. A differential per-member scalar is
-  refused.
+  profile fields are exact.
+- `members.field_decl(name, mass="differential", shape=(1,))` declares
+  a per-member scalar with a time derivative, `ds/dt = f` with a unit
+  mass entry, such as a layer that grows on each particle at its own
+  rate. Consistent initialization keeps its initial value, and it
+  enters the error norm as every differential unknown does.
 - The population lowers to one batched block: the member kernel is
   traced once and evaluated over all members in a single `vmap`, so
   `count` members cost one kernel.

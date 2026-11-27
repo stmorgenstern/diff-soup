@@ -158,14 +158,9 @@ def _mass_diagonal(eqset: EquationSet, layout: _BlockLayout) -> jax.Array:
                 if var.size == w_member.shape[0]:
                     member_slice = w_member
                 elif int(var.size) == 1:
-                    raise ValueError(
-                        f"member variable {var.name!r} in family {fam.name!r} is a "
-                        "per-member scalar declared mass='differential', but a "
-                        "member domain supplies one mass weight per node, not a "
-                        "scalar mass row. Declare the scalar mass='algebraic' "
-                        "(0 = f, closed by its member equation) or make it a "
-                        "profile field on the member domain."
-                    )
+                    # A per-member scalar has no node: its row is ds/dt = f,
+                    # one unit mass entry per member.
+                    member_slice = jnp.ones((1,), dtype=w_member.dtype)
                 else:
                     member_slice = jnp.broadcast_to(w_member[..., None], var.shape).reshape(-1)
                 scale = res_scale.get(var.name)

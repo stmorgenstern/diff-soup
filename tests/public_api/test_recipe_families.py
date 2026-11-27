@@ -223,7 +223,7 @@ def test_a_declared_stencil_radius_widens_the_member_tile_to_the_composed_stenci
 
 
 def test_a_scalar_algebraic_member_field_solves_and_projects_to_its_closed_form():
-    """A per-member scalar ``j = k c_surface`` (refused unless algebraic and one-dimensional)
+    """A per-member scalar ``j = k c_surface`` (refused unless one-dimensional)
     projects onto the cell; uniform members give ``c = c0 e^{(k-1)t}``, ``j = k c`` and
     ``m = c0 e^{-t} (e^{kt} - 1)``."""
     rates, c0, end = np.array([0.5, 2.0]), np.array([1.0, 2.0]), 0.5
@@ -237,8 +237,6 @@ def test_a_scalar_algebraic_member_field_solves_and_projects_to_its_closed_form(
         residual_scale={"c": 1.0, "j": 1.0},
     )
     members.field_decl("c", mass="differential")
-    with pytest.raises(ValueError, match="per-member scalar.*must be mass='algebraic'"):
-        members.field_decl("bad", mass="differential", shape=(1,))
     with pytest.raises(ValueError, match="multi-dim member field"):
         members.field_decl("bad", mass="algebraic", shape=(2,))
     members.field_decl("j", mass="algebraic", shape=(1,))
