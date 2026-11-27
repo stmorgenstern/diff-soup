@@ -274,22 +274,24 @@ def pullbacks() -> int:
     counts = {}
     for count in (8, 64):
         for rule in ("before", "now"):
+            # The solver view is cached by the problem's content, so each rule builds a plan
+            # of its own from the view's solver problem.
+            problem, theta = build_count(count, rule)
+            sv = ds.solver_view(problem)
             linearize._share_columns = first_choice_kept() if rule == "before" else current
             try:
-                problem, theta = build_count(count, rule)
-                sv = ds.solver_view(problem)
-                lin = sv.plan.linearization
-                held = int(np.asarray(lin.held_rows).size)
-                kinds = held_by_field(problem, np.asarray(lin.held_rows))
-                state, slope = jax.random.uniform(
-                    jax.random.PRNGKey(3), (2, sv.n), minval=0.5, maxval=1.5
-                )
-                t, cj = jnp.asarray(0.3), jnp.asarray(7.0)
-                values = sv.iteration_matrix_values(t, state, slope, theta, cj)
+                plan = linearize.build_linearization_plan(sv.problem)
             finally:
                 linearize._share_columns = current
+            lin = plan.linearization
+            held = int(np.asarray(lin.held_rows).size)
+            kinds = held_by_field(problem, np.asarray(lin.held_rows))
+            state, slope = jax.random.uniform(jax.random.PRNGKey(3), (2, sv.n), minval=0.5, maxval=1.5)
+            t, cj = jnp.asarray(0.3), jnp.asarray(7.0)
+            values = plan.combined_values(t, state, slope, theta, None, cj)
+            topology = plan.union_topology
             assembled = np.zeros((sv.n, sv.n))
-            np.add.at(assembled, (sv.full_topology.rows, sv.full_topology.cols), np.asarray(values))
+            np.add.at(assembled, (np.asarray(topology.rows), np.asarray(topology.cols)), np.asarray(values))
             dense = jax.jacfwd(lambda y: sv.residual(t, y, slope, theta))(state) + cj * jax.jacfwd(
                 lambda yd: sv.residual(t, state, yd, theta)
             )(slope)
