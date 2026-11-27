@@ -165,18 +165,20 @@ def reference(cbar0, times, steps=40_000):
     return out[:, 0], out[:, 1]
 
 
-HOSTS = 8  # host unknowns every member's rate row reads
+HOSTS = 3  # host unknowns every site's row and every member's rate row read
+SITES = 16  # sites per member in the pullback model
 
 
 def build_count(count: int, tag: str = ""):
-    """A host of ``HOSTS + 1`` unknowns and ``count`` members of ``N_MAX`` sites.
+    """A host of ``HOSTS + 1`` unknowns and ``count`` members of ``SITES`` sites.
 
-    Each member's ``rate`` row reads ``rate`` and the host unknowns ``h0`` .. ``h7``
-    (a row wider than the rest, recovered by pullback with the host columns left to the
-    colouring), and its ``layer`` row reads ``rate``, ``layer`` and the host unknown
-    ``film``: every ``layer`` row reads the one host column ``film``, as each platelet's
-    layer reads the film on the gold. The sites' rows are a diffusion. Returns the problem
-    and ``theta``.
+    Each site's row reads its neighbours and the host unknowns ``h0`` .. ``h2`` (as a
+    platelet's sites read the electrolyte). Each member's ``rate`` row reads all its sites,
+    ``rate`` and the host unknowns (a row wider than the rest, recovered by pullback with
+    the host columns left to the colouring), and its ``layer`` row reads ``rate``,
+    ``layer`` and the host unknown ``film``: every ``layer`` row reads the one host column
+    ``film``, as each platelet's layer reads the film on the gold. Returns the problem and
+    ``theta``.
     """
     spec = ds.problem(f"member_scalar_pullbacks_{count}{tag}").domain(
         "cell", cartesian_grid_1d(1, 0.0, 1.0, method="fvm")
@@ -194,7 +196,7 @@ def build_count(count: int, tag: str = ""):
     members = spec.family(
         "p",
         count=count,
-        domain=cartesian_grid_1d(N_MAX, 0.0, 1.0, method="fvm"),
+        domain=cartesian_grid_1d(SITES, 0.0, 1.0, method="fvm"),
         params={"a": np.linspace(0.5, 2.0, count)},
         scale={n: 1.0 for n in names},
         residual_scale={n: 1.0 for n in names},
@@ -203,16 +205,22 @@ def build_count(count: int, tag: str = ""):
     members.field_decl("rate", mass="algebraic", shape=(1,))
     members.field_decl("layer", mass="differential", shape=(1,))
 
+    def drive(q):
+        return sum((j + 1.0) * jnp.reshape(getattr(q, f"h{j}"), (-1,))[0] for j in range(HOSTS))
+
+    def sites(q, m):
+        return DIFF * q.ops.laplacian(q.c) - m.a * (q.c - 1.0) * drive(q)
+
     def rate_row(q, m):
-        drive = sum((j + 1.0) * jnp.reshape(getattr(q, f"h{j}"), (-1,))[0] for j in range(HOSTS))
-        return q.rate - m.a * drive
+        return q.rate - jnp.mean(sites(q, m))
 
     def layer_row(q, m):
         shared = jnp.reshape(q.film, (-1,))[0]
         return q.p.k * smooth_abs(q.rate, EPS) * (shared - q.layer)
 
-    members.equation(writes="c", reads=("c",))(lambda q, m: DIFF * q.ops.laplacian(q.c) - m.a * (q.c - 1.0))
-    members.equation(writes="rate", reads=("rate", *(f"h{j}" for j in range(HOSTS))))(rate_row)
+    host_names = tuple(f"h{j}" for j in range(HOSTS))
+    members.equation(writes="c", reads=("c", *host_names))(sites)
+    members.equation(writes="rate", reads=("c", "rate", *host_names))(rate_row)
     members.equation(writes="layer", reads=("layer", "rate", "film"))(layer_row)
     for host in (*hosts, film):
         spec.couple(host, onto="p", at=np.zeros(count, dtype=np.int64))
