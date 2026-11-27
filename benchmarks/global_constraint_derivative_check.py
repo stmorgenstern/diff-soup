@@ -27,6 +27,11 @@ Cases:
 2. ``s = 1/2``: ``p`` also enters every node's row of ``y``.
 3. ``s = 0`` with ``g`` seeded at zero: a start that is consistent only after the
    initialization moves the algebraic unknown.
+4. ``s = 0`` with an algebraic node field ``z = y - g``, ``y``'s row ``D lap(y) - k z`` and
+   the integrand ``p (z + g) - g`` (the same solution; ``p`` multiplies an algebraic node
+   unknown, as a contact's coefficient multiplies the nodes' current), differentiated in
+   three directions at once (``p = p0 + x0 + 2 x1 - x2``), so that the columns of one
+   ``jax.jacfwd`` must be in the ratios 1 : 2 : -1.
 
 For each, the forward derivative of ``y``, ``g`` and ``layer`` at the save times
 (``jax.jit(jax.jacfwd(...))`` of the solve, with ``theta.replace`` of the parameter, the way
@@ -78,9 +83,15 @@ def check(label: str, value: float, limit: float) -> None:
         failures.append(label)
 
 
-def build(source: float):
-    """The problem, the handle of ``p`` and ``y(0)``; ``source`` is ``s`` (0: ``p`` only in the constraint)."""
-    spec = ds.problem(f"global_constraint_{'source' if source else 'plain'}").domain(
+def build(source: float, via_rate: bool = False):
+    """The problem, the handle of ``p`` and ``y(0)``; ``source`` is ``s`` (0: ``p`` only in the constraint).
+
+    ``via_rate`` adds an algebraic node field ``z = y - g``, writes ``y``'s row as
+    ``D lap(y) - k z`` and the integrand as ``p (z + g) - g``: the same solution, with
+    ``p`` multiplying an algebraic node unknown inside the integrand.
+    """
+    tag = ("source" if source else "plain") + ("_rate" if via_rate else "")
+    spec = ds.problem(f"global_constraint_{tag}").domain(
         "line", cartesian_grid_1d(N, 0.0, 1.0, method="fvm")
     )
     spec.field("y", mass="differential", scale=1.0)
@@ -88,7 +99,11 @@ def build(source: float):
     spec.global_var("g", initial=0.0, scale=1.0)
     spec.global_var("layer", initial=L0, mass="differential", scale=1.0)
 
-    if source:
+    if via_rate:
+        spec.field("z", mass="algebraic", scale=1.0)
+        spec.equation(writes="z", reads=("z", "y", "g"))(lambda q: q.z - (q.y - q.g))
+        spec.equation(writes="y", reads=("y", "z"))(lambda q: D * q.ops.laplacian(q.y) - K * q.z)
+    elif source:
         spec.equation(writes="y", reads=("y", "g"))(
             lambda q: D * q.ops.laplacian(q.y) - K * (q.y - q.g) - source * q.p.gain
         )
@@ -100,7 +115,9 @@ def build(source: float):
     spec.constraint.domain_integral(
         name="g",
         field="y",
-        integrand_fn=lambda q: q.p.gain * q.y - q.g,
+        integrand_fn=(
+            (lambda q: q.p.gain * (q.z + q.g) - q.g) if via_rate else (lambda q: q.p.gain * q.y - q.g)
+        ),
         target_fn=lambda t: jnp.zeros_like(jnp.asarray(t, dtype=jnp.float64)),
         closes="g",
     )
@@ -141,11 +158,15 @@ def solver():
     )
 
 
-def run_case(label, source, g_seed):
+def run_case(label, source, g_seed, via_rate=False, coefficients=(1.0,)):
+    """One case; ``coefficients``: the forward directions, ``p = p0 + sum_k coefficients[k] x_k``."""
     print(f"\n{label}")
-    problem, handle, y_init = build(source)
+    problem, handle, y_init = build(source, via_rate)
     layout = {g["name"]: g for g in problem.global_layout()}
-    fields = np.asarray(problem.assemble_state({"y": jnp.asarray(y_init)}), np.float64)
+    given = {"y": jnp.asarray(y_init)}
+    if via_rate:
+        given["z"] = jnp.zeros(N)
+    fields = np.asarray(problem.assemble_state(given), np.float64)
     globals0 = np.zeros(sum(g["size"] for g in layout.values()))
     ybar0 = float(np.mean(y_init))
     globals0[layout["g"]["offset"]] = P0 * ybar0 if g_seed == "consistent" else 0.0
@@ -158,7 +179,8 @@ def run_case(label, source, g_seed):
     saveat = ds.SaveAt(ts=jnp.asarray(SAVE))
 
     def observed(x):
-        theta = theta0.replace(handle, jnp.asarray(P0, dtype=jnp.float64) + x[0])
+        step = jnp.dot(jnp.asarray(coefficients, dtype=jnp.float64), x)
+        theta = theta0.replace(handle, jnp.asarray(P0, dtype=jnp.float64) + step)
         sol = stepper.solve(
             problem, (T0, T_END), y0, saveat=saveat, theta=theta,
             dt0=1e-6, hmax=HMAX, max_steps=40_000,
@@ -168,10 +190,11 @@ def run_case(label, source, g_seed):
 
     value = jax.jit(observed)
     jac = jax.jit(jax.jacfwd(observed))
-    zero = jnp.zeros(1)
+    zero = jnp.zeros(len(coefficients))
     v0 = np.asarray(value(zero))
-    forward = np.asarray(jac(zero))[..., 0]
-    e = jnp.asarray([FD_STEP])
+    columns = np.asarray(jac(zero))
+    forward = columns[..., 0]
+    e = zero.at[0].set(FD_STEP)
     fd = (np.asarray(value(e)) - np.asarray(value(-e))) / (2 * FD_STEP)
     fd2 = (np.asarray(value(e / 2)) - np.asarray(value(-e / 2))) / FD_STEP
 
@@ -196,6 +219,10 @@ def run_case(label, source, g_seed):
             w = want[name][i] if name != "y" else want[name][i, 0]
             d = diff[name][i] if name != "y" else diff[name][i, 0]
             print(f"  {t:6.3f} | {name:8s} | {f: .8e} {w: .8e} {d: .8e}")
+    for k in range(1, len(coefficients)):
+        scale = float(np.abs(columns[..., 0]).max())
+        check(f"forward direction {k}: max |column - {coefficients[k]:g} x column 0| / max |column 0|",
+              float(np.abs(columns[..., k] - coefficients[k] * columns[..., 0]).max()) / scale, 1e-12)
     for name in ("y", "g", "layer"):
         scale = float(np.abs(want[name]).max())
         check(f"{name}: max |forward - exact| / max |exact|", float(np.abs(got[name] - want[name]).max()) / scale, 1e-5)
@@ -228,6 +255,8 @@ def main() -> int:
     matrix_check(problem, theta0)
     run_case("2. p also in every node's row of y", S_SOURCE, "consistent")
     run_case("3. p only in the constraint, g seeded at zero", 0.0, "zero")
+    run_case("4. p multiplying an algebraic node field in the integrand, three forward directions",
+             0.0, "consistent", via_rate=True, coefficients=(1.0, 2.0, -1.0))
     print("\n" + ("all checks pass" if not failures else f"FAILED: {failures}"))
     return 1 if failures else 0
 
