@@ -213,18 +213,33 @@ def _wide_rows(rows: np.ndarray, cols: np.ndarray, rest: np.ndarray, n: int) -> 
     if wide.size == 0 or wide.size > _MAX_HELD_OUT_FRACTION * n:
         return nothing
     narrow = int(rest[rest <= limit].max())
+    cost, split = _share_columns(rows, cols, wide, narrow, n)
+    return split if cost < int(rest.max()) else nothing
+
+
+def _share_columns(
+    rows: np.ndarray, cols: np.ndarray, wide: np.ndarray, narrow: int, n: int
+) -> tuple[int, _WideRows]:
+    """The cheapest choice of shared columns for the rows ``wide``, and its cost.
+
+    For each reader count in ``_SHARED_COLUMN_READERS``, the columns read by more
+    of the wide rows than that are shared (their entries on the wide rows stay
+    with the coloring) and the wide rows are grouped into pullbacks on the rest
+    of their columns. The cost is the colors (at least ``narrow``, the widest
+    row left to the coloring) plus ``_PULLBACK_COLORS`` per pullback.
+    """
     on_wide = np.isin(rows, wide)
     readers = np.bincount(cols[on_wide], minlength=n)
-    best_cost, best = int(rest.max()), nothing
+    best_cost, best = None, None
     for readers_allowed in _SHARED_COLUMN_READERS:
         shared = np.flatnonzero(readers > readers_allowed).astype(np.int64)
         kept = on_wide & ~np.isin(cols, shared)
         groups = _disjoint_groups(rows[kept], cols[kept], wide, n)
         left = np.bincount(rows[on_wide & ~kept], minlength=n).max(initial=0)
         cost = max(narrow, int(left)) + _PULLBACK_COLORS * (int(groups.max()) + 1)
-        if cost < best_cost:
+        if best_cost is None or cost < best_cost:
             best_cost, best = cost, _WideRows(wide, groups, shared)
-    return best
+    return best_cost, best
 
 
 def _held_out_rows(
@@ -464,8 +479,14 @@ class LinearizationPlan:
                         break
                     readers = u_rows[np.isin(u_cols, colliding) & ~np.isin(u_rows, held)]
                     wide = np.union1d(wide, readers).astype(np.int64)
-                    kept = np.isin(u_rows, wide) & ~np.isin(u_cols, shared)
-                    groups = _disjoint_groups(u_rows[kept], u_cols[kept], wide, n)
+                    # The shared columns are chosen again over the enlarged wide rows: a
+                    # column every added row reads (a host unknown each member's row reads)
+                    # would otherwise give each added row a pullback of its own.
+                    rest = np.bincount(u_rows, minlength=n)
+                    rest[np.union1d(declared, wide)] = 0
+                    _, (wide, groups, shared) = _share_columns(
+                        u_rows, u_cols, wide, int(rest.max(initial=0)), n
+                    )
                     held, seeds = _seeded(declared, wide, groups)
                     splits = [_RowSplit(r, c, held, seeds, n, wide, shared) for r, c in patterns]
                     colorings = [

@@ -3,6 +3,12 @@
 Not part of the benchmark suite: a hand-run check on a GPU with cuDSS, printed and asserted.
 
     JAX_ENABLE_X64=1 python benchmarks/member_scalar_check.py
+    JAX_ENABLE_X64=1 python benchmarks/member_scalar_check.py pullbacks
+
+``pullbacks`` prints only the cost of the iteration matrix's assembly (held rows,
+pullbacks, colours) at 8 and 64 members whose scalar rows read shared host unknowns,
+before and after the recolouring pass chose its shared columns again, and the matrix
+against a dense ``jax.jacfwd`` (see ``pullbacks``).
 
 The model. A one-cell domain holds a shared differential field ``film`` with
 ``d film/dt = g``, so ``film(t) = g t``. A family of 64 members, declared with
@@ -159,7 +165,118 @@ def reference(cbar0, times, steps=40_000):
     return out[:, 0], out[:, 1]
 
 
+def build_count(count: int, tag: str = ""):
+    """A host of two unknowns, ``ce`` and ``film``, and ``count`` members of ``N_MAX`` sites.
+
+    Each member's ``rate`` row reads its sites and ``ce`` (a wide row, recovered by
+    pullback), and its ``layer`` row reads ``rate``, ``layer`` and ``film``: every
+    ``layer`` row reads the one host column ``film``. Returns the problem and ``theta``.
+    """
+    spec = ds.problem(f"member_scalar_pullbacks_{count}{tag}").domain(
+        "cell", cartesian_grid_1d(1, 0.0, 1.0, method="fvm")
+    )
+    ce = spec.field("ce", mass="differential", scale=1.0, init=lambda x: jnp.ones_like(x))
+    film = spec.field("film", mass="differential", scale=1.0, init=lambda x: jnp.zeros_like(x))
+    spec.param("k", value=K, learnable=True)
+    spec.equation(writes="ce", reads=("ce",))(lambda q: -0.1 * q.ce)
+    spec.equation(writes="film", reads=("film",))(lambda q: G + 0.0 * q.film)
+    names = ("c", "rate", "layer")
+    members = spec.family(
+        "p",
+        count=count,
+        domain=cartesian_grid_1d(N_MAX, 0.0, 1.0, method="fvm"),
+        params={"a": np.linspace(0.5, 2.0, count)},
+        scale={n: 1.0 for n in names},
+        residual_scale={n: 1.0 for n in names},
+    )
+    members.field_decl("c", mass="differential")
+    members.field_decl("rate", mass="algebraic", shape=(1,))
+    members.field_decl("layer", mass="differential", shape=(1,))
+
+    def relax(q, m):
+        return DIFF * q.ops.laplacian(q.c) - m.a * (q.c - 1.0)
+
+    def rate_row(q, m):
+        host = jnp.reshape(q.ce, (-1,))[0]
+        return q.rate - jnp.mean(relax(q, m)) * host
+
+    def layer_row(q, m):
+        shared = jnp.reshape(q.film, (-1,))[0]
+        return q.p.k * smooth_abs(q.rate, EPS) * (shared - q.layer)
+
+    members.equation(writes="c", reads=("c",))(relax)
+    members.equation(writes="rate", reads=("c", "rate", "ce"))(rate_row)
+    members.equation(writes="layer", reads=("layer", "rate", "film"))(layer_row)
+    spec.couple(ce, onto="p", at=np.zeros(count, dtype=np.int64))
+    spec.couple(film, onto="p", at=np.zeros(count, dtype=np.int64))
+    problem = spec.build()
+    return problem, ds.default_theta(problem)
+
+
+def pullbacks() -> int:
+    """Held rows, pullbacks and colours at 8 and 64 members, and the iteration matrix.
+
+    ``before``: the recolouring pass keeps the shared columns of the first choice (as
+    diff-soup did up to 802bd5c, reproduced by replacing ``_share_columns``); ``now``: it
+    chooses them again over the enlarged held rows. The assembled iteration matrix is
+    compared with a dense ``jax.jacfwd`` of the residual for both.
+    """
+    from diff_soup.problem.implicit import linearize
+
+    current = linearize._share_columns
+
+    def first_choice_kept():
+        first = {}
+
+        def share(rows, cols, wide, narrow, n):
+            if "shared" not in first:
+                cost, split = current(rows, cols, wide, narrow, n)
+                first["shared"] = split.shared
+                return cost, split
+            kept = np.isin(rows, wide) & ~np.isin(cols, first["shared"])
+            groups = linearize._disjoint_groups(rows[kept], cols[kept], wide, n)
+            return 0, linearize._WideRows(wide, groups, first["shared"])
+
+        return share
+
+    print(f"devices {jax.devices()}")
+    print("members | rule   | n    | held rows | pullbacks | colours | max |assembled - dense|")
+    counts = {}
+    for count in (8, 64):
+        for rule in ("before", "now"):
+            linearize._share_columns = first_choice_kept() if rule == "before" else current
+            try:
+                problem, theta = build_count(count, rule)
+                sv = ds.solver_view(problem)
+                lin = sv.plan.linearization
+                held = int(np.asarray(lin.held_rows).size)
+                state, slope = jax.random.uniform(
+                    jax.random.PRNGKey(3), (2, sv.n), minval=0.5, maxval=1.5
+                )
+                t, cj = jnp.asarray(0.3), jnp.asarray(7.0)
+                values = sv.iteration_matrix_values(t, state, slope, theta, cj)
+            finally:
+                linearize._share_columns = current
+            assembled = np.zeros((sv.n, sv.n))
+            np.add.at(assembled, (sv.full_topology.rows, sv.full_topology.cols), np.asarray(values))
+            dense = jax.jacfwd(lambda y: sv.residual(t, y, slope, theta))(state) + cj * jax.jacfwd(
+                lambda yd: sv.residual(t, state, yd, theta)
+            )(slope)
+            err = float(np.abs(assembled - np.asarray(dense)).max())
+            print(
+                f"  {count:5d} | {rule:6s} | {sv.n:4d} | {held:9d} | {lin.pullback_count:9d} | "
+                f"{lin.color_count:7d} | {err:.2e}"
+            )
+            check(f"{count} members, {rule}: max |assembled - dense|", err, 1e-12)
+            counts[(count, rule)] = lin.pullback_count
+    check("pullbacks at 64 members - at 8 (now)", float(abs(counts[(64, "now")] - counts[(8, "now")])), 0.0)
+    print("\n" + ("all checks pass" if not failures else f"FAILED: {failures}"))
+    return 1 if failures else 0
+
+
 def main() -> int:
+    if sys.argv[1:] == ["pullbacks"]:
+        return pullbacks()
     print(f"devices {jax.devices()}, cuDSS {ds.linear.cudss_available()}")
     problem, k_handle, y0, cbar0 = build()
     view = problem.family_view("p")
