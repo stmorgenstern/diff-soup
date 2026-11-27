@@ -1,6 +1,6 @@
-"""Safe-math primitives: double-``where`` guards for sqrt/div/power.
+"""Safe-math primitives: double-``where`` guards for sqrt/div/power, and a smooth ``|x|``.
 
-Each primitive satisfies two contracts:
+Each guard satisfies two contracts:
 
 1. VALUE-identical to the unguarded op for every healthy input — same bits
    (``safe_sqrt(s) == sqrt(s)`` exactly for ``s > 0``).
@@ -9,8 +9,13 @@ Each primitive satisfies two contracts:
    materializes ``0 * inf = nan``.
 
 Every norm in the package (WRMS, error norms, convergence rates) routes through
-these; physics kernels use them only at KNOWN singular points — never sprinkled
-speculatively. Lives in ``utils/`` — the package floor, imports nothing above it.
+the guards; physics kernels use them only at KNOWN singular points — never sprinkled
+speculatively.
+
+``smooth_abs`` is not a guard: it replaces ``|x|`` by a function that is
+differentiable at zero, and its values differ from ``|x|`` by at most ``eps``.
+
+Lives in ``utils/`` — the package floor, imports nothing above it.
 """
 
 from __future__ import annotations
@@ -73,3 +78,23 @@ def safe_power(base: jax.Array, exponent) -> jax.Array:
     pos = base > 0.0
     one = jnp.asarray(1.0, dtype=base.dtype)
     return jnp.where(pos, jnp.power(jnp.where(pos, base, one), exponent), jnp.zeros_like(base))
+
+
+def smooth_abs(x: jax.Array, eps) -> jax.Array:
+    """``|x|`` smoothed at zero: ``sqrt(x**2 + eps**2) - eps``.
+
+    Zero at ``x == 0``, positive elsewhere, even in ``x``, and differentiable
+    everywhere with slope zero at zero. It lies below ``|x|`` by at most
+    ``eps`` and approaches ``|x| - eps`` for ``|x| >> eps``; near zero it is
+    ``x**2 / (2 eps)``.
+
+    Args:
+        x: Argument (scalar or array).
+        eps: Positive smoothing width, in the units of ``x``.
+
+    Returns:
+        ``sqrt(x**2 + eps**2) - eps``, elementwise.
+    """
+    x = jnp.asarray(x)
+    eps = jnp.asarray(eps, dtype=x.dtype)
+    return jnp.sqrt(x * x + eps * eps) - eps
